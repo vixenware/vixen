@@ -1,7 +1,7 @@
 use super::*;
 
 impl Engine {
-    pub(super) fn user_method_value_in_module(
+    pub(super) async fn user_method_value_in_module(
         &self,
         receiver: &Value,
         type_name: &str,
@@ -21,7 +21,7 @@ impl Engine {
         })))
     }
 
-    pub(super) fn invoke_builtin(
+    pub(super) async fn invoke_builtin(
         &self,
         builtin: &BuiltinValue,
         args: &[Value],
@@ -32,14 +32,18 @@ impl Engine {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => {
                 self.require_no_kwargs("Blob", kwargs)?;
                 self.check_arity("Blob", args, 1)?;
-                let value = self.materialize_value_deep(args[0].clone(), "forcing Blob value")?;
+                let value = self
+                    .materialize_value_deep(args[0].clone(), "forcing Blob value")
+                    .await?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => {
                 self.require_no_kwargs("Bytes", kwargs)?;
                 self.check_arity("Bytes", args, 1)?;
-                let value = self.materialize_value_deep(args[0].clone(), "forcing Bytes value")?;
+                let value = self
+                    .materialize_value_deep(args[0].clone(), "forcing Bytes value")
+                    .await?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
             }
@@ -47,11 +51,12 @@ impl Engine {
                 self.require_no_kwargs("Tree", kwargs)?;
                 self.check_arity("Tree", args, 1)?;
                 let (value, _) = self.split_obligations(
-                    self.materialize_value_shallow(args[0].clone(), "forcing Tree input")?,
+                    self.materialize_value_shallow(args[0].clone(), "forcing Tree input")
+                        .await?,
                 );
                 match value {
-                    Value::Map(map) => self.tree_from_map(&map),
-                    Value::Array(_) => self.array_merge(&value),
+                    Value::Map(map) => self.tree_from_map(&map).await,
+                    Value::Array(_) => self.array_merge(&value).await,
                     Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
                     Value::String(path) => {
                         Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
@@ -63,30 +68,33 @@ impl Engine {
                 }
             }
             BuiltinValue::Function(BuiltinFunction::Acquire) => {
-                self.acquire_builtin(args, kwargs, kwargs_expr)
+                self.acquire_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::Stabilize) => {
-                self.stabilize_builtin(args, kwargs, kwargs_expr)
+                self.stabilize_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::Render) => {
-                self.render_builtin(args, kwargs, kwargs_expr)
+                self.render_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::Exec) => {
-                self.exec_builtin(args, kwargs, kwargs_expr)
+                self.exec_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::Discover) => {
-                self.discover_builtin(args, kwargs, kwargs_expr)
+                self.discover_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
-                self.executor_class_builtin(args, kwargs, kwargs_expr)
+                self.executor_class_builtin(args, kwargs, kwargs_expr).await
             }
             BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
                 self.require_no_kwargs(type_name.as_ref(), kwargs)?;
                 self.check_arity(type_name.as_ref(), args, 1)?;
-                let (value, _) = self.split_obligations(self.materialize_value_shallow(
-                    args[0].clone(),
-                    &format!("forcing {type_name} payload"),
-                )?);
+                let (value, _) = self.split_obligations(
+                    self.materialize_value_shallow(
+                        args[0].clone(),
+                        &format!("forcing {type_name} payload"),
+                    )
+                    .await?,
+                );
                 let Value::Map(map) = value else {
                     return Err(self.type_error(&format!(
                         "{} expects a record/map payload, got {}",
@@ -118,8 +126,9 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
                 self.check_arity("Blob.from_string", args, 1)?;
-                let value =
-                    self.materialize_value_deep(args[0].clone(), "forcing Blob.from_string value")?;
+                let value = self
+                    .materialize_value_deep(args[0].clone(), "forcing Blob.from_string value")
+                    .await?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
@@ -127,23 +136,27 @@ impl Engine {
                 self.require_no_kwargs("Bytes", kwargs)?;
                 self.check_arity("Bytes", args, 1)?;
                 let value = self
-                    .materialize_value_deep(args[0].clone(), "forcing Bytes.from_string value")?;
+                    .materialize_value_deep(args[0].clone(), "forcing Bytes.from_string value")
+                    .await?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
             }
             BuiltinValue::Method(BuiltinMethod::StringStartsWith { receiver }) => {
                 self.require_no_kwargs("string.starts_with", kwargs)?;
                 self.check_arity("string.starts_with", args, 1)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.starts_with receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.starts_with receiver must be String"));
                 };
                 let prefix = self
-                    .materialize_value_deep(args[0].clone(), "forcing string.starts_with prefix")?;
+                    .materialize_value_deep(args[0].clone(), "forcing string.starts_with prefix")
+                    .await?;
                 let prefix = self.stringify_scalar(&prefix)?;
                 self.finish_obligated_result(
                     Ok(Value::Bool(receiver.starts_with(&prefix))),
@@ -153,16 +166,19 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StringContains { receiver }) => {
                 self.require_no_kwargs("string.contains", kwargs)?;
                 self.check_arity("string.contains", args, 1)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.contains receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.contains receiver must be String"));
                 };
-                let needle =
-                    self.materialize_value_deep(args[0].clone(), "forcing string.contains needle")?;
+                let needle = self
+                    .materialize_value_deep(args[0].clone(), "forcing string.contains needle")
+                    .await?;
                 let needle = self.stringify_scalar(&needle)?;
                 self.finish_obligated_result(
                     Ok(Value::Bool(receiver.contains(&needle))),
@@ -172,16 +188,19 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StringSplit { receiver }) => {
                 self.require_no_kwargs("string.split", kwargs)?;
                 self.check_arity("string.split", args, 1)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.split receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.split receiver must be String"));
                 };
-                let sep =
-                    self.materialize_value_deep(args[0].clone(), "forcing string.split separator")?;
+                let sep = self
+                    .materialize_value_deep(args[0].clone(), "forcing string.split separator")
+                    .await?;
                 let sep = self.stringify_scalar(&sep)?;
                 let items = receiver
                     .split(&sep)
@@ -192,11 +211,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StringLines { receiver }) => {
                 self.require_no_kwargs("string.lines", kwargs)?;
                 self.check_arity("string.lines", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.lines receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.lines receiver must be String"));
                 };
@@ -209,11 +230,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StringTrim { receiver }) => {
                 self.require_no_kwargs("string.trim", kwargs)?;
                 self.check_arity("string.trim", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.trim receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.trim receiver must be String"));
                 };
@@ -225,11 +248,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StringToLower { receiver }) => {
                 self.require_no_kwargs("string.to_lower", kwargs)?;
                 self.check_arity("string.to_lower", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing string.to_lower receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::String(receiver) = receiver else {
                     return Err(self.type_error("string.to_lower receiver must be String"));
                 };
@@ -242,14 +267,15 @@ impl Engine {
                 self.require_no_kwargs("Tree.of", kwargs)?;
                 self.check_arity("Tree.of", args, 1)?;
                 let (value, _) = self.split_obligations(
-                    self.materialize_value_shallow(args[0].clone(), "forcing Tree.of input")?,
+                    self.materialize_value_shallow(args[0].clone(), "forcing Tree.of input")
+                        .await?,
                 );
                 let Value::Map(map) = value else {
                     return Err(
                         self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
                     );
                 };
-                self.tree_from_map(&map)
+                self.tree_from_map(&map).await
             }
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
                 self.require_no_kwargs("Tree.empty", kwargs)?;
@@ -259,44 +285,47 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
                 self.require_no_kwargs("Tree.from_path", kwargs)?;
                 self.check_arity("Tree.from_path", args, 1)?;
-                let path =
-                    self.materialize_value_deep(args[0].clone(), "forcing Tree.from_path")?;
+                let path = self
+                    .materialize_value_deep(args[0].clone(), "forcing Tree.from_path")
+                    .await?;
                 let path = self.expect_path_value(&path, "Tree.from_path path")?;
                 Ok(Value::Tree(TreeValue::FsDir(path)))
             }
             BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
                 self.require_no_kwargs("array.map", kwargs)?;
                 self.check_arity("array.map", args, 1)?;
-                self.array_map(receiver, args[0].clone())
+                self.array_map(receiver, args[0].clone()).await
             }
             BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
                 self.require_no_kwargs("array.to_map", kwargs)?;
                 self.check_arity("array.to_map", args, 1)?;
-                self.array_to_map(receiver, args[0].clone())
+                self.array_to_map(receiver, args[0].clone()).await
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
                 self.require_no_kwargs("map.map_values", kwargs)?;
                 self.check_arity("map.map_values", args, 1)?;
-                self.map_map_values(receiver, args[0].clone())
+                self.map_map_values(receiver, args[0].clone()).await
             }
             BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
                 self.require_no_kwargs("array.flatten", kwargs)?;
                 self.check_arity("array.flatten", args, 0)?;
-                self.array_flatten(receiver)
+                self.array_flatten(receiver).await
             }
             BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
                 self.require_no_kwargs("array.merge", kwargs)?;
                 self.check_arity("array.merge", args, 0)?;
-                self.array_merge(receiver)
+                self.array_merge(receiver).await
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 self.require_no_kwargs("blob.to_string", kwargs)?;
                 self.check_arity("blob.to_string", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.to_string receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.to_string receiver must be Blob"));
                 };
@@ -314,11 +343,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
                 self.require_no_kwargs("blob.executable", kwargs)?;
                 self.check_arity("blob.executable", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.executable receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.executable receiver must be Blob"));
                 };
@@ -341,11 +372,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
                 self.require_no_kwargs("blob.utf8", kwargs)?;
                 self.check_arity("blob.utf8", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.utf8 receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8 receiver must be Blob"));
                 };
@@ -363,11 +396,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
                 self.check_arity("blob.utf8_lossy", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.utf8_lossy receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
                 };
@@ -392,11 +427,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
                 self.require_no_kwargs("bytes.utf8", kwargs)?;
                 self.check_arity("bytes.utf8", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.utf8 receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
                 };
@@ -416,11 +453,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
                 self.check_arity("bytes.utf8_lossy", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.utf8_lossy receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
                 };
@@ -430,11 +469,13 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
                 self.require_no_kwargs("bytes.blob", kwargs)?;
                 self.check_arity("bytes.blob", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.blob receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.blob receiver must be Bytes"));
                 };
@@ -449,29 +490,35 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
                 self.require_no_kwargs("stream.collect", kwargs)?;
                 self.check_arity("stream.collect", args, 0)?;
-                let (receiver, obligations) = self.split_obligations(self.materialize_value_deep(
-                    receiver.as_ref().clone(),
-                    "forcing stream.collect receiver",
-                )?);
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_deep(
+                        receiver.as_ref().clone(),
+                        "forcing stream.collect receiver",
+                    )
+                    .await?,
+                );
                 self.finish_obligated_result(Ok(receiver), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
                 self.check_arity("tree.file", args, 1)?;
                 let (path, path_obligations) = self.split_obligations(
-                    self.materialize_value_deep(args[0].clone(), "forcing tree.file path")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing tree.file path")
+                        .await?,
                 );
                 let path = self.expect_relative_path(&path, "tree.file path")?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.file receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
                 self.finish_obligated_result(
-                    self.tree_file(&tree, path),
+                    self.tree_file(&tree, path).await,
                     obligations.into_iter().chain(path_obligations),
                 )
             }
@@ -479,21 +526,24 @@ impl Engine {
                 self.require_no_kwargs("tree.merge", kwargs)?;
                 self.check_arity("tree.merge", args, 1)?;
                 let (other, other_obligations) = self.split_obligations(
-                    self.materialize_value_shallow(args[0].clone(), "forcing tree.merge other")?,
+                    self.materialize_value_shallow(args[0].clone(), "forcing tree.merge other")
+                        .await?,
                 );
                 let Value::Tree(other) = other else {
                     return Err(self.type_error("tree.merge expects Tree"));
                 };
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.merge receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Tree(receiver) = receiver else {
                     return Err(self.type_error("tree.merge receiver must be Tree"));
                 };
                 self.finish_obligated_result(
-                    self.tree_merge(&receiver, &other),
+                    self.tree_merge(&receiver, &other).await,
                     obligations.into_iter().chain(other_obligations),
                 )
             }
@@ -501,30 +551,35 @@ impl Engine {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
                 self.check_arity("tree.subtree", args, 1)?;
                 let (path, path_obligations) = self.split_obligations(
-                    self.materialize_value_deep(args[0].clone(), "forcing tree.subtree path")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing tree.subtree path")
+                        .await?,
                 );
                 let path = self.expect_relative_path(&path, "tree.subtree path")?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.subtree receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.subtree receiver must be Tree"));
                 };
                 self.finish_obligated_result(
-                    self.tree_subtree(&tree, path),
+                    self.tree_subtree(&tree, path).await,
                     obligations.into_iter().chain(path_obligations),
                 )
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
                 self.check_arity("option.unwrap_or", args, 1)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_value_shallow(
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing option.unwrap_or receiver",
-                    )?);
+                    )
+                    .await?,
+                );
                 let Value::Struct(option) = receiver else {
                     return Err(self.type_error("option.unwrap_or receiver must be Option"));
                 };
@@ -543,15 +598,17 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
                 self.require_no_kwargs("fallible", kwargs)?;
                 self.check_arity("fallible", args, 0)?;
-                Ok(self.build_fallible_value(receiver.as_ref().clone()))
+                Ok(self.build_fallible_value(receiver.as_ref().clone()).await)
             }
             BuiltinValue::Method(BuiltinMethod::HostOs { receiver }) => {
                 self.require_no_kwargs("host.os", kwargs)?;
                 self.check_arity("host.os", args, 0)?;
-                let receiver = self.materialize_value_shallow(
-                    receiver.as_ref().clone(),
-                    "forcing host.os receiver",
-                )?;
+                let receiver = self
+                    .materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing host.os receiver",
+                    )
+                    .await?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.os receiver must be Host"));
                 };
@@ -560,10 +617,12 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::HostArch { receiver }) => {
                 self.require_no_kwargs("host.arch", kwargs)?;
                 self.check_arity("host.arch", args, 0)?;
-                let receiver = self.materialize_value_shallow(
-                    receiver.as_ref().clone(),
-                    "forcing host.arch receiver",
-                )?;
+                let receiver = self
+                    .materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing host.arch receiver",
+                    )
+                    .await?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.arch receiver must be Host"));
                 };
@@ -573,54 +632,63 @@ impl Engine {
                 self.require_no_kwargs("host.read", kwargs)?;
                 self.check_arity("host.read", args, 1)?;
                 let (path, obligations) = self.split_obligations(
-                    self.materialize_value_deep(args[0].clone(), "forcing host.read")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.read")
+                        .await?,
                 );
-                let path = self.expect_host_path(&path, "host.read path")?;
-                let receiver = self.materialize_value_shallow(
-                    receiver.as_ref().clone(),
-                    "forcing host.read receiver",
-                )?;
+                let path = self.expect_host_path(&path, "host.read path").await?;
+                let receiver = self
+                    .materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing host.read receiver",
+                    )
+                    .await?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.read receiver must be Host"));
                 };
-                self.finish_obligated_result(self.host_read(&path), obligations)
+                self.finish_obligated_result(self.host_read(&path).await, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
                 self.require_no_kwargs("host.hash", kwargs)?;
                 self.check_arity("host.hash", args, 1)?;
                 let (path, obligations) = self.split_obligations(
-                    self.materialize_value_deep(args[0].clone(), "forcing host.hash")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.hash")
+                        .await?,
                 );
-                let path = self.expect_host_path(&path, "host.hash path")?;
-                let receiver = self.materialize_value_shallow(
-                    receiver.as_ref().clone(),
-                    "forcing host.hash receiver",
-                )?;
+                let path = self.expect_host_path(&path, "host.hash path").await?;
+                let receiver = self
+                    .materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing host.hash receiver",
+                    )
+                    .await?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.hash receiver must be Host"));
                 };
-                self.finish_obligated_result(self.host_hash(&path), obligations)
+                self.finish_obligated_result(self.host_hash(&path).await, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
                 self.require_no_kwargs("host.which", kwargs)?;
                 self.check_arity("host.which", args, 1)?;
                 let (name, obligations) = self.split_obligations(
-                    self.materialize_value_deep(args[0].clone(), "forcing host.which")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.which")
+                        .await?,
                 );
-                let name = self.expect_host_path(&name, "host.which name")?;
-                let receiver = self.materialize_value_shallow(
-                    receiver.as_ref().clone(),
-                    "forcing host.which receiver",
-                )?;
+                let name = self.expect_host_path(&name, "host.which name").await?;
+                let receiver = self
+                    .materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing host.which receiver",
+                    )
+                    .await?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.which receiver must be Host"));
                 };
-                self.finish_obligated_result(self.host_which(&name), obligations)
+                self.finish_obligated_result(self.host_which(&name).await, obligations)
             }
         }
     }
 
-    pub(super) fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
+    pub(super) async fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
         fn insert_tree_path(
             engine: &Engine,
             entries: &mut BTreeMap<Arc<str>, Value>,
@@ -672,7 +740,9 @@ impl Engine {
 
         let mut nested = BTreeMap::<Arc<str>, Value>::new();
         for (key, value) in map.entries.iter() {
-            let key = self.materialize_value_deep(key.clone(), "forcing Tree entry path")?;
+            let key = self
+                .materialize_value_deep(key.clone(), "forcing Tree entry path")
+                .await?;
             let path = self.expect_relative_path(&key, "Tree entry path")?;
             let raw = path.as_str();
             if raw.is_empty() || raw == "." {
@@ -687,13 +757,14 @@ impl Engine {
         ))))
     }
 
-    pub(super) fn array_map(
+    pub(super) async fn array_map(
         &self,
         receiver: &Value,
         callback: Value,
     ) -> Result<Value, PoisonError> {
         let (receiver, obligations) = self.split_obligations(
-            self.materialize_value_shallow(receiver.clone(), "forcing array.map receiver")?,
+            self.materialize_value_shallow(receiver.clone(), "forcing array.map receiver")
+                .await?,
         );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.map receiver must be Array"));
@@ -707,13 +778,14 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
-    pub(super) fn array_to_map(
+    pub(super) async fn array_to_map(
         &self,
         receiver: &Value,
         callback: Value,
     ) -> Result<Value, PoisonError> {
         let (receiver, obligations) = self.split_obligations(
-            self.materialize_value_shallow(receiver.clone(), "forcing array.to_map receiver")?,
+            self.materialize_value_shallow(receiver.clone(), "forcing array.to_map receiver")
+                .await?,
         );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.to_map receiver must be Array"));
@@ -737,9 +809,10 @@ impl Engine {
         ))
     }
 
-    pub(super) fn array_flatten(&self, receiver: &Value) -> Result<Value, PoisonError> {
+    pub(super) async fn array_flatten(&self, receiver: &Value) -> Result<Value, PoisonError> {
         let (receiver, obligations) = self.split_obligations(
-            self.materialize_value_shallow(receiver.clone(), "forcing array.flatten receiver")?,
+            self.materialize_value_shallow(receiver.clone(), "forcing array.flatten receiver")
+                .await?,
         );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.flatten receiver must be Array"));
@@ -748,7 +821,8 @@ impl Engine {
         let mut out = Vec::new();
         for item in items.iter() {
             let (item, item_obligations) = self.split_obligations(
-                self.materialize_value_shallow(item.clone(), "forcing array.flatten item")?,
+                self.materialize_value_shallow(item.clone(), "forcing array.flatten item")
+                    .await?,
             );
             let Value::Array(inner) = item else {
                 return Err(self.type_error("array.flatten expects Array items"));
@@ -761,9 +835,10 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
-    pub(super) fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
+    pub(super) async fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
         let (receiver, receiver_obligations) = self.split_obligations(
-            self.materialize_value_shallow(receiver.clone(), "forcing array.merge receiver")?,
+            self.materialize_value_shallow(receiver.clone(), "forcing array.merge receiver")
+                .await?,
         );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.merge receiver must be Array"));
@@ -777,7 +852,8 @@ impl Engine {
         }
 
         let mut materialized = self
-            .materialize_many_deep(items.iter().cloned().collect(), "forcing array.merge items")?;
+            .materialize_many_deep(items.iter().cloned().collect(), "forcing array.merge items")
+            .await?;
         let first = materialized.remove(0);
         let (first, mut obligations) = self.split_obligations(first);
         let Value::Tree(mut merged) = first else {
@@ -790,7 +866,7 @@ impl Engine {
             let Value::Tree(tree) = item else {
                 return Err(self.type_error("array.merge expects Tree items"));
             };
-            merged = match self.tree_merge(&merged, &tree)? {
+            merged = match self.tree_merge(&merged, &tree).await? {
                 Value::Tree(tree) => tree,
                 other => {
                     return Err(self.type_error(&format!(
@@ -805,13 +881,14 @@ impl Engine {
         Ok(self.attach_obligations(Value::Tree(merged), obligations))
     }
 
-    pub(super) fn map_map_values(
+    pub(super) async fn map_map_values(
         &self,
         receiver: &Value,
         callback: Value,
     ) -> Result<Value, PoisonError> {
         let (receiver, obligations) = self.split_obligations(
-            self.materialize_value_shallow(receiver.clone(), "forcing map.map_values receiver")?,
+            self.materialize_value_shallow(receiver.clone(), "forcing map.map_values receiver")
+                .await?,
         );
         let Value::Map(map) = receiver else {
             return Err(self.type_error("map.map_values receiver must be Map"));
@@ -836,17 +913,21 @@ impl Engine {
         ))
     }
 
-    pub(super) fn acquire_builtin(
+    pub(super) async fn acquire_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "acquire")?;
+        let kwargs = self
+            .materialize_kwargs(kwargs, kwargs_expr, "acquire")
+            .await?;
         self.check_arity("acquire", args, 1)?;
 
-        let url = self.materialize_value_deep(args[0].clone(), "forcing acquire url")?;
-        let url = self.expect_host_path(&url, "acquire url")?;
+        let url = self
+            .materialize_value_deep(args[0].clone(), "forcing acquire url")
+            .await?;
+        let url = self.expect_host_path(&url, "acquire url").await?;
 
         let mut digest = None;
         let mut extract = None;
@@ -864,29 +945,36 @@ impl Engine {
 
         let digest =
             digest.ok_or_else(|| self.type_error("acquire requires keyword argument 'digest'"))?;
-        let digest = self.materialize_value_deep(digest, "forcing acquire digest")?;
-        let digest = self.expect_host_path(&digest, "acquire digest")?;
+        let digest = self
+            .materialize_value_deep(digest, "forcing acquire digest")
+            .await?;
+        let digest = self.expect_host_path(&digest, "acquire digest").await?;
 
-        let extract = extract
-            .map(|value| {
-                let value = self.materialize_value_deep(value, "forcing acquire extract")?;
-                self.expect_host_path(&value, "acquire extract")
-            })
-            .transpose()?;
+        let extract = match extract {
+            Some(value) => {
+                let value = self
+                    .materialize_value_deep(value, "forcing acquire extract")
+                    .await?;
+                Some(self.expect_host_path(&value, "acquire extract").await?)
+            }
+            None => None,
+        };
 
         let Some(runtime) = &self.runtime else {
             return Err(self.type_error("acquire requires an acquire handler"));
         };
 
-        runtime.acquire(AcquireRequest {
-            url,
-            digest,
-            extract,
-            demand_chain: self.current_demand_chain(None),
-        })
+        runtime
+            .acquire(AcquireRequest {
+                url,
+                digest,
+                extract,
+                demand_chain: self.current_demand_chain(None),
+            })
+            .await
     }
 
-    pub(super) fn import_module(
+    pub(super) async fn import_module(
         &self,
         path: &str,
         provenance: Option<&instr::SourceProvenance>,
@@ -897,11 +985,13 @@ impl Engine {
         let from_source_id = provenance
             .map(|provenance| provenance.source_id.to_string())
             .ok_or_else(|| self.internal_error("import is missing source provenance"))?;
-        let module = runtime.import_module(ImportRequest {
-            path: path.to_string(),
-            from_source_id,
-            demand_chain: self.current_demand_chain(None),
-        })?;
+        let module = runtime
+            .import_module(ImportRequest {
+                path: path.to_string(),
+                from_source_id,
+                demand_chain: self.current_demand_chain(None),
+            })
+            .await?;
         let module_id = Arc::<str>::from(module.source_id.as_ref());
         match self.modules.entry(Arc::clone(&module_id)) {
             Entry::Occupied(_) => {}
@@ -909,19 +999,23 @@ impl Engine {
                 entry.insert(Arc::new(Self::build_module_state(module)));
             }
         }
-        self.module_namespace_for(&module_id)
+        self.module_namespace_for(&module_id).await
     }
 
-    pub(super) fn render_builtin(
+    pub(super) async fn render_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "render")?;
+        let kwargs = self
+            .materialize_kwargs(kwargs, kwargs_expr, "render")
+            .await?;
         self.check_arity("render", args, 1)?;
 
-        let template = self.materialize_value_deep(args[0].clone(), "forcing render template")?;
+        let template = self
+            .materialize_value_deep(args[0].clone(), "forcing render template")
+            .await?;
         let mut obligations = BTreeMap::new();
         self.collect_value_obligations(&template, &mut obligations);
         let template = self.expect_path_value(&template, "render template")?;
@@ -940,7 +1034,9 @@ impl Engine {
 
         let bindings = bindings
             .ok_or_else(|| self.type_error("render requires keyword argument 'bindings'"))?;
-        let bindings = self.materialize_value_deep(bindings, "forcing render bindings")?;
+        let bindings = self
+            .materialize_value_deep(bindings, "forcing render bindings")
+            .await?;
         self.collect_value_obligations(&bindings, &mut obligations);
 
         let Some(runtime) = &self.runtime else {
@@ -948,16 +1044,18 @@ impl Engine {
         };
 
         self.finish_obligated_result(
-            runtime.render(RenderRequest {
-                template: template.as_str().to_string(),
-                bindings,
-                demand_chain: self.current_demand_chain(None),
-            }),
+            runtime
+                .render(RenderRequest {
+                    template: template.as_str().to_string(),
+                    bindings,
+                    demand_chain: self.current_demand_chain(None),
+                })
+                .await,
             obligations.into_values(),
         )
     }
 
-    pub(super) fn stabilize_builtin(
+    pub(super) async fn stabilize_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -969,43 +1067,51 @@ impl Engine {
         }
         self.check_arity("stabilize", args, 2)?;
 
-        let witness = self.materialize_value_deep(args[0].clone(), "forcing stabilize witness")?;
-        let witness_value = self.resolve_boundary_value(self.build_call(witness, vec![], None))?;
-        let witness_value = self.snapshot_value(witness_value)?;
+        let witness = self
+            .materialize_value_deep(args[0].clone(), "forcing stabilize witness")
+            .await?;
+        let witness_value = self
+            .resolve_boundary_value(self.build_call(witness, vec![], None))
+            .await?;
+        let witness_value = self.snapshot_value(witness_value).await?;
 
-        let resolve = self.materialize_value_deep(args[1].clone(), "forcing stabilize resolve")?;
-        let resolve = self.ship_function(resolve)?;
+        let resolve = self
+            .materialize_value_deep(args[1].clone(), "forcing stabilize resolve")
+            .await?;
+        let resolve = self.ship_function(resolve).await?;
 
         let Some(runtime) = &self.runtime else {
             return Err(self.type_error("stabilize requires a stabilize handler"));
         };
 
-        runtime.stabilize(StabilizeRequest {
-            witness: witness_value,
-            module: self.transport_module(),
-            resolve,
-            demand_chain: self.current_demand_chain(None),
-        })
+        runtime
+            .stabilize(StabilizeRequest {
+                witness: witness_value,
+                module: self.transport_module(),
+                resolve,
+                demand_chain: self.current_demand_chain(None),
+            })
+            .await
     }
 
-    pub(super) fn exec_builtin(
+    pub(super) async fn exec_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec")?;
-        let request = self.parse_exec_request(args, &kwargs)?;
+        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec").await?;
+        let request = self.parse_exec_request(args, &kwargs).await?;
         if let Some(runtime) = &self.runtime
             && runtime.has_exec()
         {
-            let request = self.ship_exec_request(&request)?;
-            return runtime.exec(request);
+            let request = self.ship_exec_request(&request).await?;
+            return runtime.exec(request).await;
         }
-        self.exec_builtin_local(request)
+        self.exec_builtin_local(request).await
     }
 
-    pub(super) fn discover_builtin(
+    pub(super) async fn discover_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -1016,9 +1122,15 @@ impl Engine {
         }
         self.require_no_kwargs("discover", kwargs)?;
         self.check_arity("discover", args, 2)?;
-        let executor = self.materialize_value_deep(args[0].clone(), "forcing discover executor")?;
-        let executor = self.expect_executor_selector(&executor, "discover executor")?;
-        let probe = self.materialize_value_deep(args[1].clone(), "forcing discover probe")?;
+        let executor = self
+            .materialize_value_deep(args[0].clone(), "forcing discover executor")
+            .await?;
+        let executor = self
+            .expect_executor_selector(&executor, "discover executor")
+            .await?;
+        let probe = self
+            .materialize_value_deep(args[1].clone(), "forcing discover probe")
+            .await?;
 
         if let Some(runtime) = &self.runtime
             && runtime.has_discover()
@@ -1027,15 +1139,15 @@ impl Engine {
                 executor,
                 demand_chain: self.current_demand_chain(None),
                 module: self.transport_module(),
-                probe: self.ship_function(probe)?,
+                probe: self.ship_function(probe).await?,
             };
-            return runtime.discover(request);
+            return runtime.discover(request).await;
         }
 
-        self.invoke_discover_probe(probe)
+        self.invoke_discover_probe(probe).await
     }
 
-    pub(super) fn executor_class_builtin(
+    pub(super) async fn executor_class_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -1046,12 +1158,14 @@ impl Engine {
         }
         self.require_no_kwargs("executor_class", kwargs)?;
         self.check_arity("executor_class", args, 1)?;
-        let name = self.materialize_value_deep(args[0].clone(), "forcing executor_class name")?;
-        let name = self.expect_host_path(&name, "executor_class name")?;
+        let name = self
+            .materialize_value_deep(args[0].clone(), "forcing executor_class name")
+            .await?;
+        let name = self.expect_host_path(&name, "executor_class name").await?;
         Ok(Value::Executor(ExecutorSelector::class(name)))
     }
 
-    pub(super) fn materialize_kwargs(
+    pub(super) async fn materialize_kwargs(
         &self,
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
@@ -1063,7 +1177,8 @@ impl Engine {
         };
 
         let kwargs_expr = self
-            .materialize_value_shallow(kwargs_expr, &format!("forcing {context} keyword record"))?;
+            .materialize_value_shallow(kwargs_expr, &format!("forcing {context} keyword record"))
+            .await?;
         let (value, obligations) = self.split_obligations(kwargs_expr);
         let Value::Map(map) = value else {
             return Err(self.type_error(&format!(
@@ -1074,7 +1189,8 @@ impl Engine {
 
         for (key, value) in map.entries.iter() {
             let key = self
-                .materialize_value_deep(key.clone(), &format!("forcing {context} keyword key"))?;
+                .materialize_value_deep(key.clone(), &format!("forcing {context} keyword key"))
+                .await?;
             let Value::String(name) = key else {
                 return Err(self.type_error(&format!(
                     "{context} keyword record keys must be String, got {}",
@@ -1090,16 +1206,20 @@ impl Engine {
         Ok(out)
     }
 
-    pub(super) fn merge_keyword_records(
+    pub(super) async fn merge_keyword_records(
         &self,
         left: Value,
         right: Value,
     ) -> Result<Value, PoisonError> {
         let mut entries = Vec::new();
-        let left = self.materialize_value_shallow(left, "forcing keyword record spread")?;
-        self.extend_record_with_spread(&mut entries, left)?;
-        let right = self.materialize_value_shallow(right, "forcing keyword record spread")?;
-        self.extend_record_with_spread(&mut entries, right)?;
+        let left = self
+            .materialize_value_shallow(left, "forcing keyword record spread")
+            .await?;
+        self.extend_record_with_spread(&mut entries, left).await?;
+        let right = self
+            .materialize_value_shallow(right, "forcing keyword record spread")
+            .await?;
+        self.extend_record_with_spread(&mut entries, right).await?;
         Ok(Value::Map(MapValue {
             entries: Arc::from(entries),
         }))

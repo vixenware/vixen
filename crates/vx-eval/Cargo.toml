@@ -17,8 +17,9 @@ vx-parser = { path = "../vx-parser" }
 vx-store-proto = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
-crossbeam-channel = "0.5"
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
 indoc = "2"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

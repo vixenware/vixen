@@ -1,355 +1,357 @@
 use super::*;
 
 impl Engine {
-    pub(super) fn force_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => self.force_pending_shallow(node_id),
-            Value::Discovered(discovered) => {
-                let inner = self.force_value_shallow(*discovered.value)?;
-                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
-            }
-            other => Ok(other),
-        }
-    }
-
-    pub(super) fn demand_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => {
-                self.demand_value_shallow(self.force_pending_shallow(node_id)?)
-            }
-            Value::Discovered(discovered) => {
-                let inner = self.demand_value_shallow(*discovered.value)?;
-                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
-            }
-            other => Ok(other),
-        }
-    }
-
-    pub(super) fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => {
-                let value =
-                    Scheduler::with_initial_stack(self.arc_self(), self.current_demand_stack_ids())
-                        .resolve_node_shallow(node_id)?;
-                self.force_value(value)
-            }
-            Value::Discovered(discovered) => {
-                let inner = self.force_value(*discovered.value)?;
-                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
-            }
-            Value::Tuple(elems) => {
-                let forced = self.force_many(elems.iter().cloned().collect())?;
-                Ok(Value::Tuple(Arc::from(forced)))
-            }
-            Value::Array(items) => {
-                let forced = self.force_many(items.iter().cloned().collect())?;
-                Ok(Value::Array(Arc::from(forced)))
-            }
-            Value::Map(map) => {
-                let keys = map
-                    .entries
-                    .iter()
-                    .map(|(key, _)| key.clone())
-                    .collect::<Vec<_>>();
-                let values = map
-                    .entries
-                    .iter()
-                    .map(|(_, value)| value.clone())
-                    .collect::<Vec<_>>();
-                let forced_keys = self.force_many(keys)?;
-                let forced_values = self.force_many(values)?;
-                Ok(Value::Map(MapValue {
-                    entries: Arc::from(
-                        forced_keys
-                            .into_iter()
-                            .zip(forced_values)
-                            .collect::<Vec<_>>(),
-                    ),
-                }))
-            }
-            Value::Tree(tree) => match tree {
-                TreeValue::Inline(entries) => {
-                    let names = entries
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .collect::<Vec<_>>();
-                    let values = entries
-                        .iter()
-                        .map(|(_, value)| value.clone())
-                        .collect::<Vec<_>>();
-                    let forced = self.force_many(values)?;
-                    self.validate_tree_entries(&forced)?;
-                    Ok(Value::Tree(TreeValue::Inline(Arc::from(
-                        names.into_iter().zip(forced).collect::<Vec<_>>(),
-                    ))))
+    pub(super) fn force_value_shallow(
+        &self,
+        value: Value,
+    ) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => self.force_pending_shallow(node_id).await,
+                Value::Discovered(discovered) => {
+                    let inner = self.force_value_shallow(*discovered.value).await?;
+                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
                 }
-                TreeValue::FsDir(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
-                TreeValue::Store(root) => Ok(Value::Tree(TreeValue::Store(root))),
-            },
-            Value::Struct(struct_value) => {
-                let names = struct_value
-                    .fields
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
-                let values = struct_value
-                    .fields
-                    .iter()
-                    .map(|(_, value)| value.clone())
-                    .collect::<Vec<_>>();
-                let forced = self.force_many(values)?;
-                let fields = names.into_iter().zip(forced).collect::<Vec<_>>();
-                Ok(Value::Struct(StructValue {
-                    type_name: struct_value.type_name,
-                    fields: Arc::from(fields),
-                }))
-            }
-            other => Ok(other),
-        }
-    }
-
-    // r[impl eval.concurrency]
-    // r[impl error.propagation]
-    pub(super) fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
-        if values.len() <= 1 {
-            let mut forced = Vec::with_capacity(values.len());
-            let mut errors = Vec::new();
-            for value in values {
-                match self.force_value(value) {
-                    Ok(value) => forced.push(value),
-                    Err(error) => errors.push(error),
-                }
-            }
-            return if errors.is_empty() {
-                Ok(forced)
-            } else {
-                Err(self.aggregate_poison_errors("forcing dependency", errors))
-            };
-        }
-
-        thread::scope(|scope| {
-            let handles = values
-                .into_iter()
-                .map(|value| scope.spawn(move || self.force_value(value)))
-                .collect::<Vec<_>>();
-
-            let mut forced = Vec::with_capacity(handles.len());
-            let mut errors = Vec::new();
-            for handle in handles {
-                match handle.join() {
-                    Ok(Ok(value)) => forced.push(value),
-                    Ok(Err(error)) => errors.push(error),
-                    Err(_) => errors.push(self.internal_error("force worker panicked")),
-                }
-            }
-            if errors.is_empty() {
-                Ok(forced)
-            } else {
-                Err(self.aggregate_poison_errors("forcing dependencies", errors))
+                other => Ok(other),
             }
         })
     }
 
-    pub(crate) fn inspect_value(&self, value: Value) -> Result<InspectedValue, PoisonError> {
-        self.inspect_value_inner(value, &mut Vec::new())
-    }
-
-    pub(super) fn inspect_value_inner(
+    pub(super) fn demand_value_shallow(
         &self,
         value: Value,
-        visiting: &mut Vec<NodeId>,
-    ) -> Result<InspectedValue, PoisonError> {
-        match value {
-            Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => {
-                    let mut pending = BTreeSet::new();
-                    pending.insert(node_id);
-                    Ok(InspectedValue {
-                        value: Value::Pending(node_id),
-                        pending,
-                        errors: Vec::new(),
-                    })
+    ) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => {
+                    self.demand_value_shallow(self.force_pending_shallow(node_id).await?)
+                        .await
                 }
-                SchedulerNodeState::Resolved(value) => {
-                    if visiting.contains(&node_id) {
-                        return Err(self.circular_dependency_error(visiting, node_id));
+                Value::Discovered(discovered) => {
+                    let inner = self.demand_value_shallow(*discovered.value).await?;
+                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+                }
+                other => Ok(other),
+            }
+        })
+    }
+
+    pub(super) fn force_value(&self, value: Value) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => {
+                    let value = Scheduler::with_initial_stack(
+                        self.arc_self(),
+                        self.current_demand_stack_ids(),
+                    )
+                    .resolve_node_shallow(node_id)
+                    .await?;
+                    self.force_value(value).await
+                }
+                Value::Discovered(discovered) => {
+                    let inner = self.force_value(*discovered.value).await?;
+                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+                }
+                Value::Tuple(elems) => {
+                    let forced = self.force_many(elems.iter().cloned().collect()).await?;
+                    Ok(Value::Tuple(Arc::from(forced)))
+                }
+                Value::Array(items) => {
+                    let forced = self.force_many(items.iter().cloned().collect()).await?;
+                    Ok(Value::Array(Arc::from(forced)))
+                }
+                Value::Map(map) => {
+                    let keys = map
+                        .entries
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    let values = map
+                        .entries
+                        .iter()
+                        .map(|(_, value)| value.clone())
+                        .collect::<Vec<_>>();
+                    let forced_keys = self.force_many(keys).await?;
+                    let forced_values = self.force_many(values).await?;
+                    Ok(Value::Map(MapValue {
+                        entries: Arc::from(
+                            forced_keys
+                                .into_iter()
+                                .zip(forced_values)
+                                .collect::<Vec<_>>(),
+                        ),
+                    }))
+                }
+                Value::Tree(tree) => match tree {
+                    TreeValue::Inline(entries) => {
+                        let names = entries
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        let values = entries
+                            .iter()
+                            .map(|(_, value)| value.clone())
+                            .collect::<Vec<_>>();
+                        let forced = self.force_many(values).await?;
+                        self.validate_tree_entries(&forced)?;
+                        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+                            names.into_iter().zip(forced).collect::<Vec<_>>(),
+                        ))))
                     }
-                    if visiting.len() + 1 > self.max_demand_depth {
-                        return Err(self.demand_depth_exceeded_error(visiting, node_id));
-                    }
-                    visiting.push(node_id);
-                    let result = self.inspect_value_inner(value, visiting);
-                    let popped = visiting.pop();
-                    debug_assert_eq!(popped, Some(node_id));
-                    result
-                }
-                SchedulerNodeState::Poisoned(error) => Ok(InspectedValue {
-                    value: Value::Pending(node_id),
-                    pending: BTreeSet::new(),
-                    errors: vec![error],
-                }),
-            },
-            Value::Discovered(discovered) => {
-                let inspected = self.inspect_value_inner(*discovered.value, visiting)?;
-                Ok(InspectedValue {
-                    value: self.attach_obligations(
-                        inspected.value,
-                        discovered.obligations.iter().cloned(),
-                    ),
-                    pending: inspected.pending,
-                    errors: inspected.errors,
-                })
-            }
-            Value::Tuple(elems) => {
-                let (elems, pending, errors) =
-                    self.inspect_list(elems.iter().cloned(), visiting)?;
-                Ok(InspectedValue {
-                    value: Value::Tuple(Arc::from(elems)),
-                    pending,
-                    errors,
-                })
-            }
-            Value::Array(items) => {
-                let (items, pending, errors) =
-                    self.inspect_list(items.iter().cloned(), visiting)?;
-                Ok(InspectedValue {
-                    value: Value::Array(Arc::from(items)),
-                    pending,
-                    errors,
-                })
-            }
-            Value::Map(map) => {
-                let mut entries = Vec::with_capacity(map.entries.len());
-                let mut pending = BTreeSet::new();
-                let mut errors = Vec::new();
-                for (key, value) in map.entries.iter() {
-                    let key = self.inspect_value_inner(key.clone(), visiting)?;
-                    let value = self.inspect_value_inner(value.clone(), visiting)?;
-                    pending.extend(key.pending);
-                    pending.extend(value.pending);
-                    errors.extend(key.errors);
-                    errors.extend(value.errors);
-                    entries.push((key.value, value.value));
-                }
-                Ok(InspectedValue {
-                    value: Value::Map(MapValue {
-                        entries: Arc::from(entries),
-                    }),
-                    pending,
-                    errors,
-                })
-            }
-            Value::ExecPath(path) => match path {
-                ExecPathValue::InTree { tree, suffix } => {
-                    let tree = self.inspect_tree(tree, visiting)?;
-                    Ok(InspectedValue {
-                        value: Value::ExecPath(ExecPathValue::InTree {
-                            tree: match tree.value {
-                                Value::Tree(tree) => tree,
-                                other => {
-                                    return Err(self.internal_error(&format!(
-                                        "expected Tree while inspecting ExecPath, got {}",
-                                        other.type_name()
-                                    )));
-                                }
-                            },
-                            suffix,
-                        }),
-                        pending: tree.pending,
-                        errors: tree.errors,
-                    })
-                }
-                ExecPathValue::InBlob { blob, leaf } => Ok(InspectedValue::resolved(
-                    Value::ExecPath(ExecPathValue::InBlob { blob, leaf }),
-                )),
-            },
-            Value::Tree(tree) => self.inspect_tree(tree, visiting),
-            Value::Struct(struct_value) => {
-                let mut fields = Vec::with_capacity(struct_value.fields.len());
-                let mut pending = BTreeSet::new();
-                let mut errors = Vec::new();
-                for (name, value) in struct_value.fields.iter() {
-                    let value = self.inspect_value_inner(value.clone(), visiting)?;
-                    pending.extend(value.pending);
-                    errors.extend(value.errors);
-                    fields.push((name.clone(), value.value));
-                }
-                Ok(InspectedValue {
-                    value: Value::Struct(StructValue {
+                    TreeValue::FsDir(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
+                    TreeValue::Store(root) => Ok(Value::Tree(TreeValue::Store(root))),
+                },
+                Value::Struct(struct_value) => {
+                    let names = struct_value
+                        .fields
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>();
+                    let values = struct_value
+                        .fields
+                        .iter()
+                        .map(|(_, value)| value.clone())
+                        .collect::<Vec<_>>();
+                    let forced = self.force_many(values).await?;
+                    let fields = names.into_iter().zip(forced).collect::<Vec<_>>();
+                    Ok(Value::Struct(StructValue {
                         type_name: struct_value.type_name,
                         fields: Arc::from(fields),
-                    }),
-                    pending,
-                    errors,
-                })
-            }
-            Value::Function(function) => {
-                let mut captures = Vec::with_capacity(function.captures.len());
-                let mut pending = BTreeSet::new();
-                let mut errors = Vec::new();
-                for (name, value) in function.captures.iter() {
-                    let value = self.inspect_value_inner(value.clone(), visiting)?;
-                    pending.extend(value.pending);
-                    errors.extend(value.errors);
-                    captures.push((name.clone(), value.value));
+                    }))
                 }
-                Ok(InspectedValue {
-                    value: Value::Function(FunctionValue {
-                        module_id: function.module_id,
-                        def: function.def,
-                        code_identity: function.code_identity,
-                        captures: Arc::from(captures),
-                    }),
-                    pending,
-                    errors,
-                })
+                other => Ok(other),
             }
-            Value::Partial(partial) => {
-                let function = self.inspect_value_inner(partial.function.clone(), visiting)?;
-                let (args, mut pending, mut errors) =
-                    self.inspect_list(partial.args.iter().cloned(), visiting)?;
-                pending.extend(function.pending);
-                errors.extend(function.errors);
-                let mut kwargs = Vec::with_capacity(partial.kwargs.len());
-                for (name, value) in partial.kwargs.iter() {
-                    let value = self.inspect_value_inner(value.clone(), visiting)?;
-                    pending.extend(value.pending);
-                    errors.extend(value.errors);
-                    kwargs.push((name.clone(), value.value));
-                }
-                let kwargs_expr = match &partial.kwargs_expr {
-                    Some(kwargs_expr) => {
-                        let value = self.inspect_value_inner((**kwargs_expr).clone(), visiting)?;
-                        pending.extend(value.pending);
-                        errors.extend(value.errors);
-                        Some(Box::new(value.value))
-                    }
-                    None => None,
-                };
-                Ok(InspectedValue {
-                    value: Value::Partial(Arc::new(PartialValue {
-                        function: function.value,
-                        args: Arc::from(args),
-                        kwargs: Arc::from(kwargs),
-                        kwargs_expr,
-                    })),
-                    pending,
-                    errors,
-                })
+        })
+    }
+
+    // r[impl eval.concurrency]
+    // r[impl error.propagation]
+    pub(super) async fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
+        let mut forced = Vec::with_capacity(values.len());
+        let mut errors = Vec::new();
+        for value in values {
+            match self.force_value(value).await {
+                Ok(value) => forced.push(value),
+                Err(error) => errors.push(error),
             }
-            Value::Builtin(builtin) => {
-                let (builtin, pending, errors) = self.inspect_builtin(builtin, visiting)?;
-                Ok(InspectedValue {
-                    value: Value::Builtin(builtin),
-                    pending,
-                    errors,
-                })
-            }
-            other => Ok(InspectedValue::resolved(other)),
+        }
+        if errors.is_empty() {
+            Ok(forced)
+        } else {
+            Err(self.aggregate_poison_errors("forcing dependencies", errors))
         }
     }
 
-    pub(super) fn inspect_list(
+    pub(crate) async fn inspect_value(&self, value: Value) -> Result<InspectedValue, PoisonError> {
+        self.inspect_value_inner(value, &mut Vec::new()).await
+    }
+
+    pub(super) fn inspect_value_inner<'a>(
+        &'a self,
+        value: Value,
+        visiting: &'a mut Vec<NodeId>,
+    ) -> BoxFuture<'a, Result<InspectedValue, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => match self.node_state(node_id)? {
+                    SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => {
+                        let mut pending = BTreeSet::new();
+                        pending.insert(node_id);
+                        Ok(InspectedValue {
+                            value: Value::Pending(node_id),
+                            pending,
+                            errors: Vec::new(),
+                        })
+                    }
+                    SchedulerNodeState::Resolved(value) => {
+                        if visiting.contains(&node_id) {
+                            return Err(self.circular_dependency_error(visiting, node_id));
+                        }
+                        if visiting.len() + 1 > self.max_demand_depth {
+                            return Err(self.demand_depth_exceeded_error(visiting, node_id));
+                        }
+                        visiting.push(node_id);
+                        let result = self.inspect_value_inner(value, visiting).await;
+                        let popped = visiting.pop();
+                        debug_assert_eq!(popped, Some(node_id));
+                        result
+                    }
+                    SchedulerNodeState::Poisoned(error) => Ok(InspectedValue {
+                        value: Value::Pending(node_id),
+                        pending: BTreeSet::new(),
+                        errors: vec![error],
+                    }),
+                },
+                Value::Discovered(discovered) => {
+                    let inspected = self
+                        .inspect_value_inner(*discovered.value, visiting)
+                        .await?;
+                    Ok(InspectedValue {
+                        value: self.attach_obligations(
+                            inspected.value,
+                            discovered.obligations.iter().cloned(),
+                        ),
+                        pending: inspected.pending,
+                        errors: inspected.errors,
+                    })
+                }
+                Value::Tuple(elems) => {
+                    let (elems, pending, errors) =
+                        self.inspect_list(elems.iter().cloned(), visiting).await?;
+                    Ok(InspectedValue {
+                        value: Value::Tuple(Arc::from(elems)),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::Array(items) => {
+                    let (items, pending, errors) =
+                        self.inspect_list(items.iter().cloned(), visiting).await?;
+                    Ok(InspectedValue {
+                        value: Value::Array(Arc::from(items)),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::Map(map) => {
+                    let mut entries = Vec::with_capacity(map.entries.len());
+                    let mut pending = BTreeSet::new();
+                    let mut errors = Vec::new();
+                    for (key, value) in map.entries.iter() {
+                        let key = self.inspect_value_inner(key.clone(), visiting).await?;
+                        let value = self.inspect_value_inner(value.clone(), visiting).await?;
+                        pending.extend(key.pending);
+                        pending.extend(value.pending);
+                        errors.extend(key.errors);
+                        errors.extend(value.errors);
+                        entries.push((key.value, value.value));
+                    }
+                    Ok(InspectedValue {
+                        value: Value::Map(MapValue {
+                            entries: Arc::from(entries),
+                        }),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::ExecPath(path) => match path {
+                    ExecPathValue::InTree { tree, suffix } => {
+                        let tree = self.inspect_tree(tree, visiting).await?;
+                        Ok(InspectedValue {
+                            value: Value::ExecPath(ExecPathValue::InTree {
+                                tree: match tree.value {
+                                    Value::Tree(tree) => tree,
+                                    other => {
+                                        return Err(self.internal_error(&format!(
+                                            "expected Tree while inspecting ExecPath, got {}",
+                                            other.type_name()
+                                        )));
+                                    }
+                                },
+                                suffix,
+                            }),
+                            pending: tree.pending,
+                            errors: tree.errors,
+                        })
+                    }
+                    ExecPathValue::InBlob { blob, leaf } => Ok(InspectedValue::resolved(
+                        Value::ExecPath(ExecPathValue::InBlob { blob, leaf }),
+                    )),
+                },
+                Value::Tree(tree) => self.inspect_tree(tree, visiting).await,
+                Value::Struct(struct_value) => {
+                    let mut fields = Vec::with_capacity(struct_value.fields.len());
+                    let mut pending = BTreeSet::new();
+                    let mut errors = Vec::new();
+                    for (name, value) in struct_value.fields.iter() {
+                        let value = self.inspect_value_inner(value.clone(), visiting).await?;
+                        pending.extend(value.pending);
+                        errors.extend(value.errors);
+                        fields.push((name.clone(), value.value));
+                    }
+                    Ok(InspectedValue {
+                        value: Value::Struct(StructValue {
+                            type_name: struct_value.type_name,
+                            fields: Arc::from(fields),
+                        }),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::Function(function) => {
+                    let mut captures = Vec::with_capacity(function.captures.len());
+                    let mut pending = BTreeSet::new();
+                    let mut errors = Vec::new();
+                    for (name, value) in function.captures.iter() {
+                        let value = self.inspect_value_inner(value.clone(), visiting).await?;
+                        pending.extend(value.pending);
+                        errors.extend(value.errors);
+                        captures.push((name.clone(), value.value));
+                    }
+                    Ok(InspectedValue {
+                        value: Value::Function(FunctionValue {
+                            module_id: function.module_id,
+                            def: function.def,
+                            code_identity: function.code_identity,
+                            captures: Arc::from(captures),
+                        }),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::Partial(partial) => {
+                    let function = self
+                        .inspect_value_inner(partial.function.clone(), visiting)
+                        .await?;
+                    let (args, mut pending, mut errors) = self
+                        .inspect_list(partial.args.iter().cloned(), visiting)
+                        .await?;
+                    pending.extend(function.pending);
+                    errors.extend(function.errors);
+                    let mut kwargs = Vec::with_capacity(partial.kwargs.len());
+                    for (name, value) in partial.kwargs.iter() {
+                        let value = self.inspect_value_inner(value.clone(), visiting).await?;
+                        pending.extend(value.pending);
+                        errors.extend(value.errors);
+                        kwargs.push((name.clone(), value.value));
+                    }
+                    let kwargs_expr = match &partial.kwargs_expr {
+                        Some(kwargs_expr) => {
+                            let value = self
+                                .inspect_value_inner((**kwargs_expr).clone(), visiting)
+                                .await?;
+                            pending.extend(value.pending);
+                            errors.extend(value.errors);
+                            Some(Box::new(value.value))
+                        }
+                        None => None,
+                    };
+                    Ok(InspectedValue {
+                        value: Value::Partial(Arc::new(PartialValue {
+                            function: function.value,
+                            args: Arc::from(args),
+                            kwargs: Arc::from(kwargs),
+                            kwargs_expr,
+                        })),
+                        pending,
+                        errors,
+                    })
+                }
+                Value::Builtin(builtin) => {
+                    let (builtin, pending, errors) =
+                        self.inspect_builtin(builtin, visiting).await?;
+                    Ok(InspectedValue {
+                        value: Value::Builtin(builtin),
+                        pending,
+                        errors,
+                    })
+                }
+                other => Ok(InspectedValue::resolved(other)),
+            }
+        })
+    }
+
+    pub(super) async fn inspect_list(
         &self,
         values: impl IntoIterator<Item = Value>,
         visiting: &mut Vec<NodeId>,
@@ -358,7 +360,7 @@ impl Engine {
         let mut pending = BTreeSet::new();
         let mut errors = Vec::new();
         for value in values {
-            let inspected = self.inspect_value_inner(value, visiting)?;
+            let inspected = self.inspect_value_inner(value, visiting).await?;
             out.push(inspected.value);
             pending.extend(inspected.pending);
             errors.extend(inspected.errors);
@@ -366,7 +368,7 @@ impl Engine {
         Ok((out, pending, errors))
     }
 
-    pub(super) fn inspect_tree(
+    pub(super) async fn inspect_tree(
         &self,
         tree: TreeValue,
         visiting: &mut Vec<NodeId>,
@@ -377,7 +379,7 @@ impl Engine {
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
                 for (name, value) in entries.iter() {
-                    let value = self.inspect_value_inner(value.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting).await?;
                     pending.extend(value.pending);
                     errors.extend(value.errors);
                     out.push((name.clone(), value.value));
@@ -397,18 +399,17 @@ impl Engine {
         }
     }
 
-    pub(super) fn inspect_builtin(
+    pub(super) async fn inspect_builtin(
         &self,
         builtin: BuiltinValue,
         visiting: &mut Vec<NodeId>,
     ) -> Result<(BuiltinValue, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
-        let inspect_receiver =
-            |receiver: Box<Value>,
-             visiting: &mut Vec<NodeId>|
-             -> Result<(Value, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
-                let inspected = self.inspect_value_inner(*receiver, visiting)?;
-                Ok((inspected.value, inspected.pending, inspected.errors))
-            };
+        macro_rules! inspect_receiver {
+            ($receiver:expr, $visiting:expr) => {{
+                let inspected = self.inspect_value_inner(*$receiver, $visiting).await?;
+                (inspected.value, inspected.pending, inspected.errors)
+            }};
+        }
 
         match builtin {
             BuiltinValue::Namespace(namespace) => Ok((
@@ -423,7 +424,7 @@ impl Engine {
             )),
             BuiltinValue::Method(method) => match method {
                 BuiltinMethod::StringStartsWith { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringStartsWith {
                             receiver: Box::new(value),
@@ -433,7 +434,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StringContains { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringContains {
                             receiver: Box::new(value),
@@ -443,7 +444,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StringSplit { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringSplit {
                             receiver: Box::new(value),
@@ -453,7 +454,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StringLines { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringLines {
                             receiver: Box::new(value),
@@ -463,7 +464,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StringTrim { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringTrim {
                             receiver: Box::new(value),
@@ -473,7 +474,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StringToLower { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StringToLower {
                             receiver: Box::new(value),
@@ -508,7 +509,7 @@ impl Engine {
                     Vec::new(),
                 )),
                 BuiltinMethod::ArrayMap { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::ArrayMap {
                             receiver: Box::new(value),
@@ -518,7 +519,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::ArrayToMap { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::ArrayToMap {
                             receiver: Box::new(value),
@@ -528,7 +529,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::ArrayFlatten { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::ArrayFlatten {
                             receiver: Box::new(value),
@@ -538,7 +539,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::ArrayMerge { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::ArrayMerge {
                             receiver: Box::new(value),
@@ -548,7 +549,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::MapMapValues { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::MapMapValues {
                             receiver: Box::new(value),
@@ -558,7 +559,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BlobToString { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BlobToString {
                             receiver: Box::new(value),
@@ -568,7 +569,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BlobExecutable { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BlobExecutable {
                             receiver: Box::new(value),
@@ -578,7 +579,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BlobUtf8 { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BlobUtf8 {
                             receiver: Box::new(value),
@@ -588,7 +589,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BlobUtf8Lossy { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy {
                             receiver: Box::new(value),
@@ -598,7 +599,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BytesUtf8 { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BytesUtf8 {
                             receiver: Box::new(value),
@@ -608,7 +609,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BytesUtf8Lossy { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy {
                             receiver: Box::new(value),
@@ -618,7 +619,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::BytesBlob { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::BytesBlob {
                             receiver: Box::new(value),
@@ -628,7 +629,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::StreamCollect { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::StreamCollect {
                             receiver: Box::new(value),
@@ -638,7 +639,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::TreeFile { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::TreeFile {
                             receiver: Box::new(value),
@@ -648,7 +649,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::TreeMerge { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::TreeMerge {
                             receiver: Box::new(value),
@@ -658,7 +659,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::TreeSubtree { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::TreeSubtree {
                             receiver: Box::new(value),
@@ -668,7 +669,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::OptionUnwrapOr { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr {
                             receiver: Box::new(value),
@@ -678,7 +679,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::FallibleCall { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::FallibleCall {
                             receiver: Box::new(value),
@@ -688,7 +689,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::HostRead { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::HostRead {
                             receiver: Box::new(value),
@@ -698,7 +699,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::HostHash { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::HostHash {
                             receiver: Box::new(value),
@@ -708,7 +709,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::HostWhich { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::HostWhich {
                             receiver: Box::new(value),
@@ -718,7 +719,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::HostOs { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::HostOs {
                             receiver: Box::new(value),
@@ -728,7 +729,7 @@ impl Engine {
                     ))
                 }
                 BuiltinMethod::HostArch { receiver } => {
-                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
                         BuiltinValue::Method(BuiltinMethod::HostArch {
                             receiver: Box::new(value),
@@ -741,12 +742,12 @@ impl Engine {
         }
     }
 
-    pub(super) fn materialize_value_deep(
+    pub(super) async fn materialize_value_deep(
         &self,
         value: Value,
         context: &str,
     ) -> Result<Value, PoisonError> {
-        let inspected = self.inspect_value(value)?;
+        let inspected = self.inspect_value(value).await?;
         if !inspected.errors.is_empty() {
             return Err(self.aggregate_poison_errors_for_stack(context, &[], inspected.errors));
         }
@@ -764,7 +765,7 @@ impl Engine {
         Ok(inspected.value)
     }
 
-    pub(super) fn materialize_many_deep(
+    pub(super) async fn materialize_many_deep(
         &self,
         values: Vec<Value>,
         context: &str,
@@ -773,7 +774,7 @@ impl Engine {
         let mut pending = BTreeSet::new();
         let mut errors = Vec::new();
         for value in values {
-            let inspected = self.inspect_value(value)?;
+            let inspected = self.inspect_value(value).await?;
             materialized.push(inspected.value);
             pending.extend(inspected.pending);
             errors.extend(inspected.errors);
@@ -794,32 +795,35 @@ impl Engine {
         Ok(materialized)
     }
 
-    pub(super) fn materialize_value_shallow(
-        &self,
+    pub(super) fn materialize_value_shallow<'a>(
+        &'a self,
         value: Value,
-        context: &str,
-    ) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Err(self
-                    .internal_error(&format!(
-                        "{context} still had unresolved pending node {}",
-                        node_id.0
-                    ))),
-                SchedulerNodeState::Resolved(value) => {
-                    self.materialize_value_shallow(value, context)
-                }
-                SchedulerNodeState::Poisoned(error) => Err(error),
-            },
-            Value::Discovered(discovered) => Ok(self.attach_obligations(
-                self.materialize_value_shallow(*discovered.value, context)?,
-                discovered.obligations.iter().cloned(),
-            )),
-            other => Ok(other),
-        }
+        context: &'a str,
+    ) -> BoxFuture<'a, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => match self.node_state(node_id)? {
+                    SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Err(self
+                        .internal_error(&format!(
+                            "{context} still had unresolved pending node {}",
+                            node_id.0
+                        ))),
+                    SchedulerNodeState::Resolved(value) => {
+                        self.materialize_value_shallow(value, context).await
+                    }
+                    SchedulerNodeState::Poisoned(error) => Err(error),
+                },
+                Value::Discovered(discovered) => Ok(self.attach_obligations(
+                    self.materialize_value_shallow(*discovered.value, context)
+                        .await?,
+                    discovered.obligations.iter().cloned(),
+                )),
+                other => Ok(other),
+            }
+        })
     }
 
-    pub(super) fn materialize_template_parts(
+    pub(super) async fn materialize_template_parts(
         &self,
         parts: &[TemplatePartValue],
     ) -> Result<Vec<TemplatePartValue>, PoisonError> {
@@ -830,7 +834,9 @@ impl Engine {
                 TemplatePartValue::Expr(value) => Some(value.clone()),
             })
             .collect::<Vec<_>>();
-        let forced = self.materialize_many_deep(values, "forcing dependencies")?;
+        let forced = self
+            .materialize_many_deep(values, "forcing dependencies")
+            .await?;
         let mut forced_iter = forced.into_iter();
         Ok(parts
             .iter()
@@ -843,34 +849,38 @@ impl Engine {
             .collect())
     }
 
-    pub(super) fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
+    pub(super) async fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
         match &node.job {
             NodeJob::Binary { op, left, right } => {
                 let (left, right) = if matches!(op, BinOp::Concat) {
                     (
-                        self.demand_value_shallow(left.clone())?,
-                        self.demand_value_shallow(right.clone())?,
+                        self.demand_value_shallow(left.clone()).await?,
+                        self.demand_value_shallow(right.clone()).await?,
                     )
                 } else {
-                    let mut values = self.materialize_many_deep(
-                        vec![left.clone(), right.clone()],
-                        "forcing dependencies",
-                    )?;
+                    let mut values = self
+                        .materialize_many_deep(
+                            vec![left.clone(), right.clone()],
+                            "forcing dependencies",
+                        )
+                        .await?;
                     let right = values.pop().expect("pair has two values");
                     let left = values.pop().expect("pair has two values");
                     (left, right)
                 };
-                self.compute_binary(*op, &left, &right)
+                self.compute_binary(*op, &left, &right).await
             }
             NodeJob::Unary { op, operand } => {
-                let operand = self.materialize_value_deep(operand.clone(), "forcing dependency")?;
+                let operand = self
+                    .materialize_value_deep(operand.clone(), "forcing dependency")
+                    .await?;
                 self.compute_unary(*op, &operand)
             }
             NodeJob::Template { kind, parts } => {
-                let values = self.materialize_template_parts(parts)?;
+                let values = self.materialize_template_parts(parts).await?;
                 match kind {
-                    TemplateKind::String => self.interpolate_string_parts(&values),
-                    TemplateKind::Path => self.interpolate_path_parts(&values),
+                    TemplateKind::String => self.interpolate_string_parts(&values).await,
+                    TemplateKind::Path => self.interpolate_path_parts(&values).await,
                 }
             }
             NodeJob::If {
@@ -881,7 +891,9 @@ impl Engine {
                 scope_module_id,
                 scope_identity,
             } => {
-                let cond = self.materialize_value_deep(cond.clone(), "forcing dependency")?;
+                let cond = self
+                    .materialize_value_deep(cond.clone(), "forcing dependency")
+                    .await?;
                 let (cond, obligations) = self.split_obligations(cond);
                 match cond {
                     Value::Bool(true) => self
@@ -891,7 +903,8 @@ impl Engine {
                                 scope_module_id,
                                 bindings.as_ref(),
                                 scope_identity.as_ref(),
-                            ),
+                            )
+                            .await,
                             obligations,
                         )
                         .into_value(),
@@ -902,7 +915,8 @@ impl Engine {
                                 scope_module_id,
                                 bindings.as_ref(),
                                 scope_identity.as_ref(),
-                            ),
+                            )
+                            .await,
                             obligations,
                         )
                         .into_value(),
@@ -913,13 +927,16 @@ impl Engine {
                 }
             }
             NodeJob::Fallible { value } => {
-                match self.materialize_value_shallow(value.clone(), "forcing fallible operand") {
-                    Ok(value) => Ok(self.build_fallible_value(value)),
+                match self
+                    .materialize_value_shallow(value.clone(), "forcing fallible operand")
+                    .await
+                {
+                    Ok(value) => Ok(self.build_fallible_value(value).await),
                     Err(error) => Ok(self.fallible_none_from_error(&error)),
                 }
             }
             NodeJob::Demand { demands, result } => {
-                let _ = self.force_many(demands.iter().cloned().collect())?;
+                let _ = self.force_many(demands.iter().cloned().collect()).await?;
                 result.clone()
             }
             NodeJob::Call {
@@ -927,25 +944,32 @@ impl Engine {
                 args,
                 kwargs,
                 kwargs_expr,
-            } => self.execute_call(
-                function.clone(),
-                args.clone(),
-                kwargs.clone(),
-                kwargs_expr.clone(),
-            ),
+            } => {
+                self.execute_call(
+                    function.clone(),
+                    args.clone(),
+                    kwargs.clone(),
+                    kwargs_expr.clone(),
+                )
+                .await
+            }
             NodeJob::Invoke { function, args } => {
                 self.invoke_function(function, args.clone(), Arc::from([]))
+                    .await
             }
             NodeJob::Field {
                 receiver,
                 field,
                 scope_module_id,
             } => {
-                let receiver = self.demand_value_shallow(receiver.clone())?;
+                let receiver = self.demand_value_shallow(receiver.clone()).await?;
                 self.select_field_in_module(&receiver, field, scope_module_id)
+                    .await
             }
             NodeJob::Fail { message } => {
-                let message = self.materialize_value_deep(message.clone(), "forcing dependency")?;
+                let message = self
+                    .materialize_value_deep(message.clone(), "forcing dependency")
+                    .await?;
                 Err(PoisonError::new(
                     PoisonKind::UserFail,
                     message.to_string(),
@@ -962,51 +986,63 @@ impl Engine {
         }
     }
 
-    pub(super) fn execute_call(
-        &self,
+    pub(super) fn execute_call<'a>(
+        &'a self,
         function: Value,
         args: Arc<[Value]>,
         kwargs: Arc<[(Arc<str>, Value)]>,
         kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        let (function, function_obligations) = self.split_obligations(
-            self.materialize_value_shallow(function, "forcing callable surface")?,
-        );
-        match function {
-            Value::Function(function) => {
-                self.finish_execute_call(function, args, kwargs, kwargs_expr, function_obligations)
-            }
-            Value::Partial(partial) => {
-                let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
-                merged_args.extend(args.iter().cloned());
-                let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
-                merged_kwargs.extend(kwargs.iter().cloned());
-                let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
-                    (Some(left), Some(right)) => {
-                        Some(self.merge_keyword_records((**left).clone(), right)?)
-                    }
-                    (Some(value), None) => Some((**value).clone()),
-                    (None, value) => value,
-                };
-                self.finish_obligated_result(
-                    self.execute_call(
-                        partial.function.clone(),
-                        Arc::from(merged_args),
-                        Arc::from(merged_kwargs),
-                        merged_kwargs_expr,
-                    ),
+    ) -> BoxFuture<'a, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let (function, function_obligations) = self.split_obligations(
+                self.materialize_value_shallow(function, "forcing callable surface")
+                    .await?,
+            );
+            match function {
+                Value::Function(function) => {
+                    self.finish_execute_call(
+                        function,
+                        args,
+                        kwargs,
+                        kwargs_expr,
+                        function_obligations,
+                    )
+                    .await
+                }
+                Value::Partial(partial) => {
+                    let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
+                    merged_args.extend(args.iter().cloned());
+                    let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
+                    merged_kwargs.extend(kwargs.iter().cloned());
+                    let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
+                        (Some(left), Some(right)) => {
+                            Some(self.merge_keyword_records((**left).clone(), right).await?)
+                        }
+                        (Some(value), None) => Some((**value).clone()),
+                        (None, value) => value,
+                    };
+                    self.finish_obligated_result(
+                        self.execute_call(
+                            partial.function.clone(),
+                            Arc::from(merged_args),
+                            Arc::from(merged_kwargs),
+                            merged_kwargs_expr,
+                        )
+                        .await,
+                        function_obligations,
+                    )
+                }
+                Value::Builtin(builtin) => self.finish_obligated_result(
+                    self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)
+                        .await,
                     function_obligations,
-                )
+                ),
+                other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
             }
-            Value::Builtin(builtin) => self.finish_obligated_result(
-                self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr),
-                function_obligations,
-            ),
-            other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
-        }
+        })
     }
 
-    pub(super) fn finish_execute_call(
+    pub(super) async fn finish_execute_call(
         &self,
         function: FunctionValue,
         args: Arc<[Value]>,
@@ -1014,11 +1050,13 @@ impl Engine {
         kwargs_expr: Option<Value>,
         function_obligations: Vec<HostObservation>,
     ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs(
-            &kwargs,
-            kwargs_expr,
-            &format!("function '{}'", function.def.name),
-        )?;
+        let kwargs = self
+            .materialize_kwargs(
+                &kwargs,
+                kwargs_expr,
+                &format!("function '{}'", function.def.name),
+            )
+            .await?;
 
         if kwargs.is_empty()
             && function.key().is_some()
@@ -1029,13 +1067,14 @@ impl Engine {
         }
 
         self.finish_obligated_result(
-            self.invoke_function(&function, args, Arc::from(kwargs)),
+            self.invoke_function(&function, args, Arc::from(kwargs))
+                .await,
             function_obligations,
         )
     }
 
     // r[impl eval.enter-functions]
-    pub(super) fn invoke_function(
+    pub(super) async fn invoke_function(
         &self,
         function: &FunctionValue,
         args: Arc<[Value]>,
@@ -1097,6 +1136,7 @@ impl Engine {
                     &bindings,
                     function.code_identity.as_ref(),
                 )
+                .await
                 .into_value()?;
             bindings.insert(param.name.clone(), value);
         }
@@ -1114,15 +1154,16 @@ impl Engine {
             &bindings,
             function.code_identity.as_ref(),
         )
+        .await
         .into_value()
     }
 
-    pub(super) fn resolve_module_function(
+    pub(super) async fn resolve_module_function(
         &self,
         module_id: &ModuleId,
         name: &str,
     ) -> Result<FunctionValue, PoisonError> {
-        let mut bindings = (*self.eval_module_scope(module_id)?).clone();
+        let mut bindings = (*self.eval_module_scope(module_id).await?).clone();
         match bindings.remove(name) {
             Some(Value::Function(function)) => Ok(function),
             Some(other) => Err(self.type_error(&format!(
@@ -1133,7 +1174,7 @@ impl Engine {
         }
     }
 
-    pub(super) fn eval_module_scope(
+    pub(super) async fn eval_module_scope(
         &self,
         module_id: &ModuleId,
     ) -> Result<Arc<HashMap<String, Value>>, PoisonError> {
@@ -1172,20 +1213,23 @@ impl Engine {
             );
         }
 
-        let outcome = (|| -> Result<Arc<HashMap<String, Value>>, PoisonError> {
+        let outcome = async {
             for stmt in &module.module.top_level.stmts {
                 match stmt {
                     instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
                         let value = self
                             .eval_expr(value, module_id, &bindings, module_id.as_ref())
+                            .await
                             .into_value()?;
                         bindings.insert(name.clone(), value);
                     }
                     instr::Stmt::LetPattern { pattern, value } => {
                         let value = self
                             .eval_expr(value, module_id, &bindings, module_id.as_ref())
+                            .await
                             .into_value()?;
-                        self.bind_pattern_into(pattern, value, &mut bindings)?;
+                        self.bind_pattern_into(pattern, value, &mut bindings)
+                            .await?;
                     }
                     instr::Stmt::Return(_) => {
                         return Err(self.internal_error("return is not allowed at file scope"));
@@ -1211,15 +1255,18 @@ impl Engine {
                     instr::Stmt::Expr(expr) => {
                         let value = self
                             .eval_expr(expr, module_id, &bindings, module_id.as_ref())
+                            .await
                             .into_value()?;
                         demanded_values.push(value);
                     }
                 }
             }
 
-            self.resolve_demanded_values(mem::take(&mut demanded_values))?;
+            self.resolve_demanded_values(mem::take(&mut demanded_values))
+                .await?;
             Ok(Arc::new(bindings))
-        })();
+        }
+        .await;
 
         let mut state = module
             .scope_state
@@ -1236,7 +1283,7 @@ impl Engine {
         outcome
     }
 
-    pub(super) fn eval_block(
+    pub(super) async fn eval_block(
         &self,
         block: &instr::Block,
         current_module_id: &ModuleId,
@@ -1250,60 +1297,80 @@ impl Engine {
             let is_last = index + 1 == block.stmts.len();
             match stmt {
                 instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
-                    match self.eval_expr(
-                        value,
-                        current_module_id,
-                        &local_bindings,
-                        current_code_identity,
-                    ) {
+                    match self
+                        .eval_expr(
+                            value,
+                            current_module_id,
+                            &local_bindings,
+                            current_code_identity,
+                        )
+                        .await
+                    {
                         BuildResult::Value(value) => {
                             local_bindings.insert(name.clone(), value);
                         }
                         other => {
-                            return self.finish_demanded_result(other, &mut demanded_values);
+                            return self
+                                .finish_demanded_result(other, &mut demanded_values)
+                                .await;
                         }
                     }
                 }
                 instr::Stmt::LetPattern { pattern, value } => {
-                    match self.eval_expr(
-                        value,
-                        current_module_id,
-                        &local_bindings,
-                        current_code_identity,
-                    ) {
+                    match self
+                        .eval_expr(
+                            value,
+                            current_module_id,
+                            &local_bindings,
+                            current_code_identity,
+                        )
+                        .await
+                    {
                         BuildResult::Value(value) => {
-                            if let Err(error) =
-                                self.bind_pattern_into(pattern, value, &mut local_bindings)
+                            if let Err(error) = self
+                                .bind_pattern_into(pattern, value, &mut local_bindings)
+                                .await
                             {
-                                return self.finish_demanded_result(
-                                    BuildResult::Poisoned(error),
-                                    &mut demanded_values,
-                                );
+                                return self
+                                    .finish_demanded_result(
+                                        BuildResult::Poisoned(error),
+                                        &mut demanded_values,
+                                    )
+                                    .await;
                             }
                         }
                         other => {
-                            return self.finish_demanded_result(other, &mut demanded_values);
+                            return self
+                                .finish_demanded_result(other, &mut demanded_values)
+                                .await;
                         }
                     }
                 }
                 instr::Stmt::Return(expr) => {
-                    match self.eval_expr(
-                        expr,
-                        current_module_id,
-                        &local_bindings,
-                        current_code_identity,
-                    ) {
+                    match self
+                        .eval_expr(
+                            expr,
+                            current_module_id,
+                            &local_bindings,
+                            current_code_identity,
+                        )
+                        .await
+                    {
                         BuildResult::Value(value) | BuildResult::Returned(value) => {
-                            return self.finish_demanded_result(
-                                BuildResult::Returned(value),
-                                &mut demanded_values,
-                            );
+                            return self
+                                .finish_demanded_result(
+                                    BuildResult::Returned(value),
+                                    &mut demanded_values,
+                                )
+                                .await;
                         }
                         BuildResult::Poisoned(error) => {
-                            return self.finish_demanded_result(
-                                BuildResult::Poisoned(error),
-                                &mut demanded_values,
-                            );
+                            return self
+                                .finish_demanded_result(
+                                    BuildResult::Poisoned(error),
+                                    &mut demanded_values,
+                                )
+                                .await;
                         }
                     }
                 }
@@ -1326,23 +1393,30 @@ impl Engine {
                     local_bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
                 }
                 instr::Stmt::Expr(expr) => {
-                    match self.eval_expr(
-                        expr,
-                        current_module_id,
-                        &local_bindings,
-                        current_code_identity,
-                    ) {
+                    match self
+                        .eval_expr(
+                            expr,
+                            current_module_id,
+                            &local_bindings,
+                            current_code_identity,
+                        )
+                        .await
+                    {
                         BuildResult::Value(value) => {
                             if is_last {
-                                return self.finish_demanded_result(
-                                    BuildResult::Value(value),
-                                    &mut demanded_values,
-                                );
+                                return self
+                                    .finish_demanded_result(
+                                        BuildResult::Value(value),
+                                        &mut demanded_values,
+                                    )
+                                    .await;
                             }
                             demanded_values.push(value);
                         }
                         other => {
-                            return self.finish_demanded_result(other, &mut demanded_values);
+                            return self
+                                .finish_demanded_result(other, &mut demanded_values)
+                                .await;
                         }
                     }
                 }
@@ -1350,9 +1424,10 @@ impl Engine {
         }
 
         self.finish_demanded_result(BuildResult::Value(Value::Unit), &mut demanded_values)
+            .await
     }
 
-    pub(super) fn finish_demanded_result(
+    pub(super) async fn finish_demanded_result(
         &self,
         result: BuildResult,
         demanded_values: &mut Vec<Value>,
@@ -1360,13 +1435,13 @@ impl Engine {
         let demanded_values = mem::take(demanded_values);
         match result {
             BuildResult::Value(value) => {
-                BuildResult::Value(self.wrap_demanded_value(demanded_values, Ok(value)))
+                BuildResult::Value(self.wrap_demanded_value(demanded_values, Ok(value)).await)
             }
             BuildResult::Returned(value) => {
-                BuildResult::Returned(self.wrap_demanded_value(demanded_values, Ok(value)))
+                BuildResult::Returned(self.wrap_demanded_value(demanded_values, Ok(value)).await)
             }
             BuildResult::Poisoned(error) => {
-                if let Err(demand_error) = self.resolve_demanded_values(demanded_values) {
+                if let Err(demand_error) = self.resolve_demanded_values(demanded_values).await {
                     return BuildResult::Poisoned(demand_error);
                 }
                 BuildResult::Poisoned(error)
@@ -1374,7 +1449,7 @@ impl Engine {
         }
     }
 
-    pub(super) fn wrap_demanded_value(
+    pub(super) async fn wrap_demanded_value(
         &self,
         demanded_values: Vec<Value>,
         result: Result<Value, PoisonError>,
@@ -1393,7 +1468,7 @@ impl Engine {
         )
     }
 
-    pub(super) fn resolve_demanded_values(
+    pub(super) async fn resolve_demanded_values(
         &self,
         demanded_values: Vec<Value>,
     ) -> Result<(), PoisonError> {
@@ -1401,11 +1476,13 @@ impl Engine {
             return Ok(());
         }
 
-        let _ = self.resolve_boundary_value(Value::Array(Arc::from(demanded_values)))?;
+        let _ = self
+            .resolve_boundary_value(Value::Array(Arc::from(demanded_values)))
+            .await?;
         Ok(())
     }
 
-    pub(super) fn build_fallible_value(&self, value: Value) -> Value {
+    pub(super) async fn build_fallible_value(&self, value: Value) -> Value {
         let (value, obligations) = self.split_obligations(value);
         match value {
             Value::Function(_) | Value::Builtin(_) | Value::Partial(_) => {
@@ -1430,530 +1507,576 @@ impl Engine {
     }
 
     // r[impl eval.forcing]
-    pub(super) fn eval_expr(
-        &self,
-        expr: &instr::Expr,
-        current_module_id: &ModuleId,
-        bindings: &HashMap<String, Value>,
-        current_code_identity: &str,
-    ) -> BuildResult {
-        match expr {
-            instr::Expr::LitInt(n) => BuildResult::Value(Value::U64(*n)),
-            instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
-            instr::Expr::LitBool(b) => BuildResult::Value(Value::Bool(*b)),
-            instr::Expr::LitString(s) => BuildResult::Value(Value::String(Arc::from(s.as_str()))),
-            instr::Expr::StringTemplate { parts, provenance } => self.eval_template_expr(
-                TemplateKind::String,
-                parts,
-                provenance.as_ref(),
-                current_module_id,
-                bindings,
-                current_code_identity,
-            ),
-            instr::Expr::PathTemplate { parts, provenance } => self.eval_template_expr(
-                TemplateKind::Path,
-                parts,
-                provenance.as_ref(),
-                current_module_id,
-                bindings,
-                current_code_identity,
-            ),
-            instr::Expr::Import { path, provenance } => {
-                BuildResult::from_result(self.import_module(path, provenance.as_ref()))
-            }
-            instr::Expr::Unit => BuildResult::Value(Value::Unit),
-            instr::Expr::Var(name) => {
-                if let Some(value) = bindings.get(name) {
-                    BuildResult::Value(value.clone())
-                } else if name == "None" {
-                    BuildResult::Value(option_none())
-                } else if let Some(overloads) = self
-                    .module_state(current_module_id)
-                    .ok()
-                    .and_then(|module| module.functions.get(name).cloned())
-                {
-                    BuildResult::Value(Value::Function(
-                        self.global_function_value(current_module_id, overloads[0].clone()),
-                    ))
-                } else if let Some(builtin) = builtin_namespace(name) {
-                    BuildResult::Value(Value::Builtin(builtin))
-                } else {
-                    BuildResult::Poisoned(self.unresolved_name(name))
+    pub(super) fn eval_expr<'a>(
+        &'a self,
+        expr: &'a instr::Expr,
+        current_module_id: &'a ModuleId,
+        bindings: &'a HashMap<String, Value>,
+        current_code_identity: &'a str,
+    ) -> BoxFuture<'a, BuildResult> {
+        Box::pin(async move {
+            match expr {
+                instr::Expr::LitInt(n) => BuildResult::Value(Value::U64(*n)),
+                instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
+                instr::Expr::LitBool(b) => BuildResult::Value(Value::Bool(*b)),
+                instr::Expr::LitString(s) => {
+                    BuildResult::Value(Value::String(Arc::from(s.as_str())))
                 }
-            }
-            instr::Expr::Binary {
-                op,
-                left,
-                right,
-                provenance,
-            } => {
-                let left = match self.eval_expr(
+                instr::Expr::StringTemplate { parts, provenance } => {
+                    self.eval_template_expr(
+                        TemplateKind::String,
+                        parts,
+                        provenance.as_ref(),
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    )
+                    .await
+                }
+                instr::Expr::PathTemplate { parts, provenance } => {
+                    self.eval_template_expr(
+                        TemplateKind::Path,
+                        parts,
+                        provenance.as_ref(),
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    )
+                    .await
+                }
+                instr::Expr::Import { path, provenance } => {
+                    BuildResult::from_result(self.import_module(path, provenance.as_ref()).await)
+                }
+                instr::Expr::Unit => BuildResult::Value(Value::Unit),
+                instr::Expr::Var(name) => {
+                    if let Some(value) = bindings.get(name) {
+                        BuildResult::Value(value.clone())
+                    } else if name == "None" {
+                        BuildResult::Value(option_none())
+                    } else if let Some(overloads) = self
+                        .module_state(current_module_id)
+                        .ok()
+                        .and_then(|module| module.functions.get(name).cloned())
+                    {
+                        BuildResult::Value(Value::Function(
+                            self.global_function_value(current_module_id, overloads[0].clone()),
+                        ))
+                    } else if let Some(builtin) = builtin_namespace(name) {
+                        BuildResult::Value(Value::Builtin(builtin))
+                    } else {
+                        BuildResult::Poisoned(self.unresolved_name(name))
+                    }
+                }
+                instr::Expr::Binary {
+                    op,
                     left,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
-                let right =
-                    match self.eval_expr(right, current_module_id, bindings, current_code_identity)
+                    right,
+                    provenance,
+                } => {
+                    let left = match self
+                        .eval_expr(left, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    let right = match self
+                        .eval_expr(right, current_module_id, bindings, current_code_identity)
+                        .await
                     {
                         BuildResult::Value(value) => value,
                         other => return other,
                     };
 
-                let concat_ready = if matches!(op, BinOp::Concat) {
-                    let mut deps = Vec::new();
-                    left.collect_pending_shallow(&mut deps);
-                    right.collect_pending_shallow(&mut deps);
-                    deps.is_empty()
-                } else {
-                    false
-                };
+                    let concat_ready = if matches!(op, BinOp::Concat) {
+                        let mut deps = Vec::new();
+                        left.collect_pending_shallow(&mut deps);
+                        right.collect_pending_shallow(&mut deps);
+                        deps.is_empty()
+                    } else {
+                        false
+                    };
 
-                if concat_ready || (left.key().is_some() && right.key().is_some()) {
-                    BuildResult::from_result(self.compute_binary(*op, &left, &right))
-                } else {
-                    BuildResult::Value(self.pending_value(
-                        NodeJob::Binary {
-                            op: *op,
-                            left,
-                            right,
-                        },
-                        format!("binary({op:?})"),
-                        provenance.clone(),
-                    ))
+                    if concat_ready || (left.key().is_some() && right.key().is_some()) {
+                        BuildResult::from_result(self.compute_binary(*op, &left, &right).await)
+                    } else {
+                        BuildResult::Value(self.pending_value(
+                            NodeJob::Binary {
+                                op: *op,
+                                left,
+                                right,
+                            },
+                            format!("binary({op:?})"),
+                            provenance.clone(),
+                        ))
+                    }
                 }
-            }
-            instr::Expr::Unary {
-                op,
-                operand,
-                provenance,
-            } => {
-                let operand = match self.eval_expr(
+                instr::Expr::Unary {
+                    op,
                     operand,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
+                    provenance,
+                } => {
+                    let operand = match self
+                        .eval_expr(operand, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
 
-                if operand.key().is_some() {
-                    BuildResult::from_result(self.compute_unary(*op, &operand))
-                } else {
-                    BuildResult::Value(self.pending_value(
-                        NodeJob::Unary { op: *op, operand },
-                        format!("unary({op:?})"),
-                        provenance.clone(),
-                    ))
+                    if operand.key().is_some() {
+                        BuildResult::from_result(self.compute_unary(*op, &operand))
+                    } else {
+                        BuildResult::Value(self.pending_value(
+                            NodeJob::Unary { op: *op, operand },
+                            format!("unary({op:?})"),
+                            provenance.clone(),
+                        ))
+                    }
                 }
-            }
-            instr::Expr::Block(block) => {
-                self.eval_block(block, current_module_id, bindings, current_code_identity)
-            }
-            // r[impl eval.control-demand]
-            instr::Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-                provenance,
-            } => {
-                let cond = match self.eval_expr(
+                instr::Expr::Block(block) => {
+                    self.eval_block(block, current_module_id, bindings, current_code_identity)
+                        .await
+                }
+                // r[impl eval.control-demand]
+                instr::Expr::If {
                     cond,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
-                let (cond, obligations) = self.split_obligations(cond);
+                    then_branch,
+                    else_branch,
+                    provenance,
+                } => {
+                    let cond = match self
+                        .eval_expr(cond, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    let (cond, obligations) = self.split_obligations(cond);
 
-                match cond {
-                    Value::Bool(true) => self.finish_obligated_build_result(
-                        self.eval_block(
-                            then_branch,
-                            current_module_id,
-                            bindings,
-                            current_code_identity,
+                    match cond {
+                        Value::Bool(true) => self.finish_obligated_build_result(
+                            self.eval_block(
+                                then_branch,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            )
+                            .await,
+                            obligations,
                         ),
-                        obligations,
-                    ),
-                    Value::Bool(false) => self.finish_obligated_build_result(
-                        self.eval_block(
-                            else_branch,
-                            current_module_id,
-                            bindings,
-                            current_code_identity,
+                        Value::Bool(false) => self.finish_obligated_build_result(
+                            self.eval_block(
+                                else_branch,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            )
+                            .await,
+                            obligations,
                         ),
-                        obligations,
-                    ),
-                    Value::Pending(_) => BuildResult::Value(self.pending_value(
-                        NodeJob::If {
-                            cond,
-                            then_branch: then_branch.clone(),
-                            else_branch: else_branch.clone(),
-                            bindings: Arc::new(bindings.clone()),
-                            scope_module_id: Arc::clone(current_module_id),
-                            scope_identity: Arc::from(current_code_identity),
+                        Value::Pending(_) => BuildResult::Value(self.pending_value(
+                            NodeJob::If {
+                                cond,
+                                then_branch: then_branch.clone(),
+                                else_branch: else_branch.clone(),
+                                bindings: Arc::new(bindings.clone()),
+                                scope_module_id: Arc::clone(current_module_id),
+                                scope_identity: Arc::from(current_code_identity),
+                            },
+                            "if(..)".into(),
+                            provenance.clone(),
+                        )),
+                        other => BuildResult::Poisoned(self.type_error(&format!(
+                            "if condition must be Bool, got {}",
+                            other.type_name()
+                        ))),
+                    }
+                }
+                // r[impl fn.closure]
+                // r[impl fn.identity.closure]
+                instr::Expr::Closure { closure_id, def } => {
+                    BuildResult::Value(Value::Function(self.closure_function_value(
+                        current_module_id,
+                        def.clone(),
+                        Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
+                        capture_referenced_bindings(
+                            bindings,
+                            &def.params,
+                            &def.keyword_params,
+                            &def.body,
+                        ),
+                    )))
+                }
+                instr::Expr::Call {
+                    func,
+                    args,
+                    kwargs,
+                    kwargs_expr,
+                    provenance,
+                } => {
+                    let function = match self
+                        .eval_expr(func, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    let mut arg_values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        match self
+                            .eval_expr(arg, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => arg_values.push(value),
+                            other => return other,
+                        }
+                    }
+                    let mut kwarg_values = Vec::with_capacity(kwargs.len());
+                    for (name, arg) in kwargs {
+                        match self
+                            .eval_expr(arg, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => {
+                                kwarg_values.push((Arc::from(name.as_str()), value));
+                            }
+                            other => return other,
+                        }
+                    }
+                    let kwargs_expr_value = match kwargs_expr {
+                        Some(expr) => match self
+                            .eval_expr(expr, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => Some(value),
+                            other => return other,
                         },
-                        "if(..)".into(),
+                        None => None,
+                    };
+                    BuildResult::Value(self.build_call_with_kwargs(
+                        function,
+                        arg_values,
+                        kwarg_values,
+                        kwargs_expr_value,
                         provenance.clone(),
-                    )),
-                    other => BuildResult::Poisoned(self.type_error(&format!(
-                        "if condition must be Bool, got {}",
-                        other.type_name()
-                    ))),
+                    ))
                 }
-            }
-            // r[impl fn.closure]
-            // r[impl fn.identity.closure]
-            instr::Expr::Closure { closure_id, def } => {
-                BuildResult::Value(Value::Function(self.closure_function_value(
-                    current_module_id,
-                    def.clone(),
-                    Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
-                    capture_referenced_bindings(
-                        bindings,
-                        &def.params,
-                        &def.keyword_params,
-                        &def.body,
-                    ),
-                )))
-            }
-            instr::Expr::Call {
-                func,
-                args,
-                kwargs,
-                kwargs_expr,
-                provenance,
-            } => {
-                let function = match self.eval_expr(
+                instr::Expr::PartialCall {
                     func,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
-                let mut arg_values = Vec::with_capacity(args.len());
-                for arg in args {
-                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
-                        BuildResult::Value(value) => arg_values.push(value),
+                    args,
+                    kwargs,
+                    kwargs_expr,
+                    provenance: _,
+                } => {
+                    let function = match self
+                        .eval_expr(func, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
                         other => return other,
-                    }
-                }
-                let mut kwarg_values = Vec::with_capacity(kwargs.len());
-                for (name, arg) in kwargs {
-                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
-                        BuildResult::Value(value) => {
-                            kwarg_values.push((Arc::from(name.as_str()), value));
+                    };
+                    let mut arg_values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        match self
+                            .eval_expr(arg, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => arg_values.push(value),
+                            other => return other,
                         }
-                        other => return other,
                     }
-                }
-                let kwargs_expr_value = match kwargs_expr {
-                    Some(expr) => match self.eval_expr(
-                        expr,
-                        current_module_id,
-                        bindings,
-                        current_code_identity,
-                    ) {
-                        BuildResult::Value(value) => Some(value),
-                        other => return other,
-                    },
-                    None => None,
-                };
-                BuildResult::Value(self.build_call_with_kwargs(
-                    function,
-                    arg_values,
-                    kwarg_values,
-                    kwargs_expr_value,
-                    provenance.clone(),
-                ))
-            }
-            instr::Expr::PartialCall {
-                func,
-                args,
-                kwargs,
-                kwargs_expr,
-                provenance: _,
-            } => {
-                let function = match self.eval_expr(
-                    func,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
-                let mut arg_values = Vec::with_capacity(args.len());
-                for arg in args {
-                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
-                        BuildResult::Value(value) => arg_values.push(value),
-                        other => return other,
-                    }
-                }
-                let mut kwarg_values = Vec::with_capacity(kwargs.len());
-                for (name, arg) in kwargs {
-                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
-                        BuildResult::Value(value) => {
-                            kwarg_values.push((Arc::from(name.as_str()), value));
+                    let mut kwarg_values = Vec::with_capacity(kwargs.len());
+                    for (name, arg) in kwargs {
+                        match self
+                            .eval_expr(arg, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => {
+                                kwarg_values.push((Arc::from(name.as_str()), value));
+                            }
+                            other => return other,
                         }
-                        other => return other,
                     }
+                    let kwargs_expr_value = match kwargs_expr {
+                        Some(expr) => match self
+                            .eval_expr(expr, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => Some(value),
+                            other => return other,
+                        },
+                        None => None,
+                    };
+                    BuildResult::Value(Value::Partial(Arc::new(PartialValue {
+                        function,
+                        args: Arc::from(arg_values),
+                        kwargs: Arc::from(kwarg_values),
+                        kwargs_expr: kwargs_expr_value.map(Box::new),
+                    })))
                 }
-                let kwargs_expr_value = match kwargs_expr {
-                    Some(expr) => match self.eval_expr(
-                        expr,
-                        current_module_id,
-                        bindings,
-                        current_code_identity,
-                    ) {
-                        BuildResult::Value(value) => Some(value),
-                        other => return other,
-                    },
-                    None => None,
-                };
-                BuildResult::Value(Value::Partial(Arc::new(PartialValue {
-                    function,
-                    args: Arc::from(arg_values),
-                    kwargs: Arc::from(kwarg_values),
-                    kwargs_expr: kwargs_expr_value.map(Box::new),
-                })))
-            }
-            instr::Expr::StructLit { name, fields } => {
-                let mut values = Vec::with_capacity(fields.len());
-                for (field_name, field_expr) in fields {
-                    match self.eval_expr(
-                        field_expr,
-                        current_module_id,
-                        bindings,
-                        current_code_identity,
-                    ) {
-                        BuildResult::Value(value) => {
-                            values.push((Arc::from(field_name.as_str()), value));
-                        }
-                        other => return other,
-                    }
-                }
-                BuildResult::Value(Value::Struct(StructValue {
-                    type_name: Arc::from(name.as_str()),
-                    fields: Arc::from(values),
-                }))
-            }
-            instr::Expr::Record(items) => {
-                let mut entries = Vec::new();
-                for item in items {
-                    match item {
-                        instr::RecordItem::Field { name, value } => {
-                            let value = match self.eval_expr(
-                                value,
+                instr::Expr::StructLit { name, fields } => {
+                    let mut values = Vec::with_capacity(fields.len());
+                    for (field_name, field_expr) in fields {
+                        match self
+                            .eval_expr(
+                                field_expr,
                                 current_module_id,
                                 bindings,
                                 current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            entries.push((Value::String(Arc::from(name.as_str())), value));
+                            )
+                            .await
+                        {
+                            BuildResult::Value(value) => {
+                                values.push((Arc::from(field_name.as_str()), value));
+                            }
+                            other => return other,
                         }
-                        instr::RecordItem::Spread(spread_expr) => {
-                            let spread_value = match self.eval_expr(
-                                spread_expr,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            let spread_value = match self.demand_value_shallow(spread_value) {
-                                Ok(value) => value,
-                                Err(error) => return BuildResult::Poisoned(error),
-                            };
-                            match self.extend_record_with_spread(&mut entries, spread_value) {
-                                Ok(()) => {}
-                                Err(error) => return BuildResult::Poisoned(error),
+                    }
+                    BuildResult::Value(Value::Struct(StructValue {
+                        type_name: Arc::from(name.as_str()),
+                        fields: Arc::from(values),
+                    }))
+                }
+                instr::Expr::Record(items) => {
+                    let mut entries = Vec::new();
+                    for item in items {
+                        match item {
+                            instr::RecordItem::Field { name, value } => {
+                                let value = match self
+                                    .eval_expr(
+                                        value,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                entries.push((Value::String(Arc::from(name.as_str())), value));
+                            }
+                            instr::RecordItem::Spread(spread_expr) => {
+                                let spread_value = match self
+                                    .eval_expr(
+                                        spread_expr,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                let spread_value =
+                                    match self.demand_value_shallow(spread_value).await {
+                                        Ok(value) => value,
+                                        Err(error) => return BuildResult::Poisoned(error),
+                                    };
+                                match self
+                                    .extend_record_with_spread(&mut entries, spread_value)
+                                    .await
+                                {
+                                    Ok(()) => {}
+                                    Err(error) => return BuildResult::Poisoned(error),
+                                }
                             }
                         }
                     }
+                    BuildResult::Value(Value::Map(MapValue {
+                        entries: Arc::from(entries),
+                    }))
                 }
-                BuildResult::Value(Value::Map(MapValue {
-                    entries: Arc::from(entries),
-                }))
-            }
-            instr::Expr::Array(items) => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    match item {
-                        instr::ArrayItem::Expr(item_expr) => {
-                            match self.eval_expr(
-                                item_expr,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => values.push(value),
-                                other => return other,
+                instr::Expr::Array(items) => {
+                    let mut values = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item {
+                            instr::ArrayItem::Expr(item_expr) => {
+                                match self
+                                    .eval_expr(
+                                        item_expr,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => values.push(value),
+                                    other => return other,
+                                }
                             }
-                        }
-                        instr::ArrayItem::Spread(spread_expr) => {
-                            let spread_value = match self.eval_expr(
-                                spread_expr,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            let spread_value = match self.demand_value_shallow(spread_value) {
-                                Ok(value) => value,
-                                Err(error) => return BuildResult::Poisoned(error),
-                            };
-                            match self.extend_array_with_spread(&mut values, spread_value) {
-                                Ok(()) => {}
-                                Err(error) => return BuildResult::Poisoned(error),
-                            }
-                        }
-                    }
-                }
-                BuildResult::Value(Value::Array(Arc::from(values)))
-            }
-            instr::Expr::Map(entries) => {
-                let mut values = Vec::with_capacity(entries.len());
-                for entry in entries {
-                    match entry {
-                        instr::MapItem::Entry { key, value } => {
-                            let key = match self.eval_expr(
-                                key,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            let value = match self.eval_expr(
-                                value,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            values.push((key, value));
-                        }
-                        instr::MapItem::Spread(spread_expr) => {
-                            let spread_value = match self.eval_expr(
-                                spread_expr,
-                                current_module_id,
-                                bindings,
-                                current_code_identity,
-                            ) {
-                                BuildResult::Value(value) => value,
-                                other => return other,
-                            };
-                            let spread_value = match self.demand_value_shallow(spread_value) {
-                                Ok(value) => value,
-                                Err(error) => return BuildResult::Poisoned(error),
-                            };
-                            match self.extend_map_with_spread(&mut values, spread_value) {
-                                Ok(()) => {}
-                                Err(error) => return BuildResult::Poisoned(error),
+                            instr::ArrayItem::Spread(spread_expr) => {
+                                let spread_value = match self
+                                    .eval_expr(
+                                        spread_expr,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                let spread_value =
+                                    match self.demand_value_shallow(spread_value).await {
+                                        Ok(value) => value,
+                                        Err(error) => return BuildResult::Poisoned(error),
+                                    };
+                                match self
+                                    .extend_array_with_spread(&mut values, spread_value)
+                                    .await
+                                {
+                                    Ok(()) => {}
+                                    Err(error) => return BuildResult::Poisoned(error),
+                                }
                             }
                         }
                     }
+                    BuildResult::Value(Value::Array(Arc::from(values)))
                 }
-                BuildResult::Value(Value::Map(MapValue {
-                    entries: Arc::from(values),
-                }))
-            }
-            instr::Expr::Field {
-                receiver,
-                field,
-                provenance,
-            } => {
-                let receiver = match self.eval_expr(
+                instr::Expr::Map(entries) => {
+                    let mut values = Vec::with_capacity(entries.len());
+                    for entry in entries {
+                        match entry {
+                            instr::MapItem::Entry { key, value } => {
+                                let key = match self
+                                    .eval_expr(
+                                        key,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                let value = match self
+                                    .eval_expr(
+                                        value,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                values.push((key, value));
+                            }
+                            instr::MapItem::Spread(spread_expr) => {
+                                let spread_value = match self
+                                    .eval_expr(
+                                        spread_expr,
+                                        current_module_id,
+                                        bindings,
+                                        current_code_identity,
+                                    )
+                                    .await
+                                {
+                                    BuildResult::Value(value) => value,
+                                    other => return other,
+                                };
+                                let spread_value =
+                                    match self.demand_value_shallow(spread_value).await {
+                                        Ok(value) => value,
+                                        Err(error) => return BuildResult::Poisoned(error),
+                                    };
+                                match self.extend_map_with_spread(&mut values, spread_value).await {
+                                    Ok(()) => {}
+                                    Err(error) => return BuildResult::Poisoned(error),
+                                }
+                            }
+                        }
+                    }
+                    BuildResult::Value(Value::Map(MapValue {
+                        entries: Arc::from(values),
+                    }))
+                }
+                instr::Expr::Field {
                     receiver,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
+                    field,
+                    provenance,
+                } => {
+                    let receiver = match self
+                        .eval_expr(receiver, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
 
-                if matches!(receiver, Value::Pending(_)) {
+                    if matches!(receiver, Value::Pending(_)) {
+                        BuildResult::Value(self.pending_value(
+                            NodeJob::Field {
+                                receiver,
+                                field: Arc::from(field.as_str()),
+                                scope_module_id: Arc::clone(current_module_id),
+                            },
+                            format!("field(.{field})"),
+                            provenance.clone(),
+                        ))
+                    } else {
+                        BuildResult::from_result(
+                            self.select_field_in_module(&receiver, field, current_module_id)
+                                .await,
+                        )
+                    }
+                }
+                // r[impl error.fail]
+                instr::Expr::Fail {
+                    message,
+                    provenance,
+                } => {
+                    let message = match self
+                        .eval_expr(message, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
                     BuildResult::Value(self.pending_value(
-                        NodeJob::Field {
-                            receiver,
-                            field: Arc::from(field.as_str()),
-                            scope_module_id: Arc::clone(current_module_id),
-                        },
-                        format!("field(.{field})"),
+                        NodeJob::Fail { message },
+                        "fail(..)".into(),
                         provenance.clone(),
                     ))
-                } else {
-                    BuildResult::from_result(self.select_field_in_module(
-                        &receiver,
-                        field,
-                        current_module_id,
-                    ))
                 }
-            }
-            // r[impl error.fail]
-            instr::Expr::Fail {
-                message,
-                provenance,
-            } => {
-                let message = match self.eval_expr(
-                    message,
-                    current_module_id,
-                    bindings,
-                    current_code_identity,
-                ) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
-                BuildResult::Value(self.pending_value(
-                    NodeJob::Fail { message },
-                    "fail(..)".into(),
-                    provenance.clone(),
-                ))
-            }
-            instr::Expr::Fallible(expr) => {
-                match self.eval_expr(expr, current_module_id, bindings, current_code_identity) {
-                    BuildResult::Value(value) => {
-                        BuildResult::Value(self.build_fallible_value(value))
-                    }
-                    BuildResult::Poisoned(error) => {
-                        BuildResult::Value(self.fallible_none_from_error(&error))
-                    }
-                    other => other,
-                }
-            }
-            instr::Expr::Tuple(elems) => {
-                let mut values = Vec::with_capacity(elems.len());
-                for elem in elems {
-                    match self.eval_expr(elem, current_module_id, bindings, current_code_identity) {
-                        BuildResult::Value(value) => values.push(value),
-                        other => return other,
+                instr::Expr::Fallible(expr) => {
+                    match self
+                        .eval_expr(expr, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
+                        BuildResult::Value(value) => {
+                            BuildResult::Value(self.build_fallible_value(value).await)
+                        }
+                        BuildResult::Poisoned(error) => {
+                            BuildResult::Value(self.fallible_none_from_error(&error))
+                        }
+                        other => other,
                     }
                 }
-                BuildResult::Value(Value::Tuple(Arc::from(values)))
+                instr::Expr::Tuple(elems) => {
+                    let mut values = Vec::with_capacity(elems.len());
+                    for elem in elems {
+                        match self
+                            .eval_expr(elem, current_module_id, bindings, current_code_identity)
+                            .await
+                        {
+                            BuildResult::Value(value) => values.push(value),
+                            other => return other,
+                        }
+                    }
+                    BuildResult::Value(Value::Tuple(Arc::from(values)))
+                }
             }
-        }
+        })
     }
 
-    pub(super) fn eval_template_expr(
+    pub(super) async fn eval_template_expr(
         &self,
         kind: TemplateKind,
         parts: &[instr::TemplatePart],
@@ -1969,12 +2092,10 @@ impl Engine {
                     values.push(TemplatePartValue::Text(Arc::from(text.as_str())));
                 }
                 instr::TemplatePart::Expr(expr) => {
-                    let value = match self.eval_expr(
-                        expr,
-                        current_module_id,
-                        bindings,
-                        current_code_identity,
-                    ) {
+                    let value = match self
+                        .eval_expr(expr, current_module_id, bindings, current_code_identity)
+                        .await
+                    {
                         BuildResult::Value(value) => value,
                         other => return other,
                     };
@@ -1999,13 +2120,13 @@ impl Engine {
         }
 
         let result = match kind {
-            TemplateKind::String => self.interpolate_string_parts(&values),
-            TemplateKind::Path => self.interpolate_path_parts(&values),
+            TemplateKind::String => self.interpolate_string_parts(&values).await,
+            TemplateKind::Path => self.interpolate_path_parts(&values).await,
         };
         BuildResult::from_result(result)
     }
 
-    pub(super) fn interpolate_string_parts(
+    pub(super) async fn interpolate_string_parts(
         &self,
         parts: &[TemplatePartValue],
     ) -> Result<Value, PoisonError> {
@@ -2017,7 +2138,7 @@ impl Engine {
                 TemplatePartValue::Expr(value_part) => {
                     let (value_part, value_obligations) = self.split_obligations_ref(value_part);
                     Self::add_obligations(&mut obligations, value_obligations.iter().cloned());
-                    value.push_str(&self.stringify_interpolated_value(value_part)?);
+                    value.push_str(&self.stringify_interpolated_value(value_part).await?);
                 }
             }
         }
@@ -2028,7 +2149,7 @@ impl Engine {
     }
 
     // r[exec.arg.interpolation]
-    pub(super) fn interpolate_path_parts(
+    pub(super) async fn interpolate_path_parts(
         &self,
         parts: &[TemplatePartValue],
     ) -> Result<Value, PoisonError> {
@@ -2128,7 +2249,7 @@ impl Engine {
         )
     }
 
-    pub(super) fn stringify_interpolated_value(
+    pub(super) async fn stringify_interpolated_value(
         &self,
         value: &Value,
     ) -> Result<String, PoisonError> {
@@ -2145,11 +2266,16 @@ impl Engine {
         }
     }
 
-    pub(super) fn select_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
+    pub(super) async fn select_field(
+        &self,
+        receiver: &Value,
+        field: &str,
+    ) -> Result<Value, PoisonError> {
         self.select_field_in_module(receiver, field, &self.root_module_id)
+            .await
     }
 
-    pub(super) fn select_field_in_module(
+    pub(super) async fn select_field_in_module(
         &self,
         receiver: &Value,
         field: &str,
@@ -2167,25 +2293,31 @@ impl Engine {
                     },
                 )))
             }
-            Value::Struct(struct_value) => struct_value
-                .fields
-                .iter()
-                .find(|(name, _)| name.as_ref() == field)
-                .map(|(_, value)| value.clone())
-                .or_else(|| {
-                    self.user_method_value_in_module(
-                        receiver,
-                        struct_value.type_name.as_ref(),
-                        field,
-                        current_module_id,
-                    )
-                })
-                .ok_or_else(|| {
+            Value::Struct(struct_value) => {
+                let found = struct_value
+                    .fields
+                    .iter()
+                    .find(|(name, _)| name.as_ref() == field)
+                    .map(|(_, value)| value.clone());
+                let found = match found {
+                    Some(v) => Some(v),
+                    None => {
+                        self.user_method_value_in_module(
+                            receiver,
+                            struct_value.type_name.as_ref(),
+                            field,
+                            current_module_id,
+                        )
+                        .await
+                    }
+                };
+                found.ok_or_else(|| {
                     self.type_error(&format!(
                         "no field '{}' on struct {}",
                         field, struct_value.type_name
                     ))
-                }),
+                })
+            }
             Value::Tuple(elems) => {
                 if let Some(index) = field.strip_prefix('_')
                     && let Ok(index) = index.parse::<usize>()
@@ -2378,7 +2510,7 @@ impl Engine {
         self.finish_obligated_result(result, obligations.iter().cloned())
     }
 
-    pub(super) fn compute_binary(
+    pub(super) async fn compute_binary(
         &self,
         op: BinOp,
         left: &Value,

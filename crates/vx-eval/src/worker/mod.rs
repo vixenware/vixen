@@ -33,10 +33,10 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
 use crate::exec::{
-    AcquireRequest, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue, ExecMount,
-    ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler, SharedDiscoverHandler,
-    SharedExecHandler, SharedImportHandler, SharedRenderHandler, SharedStabilizeHandler,
-    SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
+    AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue,
+    ExecMount, ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler,
+    SharedDiscoverHandler, SharedExecHandler, SharedImportHandler, SharedRenderHandler,
+    SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -51,8 +51,8 @@ use crate::value::{
     PartialValue, PathValue, StructValue, TreeValue, Value,
 };
 
-thread_local! {
-    static DEMAND_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+tokio::task_local! {
+    pub(crate) static DEMAND_STACK: RefCell<Vec<NodeId>>;
 }
 
 const DEFAULT_MAX_DEMAND_DEPTH: usize = 1_024;
@@ -206,23 +206,6 @@ impl Engine {
         Self::rewrap(this)
     }
 
-    pub(crate) fn run_batch(
-        self: &Arc<Self>,
-        items: Vec<(crate::node::NodeId, Vec<crate::node::NodeId>)>,
-    ) -> Result<
-        Vec<(
-            crate::node::NodeId,
-            Result<Value, crate::poison::PoisonError>,
-        )>,
-        (),
-    > {
-        if let Some(runtime) = &self.runtime {
-            runtime.run_batch(Arc::clone(self), items)
-        } else {
-            ClosureRuntime::default().run_batch(Arc::clone(self), items)
-        }
-    }
-
     fn ensure_closure_runtime(this: &mut Self) -> &mut ClosureRuntime {
         if this.runtime.is_none() {
             this.runtime = Some(Arc::new(ClosureRuntime::default()));
@@ -289,10 +272,16 @@ impl Engine {
 
     // r[impl eval.forcing.boundary]
     /// Evaluate a top-level function by name at the external forcing boundary.
-    pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.resolve_module_function(&self.root_module_id, name)?;
-        let value = self.build_call(Value::Function(function), args, None);
-        self.resolve_boundary_value(value)
+    pub async fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let function = self
+                    .resolve_module_function(&self.root_module_id, name)
+                    .await?;
+                let value = self.build_call(Value::Function(function), args, None);
+                self.resolve_boundary_value(value).await
+            })
+            .await
     }
 
     pub fn transport_module(&self) -> TransportModule {
@@ -316,12 +305,16 @@ impl Engine {
         module
     }
 
-    pub fn module_namespace(&self) -> Result<Value, PoisonError> {
-        self.module_namespace_for(&self.root_module_id)
+    pub async fn module_namespace(&self) -> Result<Value, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                self.module_namespace_for(&self.root_module_id).await
+            })
+            .await
     }
 
-    fn module_namespace_for(&self, module_id: &ModuleId) -> Result<Value, PoisonError> {
-        let bindings = self.eval_module_scope(module_id)?;
+    async fn module_namespace_for(&self, module_id: &ModuleId) -> Result<Value, PoisonError> {
+        let bindings = self.eval_module_scope(module_id).await?;
         let mut entries = bindings
             .iter()
             .map(|(name, value)| (Value::String(Arc::from(name.as_str())), value.clone()))
@@ -347,53 +340,75 @@ impl Engine {
             .ok_or_else(|| self.internal_error(&format!("missing module {}", module_id)))
     }
 
-    pub fn ship_value(&self, value: Value) -> Result<TransportValue, PoisonError> {
-        let value = self.resolve_boundary_value(value)?;
-        TransportValue::try_from(&value).map_err(|message| self.type_error(&message))
+    pub async fn ship_value(&self, value: Value) -> Result<TransportValue, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let value = self.resolve_boundary_value(value).await?;
+                TransportValue::try_from(&value).map_err(|message| self.type_error(&message))
+            })
+            .await
     }
 
-    pub fn ship_function(&self, value: Value) -> Result<ShippedFunction, PoisonError> {
-        let value = self.resolve_boundary_value(value)?;
-        let Value::Function(function) = value else {
-            return Err(self.type_error("shipped callbacks must be functions"));
-        };
-        ShippedFunction::try_from(&function).map_err(|message| self.type_error(&message))
+    pub async fn ship_function(&self, value: Value) -> Result<ShippedFunction, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let value = self.resolve_boundary_value(value).await?;
+                let Value::Function(function) = value else {
+                    return Err(self.type_error("shipped callbacks must be functions"));
+                };
+                ShippedFunction::try_from(&function).map_err(|message| self.type_error(&message))
+            })
+            .await
     }
 
-    pub fn call_shipped(
+    pub async fn call_shipped(
         &self,
         function: &ShippedFunction,
         args: Vec<Value>,
     ) -> Result<Value, PoisonError> {
-        let function = function
-            .to_runtime()
-            .map_err(|message| self.type_error(&message))?;
-        let value = self.build_call(Value::Function(function), args, None);
-        self.resolve_boundary_value(value)
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let function = function
+                    .to_runtime()
+                    .map_err(|message| self.type_error(&message))?;
+                let value = self.build_call(Value::Function(function), args, None);
+                self.resolve_boundary_value(value).await
+            })
+            .await
     }
 
-    pub fn invoke_shipped(
+    pub async fn invoke_shipped(
         module: &TransportModule,
         function: &ShippedFunction,
         args: Vec<Value>,
     ) -> Result<Value, PoisonError> {
         let engine = Self::from_transport_module(module);
-        let function = function
-            .to_runtime()
-            .map_err(|message| engine.type_error(&message))?;
-        let value = engine.build_call(Value::Function(function), args, None);
-        engine.resolve_boundary_value(value)
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let function = function
+                    .to_runtime()
+                    .map_err(|message| engine.type_error(&message))?;
+                let value = engine.build_call(Value::Function(function), args, None);
+                engine.resolve_boundary_value(value).await
+            })
+            .await
     }
 
-    pub fn invoke_shipped_discover(
+    pub async fn invoke_shipped_discover(
         module: &TransportModule,
         function: &ShippedFunction,
     ) -> Result<Value, PoisonError> {
         let engine = Self::from_transport_module(module);
-        let function = function
-            .to_runtime()
-            .map_err(|message| engine.type_error(&message))?;
-        engine.invoke_discover_probe(Value::Function(function))
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let function = function
+                    .to_runtime()
+                    .map_err(|message| engine.type_error(&message))?;
+                engine
+                    .invoke_discover_probe(Value::Function(function))
+                    .await
+            })
+            .await
     }
 
     fn from_transport_module(module: &TransportModule) -> Arc<Self> {
@@ -410,24 +425,42 @@ impl Engine {
         engine
     }
 
-    fn resolve_boundary_value(&self, value: Value) -> Result<Value, PoisonError> {
-        Scheduler::new(self.arc_self()).resolve_value(value)
+    async fn resolve_boundary_value(&self, value: Value) -> Result<Value, PoisonError> {
+        Scheduler::new(self.arc_self()).resolve_value(value).await
     }
 
     #[cfg(test)]
-    pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.resolve_module_function(&self.root_module_id, name)?;
-        Ok(self.build_call(Value::Function(function), args, None))
+    pub(crate) async fn call_unforced(
+        &self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let function = self
+                    .resolve_module_function(&self.root_module_id, name)
+                    .await?;
+                Ok(self.build_call(Value::Function(function), args, None))
+            })
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) fn force_shallow(&self, value: Value) -> Result<Value, PoisonError> {
-        self.force_value_shallow(value)
+    pub(crate) async fn force_shallow(&self, value: Value) -> Result<Value, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                self.force_value_shallow(value).await
+            })
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) fn force_fully(&self, value: Value) -> Result<Value, PoisonError> {
-        self.force_value(value)
+    pub(crate) async fn force_fully(&self, value: Value) -> Result<Value, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                self.force_value(value).await
+            })
+            .await
     }
 
     #[cfg(test)]
@@ -451,21 +484,31 @@ impl Engine {
     }
 
     #[cfg(test)]
-    pub(crate) fn function_key(&self, name: &str) -> Result<String, PoisonError> {
-        self.resolve_module_function(&self.root_module_id, name)?
-            .key()
-            .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
+    pub(crate) async fn function_key(&self, name: &str) -> Result<String, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                self.resolve_module_function(&self.root_module_id, name)
+                    .await?
+                    .key()
+                    .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
+            })
+            .await
     }
 
     #[cfg(test)]
-    pub(crate) fn function_identity_string(&self, name: &str) -> Result<String, PoisonError> {
-        Ok(self
-            .resolve_module_function(&self.root_module_id, name)?
-            .identity())
+    pub(crate) async fn function_identity_string(&self, name: &str) -> Result<String, PoisonError> {
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                Ok(self
+                    .resolve_module_function(&self.root_module_id, name)
+                    .await?
+                    .identity())
+            })
+            .await
     }
 
     // r[impl eval.entry]
-    pub fn call_entry(
+    pub async fn call_entry(
         &self,
         name: &str,
         workspace: impl AsRef<str>,
@@ -491,17 +534,21 @@ impl Engine {
             ),
         });
 
-        let value = self.call(name, vec![workspace, args, env])?;
-        match value {
-            Value::Tree(_) => Ok(value),
-            other => Err(self.type_error(&format!(
-                "build entry must return Tree, got {}",
-                other.type_name()
-            ))),
-        }
+        DEMAND_STACK
+            .scope(RefCell::new(Vec::new()), async {
+                let value = self.call(name, vec![workspace, args, env]).await?;
+                match value {
+                    Value::Tree(_) => Ok(value),
+                    other => Err(self.type_error(&format!(
+                        "build entry must return Tree, got {}",
+                        other.type_name()
+                    ))),
+                }
+            })
+            .await
     }
 
-    fn invoke_discover_probe(&self, probe: Value) -> Result<Value, PoisonError> {
+    async fn invoke_discover_probe(&self, probe: Value) -> Result<Value, PoisonError> {
         match probe {
             Value::Function(_) | Value::Builtin(_) => {}
             other => {
@@ -513,6 +560,7 @@ impl Engine {
         }
 
         self.resolve_boundary_value(self.build_call(probe, vec![Value::Host(HostValue)], None))
+            .await
     }
 
     fn add_obligations(
@@ -597,7 +645,7 @@ impl Engine {
         }
     }
 
-    fn hydrate_store_value(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
+    async fn hydrate_store_value(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         match value {
             Value::Blob(BlobValue::Store { .. }) | Value::Tree(TreeValue::Store(_)) => {
                 let Some(runtime) = &self.runtime else {
@@ -605,10 +653,12 @@ impl Engine {
                         "{context} requires an external store hydration handler"
                     )));
                 };
-                let hydrated = runtime.store_hydration(StoreHydrationRequest {
-                    value,
-                    demand_chain: self.current_demand_chain(None),
-                })?;
+                let hydrated = runtime
+                    .store_hydration(StoreHydrationRequest {
+                        value,
+                        demand_chain: self.current_demand_chain(None),
+                    })
+                    .await?;
                 match hydrated {
                     Value::Blob(BlobValue::Store { .. }) | Value::Tree(TreeValue::Store(_)) => {
                         Err(self.internal_error(&format!(
@@ -622,12 +672,14 @@ impl Engine {
         }
     }
 
-    fn hydrate_store_blob(
+    async fn hydrate_store_blob(
         &self,
         blob: &BlobValue,
         context: &str,
     ) -> Result<BlobValue, PoisonError> {
-        let hydrated = self.hydrate_store_value(Value::Blob(blob.clone()), context)?;
+        let hydrated = self
+            .hydrate_store_value(Value::Blob(blob.clone()), context)
+            .await?;
         let Value::Blob(blob) = hydrated else {
             return Err(self.internal_error(&format!(
                 "{context} store hydration returned {} instead of Blob",
@@ -637,12 +689,14 @@ impl Engine {
         Ok(blob)
     }
 
-    fn hydrate_store_tree(
+    async fn hydrate_store_tree(
         &self,
         tree: &TreeValue,
         context: &str,
     ) -> Result<TreeValue, PoisonError> {
-        let hydrated = self.hydrate_store_value(Value::Tree(tree.clone()), context)?;
+        let hydrated = self
+            .hydrate_store_value(Value::Tree(tree.clone()), context)
+            .await?;
         let Value::Tree(tree) = hydrated else {
             return Err(self.internal_error(&format!(
                 "{context} store hydration returned {} instead of Tree",
@@ -902,9 +956,12 @@ impl Engine {
         }
     }
 
-    pub(crate) fn wait_for_node_completion(&self, node_id: NodeId) -> Result<(), PoisonError> {
+    pub(crate) async fn wait_for_node_completion(
+        &self,
+        node_id: NodeId,
+    ) -> Result<(), PoisonError> {
         let node = self.node_ref(node_id)?;
-        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
         let waiter = Waiter { sender };
 
         let immediate = {
@@ -922,327 +979,364 @@ impl Engine {
 
         match immediate {
             Some(Outcome::Value(_)) | Some(Outcome::Poison(_)) => Ok(()),
-            None => match receiver.recv() {
+            None => match receiver.await {
                 Ok((_node_id, Outcome::Value(_))) | Ok((_node_id, Outcome::Poison(_))) => Ok(()),
                 Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
             },
         }
     }
 
-    pub(crate) fn node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
+    pub(crate) async fn node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
         let node = self.node_ref(node_id)?;
         let deps = match &node.job {
             NodeJob::Binary { op, left, right } => {
                 let mut deps = if matches!(op, BinOp::Concat) {
-                    self.collect_pending_shallow(left.clone())?
+                    self.collect_pending_shallow(left.clone()).await?
                 } else {
-                    self.collect_pending_deep(left.clone())?
+                    self.collect_pending_deep(left.clone()).await?
                 };
                 deps.extend(if matches!(op, BinOp::Concat) {
-                    self.collect_pending_shallow(right.clone())?
+                    self.collect_pending_shallow(right.clone()).await?
                 } else {
-                    self.collect_pending_deep(right.clone())?
+                    self.collect_pending_deep(right.clone()).await?
                 });
                 deps
             }
-            NodeJob::Unary { operand, .. } => self.collect_pending_deep(operand.clone())?,
+            NodeJob::Unary { operand, .. } => self.collect_pending_deep(operand.clone()).await?,
             NodeJob::Template { parts, .. } => {
                 let mut deps = Vec::new();
                 for part in parts.iter() {
                     if let TemplatePartValue::Expr(value) = part {
-                        deps.extend(self.collect_pending_deep(value.clone())?);
+                        deps.extend(self.collect_pending_deep(value.clone()).await?);
                     }
                 }
                 deps
             }
-            NodeJob::If { cond, .. } => self.collect_pending_deep(cond.clone())?,
-            NodeJob::Fallible { value } => self.collect_pending_shallow(value.clone())?,
+            NodeJob::If { cond, .. } => self.collect_pending_deep(cond.clone()).await?,
+            NodeJob::Fallible { value } => self.collect_pending_shallow(value.clone()).await?,
             NodeJob::Demand { demands, .. } => {
                 let mut deps = Vec::new();
                 for value in demands.iter() {
-                    deps.extend(self.collect_pending_deep(value.clone())?);
+                    deps.extend(self.collect_pending_deep(value.clone()).await?);
                 }
                 deps
             }
-            NodeJob::Fail { message } => self.collect_pending_deep(message.clone())?,
+            NodeJob::Fail { message } => self.collect_pending_deep(message.clone()).await?,
             NodeJob::Call {
                 function,
                 args,
                 kwargs,
                 kwargs_expr,
             } => {
-                let mut deps = self.collect_callable_pending(function.clone())?;
+                let mut deps = self.collect_callable_pending(function.clone()).await?;
                 if deps.is_empty() {
-                    deps.extend(self.builtin_call_pending_deps(
-                        function.clone(),
-                        args.as_ref(),
-                        kwargs.as_ref(),
-                        kwargs_expr.as_ref(),
-                    )?);
+                    deps.extend(
+                        self.builtin_call_pending_deps(
+                            function.clone(),
+                            args.as_ref(),
+                            kwargs.as_ref(),
+                            kwargs_expr.as_ref(),
+                        )
+                        .await?,
+                    );
                 } else if let Some(kwargs_expr) = kwargs_expr {
-                    deps.extend(self.collect_pending_shallow(kwargs_expr.clone())?);
+                    deps.extend(self.collect_pending_shallow(kwargs_expr.clone()).await?);
                 }
                 deps
             }
             NodeJob::Invoke { .. } => Vec::new(),
-            NodeJob::Field { receiver, .. } => self.collect_pending_shallow(receiver.clone())?,
+            NodeJob::Field { receiver, .. } => {
+                self.collect_pending_shallow(receiver.clone()).await?
+            }
             #[cfg(test)]
             NodeJob::Sleep { .. } | NodeJob::Poison(_) => Vec::new(),
         };
         Ok(Self::dedup_node_ids(deps))
     }
 
-    fn collect_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
-        Ok(self.inspect_value(value)?.pending.into_iter().collect())
+    async fn collect_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        Ok(self
+            .inspect_value(value)
+            .await?
+            .pending
+            .into_iter()
+            .collect())
     }
 
-    fn collect_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+    async fn collect_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
         self.collect_pending_shallow_inner(value, &mut Vec::new())
+            .await
     }
 
-    fn collect_pending_shallow_inner(
-        &self,
+    fn collect_pending_shallow_inner<'a>(
+        &'a self,
         value: Value,
-        visiting: &mut Vec<NodeId>,
-    ) -> Result<Vec<NodeId>, PoisonError> {
-        match value {
-            Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Ok(vec![node_id]),
-                SchedulerNodeState::Resolved(value) => {
-                    if visiting.contains(&node_id) {
-                        return Err(self.circular_dependency_error(visiting, node_id));
+        visiting: &'a mut Vec<NodeId>,
+    ) -> BoxFuture<'a, Result<Vec<NodeId>, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => match self.node_state(node_id)? {
+                    SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => {
+                        Ok(vec![node_id])
                     }
-                    visiting.push(node_id);
-                    let result = self.collect_pending_shallow_inner(value, visiting);
-                    let popped = visiting.pop();
-                    debug_assert_eq!(popped, Some(node_id));
-                    result
-                }
-                SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
-            },
-            Value::Discovered(discovered) => {
-                self.collect_pending_shallow_inner(*discovered.value, visiting)
-            }
-            Value::Builtin(_) => {
-                let mut deps = Vec::new();
-                value.collect_pending(&mut deps);
-                Ok(Self::dedup_node_ids(deps))
-            }
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    fn collect_callable_pending(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
-        self.collect_callable_pending_inner(value, &mut Vec::new())
-    }
-
-    fn collect_callable_pending_inner(
-        &self,
-        value: Value,
-        visiting: &mut Vec<NodeId>,
-    ) -> Result<Vec<NodeId>, PoisonError> {
-        match value {
-            Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Ok(vec![node_id]),
-                SchedulerNodeState::Resolved(value) => {
-                    if visiting.contains(&node_id) {
-                        return Err(self.circular_dependency_error(visiting, node_id));
-                    }
-                    visiting.push(node_id);
-                    let result = self.collect_callable_pending_inner(value, visiting);
-                    let popped = visiting.pop();
-                    debug_assert_eq!(popped, Some(node_id));
-                    result
-                }
-                SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
-            },
-            Value::Discovered(discovered) => {
-                self.collect_callable_pending_inner(*discovered.value, visiting)
-            }
-            Value::Partial(partial) => {
-                self.collect_callable_pending_inner(partial.function.clone(), visiting)
-            }
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    fn builtin_call_pending_deps(
-        &self,
-        function: Value,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<&Value>,
-    ) -> Result<Vec<NodeId>, PoisonError> {
-        let function = self.materialize_value_shallow(function, "forcing callable surface")?;
-        let (function, _) = self.split_obligations(function);
-        match function {
-            Value::Partial(partial) => {
-                let mut deps =
-                    self.builtin_call_pending_deps(partial.function.clone(), &[], &[], None)?;
-                for value in partial.args.iter().chain(args.iter()) {
-                    deps.extend(self.collect_pending_deep(value.clone())?);
-                }
-                for (_, value) in partial.kwargs.iter().chain(kwargs.iter()) {
-                    deps.extend(self.collect_pending_deep(value.clone())?);
-                }
-                if let Some(kwargs_expr) = &partial.kwargs_expr {
-                    deps.extend(self.collect_pending_deep((**kwargs_expr).clone())?);
-                }
-                if let Some(kwargs_expr) = kwargs_expr {
-                    deps.extend(self.collect_pending_deep(kwargs_expr.clone())?);
-                }
-                Ok(Self::dedup_node_ids(deps))
-            }
-            Value::Builtin(builtin) => match builtin {
-                BuiltinValue::Namespace(BuiltinNamespace::Blob)
-                | BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::dedup_node_ids(
-                    self.collect_pending_deep(args[0].clone())?,
-                )),
-                BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
-                    let mut deps = self.collect_pending_shallow(args[0].clone())?;
-                    if !deps.is_empty() {
-                        return Ok(Self::dedup_node_ids(deps));
-                    }
-
-                    let value =
-                        self.materialize_value_shallow(args[0].clone(), "forcing Tree input")?;
-                    let (value, _) = self.split_obligations(value);
-                    match value {
-                        Value::Map(map) => {
-                            for (key, _) in map.entries.iter() {
-                                deps.extend(self.collect_pending_deep(key.clone())?);
-                            }
+                    SchedulerNodeState::Resolved(value) => {
+                        if visiting.contains(&node_id) {
+                            return Err(self.circular_dependency_error(visiting, node_id));
                         }
-                        Value::Array(items) => {
-                            for item in items.iter() {
-                                deps.extend(self.collect_pending_deep(item.clone())?);
-                            }
-                        }
-                        Value::Path(_) | Value::String(_) => {}
-                        _ => {}
+                        visiting.push(node_id);
+                        let result = self.collect_pending_shallow_inner(value, visiting).await;
+                        let popped = visiting.pop();
+                        debug_assert_eq!(popped, Some(node_id));
+                        result
                     }
-                    Ok(Self::dedup_node_ids(deps))
+                    SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
+                },
+                Value::Discovered(discovered) => {
+                    self.collect_pending_shallow_inner(*discovered.value, visiting)
+                        .await
                 }
-                BuiltinValue::Function(BuiltinFunction::StructConstructor { .. }) => Ok(
-                    Self::dedup_node_ids(self.collect_pending_shallow(args[0].clone())?),
-                ),
-                BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
-                    let receiver = self
-                        .materialize_value_shallow(*receiver, "forcing array.flatten receiver")?;
-                    let (receiver, _) = self.split_obligations(receiver);
-                    let Value::Array(items) = receiver else {
-                        return Ok(Vec::new());
-                    };
-
+                Value::Builtin(_) => {
                     let mut deps = Vec::new();
-                    for item in items.iter() {
-                        deps.extend(self.collect_pending_shallow(item.clone())?);
-                    }
-                    Ok(Self::dedup_node_ids(deps))
-                }
-                BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
-                    let receiver =
-                        self.materialize_value_shallow(*receiver, "forcing array.merge receiver")?;
-                    let (receiver, _) = self.split_obligations(receiver);
-                    let Value::Array(items) = receiver else {
-                        return Ok(Vec::new());
-                    };
-
-                    let mut deps = Vec::new();
-                    for item in items.iter() {
-                        deps.extend(self.collect_pending_deep(item.clone())?);
-                    }
-                    Ok(Self::dedup_node_ids(deps))
-                }
-                BuiltinValue::Method(BuiltinMethod::StringStartsWith { .. })
-                | BuiltinValue::Method(BuiltinMethod::StringContains { .. })
-                | BuiltinValue::Method(BuiltinMethod::StringSplit { .. })
-                | BuiltinValue::Method(BuiltinMethod::BlobFromString)
-                | BuiltinValue::Method(BuiltinMethod::BytesFromString)
-                | BuiltinValue::Method(BuiltinMethod::TreeFromPath)
-                | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
-                | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
-                | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => Ok(
-                    Self::dedup_node_ids(self.collect_pending_deep(args[0].clone())?),
-                ),
-                BuiltinValue::Method(BuiltinMethod::TreeOf) => {
-                    let mut deps = self.collect_pending_shallow(args[0].clone())?;
-                    if !deps.is_empty() {
-                        return Ok(Self::dedup_node_ids(deps));
-                    }
-
-                    let value =
-                        self.materialize_value_shallow(args[0].clone(), "forcing Tree.of input")?;
-                    let (value, _) = self.split_obligations(value);
-                    let Value::Map(map) = value else {
-                        return Ok(Vec::new());
-                    };
-                    for (key, _) in map.entries.iter() {
-                        deps.extend(self.collect_pending_deep(key.clone())?);
-                    }
-                    Ok(Self::dedup_node_ids(deps))
-                }
-                BuiltinValue::Method(BuiltinMethod::TreeEmpty)
-                | BuiltinValue::Method(BuiltinMethod::StringLines { .. })
-                | BuiltinValue::Method(BuiltinMethod::StringTrim { .. })
-                | BuiltinValue::Method(BuiltinMethod::StringToLower { .. })
-                | BuiltinValue::Method(BuiltinMethod::BlobToString { .. })
-                | BuiltinValue::Method(BuiltinMethod::BlobExecutable { .. })
-                | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. })
-                | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { .. })
-                | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { .. })
-                | BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { .. })
-                | BuiltinValue::Method(BuiltinMethod::BytesBlob { .. })
-                | BuiltinValue::Method(BuiltinMethod::StreamCollect { .. }) => Ok(Vec::new()),
-                BuiltinValue::Method(BuiltinMethod::TreeFile { .. })
-                | BuiltinValue::Method(BuiltinMethod::TreeSubtree { .. }) => Ok(
-                    Self::dedup_node_ids(self.collect_pending_deep(args[0].clone())?),
-                ),
-                BuiltinValue::Method(BuiltinMethod::TreeMerge { .. }) => Ok(Self::dedup_node_ids(
-                    self.collect_pending_shallow(args[0].clone())?,
-                )),
-                BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => Ok(
-                    Self::dedup_node_ids(self.collect_pending_shallow(receiver.as_ref().clone())?),
-                ),
-                BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
-                    let receiver = self.materialize_value_shallow(
-                        *receiver,
-                        "forcing option.unwrap_or receiver",
-                    )?;
-                    let (receiver, _) = self.split_obligations(receiver);
-                    let Value::Struct(option) = receiver else {
-                        return Ok(Vec::new());
-                    };
-                    match option.type_name.as_ref() {
-                        "Some" => Ok(Vec::new()),
-                        "None" => Ok(Self::dedup_node_ids(
-                            self.collect_pending_deep(args[0].clone())?,
-                        )),
-                        _ => Ok(Vec::new()),
-                    }
-                }
-                BuiltinValue::Function(BuiltinFunction::Acquire)
-                | BuiltinValue::Function(BuiltinFunction::Stabilize)
-                | BuiltinValue::Function(BuiltinFunction::Render)
-                | BuiltinValue::Function(BuiltinFunction::Exec)
-                | BuiltinValue::Function(BuiltinFunction::Discover)
-                | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
-                    let mut deps = Vec::new();
-                    for value in args {
-                        deps.extend(self.collect_pending_deep(value.clone())?);
-                    }
-                    for (_, value) in kwargs {
-                        deps.extend(self.collect_pending_deep(value.clone())?);
-                    }
-                    if let Some(kwargs_expr) = kwargs_expr {
-                        deps.extend(self.collect_pending_deep(kwargs_expr.clone())?);
-                    }
+                    value.collect_pending(&mut deps);
                     Ok(Self::dedup_node_ids(deps))
                 }
                 _ => Ok(Vec::new()),
-            },
-            _ => Ok(Vec::new()),
-        }
+            }
+        })
+    }
+
+    async fn collect_callable_pending(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        self.collect_callable_pending_inner(value, &mut Vec::new())
+            .await
+    }
+
+    fn collect_callable_pending_inner<'a>(
+        &'a self,
+        value: Value,
+        visiting: &'a mut Vec<NodeId>,
+    ) -> BoxFuture<'a, Result<Vec<NodeId>, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => match self.node_state(node_id)? {
+                    SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => {
+                        Ok(vec![node_id])
+                    }
+                    SchedulerNodeState::Resolved(value) => {
+                        if visiting.contains(&node_id) {
+                            return Err(self.circular_dependency_error(visiting, node_id));
+                        }
+                        visiting.push(node_id);
+                        let result = self.collect_callable_pending_inner(value, visiting).await;
+                        let popped = visiting.pop();
+                        debug_assert_eq!(popped, Some(node_id));
+                        result
+                    }
+                    SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
+                },
+                Value::Discovered(discovered) => {
+                    self.collect_callable_pending_inner(*discovered.value, visiting)
+                        .await
+                }
+                Value::Partial(partial) => {
+                    self.collect_callable_pending_inner(partial.function.clone(), visiting)
+                        .await
+                }
+                _ => Ok(Vec::new()),
+            }
+        })
+    }
+
+    fn builtin_call_pending_deps<'a>(
+        &'a self,
+        function: Value,
+        args: &'a [Value],
+        kwargs: &'a [(Arc<str>, Value)],
+        kwargs_expr: Option<&'a Value>,
+    ) -> BoxFuture<'a, Result<Vec<NodeId>, PoisonError>> {
+        Box::pin(async move {
+            let function = self
+                .materialize_value_shallow(function, "forcing callable surface")
+                .await?;
+            let (function, _) = self.split_obligations(function);
+            match function {
+                Value::Partial(partial) => {
+                    let mut deps = self
+                        .builtin_call_pending_deps(partial.function.clone(), &[], &[], None)
+                        .await?;
+                    for value in partial.args.iter().chain(args.iter()) {
+                        deps.extend(self.collect_pending_deep(value.clone()).await?);
+                    }
+                    for (_, value) in partial.kwargs.iter().chain(kwargs.iter()) {
+                        deps.extend(self.collect_pending_deep(value.clone()).await?);
+                    }
+                    if let Some(kwargs_expr) = &partial.kwargs_expr {
+                        deps.extend(self.collect_pending_deep((**kwargs_expr).clone()).await?);
+                    }
+                    if let Some(kwargs_expr) = kwargs_expr {
+                        deps.extend(self.collect_pending_deep(kwargs_expr.clone()).await?);
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                Value::Builtin(builtin) => match builtin {
+                    BuiltinValue::Namespace(BuiltinNamespace::Blob)
+                    | BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::dedup_node_ids(
+                        self.collect_pending_deep(args[0].clone()).await?,
+                    )),
+                    BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
+                        let mut deps = self.collect_pending_shallow(args[0].clone()).await?;
+                        if !deps.is_empty() {
+                            return Ok(Self::dedup_node_ids(deps));
+                        }
+
+                        let value = self
+                            .materialize_value_shallow(args[0].clone(), "forcing Tree input")
+                            .await?;
+                        let (value, _) = self.split_obligations(value);
+                        match value {
+                            Value::Map(map) => {
+                                for (key, _) in map.entries.iter() {
+                                    deps.extend(self.collect_pending_deep(key.clone()).await?);
+                                }
+                            }
+                            Value::Array(items) => {
+                                for item in items.iter() {
+                                    deps.extend(self.collect_pending_deep(item.clone()).await?);
+                                }
+                            }
+                            Value::Path(_) | Value::String(_) => {}
+                            _ => {}
+                        }
+                        Ok(Self::dedup_node_ids(deps))
+                    }
+                    BuiltinValue::Function(BuiltinFunction::StructConstructor { .. }) => Ok(
+                        Self::dedup_node_ids(self.collect_pending_shallow(args[0].clone()).await?),
+                    ),
+                    BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                        let receiver = self
+                            .materialize_value_shallow(*receiver, "forcing array.flatten receiver")
+                            .await?;
+                        let (receiver, _) = self.split_obligations(receiver);
+                        let Value::Array(items) = receiver else {
+                            return Ok(Vec::new());
+                        };
+
+                        let mut deps = Vec::new();
+                        for item in items.iter() {
+                            deps.extend(self.collect_pending_shallow(item.clone()).await?);
+                        }
+                        Ok(Self::dedup_node_ids(deps))
+                    }
+                    BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                        let receiver = self
+                            .materialize_value_shallow(*receiver, "forcing array.merge receiver")
+                            .await?;
+                        let (receiver, _) = self.split_obligations(receiver);
+                        let Value::Array(items) = receiver else {
+                            return Ok(Vec::new());
+                        };
+
+                        let mut deps = Vec::new();
+                        for item in items.iter() {
+                            deps.extend(self.collect_pending_deep(item.clone()).await?);
+                        }
+                        Ok(Self::dedup_node_ids(deps))
+                    }
+                    BuiltinValue::Method(BuiltinMethod::StringStartsWith { .. })
+                    | BuiltinValue::Method(BuiltinMethod::StringContains { .. })
+                    | BuiltinValue::Method(BuiltinMethod::StringSplit { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BlobFromString)
+                    | BuiltinValue::Method(BuiltinMethod::BytesFromString)
+                    | BuiltinValue::Method(BuiltinMethod::TreeFromPath)
+                    | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
+                    | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
+                    | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => Ok(
+                        Self::dedup_node_ids(self.collect_pending_deep(args[0].clone()).await?),
+                    ),
+                    BuiltinValue::Method(BuiltinMethod::TreeOf) => {
+                        let mut deps = self.collect_pending_shallow(args[0].clone()).await?;
+                        if !deps.is_empty() {
+                            return Ok(Self::dedup_node_ids(deps));
+                        }
+
+                        let value = self
+                            .materialize_value_shallow(args[0].clone(), "forcing Tree.of input")
+                            .await?;
+                        let (value, _) = self.split_obligations(value);
+                        let Value::Map(map) = value else {
+                            return Ok(Vec::new());
+                        };
+                        for (key, _) in map.entries.iter() {
+                            deps.extend(self.collect_pending_deep(key.clone()).await?);
+                        }
+                        Ok(Self::dedup_node_ids(deps))
+                    }
+                    BuiltinValue::Method(BuiltinMethod::TreeEmpty)
+                    | BuiltinValue::Method(BuiltinMethod::StringLines { .. })
+                    | BuiltinValue::Method(BuiltinMethod::StringTrim { .. })
+                    | BuiltinValue::Method(BuiltinMethod::StringToLower { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BlobToString { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BlobExecutable { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { .. })
+                    | BuiltinValue::Method(BuiltinMethod::BytesBlob { .. })
+                    | BuiltinValue::Method(BuiltinMethod::StreamCollect { .. }) => Ok(Vec::new()),
+                    BuiltinValue::Method(BuiltinMethod::TreeFile { .. })
+                    | BuiltinValue::Method(BuiltinMethod::TreeSubtree { .. }) => Ok(
+                        Self::dedup_node_ids(self.collect_pending_deep(args[0].clone()).await?),
+                    ),
+                    BuiltinValue::Method(BuiltinMethod::TreeMerge { .. }) => Ok(
+                        Self::dedup_node_ids(self.collect_pending_shallow(args[0].clone()).await?),
+                    ),
+                    BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                        Ok(Self::dedup_node_ids(
+                            self.collect_pending_shallow(receiver.as_ref().clone())
+                                .await?,
+                        ))
+                    }
+                    BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
+                        let receiver = self
+                            .materialize_value_shallow(
+                                *receiver,
+                                "forcing option.unwrap_or receiver",
+                            )
+                            .await?;
+                        let (receiver, _) = self.split_obligations(receiver);
+                        let Value::Struct(option) = receiver else {
+                            return Ok(Vec::new());
+                        };
+                        match option.type_name.as_ref() {
+                            "Some" => Ok(Vec::new()),
+                            "None" => Ok(Self::dedup_node_ids(
+                                self.collect_pending_deep(args[0].clone()).await?,
+                            )),
+                            _ => Ok(Vec::new()),
+                        }
+                    }
+                    BuiltinValue::Function(BuiltinFunction::Acquire)
+                    | BuiltinValue::Function(BuiltinFunction::Stabilize)
+                    | BuiltinValue::Function(BuiltinFunction::Render)
+                    | BuiltinValue::Function(BuiltinFunction::Exec)
+                    | BuiltinValue::Function(BuiltinFunction::Discover)
+                    | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                        let mut deps = Vec::new();
+                        for value in args {
+                            deps.extend(self.collect_pending_deep(value.clone()).await?);
+                        }
+                        for (_, value) in kwargs {
+                            deps.extend(self.collect_pending_deep(value.clone()).await?);
+                        }
+                        if let Some(kwargs_expr) = kwargs_expr {
+                            deps.extend(self.collect_pending_deep(kwargs_expr.clone()).await?);
+                        }
+                        Ok(Self::dedup_node_ids(deps))
+                    }
+                    _ => Ok(Vec::new()),
+                },
+                _ => Ok(Vec::new()),
+            }
+        })
     }
 
     fn dedup_node_ids(ids: Vec<NodeId>) -> Vec<NodeId> {
@@ -1252,18 +1346,19 @@ impl Engine {
             .collect()
     }
 
-    pub fn execute_pending_node_with_chain(
+    pub async fn execute_pending_node_with_chain(
         &self,
         node_id: NodeId,
         chain: &[NodeId],
     ) -> Result<Value, PoisonError> {
         let node = self.node_ref(node_id)?;
-        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let result =
-                    self.with_prefixed_demand_chain(chain, node_id, || self.execute_node(&node));
+                let result = self
+                    .with_prefixed_demand_chain(chain, node_id, self.execute_node(&node))
+                    .await;
                 match result {
                     Ok(value) => {
                         node.resolve(value.clone());
@@ -1277,7 +1372,7 @@ impl Engine {
             }
             Err(Some(Outcome::Value(value))) => Ok(value),
             Err(Some(Outcome::Poison(error))) => Err(error),
-            Err(None) => match receiver.recv() {
+            Err(None) => match receiver.await {
                 Ok((_node_id, Outcome::Value(value))) => Ok(value),
                 Ok((_node_id, Outcome::Poison(error))) => Err(error),
                 Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
@@ -1285,14 +1380,14 @@ impl Engine {
         }
     }
 
-    fn with_prefixed_demand_chain<T>(
+    async fn with_prefixed_demand_chain<T>(
         &self,
         chain: &[NodeId],
         node_id: NodeId,
-        f: impl FnOnce() -> Result<T, PoisonError>,
+        f: impl std::future::Future<Output = Result<T, PoisonError>>,
     ) -> Result<T, PoisonError> {
         DEMAND_STACK.with(|stack| stack.borrow_mut().extend(chain.iter().copied()));
-        let result = self.with_demand(node_id, f);
+        let result = self.with_demand(node_id, f).await;
         DEMAND_STACK.with(|stack| {
             let mut stack = stack.borrow_mut();
             for expected in chain.iter().rev() {
@@ -1378,9 +1473,9 @@ impl Engine {
             NodeState::Resolved(value) => format!("Resolved({})", value.type_name()),
             NodeState::Poisoned(error) => format!("Poisoned({})", error.message),
         };
-        let deps = self
-            .node_deps(node_id)
-            .unwrap_or_else(|_| node.job.pending_deps())
+        let deps = node
+            .job
+            .pending_deps()
             .into_iter()
             .map(|dep| {
                 if depth == 0 {
@@ -1539,16 +1634,17 @@ impl Engine {
         DEMAND_STACK.with(|stack| stack.borrow().iter().copied().collect())
     }
 
-    fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
+    async fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
         Scheduler::with_initial_stack(self.arc_self(), self.current_demand_stack_ids())
             .resolve_node_shallow(node_id)
+            .await
     }
 
     // r[impl eval.demand-depth]
-    fn with_demand<T>(
+    async fn with_demand<T>(
         &self,
         node_id: NodeId,
-        f: impl FnOnce() -> Result<T, PoisonError>,
+        f: impl std::future::Future<Output = Result<T, PoisonError>>,
     ) -> Result<T, PoisonError> {
         if DEMAND_STACK.with(|stack| stack.borrow().contains(&node_id)) {
             return Err(PoisonError::new(
@@ -1571,7 +1667,7 @@ impl Engine {
         }
 
         DEMAND_STACK.with(|stack| stack.borrow_mut().push(node_id));
-        let result = f();
+        let result = f.await;
         DEMAND_STACK.with(|stack| {
             let popped = stack.borrow_mut().pop();
             debug_assert_eq!(popped, Some(node_id));

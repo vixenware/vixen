@@ -1,13 +1,16 @@
 //! Structured executor requests for the `exec` builtin.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::instr;
-use crate::node::NodeId;
 use crate::poison::DemandChain;
 use crate::poison::PoisonError;
 use crate::transport::{ShippedFunction, TransportModule};
 use crate::value::{ExecutorSelector, HostObservation, PathValue, Value};
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecArgValue {
@@ -124,17 +127,23 @@ pub type SharedRenderHandler = Arc<RenderHandler>;
 
 /// Trait for external runtime operations that the evaluator delegates to.
 ///
-/// The evaluator is synchronous and has no tokio dependency. Implementations
-/// bridge to whatever async/sync infrastructure is available (e.g. `vxd` spawns
-/// tasks on the tokio runtime; tests return immediate values).
+/// All methods are async. Implementations can `.await` directly on their
+/// async infrastructure (e.g. `vxd` calls store/runner clients; tests
+/// return ready values).
 pub trait BuildRuntime: Send + Sync {
-    fn store_hydration(&self, request: StoreHydrationRequest) -> Result<Value, PoisonError>;
-    fn acquire(&self, request: AcquireRequest) -> Result<Value, PoisonError>;
-    fn import_module(&self, request: ImportRequest) -> Result<instr::Module, PoisonError>;
-    fn render(&self, request: RenderRequest) -> Result<Value, PoisonError>;
-    fn stabilize(&self, request: StabilizeRequest) -> Result<Value, PoisonError>;
-    fn exec(&self, request: ExecRequest) -> Result<Value, PoisonError>;
-    fn discover(&self, request: DiscoverRequest) -> Result<Value, PoisonError>;
+    fn store_hydration(
+        &self,
+        request: StoreHydrationRequest,
+    ) -> BoxFuture<'_, Result<Value, PoisonError>>;
+    fn acquire(&self, request: AcquireRequest) -> BoxFuture<'_, Result<Value, PoisonError>>;
+    fn import_module(
+        &self,
+        request: ImportRequest,
+    ) -> BoxFuture<'_, Result<instr::Module, PoisonError>>;
+    fn render(&self, request: RenderRequest) -> BoxFuture<'_, Result<Value, PoisonError>>;
+    fn stabilize(&self, request: StabilizeRequest) -> BoxFuture<'_, Result<Value, PoisonError>>;
+    fn exec(&self, request: ExecRequest) -> BoxFuture<'_, Result<Value, PoisonError>>;
+    fn discover(&self, request: DiscoverRequest) -> BoxFuture<'_, Result<Value, PoisonError>>;
 
     /// Whether this runtime handles exec requests (true) or the engine should
     /// fall back to local execution (false).
@@ -146,40 +155,6 @@ pub trait BuildRuntime: Send + Sync {
     /// should fall back to local probe invocation (false).
     fn has_discover(&self) -> bool {
         false
-    }
-
-    /// Run a batch of node executions in parallel and return all results.
-    ///
-    /// The default implementation uses `thread::scope`. Production runtimes
-    /// should override this with `tokio::task::spawn_blocking` or similar to
-    /// avoid deadlocking when work items call async handlers.
-    fn run_batch(
-        &self,
-        engine: Arc<crate::worker::Engine>,
-        items: Vec<(NodeId, Vec<NodeId>)>,
-    ) -> Result<Vec<(NodeId, Result<Value, PoisonError>)>, ()> {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = items
-                .into_iter()
-                .map(|(node_id, chain)| {
-                    let engine = &engine;
-                    scope.spawn(move || {
-                        (
-                            node_id,
-                            engine.execute_pending_node_with_chain(node_id, &chain),
-                        )
-                    })
-                })
-                .collect();
-            let mut results = Vec::with_capacity(handles.len());
-            for handle in handles {
-                match handle.join() {
-                    Ok(result) => results.push(result),
-                    Err(_) => return Err(()),
-                }
-            }
-            Ok(results)
-        })
     }
 
     /// Downcast support for `ClosureRuntime` builder methods.
@@ -210,44 +185,57 @@ impl BuildRuntime for ClosureRuntime {
         self
     }
 
-    fn store_hydration(&self, request: StoreHydrationRequest) -> Result<Value, PoisonError> {
-        (self
+    fn store_hydration(
+        &self,
+        request: StoreHydrationRequest,
+    ) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self
             .store_hydration
             .as_ref()
-            .expect("store_hydration handler not configured"))(request)
+            .expect("store_hydration handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn acquire(&self, request: AcquireRequest) -> Result<Value, PoisonError> {
-        (self
+    fn acquire(&self, request: AcquireRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self
             .acquire
             .as_ref()
-            .expect("acquire handler not configured"))(request)
+            .expect("acquire handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn import_module(&self, request: ImportRequest) -> Result<instr::Module, PoisonError> {
-        (self.import.as_ref().expect("import handler not configured"))(request)
+    fn import_module(
+        &self,
+        request: ImportRequest,
+    ) -> BoxFuture<'_, Result<instr::Module, PoisonError>> {
+        let result = (self.import.as_ref().expect("import handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn render(&self, request: RenderRequest) -> Result<Value, PoisonError> {
-        (self.render.as_ref().expect("render handler not configured"))(request)
+    fn render(&self, request: RenderRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self.render.as_ref().expect("render handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn stabilize(&self, request: StabilizeRequest) -> Result<Value, PoisonError> {
-        (self
+    fn stabilize(&self, request: StabilizeRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self
             .stabilize
             .as_ref()
-            .expect("stabilize handler not configured"))(request)
+            .expect("stabilize handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn exec(&self, request: ExecRequest) -> Result<Value, PoisonError> {
-        (self.exec.as_ref().expect("exec handler not configured"))(request)
+    fn exec(&self, request: ExecRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self.exec.as_ref().expect("exec handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
-    fn discover(&self, request: DiscoverRequest) -> Result<Value, PoisonError> {
-        (self
+    fn discover(&self, request: DiscoverRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+        let result = (self
             .discover
             .as_ref()
-            .expect("discover handler not configured"))(request)
+            .expect("discover handler not configured"))(request);
+        Box::pin(std::future::ready(result))
     }
 
     fn has_exec(&self) -> bool {

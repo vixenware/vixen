@@ -35,7 +35,7 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{
-    AcquireRequest as EvalAcquireRequest, BlobValue, BuildRuntime, DemandChain,
+    AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
     ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
     ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
@@ -3185,7 +3185,6 @@ pub(crate) fn summarize_build_vx_import_request(request: &EvalImportRequest) -> 
 
 #[derive(Clone)]
 struct BuildVxRuntime {
-    runtime_handle: Handle,
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
     activity_registry: ActivityRegistry,
@@ -3197,44 +3196,9 @@ struct BuildVxRuntime {
     module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
 }
 
-/// Run an async future to completion, blocking the calling thread.
-///
-/// Works from any thread (tokio worker, scoped OS thread, blocking pool thread)
-/// by spawning the future as a tokio task and waiting on a crossbeam channel.
-fn spawn_on_runtime<T: Send + 'static>(
-    runtime: &Handle,
-    future: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let timeout = std::time::Duration::from_secs(120);
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    runtime.spawn(async move {
-        let _ = tx.send(future.await);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(value) => value,
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-            panic!(
-                "spawn_on_runtime: async task did not complete within {timeout:?}, \
-                 this likely indicates a deadlock"
-            );
-        }
-        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-            panic!("spawn_on_runtime: spawned task was cancelled");
-        }
-    }
-}
-
-fn emit_build_vx_boundary_log(
-    runtime: &Handle,
-    listener: &Option<Arc<ProgressListenerClient>>,
-    message: &str,
-) {
+async fn emit_build_vx_boundary_log(listener: &Option<Arc<ProgressListenerClient>>, message: &str) {
     if let Some(listener) = listener {
-        let listener = Arc::clone(listener);
-        let message = message.to_string();
-        runtime.spawn(async move {
-            let _ = listener.log_message(message).await;
-        });
+        let _ = listener.log_message(message.to_string()).await;
     }
 }
 
@@ -3342,8 +3306,8 @@ impl BuildVxRuntime {
         Engine::from_module(module).with_runtime(Arc::new(self.clone()))
     }
 
-    fn emit_boundary_log(&self, message: &str) {
-        emit_build_vx_boundary_log(&self.runtime_handle, &self.progress_listener, message);
+    async fn emit_boundary_log(&self, message: &str) {
+        emit_build_vx_boundary_log(&self.progress_listener, message).await;
     }
 
     async fn load_imported_module(
@@ -3491,7 +3455,9 @@ impl BuildVxRuntime {
 
         let module: EvalModule = request.module.clone().into();
         let engine = self.build_engine(&module);
-        let value = engine.call_shipped(&request.resolve, vec![request.witness])?;
+        let value = engine
+            .call_shipped(&request.resolve, vec![request.witness])
+            .await?;
         let transport = TransportValue::try_from(&value).map_err(|message| {
             exec_bridge_poison(
                 PoisonKind::TypeError,
@@ -3548,138 +3514,103 @@ impl BuildRuntime for BuildVxRuntime {
         true
     }
 
-    fn run_batch(
-        &self,
-        engine: Arc<Engine>,
-        items: Vec<(vx_eval::NodeId, Vec<vx_eval::NodeId>)>,
-    ) -> std::result::Result<Vec<(vx_eval::NodeId, std::result::Result<Value, PoisonError>)>, ()>
-    {
-        // Run each node on tokio's blocking pool. This keeps worker threads
-        // free to drive async handler tasks spawned via spawn_on_runtime.
-        let handles: Vec<_> = items
-            .into_iter()
-            .map(|(node_id, chain)| {
-                let engine = Arc::clone(&engine);
-                let runtime = self.runtime_handle.clone();
-                let (tx, rx) = crossbeam_channel::bounded(1);
-                runtime.spawn_blocking(move || {
-                    let _ = tx.send((
-                        node_id,
-                        engine.execute_pending_node_with_chain(node_id, &chain),
-                    ));
-                });
-                rx
-            })
-            .collect();
-        let timeout = std::time::Duration::from_secs(120);
-        let mut results = Vec::with_capacity(handles.len());
-        for (i, rx) in handles.iter().enumerate() {
-            match rx.recv_timeout(timeout) {
-                Ok(result) => results.push(result),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    tracing::error!(
-                        batch_size = handles.len(),
-                        stuck_index = i,
-                        "run_batch: node execution timed out after {timeout:?}, \
-                         this likely indicates a deadlock in the evaluator"
-                    );
-                    return Err(());
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Err(()),
-            }
-        }
-        Ok(results)
-    }
-
     fn store_hydration(
         &self,
         request: EvalStoreHydrationRequest,
-    ) -> std::result::Result<Value, PoisonError> {
-        let this = self.clone();
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
         let value = request.value;
         let demand_chain = request.demand_chain;
-        spawn_on_runtime(&self.runtime_handle, async move {
-            hydrate_exec_value_from_store(Arc::clone(&this.store), value, demand_chain).await
-        })
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { hydrate_exec_value_from_store(store, value, demand_chain).await })
     }
 
-    fn acquire(&self, request: EvalAcquireRequest) -> std::result::Result<Value, PoisonError> {
-        let summary = summarize_build_vx_acquire_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
-            run_build_vx_acquire_via_store(&this.store, request).await
+    fn acquire(
+        &self,
+        request: EvalAcquireRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_acquire_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_acquire_via_store(&self.store, request)
+                .await
+                .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 
     fn import_module(
         &self,
         request: EvalImportRequest,
-    ) -> std::result::Result<EvalModule, PoisonError> {
-        let summary = summarize_build_vx_import_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
-            this.load_imported_module(request).await
+    ) -> BoxFuture<'_, std::result::Result<EvalModule, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_import_request(&request);
+            self.emit_boundary_log(&summary).await;
+            self.load_imported_module(request)
+                .await
+                .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 
-    fn render(&self, request: EvalRenderRequest) -> std::result::Result<Value, PoisonError> {
-        let summary = summarize_build_vx_render_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
-            run_build_vx_render_via_store(&this.store, &this.workspace_root, request).await
+    fn render(
+        &self,
+        request: EvalRenderRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_render_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_render_via_store(&self.store, &self.workspace_root, request)
+                .await
+                .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 
-    fn stabilize(&self, request: EvalStabilizeRequest) -> std::result::Result<Value, PoisonError> {
-        let summary = summarize_build_vx_stabilize_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
-            this.run_stabilize_via_store(request).await
+    fn stabilize(
+        &self,
+        request: EvalStabilizeRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_stabilize_request(&request);
+            self.emit_boundary_log(&summary).await;
+            self.run_stabilize_via_store(request)
+                .await
+                .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 
-    fn exec(&self, request: ExecRequest) -> std::result::Result<Value, PoisonError> {
-        let summary = summarize_build_vx_exec_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
+    fn exec(&self, request: ExecRequest) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_exec_request(&request);
+            self.emit_boundary_log(&summary).await;
             run_build_vx_exec_via_runner(
-                &this.store,
-                &this.executors,
-                &this.activity_registry,
-                &this.exec_mount_prep_inflight,
-                &this.exec_fs_tree_snapshot_cache,
-                this.progress_listener.clone(),
+                &self.store,
+                &self.executors,
+                &self.activity_registry,
+                &self.exec_mount_prep_inflight,
+                &self.exec_fs_tree_snapshot_cache,
+                self.progress_listener.clone(),
                 request,
             )
             .await
+            .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 
-    fn discover(&self, request: EvalDiscoverRequest) -> std::result::Result<Value, PoisonError> {
-        let summary = summarize_build_vx_discover_request(&request);
-        self.emit_boundary_log(&summary);
-        let this = self.clone();
-        spawn_on_runtime(&self.runtime_handle, async move {
+    fn discover(
+        &self,
+        request: EvalDiscoverRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_discover_request(&request);
+            self.emit_boundary_log(&summary).await;
             run_build_vx_discover_via_runner(
-                &this.store,
-                &this.executors,
-                &this.activity_registry,
-                this.progress_listener.clone(),
+                &self.store,
+                &self.executors,
+                &self.activity_registry,
+                self.progress_listener.clone(),
                 request,
             )
             .await
+            .map_err(|error| error.with_context(summary))
         })
-        .map_err(|error| error.with_context(summary))
     }
 }
 
@@ -4394,10 +4325,11 @@ impl VxdService {
                     return Ok(build_failure_result(failure, 1));
                 }
 
-                let root = SourceFile::cast_root(parse.syntax());
-                let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
+                let module = {
+                    let root = SourceFile::cast_root(parse.syntax());
+                    lower_source_file_with_source_id(&root, build_vx_path.to_string())
+                };
                 let build_runtime = BuildVxRuntime {
-                    runtime_handle: Handle::current(),
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
                     activity_registry: self.activity_registry.clone(),
@@ -4419,6 +4351,7 @@ impl VxdService {
                         Vec::new(),
                         Default::default(),
                     )
+                    .await
                     .map_err(|error| {
                         build_failure_result(
                             build_failure::from_poison_error(&request.project_path, &error),

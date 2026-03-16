@@ -26,9 +26,9 @@ use crate::value::{
 };
 use crate::worker::Engine;
 
-fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
+async fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
     let engine = engine(source);
-    engine.call(entry, vec![])
+    engine.call(entry, vec![]).await
 }
 
 fn engine(source: &str) -> Arc<Engine> {
@@ -141,21 +141,23 @@ fn sorted_node_ids(ids: Vec<NodeId>) -> Vec<u64> {
     ids
 }
 
-#[test]
-fn integer_literal() {
-    let val = eval("fn main() { 42 }", "main").unwrap();
+#[tokio::test]
+async fn integer_literal() {
+    let val = eval("fn main() { 42 }", "main").await.unwrap();
     assert_eq!(val, Value::U64(42));
 }
 
-#[test]
-fn addition() {
-    let val = eval("fn main() { 1 + 2 }", "main").unwrap();
+#[tokio::test]
+async fn addition() {
+    let val = eval("fn main() { 1 + 2 }", "main").await.unwrap();
     assert_eq!(val, Value::U64(3));
 }
 
-#[test]
-fn array_concat() {
-    let val = eval("fn main() { [1, 2] ++ [3, 4] }", "main").unwrap();
+#[tokio::test]
+async fn array_concat() {
+    let val = eval("fn main() { [1, 2] ++ [3, 4] }", "main")
+        .await
+        .unwrap();
     assert_eq!(
         val,
         Value::Array(Arc::from([
@@ -167,8 +169,8 @@ fn array_concat() {
     );
 }
 
-#[test]
-fn string_methods_work() {
+#[tokio::test]
+async fn string_methods_work() {
     let value = eval(
         r#"
 fn main() {
@@ -184,6 +186,7 @@ fn main() {
 "#,
         "main",
     )
+    .await
     .unwrap();
 
     let Value::Map(map) = value else {
@@ -221,8 +224,8 @@ fn main() {
     assert_eq!(get("lower"), Value::String(Arc::from("png_arm_neon")));
 }
 
-#[test]
-fn pending_string_contains_resolves() {
+#[tokio::test]
+async fn pending_string_contains_resolves() {
     let engine = engine(indoc! {r#"
         fn main() {
           let target =
@@ -248,13 +251,13 @@ fn pending_string_contains_resolves() {
     }));
 
     assert_eq!(
-        engine.call("main", vec![]).unwrap(),
+        engine.call("main", vec![]).await.unwrap(),
         Value::String(Arc::from("x86_64"))
     );
 }
 
-#[test]
-fn pending_array_map_receiver_resolves() {
+#[tokio::test]
+async fn pending_array_map_receiver_resolves() {
     let engine = engine(indoc! {r#"
         fn main() {
           let target =
@@ -282,15 +285,15 @@ fn pending_array_map_receiver_resolves() {
     }));
 
     assert_eq!(
-        engine.call("main", vec![]).unwrap(),
+        engine.call("main", vec![]).await.unwrap(),
         Value::Array(Arc::from([Value::String(Arc::from(
             "-DPNG_INTEL_SSE_OPT=1",
         ))]))
     );
 }
 
-#[test]
-fn pending_kwarg_array_map_receiver_resolves() {
+#[tokio::test]
+async fn pending_kwarg_array_map_receiver_resolves() {
     let engine = engine(indoc! {r#"
         fn render_defines() where { defines: Array[String] = [] } {
           defines.map((define) => `-D${define}`)
@@ -322,15 +325,15 @@ fn pending_kwarg_array_map_receiver_resolves() {
     }));
 
     assert_eq!(
-        engine.call("main", vec![]).unwrap(),
+        engine.call("main", vec![]).await.unwrap(),
         Value::Array(Arc::from([Value::String(Arc::from(
             "-DPNG_INTEL_SSE_OPT=1",
         ))]))
     );
 }
 
-#[test]
-fn pending_kwarg_array_map_spread_into_exec_resolves() {
+#[tokio::test]
+async fn pending_kwarg_array_map_spread_into_exec_resolves() {
     let engine = engine(indoc! {r#"
         fn observe(_proc: Process, tree: Tree) {
           tree
@@ -380,13 +383,13 @@ fn pending_kwarg_array_map_spread_into_exec_resolves() {
     }));
 
     assert_eq!(
-        collect_tree_leaf_paths(&engine.call("main", vec![]).unwrap()),
+        collect_tree_leaf_paths(&engine.call("main", vec![]).await.unwrap()),
         vec!["out/result".to_string()]
     );
 }
 
-#[test]
-fn pending_kwarg_array_map_spread_shared_across_exec_callbacks_resolves() {
+#[tokio::test]
+async fn pending_kwarg_array_map_spread_shared_across_exec_callbacks_resolves() {
     let engine = engine(indoc! {r#"
         fn observe(_proc: Process, tree: Tree) {
           tree
@@ -465,13 +468,13 @@ fn pending_kwarg_array_map_spread_shared_across_exec_callbacks_resolves() {
     }));
 
     assert_eq!(
-        collect_tree_leaf_paths(&engine.call("main", vec![]).unwrap()),
+        collect_tree_leaf_paths(&engine.call("main", vec![]).await.unwrap()),
         vec!["out/a.c.o".to_string(), "out/b.c.o".to_string()]
     );
 }
 
-#[test]
-fn match_expression_selects_literal_arms() {
+#[tokio::test]
+async fn match_expression_selects_literal_arms() {
     let source = r#"
 fn main(target: String) {
   match target (
@@ -484,19 +487,21 @@ fn main(target: String) {
     assert_eq!(
         engine
             .call("main", vec![Value::String(Arc::from("linux-x86_64"))])
+            .await
             .unwrap(),
         Value::String(Arc::from("intel"))
     );
     assert_eq!(
         engine
             .call("main", vec![Value::String(Arc::from("linux-riscv64"))])
+            .await
             .unwrap(),
         Value::String(Arc::from("generic"))
     );
 }
 
-#[test]
-fn match_expression_with_binding_pattern_returns_scrutinee() {
+#[tokio::test]
+async fn match_expression_with_binding_pattern_returns_scrutinee() {
     let source = r#"
 fn main(target: String) {
   match target (
@@ -507,12 +512,13 @@ fn main(target: String) {
     let engine = engine(source);
     let value = engine
         .call("main", vec![Value::String(Arc::from("linux-x86_64"))])
+        .await
         .unwrap();
     assert_eq!(value, Value::String(Arc::from("linux-x86_64")));
 }
 
-#[test]
-fn ordinary_functions_accept_keyword_args_via_where_records() {
+#[tokio::test]
+async fn ordinary_functions_accept_keyword_args_via_where_records() {
     let source = r#"
 fn cc_probe(source: String) where {
   flags: Array[String] = [],
@@ -533,7 +539,7 @@ fn main() {
   }
 }
 "#;
-    let value = eval(source, "main").unwrap();
+    let value = eval(source, "main").await.unwrap();
     assert_eq!(
         value,
         Value::Array(Arc::from([
@@ -544,8 +550,8 @@ fn main() {
     );
 }
 
-#[test]
-fn keyword_defaults_can_reference_prior_bindings() {
+#[tokio::test]
+async fn keyword_defaults_can_reference_prior_bindings() {
     let source = r#"
 fn banner(name: String) where {
   prefix: String = name,
@@ -558,60 +564,67 @@ fn main() {
   banner("png")
 }
 "#;
-    let value = eval(source, "main").unwrap();
+    let value = eval(source, "main").await.unwrap();
     assert_eq!(value, Value::String(Arc::from("png:png!")));
 }
 
-#[test]
-fn nested_arithmetic() {
-    let val = eval("fn main() { 2 + 3 * 4 }", "main").unwrap();
+#[tokio::test]
+async fn nested_arithmetic() {
+    let val = eval("fn main() { 2 + 3 * 4 }", "main").await.unwrap();
     // Parser handles precedence: 2 + (3 * 4) = 14
     assert_eq!(val, Value::U64(14));
 }
 
-#[test]
-fn boolean_literal() {
+#[tokio::test]
+async fn boolean_literal() {
     assert_eq!(
-        eval("fn main() { true }", "main").unwrap(),
+        eval("fn main() { true }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { false }", "main").unwrap(),
+        eval("fn main() { false }", "main").await.unwrap(),
         Value::Bool(false)
     );
 }
 
-#[test]
-fn string_literal() {
-    let val = eval(r#"fn main() { "hello" }"#, "main").unwrap();
+#[tokio::test]
+async fn string_literal() {
+    let val = eval(r#"fn main() { "hello" }"#, "main").await.unwrap();
     assert_eq!(val, Value::String(Arc::from("hello")));
 }
 
-#[test]
-fn option_unwrap_or_returns_the_inner_value() {
-    let val = eval(r#"fn main() { (Some { value: 7 }).unwrap_or(9) }"#, "main").unwrap();
+#[tokio::test]
+async fn option_unwrap_or_returns_the_inner_value() {
+    let val = eval(r#"fn main() { (Some { value: 7 }).unwrap_or(9) }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::U64(7));
 }
 
-#[test]
-fn option_unwrap_or_returns_the_default_for_none() {
-    let val = eval(r#"fn main() { None.unwrap_or(9) }"#, "main").unwrap();
+#[tokio::test]
+async fn option_unwrap_or_returns_the_default_for_none() {
+    let val = eval(r#"fn main() { None.unwrap_or(9) }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::U64(9));
 }
 
-#[test]
-fn option_unwrap_or_does_not_force_the_default_when_some() {
+#[tokio::test]
+async fn option_unwrap_or_does_not_force_the_default_when_some() {
     let val = eval(
         r#"fn main() { (Some { value: 7 }).unwrap_or((fail "should not be forced")) }"#,
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(7));
 }
 
-#[test]
-fn fallible_suffix_invokes_zero_arg_callables() {
-    let value = eval(r#"fn main() { Blob("hello").utf8? }"#, "main").unwrap();
+#[tokio::test]
+async fn fallible_suffix_invokes_zero_arg_callables() {
+    let value = eval(r#"fn main() { Blob("hello").utf8? }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(
         value,
         Value::Struct(StructValue {
@@ -621,24 +634,27 @@ fn fallible_suffix_invokes_zero_arg_callables() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify expr.literal.interpolation]
-fn interpolated_string_literal() {
-    let val = eval(r#"fn main() { `hello ${"world"}` }"#, "main").unwrap();
+async fn interpolated_string_literal() {
+    let val = eval(r#"fn main() { `hello ${"world"}` }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::String(Arc::from("hello world")));
 }
 
-#[test]
-fn path_literal_normalizes_slashes() {
+#[tokio::test]
+async fn path_literal_normalizes_slashes() {
     let engine = engine(r#"fn main(root: Path) { @({root}/./artifact.o) }"#);
     let val = engine
         .call("main", vec![Value::Path(PathValue::new("out//"))])
+        .await
         .unwrap();
     assert_eq!(val, Value::Path(PathValue::new("out/artifact.o")));
 }
 
-#[test]
-fn symbol_keyed_toolchain_pipeline_supports_method_values_and_destructuring() {
+#[tokio::test]
+async fn symbol_keyed_toolchain_pipeline_supports_method_values_and_destructuring() {
     let source = r#"
 fn build(host: Host) (
   struct Tool {
@@ -722,7 +738,10 @@ fn build(host: Host) (
 
     let engine = Engine::from_module(&module);
 
-    let value = engine.call("build", vec![Value::Host(HostValue)]).unwrap();
+    let value = engine
+        .call("build", vec![Value::Host(HostValue)])
+        .await
+        .unwrap();
     let Value::Array(items) = value else {
         panic!("expected array result");
     };
@@ -731,8 +750,8 @@ fn build(host: Host) (
     assert_eq!(items[1], Value::String(Arc::from("/usr/bin/cc")));
 }
 
-#[test]
-fn lua_sketch_runs_with_discovered_tools_and_fake_sources() {
+#[tokio::test]
+async fn lua_sketch_runs_with_discovered_tools_and_fake_sources() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let engine = engine(&source);
@@ -845,16 +864,18 @@ printf 'archive\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -877,8 +898,8 @@ printf 'archive\n' > "$out"
     );
 }
 
-#[test]
-fn lua_sketch_compile_single_file_returns_tree() {
+#[tokio::test]
+async fn lua_sketch_compile_single_file_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(LUA_SKETCH_TAIL, "  compile(@lapi.c)\n");
@@ -940,16 +961,18 @@ printf 'artifact\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -967,8 +990,8 @@ printf 'artifact\n' > "$out"
     );
 }
 
-#[test]
-fn lua_sketch_compile_map_returns_tree_items() {
+#[tokio::test]
+async fn lua_sketch_compile_map_returns_tree_items() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(LUA_SKETCH_TAIL, "  all_lib_sources.map(compile)\n");
@@ -1061,16 +1084,18 @@ printf 'artifact\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -1093,8 +1118,8 @@ printf 'artifact\n' > "$out"
     );
 }
 
-#[test]
-fn cc_version_sketch_returns_stdout_blob_in_output_tree() {
+#[tokio::test]
+async fn cc_version_sketch_returns_stdout_blob_in_output_tree() {
     let sketch_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let source = fs::read_to_string(&sketch_path).expect("read cc-version sketch");
@@ -1139,6 +1164,7 @@ printf 'fake cc 1.0\n'
             vec!["build".into()],
             BTreeMap::new(),
         )
+        .await
         .unwrap();
 
     match old_path {
@@ -1161,8 +1187,8 @@ printf 'fake cc 1.0\n'
     );
 }
 
-#[test]
-fn lua_sketch_object_merge_returns_tree() {
+#[tokio::test]
+async fn lua_sketch_object_merge_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
@@ -1258,16 +1284,18 @@ printf 'artifact\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -1285,8 +1313,8 @@ printf 'artifact\n' > "$out"
     );
 }
 
-#[test]
-fn lua_sketch_archive_returns_tree() {
+#[tokio::test]
+async fn lua_sketch_archive_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
@@ -1397,16 +1425,18 @@ printf 'archive\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -1424,8 +1454,8 @@ printf 'archive\n' > "$out"
     );
 }
 
-#[test]
-fn libpng_sketch_zlib_archive_returns_tree_with_mocked_boundaries() {
+#[tokio::test]
+async fn libpng_sketch_zlib_archive_returns_tree_with_mocked_boundaries() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
     let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
     let marker = "  let zlib_static = static_archive(@lib/libz.a, zlib_objects);\n";
@@ -1500,6 +1530,7 @@ fn libpng_sketch_zlib_archive_returns_tree_with_mocked_boundaries() {
                 }),
             ],
         )
+        .await
         .unwrap();
 
     assert!(
@@ -1512,8 +1543,8 @@ fn libpng_sketch_zlib_archive_returns_tree_with_mocked_boundaries() {
     );
 }
 
-#[test]
-fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
+#[tokio::test]
+async fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
     let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
 
@@ -1612,6 +1643,7 @@ fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
                 }),
             ],
         )
+        .await
         .unwrap();
 
     assert!(
@@ -1634,8 +1666,8 @@ fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
     );
 }
 
-#[test]
-fn libpng_sketch_full_build_with_discovered_tools_returns_tree_with_mocked_boundaries() {
+#[tokio::test]
+async fn libpng_sketch_full_build_with_discovered_tools_returns_tree_with_mocked_boundaries() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
     let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
 
@@ -1768,6 +1800,7 @@ fn libpng_sketch_full_build_with_discovered_tools_returns_tree_with_mocked_bound
                 }),
             ],
         )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -1786,8 +1819,8 @@ fn libpng_sketch_full_build_with_discovered_tools_returns_tree_with_mocked_bound
     );
 }
 
-#[test]
-fn libpng_sketch_surfaces_archive_failures_from_exec_boundaries() {
+#[tokio::test]
+async fn libpng_sketch_surfaces_archive_failures_from_exec_boundaries() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
     let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
 
@@ -1898,6 +1931,7 @@ fn libpng_sketch_surfaces_archive_failures_from_exec_boundaries() {
                 }),
             ],
         )
+        .await
         .expect_err("archive failure should poison the build");
 
     assert_eq!(error.kind, PoisonKind::UserFail);
@@ -1907,8 +1941,8 @@ fn libpng_sketch_surfaces_archive_failures_from_exec_boundaries() {
     );
 }
 
-#[test]
-fn libpng_compile_objects_body_survives_lowering() {
+#[tokio::test]
+async fn libpng_compile_objects_body_survives_lowering() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
     let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
     let parse = vx_parser::parse(&source);
@@ -1944,8 +1978,8 @@ fn libpng_compile_objects_body_survives_lowering() {
     );
 }
 
-#[test]
-fn lowering_preserves_includes_map_flatten_expression() {
+#[tokio::test]
+async fn lowering_preserves_includes_map_flatten_expression() {
     let source = r#"
 fn main(includes: Array[Path]) {
   includes.map((include) => ["-I", include]).flatten()
@@ -1968,8 +2002,8 @@ fn main(includes: Array[Path]) {
     );
 }
 
-#[test]
-fn lowering_preserves_exec_where_expression_with_spreads() {
+#[tokio::test]
+async fn lowering_preserves_exec_where_expression_with_spreads() {
     let source = r#"
 fn main(
   cexec: Fn(Array[ExecInput]) -> Tree,
@@ -2016,8 +2050,8 @@ fn main(
     );
 }
 
-#[test]
-fn lua_sketch_link_input_array_contains_tree_items() {
+#[tokio::test]
+async fn lua_sketch_link_input_array_contains_tree_items() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
@@ -2129,16 +2163,18 @@ printf 'archive\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -2160,8 +2196,8 @@ printf 'archive\n' > "$out"
     );
 }
 
-#[test]
-fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
+#[tokio::test]
+async fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
@@ -2273,16 +2309,18 @@ printf 'archive\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -2300,8 +2338,8 @@ printf 'archive\n' > "$out"
     );
 }
 
-#[test]
-fn lua_sketch_link_returns_tree() {
+#[tokio::test]
+async fn lua_sketch_link_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
@@ -2413,16 +2451,18 @@ printf 'archive\n' > "$out"
         std::env::set_var("PATH", &joined);
     }
 
-    let result = engine.call(
-        "build",
-        vec![
-            Value::Path(PathValue::new(workspace.to_string_lossy())),
-            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
-            Value::Map(MapValue {
-                entries: Arc::from([]),
-            }),
-        ],
-    );
+    let result = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .await;
 
     match old_path {
         Some(path) => unsafe {
@@ -2440,8 +2480,8 @@ printf 'archive\n' > "$out"
     );
 }
 
-#[test]
-fn exec_stringifies_custom_values_via_to_string_method() {
+#[tokio::test]
+async fn exec_stringifies_custom_values_via_to_string_method() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(
@@ -2468,7 +2508,7 @@ fn build() (
         Ok(Value::U64(0))
     }));
 
-    let value = engine.call("build", vec![]).unwrap();
+    let value = engine.call("build", vec![]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -2486,8 +2526,8 @@ fn build() (
     );
 }
 
-#[test]
-fn partial_exec_where_common_preserves_keyword_records() {
+#[tokio::test]
+async fn partial_exec_where_common_preserves_keyword_records() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(
@@ -2514,6 +2554,7 @@ fn build(input: Blob) (
 
     let value = engine
         .call("build", vec![Value::Blob(BlobValue::from_string("hello"))])
+        .await
         .unwrap();
     assert_eq!(value, Value::U64(0));
 
@@ -2527,8 +2568,8 @@ fn build(input: Blob) (
     assert_eq!(request.mounts[0].path, PathValue::new("src/input.txt"));
 }
 
-#[test]
-fn array_merge_combines_tree_results_in_current_syntax() {
+#[tokio::test]
+async fn array_merge_combines_tree_results_in_current_syntax() {
     let value = eval(
         r#"
 fn build(a: Tree, b: Tree) (
@@ -2536,8 +2577,12 @@ fn build(a: Tree, b: Tree) (
 )
 "#,
         "build",
+    )
+    .await;
+    assert!(
+        value.is_err(),
+        "direct eval().await should require arguments"
     );
-    assert!(value.is_err(), "direct eval() should require arguments");
 
     let engine = engine(
         r#"
@@ -2554,7 +2599,7 @@ fn build(a: Tree, b: Tree) (
         Arc::from("b.o"),
         Value::Blob(BlobValue::from_string("right")),
     )])));
-    let value = engine.call("build", vec![left, right]).unwrap();
+    let value = engine.call("build", vec![left, right]).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -2563,17 +2608,18 @@ fn build(a: Tree, b: Tree) (
     assert_eq!(entries[1].0.as_ref(), "b.o");
 }
 
-#[test]
-fn interpolated_path_literal_builds_plain_paths() {
+#[tokio::test]
+async fn interpolated_path_literal_builds_plain_paths() {
     let engine = engine(r#"fn main(name: String) { @(out/{name}.o) }"#);
     let value = engine
         .call("main", vec![Value::String(Arc::from("lua"))])
+        .await
         .unwrap();
     assert_eq!(value, Value::Path(PathValue::new("out/lua.o")));
 }
 
-#[test]
-fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
+#[tokio::test]
+async fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
     let parse = vx_parser::parse(indoc! {r#"
         fn main(root: Path) {
           @({root}/src/./lib.rs)
@@ -2600,8 +2646,8 @@ fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
     }
 }
 
-#[test]
-fn lowering_keeps_import_expressions_in_function_bodies() {
+#[tokio::test]
+async fn lowering_keeps_import_expressions_in_function_bodies() {
     let parse = vx_parser::parse(indoc! {r#"
         fn main() {
           import("./c-rules")
@@ -2631,8 +2677,8 @@ fn lowering_keeps_import_expressions_in_function_bodies() {
     }
 }
 
-#[test]
-fn import_handler_returns_module_namespace_values() {
+#[tokio::test]
+async fn import_handler_returns_module_namespace_values() {
     let captured = Arc::new(Mutex::new(None::<ImportRequest>));
     let sink = Arc::clone(&captured);
     let imported: crate::instr::Module = engine_with_source_id(
@@ -2657,7 +2703,7 @@ fn import_handler_returns_module_namespace_values() {
         Ok(imported.clone())
     }));
 
-    let value = engine.call("build", vec![]).unwrap();
+    let value = engine.call("build", vec![]).await.unwrap();
     assert_eq!(value, Value::U64(42));
 
     let request = captured
@@ -2669,8 +2715,8 @@ fn import_handler_returns_module_namespace_values() {
     assert_eq!(request.from_source_id, "/workspace/build.vx");
 }
 
-#[test]
-fn lowering_keeps_call_provenance_with_source_spans() {
+#[tokio::test]
+async fn lowering_keeps_call_provenance_with_source_spans() {
     let source = indoc! {r#"
         fn main(tree: Tree) {
           tree.file("missing.txt").utf8()
@@ -2702,8 +2748,8 @@ fn lowering_keeps_call_provenance_with_source_spans() {
     assert_eq!(provenance.span.end, u32::from(expected_range.end()));
 }
 
-#[test]
-fn lowering_keeps_source_ids_for_local_function_provenance() {
+#[tokio::test]
+async fn lowering_keeps_source_ids_for_local_function_provenance() {
     let source = indoc! {r#"
         fn build(ws: Path) {
           fn compile() {
@@ -2731,8 +2777,8 @@ fn lowering_keeps_source_ids_for_local_function_provenance() {
     assert_eq!(provenance.source_id.as_ref(), "fixtures/build.vx");
 }
 
-#[test]
-fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
+#[tokio::test]
+async fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
     let parse = vx_parser::parse(indoc! {r#"
         fn main(other: Blob) {
           Tree(%{
@@ -2804,8 +2850,8 @@ fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
     }
 }
 
-#[test]
-fn lowering_keeps_where_calls_as_final_expression_statements() {
+#[tokio::test]
+async fn lowering_keeps_where_calls_as_final_expression_statements() {
     let parse = vx_parser::parse(indoc! {r#"
         fn observe(process: Process, tree: Tree) {
           process.exit_code
@@ -2864,8 +2910,8 @@ fn lowering_keeps_where_calls_as_final_expression_statements() {
     }
 }
 
-#[test]
-fn top_level_let_bindings_are_visible_to_exported_functions() {
+#[tokio::test]
+async fn top_level_let_bindings_are_visible_to_exported_functions() {
     let value = eval(
         r#"
 let greeting = "hello";
@@ -2873,20 +2919,25 @@ fn main() { greeting }
 "#,
         "main",
     )
+    .await
     .unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello")));
 }
 
-#[test]
-fn let_binding() {
-    let val = eval("fn main() { let x = 10; let y = 20; x + y }", "main").unwrap();
+#[tokio::test]
+async fn let_binding() {
+    let val = eval("fn main() { let x = 10; let y = 20; x + y }", "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::U64(30));
 }
 
-#[test]
-fn array_spread_flattens_arrays() {
-    let value = eval(r#"fn main() { [1, ..[2, 3], 4] }"#, "main").unwrap();
+#[tokio::test]
+async fn array_spread_flattens_arrays() {
+    let value = eval(r#"fn main() { [1, ..[2, 3], 4] }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(
         value,
         Value::Array(Arc::from([
@@ -2898,8 +2949,8 @@ fn array_spread_flattens_arrays() {
     );
 }
 
-#[test]
-fn array_spread_forces_pending_trees_shallowly() {
+#[tokio::test]
+async fn array_spread_forces_pending_trees_shallowly() {
     let value = eval(
         r#"
 fn objects() {
@@ -2912,6 +2963,7 @@ fn main() {
 "#,
         "main",
     )
+    .await
     .unwrap();
 
     let Value::Array(items) = value else {
@@ -2925,63 +2977,71 @@ fn main() {
     );
 }
 
-#[test]
-fn if_true_branch() {
-    let val = eval("fn main() { if true { 1 } else { 2 } }", "main").unwrap();
+#[tokio::test]
+async fn if_true_branch() {
+    let val = eval("fn main() { if true { 1 } else { 2 } }", "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::U64(1));
 }
 
-#[test]
-fn if_false_branch() {
-    let val = eval("fn main() { if false { 1 } else { 2 } }", "main").unwrap();
+#[tokio::test]
+async fn if_false_branch() {
+    let val = eval("fn main() { if false { 1 } else { 2 } }", "main")
+        .await
+        .unwrap();
     assert_eq!(val, Value::U64(2));
 }
 
-#[test]
-fn if_with_condition() {
+#[tokio::test]
+async fn if_with_condition() {
     let val = eval(
         "fn main() { let x = 5; if x > 3 { 100 } else { 0 } }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(100));
 }
 
-#[test]
-fn function_call() {
+#[tokio::test]
+async fn function_call() {
     let val = eval(
         "fn double(x: U64) { x + x }
          fn main() { double(21) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(42));
 }
 
-#[test]
-fn function_parameters_can_omit_type_annotations() {
+#[tokio::test]
+async fn function_parameters_can_omit_type_annotations() {
     let val = eval(
         "fn double(x) { x + x }
          fn main() { double(21) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(42));
 }
 
-#[test]
-fn nested_function_calls() {
+#[tokio::test]
+async fn nested_function_calls() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
          fn main() { add(add(1, 2), add(3, 4)) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(10));
 }
 
-#[test]
-fn recursive_function() {
+#[tokio::test]
+async fn recursive_function() {
     let val = eval(
         "fn factorial(n: U64) {
            if n <= 1 { 1 } else { n * factorial(n - 1) }
@@ -2989,12 +3049,13 @@ fn recursive_function() {
          fn main() { factorial(5) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(120));
 }
 
-#[test]
-fn struct_literal_and_field_access() {
+#[tokio::test]
+async fn struct_literal_and_field_access() {
     let val = eval(
         "fn main() {
            let p = Point { x: 10, y: 20 };
@@ -3002,12 +3063,13 @@ fn struct_literal_and_field_access() {
          }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(30));
 }
 
-#[test]
-fn block_expression() {
+#[tokio::test]
+async fn block_expression() {
     let val = eval(
         "fn main() {
            let result = {
@@ -3019,95 +3081,99 @@ fn block_expression() {
          }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(13));
 }
 
-#[test]
-fn comparison_operators() {
+#[tokio::test]
+async fn comparison_operators() {
     assert_eq!(
-        eval("fn main() { 1 == 1 }", "main").unwrap(),
+        eval("fn main() { 1 == 1 }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { 1 != 2 }", "main").unwrap(),
+        eval("fn main() { 1 != 2 }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { 1 < 2 }", "main").unwrap(),
+        eval("fn main() { 1 < 2 }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { 2 >= 2 }", "main").unwrap(),
+        eval("fn main() { 2 >= 2 }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { 3 > 2 }", "main").unwrap(),
+        eval("fn main() { 3 > 2 }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { 1 <= 1 }", "main").unwrap(),
+        eval("fn main() { 1 <= 1 }", "main").await.unwrap(),
         Value::Bool(true)
     );
 }
 
-#[test]
-fn logical_operators() {
+#[tokio::test]
+async fn logical_operators() {
     assert_eq!(
-        eval("fn main() { true && false }", "main").unwrap(),
+        eval("fn main() { true && false }", "main").await.unwrap(),
         Value::Bool(false)
     );
     assert_eq!(
-        eval("fn main() { true || false }", "main").unwrap(),
+        eval("fn main() { true || false }", "main").await.unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("fn main() { !true }", "main").unwrap(),
+        eval("fn main() { !true }", "main").await.unwrap(),
         Value::Bool(false)
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify error.poison]
-fn division_by_zero_poisons() {
-    let err = eval("fn main() { 10 / 0 }", "main").unwrap_err();
+async fn division_by_zero_poisons() {
+    let err = eval("fn main() { 10 / 0 }", "main").await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::ArithmeticError);
 }
 
-#[test]
-fn type_error_poisons() {
-    let err = eval(r#"fn main() { 1 + "hello" }"#, "main").unwrap_err();
+#[tokio::test]
+async fn type_error_poisons() {
+    let err = eval(r#"fn main() { 1 + "hello" }"#, "main")
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, PoisonKind::TypeError);
 }
 
-#[test]
-fn unresolved_name_poisons() {
-    let err = eval("fn main() { nonexistent }", "main").unwrap_err();
+#[tokio::test]
+async fn unresolved_name_poisons() {
+    let err = eval("fn main() { nonexistent }", "main").await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::UnresolvedName);
 }
 
-#[test]
-fn empty_function_returns_unit() {
-    let val = eval("fn main() { }", "main").unwrap();
+#[tokio::test]
+async fn empty_function_returns_unit() {
+    let val = eval("fn main() { }", "main").await.unwrap();
     assert_eq!(val, Value::Unit);
 }
 
-#[test]
-fn function_as_value() {
+#[tokio::test]
+async fn function_as_value() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
          fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f(x, y) }
          fn main() { apply(add, 3, 4) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(7));
 }
 
-#[test]
+#[tokio::test]
 // r[verify expr.closure]
 // r[verify fn.closure]
-fn closures_capture_by_value_and_support_block_bodies() {
+async fn closures_capture_by_value_and_support_block_bodies() {
     let val = eval(
         "fn apply(f: Fn(U64) -> U64, x: U64) { f(x) }
          fn main() {
@@ -3121,18 +3187,19 @@ fn closures_capture_by_value_and_support_block_bodies() {
          }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(42));
 }
 
-#[test]
+#[tokio::test]
 // r[verify fn.identity.closure]
-fn closure_identity_includes_the_capture_set() {
+async fn closure_identity_includes_the_capture_set() {
     let engine = engine("fn make(offset: U64) { (x) => offset + x }");
 
-    let first = engine.call("make", vec![Value::U64(1)]).unwrap();
-    let same = engine.call("make", vec![Value::U64(1)]).unwrap();
-    let different = engine.call("make", vec![Value::U64(2)]).unwrap();
+    let first = engine.call("make", vec![Value::U64(1)]).await.unwrap();
+    let same = engine.call("make", vec![Value::U64(1)]).await.unwrap();
+    let different = engine.call("make", vec![Value::U64(2)]).await.unwrap();
 
     let Value::Function(first) = first else {
         panic!("expected closure value");
@@ -3149,8 +3216,8 @@ fn closure_identity_includes_the_capture_set() {
     assert_ne!(first.key(), different.key());
 }
 
-#[test]
-fn shipped_functions_preserve_global_calls_and_captures() {
+#[tokio::test]
+async fn shipped_functions_preserve_global_calls_and_captures() {
     let engine = engine(
         "fn helper(x: U64) { x + 1 }
          fn make(offset: U64) {
@@ -3161,15 +3228,18 @@ fn shipped_functions_preserve_global_calls_and_captures() {
 
     let module = engine.transport_module();
     let shipped = engine
-        .ship_function(engine.call("make", vec![Value::U64(1)]).unwrap())
+        .ship_function(engine.call("make", vec![Value::U64(1)]).await.unwrap())
+        .await
         .unwrap();
-    let value = Engine::invoke_shipped(&module, &shipped, vec![Value::U64(1)]).unwrap();
+    let value = Engine::invoke_shipped(&module, &shipped, vec![Value::U64(1)])
+        .await
+        .unwrap();
 
     assert_eq!(value, Value::U64(43));
 }
 
-#[test]
-fn inline_values_round_trip_through_transport() {
+#[tokio::test]
+async fn inline_values_round_trip_through_transport() {
     let engine = engine(indoc! {r#"
         fn pack(root: Path) {
           %{
@@ -3183,20 +3253,21 @@ fn inline_values_round_trip_through_transport() {
     "#});
     let value = engine
         .call("pack", vec![Value::Path(PathValue::new("src"))])
+        .await
         .unwrap();
 
-    let shipped = engine.ship_value(value.clone()).unwrap();
+    let shipped = engine.ship_value(value.clone()).await.unwrap();
     let round_trip = Value::try_from(shipped).unwrap();
 
     assert_eq!(round_trip, value);
     assert!(matches!(
-        engine.ship_value(value).unwrap(),
+        engine.ship_value(value).await.unwrap(),
         TransportValue::Map(_)
     ));
 }
 
-#[test]
-fn store_backed_values_round_trip_through_transport() {
+#[tokio::test]
+async fn store_backed_values_round_trip_through_transport() {
     let engine = engine("fn main() { () }");
     let blob = Value::Blob(BlobValue::Store {
         blob_ref: BlobRef::Small {
@@ -3207,15 +3278,15 @@ fn store_backed_values_round_trip_through_transport() {
     });
     let tree = Value::Tree(TreeValue::Store(NodeHash(Blake3Hash([0x22; 32]))));
 
-    let shipped_blob = engine.ship_value(blob.clone()).unwrap();
-    let shipped_tree = engine.ship_value(tree.clone()).unwrap();
+    let shipped_blob = engine.ship_value(blob.clone()).await.unwrap();
+    let shipped_tree = engine.ship_value(tree.clone()).await.unwrap();
 
     assert_eq!(Value::try_from(shipped_blob).unwrap(), blob);
     assert_eq!(Value::try_from(shipped_tree).unwrap(), tree);
 }
 
-#[test]
-fn shadowing() {
+#[tokio::test]
+async fn shadowing() {
     let val = eval(
         "fn main() {
            let x = 1;
@@ -3224,23 +3295,25 @@ fn shadowing() {
          }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(11));
 }
 
-#[test]
-fn user_bindings_can_shadow_exec() {
+#[tokio::test]
+async fn user_bindings_can_shadow_exec() {
     let val = eval(
         "fn exec() { 42 }
          fn main() { exec() }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(42));
 }
 
-#[test]
-fn early_return() {
+#[tokio::test]
+async fn early_return() {
     let val = eval(
         "fn check(n: U64) {
            if n > 10 { return 999 } else { () };
@@ -3249,12 +3322,13 @@ fn early_return() {
          fn main() { check(20) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(999));
 }
 
-#[test]
-fn fibonacci() {
+#[tokio::test]
+async fn fibonacci() {
     let val = eval(
         "fn fib(n: U64) {
            if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
@@ -3262,25 +3336,29 @@ fn fibonacci() {
          fn main() { fib(10) }",
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(val, Value::U64(55));
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.forcing.boundary]
 // r[verify eval.pending]
-fn unused_pending_arg_is_not_forced() {
+async fn unused_pending_arg_is_not_forced() {
     let engine = engine("fn first(x: U64, y: U64) { x }");
     let pending = engine.poison_value("unused");
 
-    let value = engine.call("first", vec![Value::U64(1), pending]).unwrap();
+    let value = engine
+        .call("first", vec![Value::U64(1), pending])
+        .await
+        .unwrap();
 
     assert_eq!(value, Value::U64(1));
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.pending]
-fn field_access_does_not_force_other_fields() {
+async fn field_access_does_not_force_other_fields() {
     let engine = engine("fn get_x(pair: Pair) { pair.x }");
     let value = engine
         .call(
@@ -3293,13 +3371,14 @@ fn field_access_does_not_force_other_fields() {
                 ]),
             })],
         )
+        .await
         .unwrap();
 
     assert_eq!(value, Value::U64(7));
 }
 
-#[test]
-fn collect_pending_walks_nested_runtime_values() {
+#[tokio::test]
+async fn collect_pending_walks_nested_runtime_values() {
     let value = Value::Array(Arc::from([
         Value::Pending(NodeId(1)),
         Value::ExecPath(ExecPathValue::InTree {
@@ -3341,8 +3420,8 @@ fn collect_pending_walks_nested_runtime_values() {
     assert_eq!(sorted_node_ids(deps), vec![1, 2, 3, 4, 5, 6, 7]);
 }
 
-#[test]
-fn node_job_pending_deps_cover_templates_calls_and_invokes() {
+#[tokio::test]
+async fn node_job_pending_deps_cover_templates_calls_and_invokes() {
     let template = NodeJob::Template {
         kind: TemplateKind::String,
         parts: Arc::from([
@@ -3386,8 +3465,8 @@ fn node_job_pending_deps_cover_templates_calls_and_invokes() {
     assert_eq!(sorted_node_ids(invoke.pending_deps()), vec![15, 16]);
 }
 
-#[test]
-fn node_job_if_only_depends_on_the_condition() {
+#[tokio::test]
+async fn node_job_if_only_depends_on_the_condition() {
     let job = NodeJob::If {
         cond: Value::Pending(NodeId(17)),
         then_branch: Block { stmts: Vec::new() },
@@ -3403,39 +3482,40 @@ fn node_job_if_only_depends_on_the_condition() {
     assert_eq!(sorted_node_ids(job.pending_deps()), vec![17]);
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.memoization]
 // r[verify eval.memoization.pending]
-fn resolved_calls_are_memoized() {
+async fn resolved_calls_are_memoized() {
     let engine = engine("fn double(x: U64) { x + x }");
 
     assert_eq!(engine.memoized_call_count(), 0);
     assert_eq!(
-        engine.call("double", vec![Value::U64(21)]).unwrap(),
+        engine.call("double", vec![Value::U64(21)]).await.unwrap(),
         Value::U64(42)
     );
     assert_eq!(engine.memoized_call_count(), 1);
 
     assert_eq!(
-        engine.call("double", vec![Value::U64(21)]).unwrap(),
+        engine.call("double", vec![Value::U64(21)]).await.unwrap(),
         Value::U64(42)
     );
     assert_eq!(engine.memoized_call_count(), 1);
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.pending]
 // r[verify eval.enter-functions]
-fn structs_can_hold_pending_children_inside_the_orchestrator() {
+async fn structs_can_hold_pending_children_inside_the_orchestrator() {
     let engine = engine("fn pair(x: U64, y: U64) { Pair { x: x, y: y } }");
     let call = engine
         .call_unforced(
             "pair",
             vec![Value::U64(1), engine.poison_value("pending child")],
         )
+        .await
         .unwrap();
 
-    let pair = engine.force_shallow(call).unwrap();
+    let pair = engine.force_shallow(call).await.unwrap();
     let Value::Struct(pair) = pair else {
         panic!("expected struct result");
     };
@@ -3444,13 +3524,13 @@ fn structs_can_hold_pending_children_inside_the_orchestrator() {
     assert_eq!(pair.fields[1].0.as_ref(), "y");
     assert!(matches!(pair.fields[1].1, Value::Pending(_)));
 
-    let err = engine.force_fully(Value::Struct(pair)).unwrap_err();
+    let err = engine.force_fully(Value::Struct(pair)).await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.forcing]
-fn binary_ops_with_pending_inputs_produce_pending_results() {
+async fn binary_ops_with_pending_inputs_produce_pending_results() {
     let engine = engine(
         "fn first(x: U64, y: U64) { x }
          fn add(x: U64, y: U64) { x + y }",
@@ -3460,29 +3540,34 @@ fn binary_ops_with_pending_inputs_produce_pending_results() {
             "first",
             vec![Value::U64(1), engine.poison_value("left pending")],
         )
+        .await
         .unwrap();
     let call = engine
         .call_unforced("add", vec![left, Value::U64(2)])
+        .await
         .unwrap();
 
-    let result = engine.force_shallow(call).unwrap();
+    let result = engine.force_shallow(call).await.unwrap();
     assert!(matches!(result, Value::Pending(_)));
-    assert_eq!(engine.force_fully(result).unwrap(), Value::U64(3));
+    assert_eq!(engine.force_fully(result).await.unwrap(), Value::U64(3));
 }
 
-#[test]
-fn array_concat_keeps_pending_children_lazy() {
+#[tokio::test]
+async fn array_concat_keeps_pending_children_lazy() {
     let engine = engine("fn append(xs: Array[U64], ys: Array[U64]) { xs ++ ys }");
     let left = Value::Array(Arc::from([
         Value::U64(1),
         engine.poison_value("pending child"),
     ]));
     let right = Value::Array(Arc::from([Value::U64(3)]));
-    let call = engine.call_unforced("append", vec![left, right]).unwrap();
+    let call = engine
+        .call_unforced("append", vec![left, right])
+        .await
+        .unwrap();
 
-    let mut result = engine.force_shallow(call).unwrap();
+    let mut result = engine.force_shallow(call).await.unwrap();
     while matches!(result, Value::Pending(_)) {
-        result = engine.force_shallow(result).unwrap();
+        result = engine.force_shallow(result).await.unwrap();
     }
     let Value::Array(items) = &result else {
         panic!("expected concatenation to produce an array");
@@ -3492,12 +3577,12 @@ fn array_concat_keeps_pending_children_lazy() {
     assert!(matches!(items[1], Value::Pending(_)));
     assert_eq!(items[2], Value::U64(3));
 
-    let err = engine.force_fully(result).unwrap_err();
+    let err = engine.force_fully(result).await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
 }
 
-#[test]
-fn array_concat_map_merge_resolves_pending_tree_items() {
+#[tokio::test]
+async fn array_concat_map_merge_resolves_pending_tree_items() {
     let engine = engine(
         r#"
 fn object(file: Path) {
@@ -3518,9 +3603,10 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -3536,8 +3622,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
 }
 
-#[test]
-fn array_concat_map_merge_resolves_exec_tree_results() {
+#[tokio::test]
+async fn array_concat_map_merge_resolves_exec_tree_results() {
     let engine = engine(
         r#"
 fn observe(process: Process, tree: Tree) {
@@ -3582,9 +3668,10 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -3599,8 +3686,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
 }
 
-#[test]
-fn array_concat_map_merge_resolves_partial_exec_tree_results() {
+#[tokio::test]
+async fn array_concat_map_merge_resolves_partial_exec_tree_results() {
     let engine = engine(
         r#"
 fn observe(process: Process, tree: Tree) {
@@ -3643,9 +3730,10 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -3660,8 +3748,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
 }
 
-#[test]
-fn array_concat_map_merge_with_discovered_tool_exec_results_resolves() {
+#[tokio::test]
+async fn array_concat_map_merge_with_discovered_tool_exec_results_resolves() {
     let engine = engine(
         r#"
 struct Tool {
@@ -3742,6 +3830,7 @@ fn main(extra: Array[Path], cc: Tool) {
                 cc,
             ],
         )
+        .await
         .unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
@@ -3749,8 +3838,8 @@ fn main(extra: Array[Path], cc: Tool) {
     assert_eq!(entries.len(), 1);
 }
 
-#[test]
-fn compile_objects_shape_with_concat_exec_and_mount_spreads_resolves() {
+#[tokio::test]
+async fn compile_objects_shape_with_concat_exec_and_mount_spreads_resolves() {
     let engine = engine(
         r#"
 let common_cflags = ["-O2", "-fPIC"];
@@ -3835,9 +3924,10 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -3852,8 +3942,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
 }
 
-#[test]
-fn compile_objects_shape_with_discovered_tool_and_mount_spreads_resolves() {
+#[tokio::test]
+async fn compile_objects_shape_with_discovered_tool_and_mount_spreads_resolves() {
     let engine = engine(
         r#"
 struct Tool {
@@ -3971,6 +4061,7 @@ fn main(extra: Array[Path], cc: Tool) {
                 cc,
             ],
         )
+        .await
         .unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
@@ -3978,8 +4069,8 @@ fn main(extra: Array[Path], cc: Tool) {
     assert_eq!(entries.len(), 1);
 }
 
-#[test]
-fn compile_objects_shape_with_match_rhs_concat_resolves() {
+#[tokio::test]
+async fn compile_objects_shape_with_match_rhs_concat_resolves() {
     let engine = engine(
         r#"
 let common_cflags = ["-O2", "-fPIC"];
@@ -4065,7 +4156,7 @@ fn main() {
         )]))))
     }));
 
-    let value = engine.call("main", vec![]).unwrap();
+    let value = engine.call("main", vec![]).await.unwrap();
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected merged tree");
     };
@@ -4080,8 +4171,8 @@ fn main() {
     assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
 }
 
-#[test]
-fn array_merge_over_nested_subtree_exec_results_resolves() {
+#[tokio::test]
+async fn array_merge_over_nested_subtree_exec_results_resolves() {
     let engine = engine(
         r#"
 fn observe(process: Process, tree: Tree) {
@@ -4119,8 +4210,8 @@ fn main() {
         Ok(inline_tree_with_blob(&relative, "ok"))
     }));
 
-    let call = engine.call_unforced("main", vec![]).unwrap();
-    let value = engine.force_fully(call).unwrap();
+    let call = engine.call_unforced("main", vec![]).await.unwrap();
+    let value = engine.force_fully(call).await.unwrap();
 
     assert_eq!(
         collect_tree_leaf_paths(&value),
@@ -4128,8 +4219,8 @@ fn main() {
     );
 }
 
-#[test]
-fn static_archive_shape_with_tool_to_string_and_tree_spread_resolves() {
+#[tokio::test]
+async fn static_archive_shape_with_tool_to_string_and_tree_spread_resolves() {
     let engine = engine(
         r#"
 struct Tool {
@@ -4200,6 +4291,7 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
     let Value::Blob(BlobValue::Inline { bytes, executable }) = value else {
@@ -4209,8 +4301,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(bytes.as_ref(), b"archive");
 }
 
-#[test]
-fn static_archive_shape_with_store_backed_exec_results_resolves() {
+#[tokio::test]
+async fn static_archive_shape_with_store_backed_exec_results_resolves() {
     let stored_trees = Arc::new(Mutex::new(HashMap::<NodeHash, Value>::new()));
     let store_sink = Arc::clone(&stored_trees);
     let engine = engine(
@@ -4316,6 +4408,7 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
     let Value::Blob(BlobValue::Inline { bytes, executable }) = value else {
@@ -4325,8 +4418,8 @@ fn main(extra: Array[Path]) {
     assert_eq!(bytes.as_ref(), b"archive");
 }
 
-#[test]
-fn local_exec_partial_archive_shape_with_concat_resolves() {
+#[tokio::test]
+async fn local_exec_partial_archive_shape_with_concat_resolves() {
     let engine = engine(
         r#"
 struct Tool {
@@ -4377,6 +4470,7 @@ fn main(extra: Array[Path]) {
                 "arch1.c",
             ))]))],
         )
+        .await
         .unwrap();
 
     let paths = collect_tree_leaf_paths(&value);
@@ -4387,20 +4481,20 @@ fn main(extra: Array[Path]) {
     assert!(paths.iter().any(|path| path.ends_with("/out/arch1.c.o")));
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.demand]
-fn top_level_calls_build_a_pending_graph_until_forced() {
+async fn top_level_calls_build_a_pending_graph_until_forced() {
     let engine = engine("fn main() { 1 + 2 }");
-    let call = engine.call_unforced("main", vec![]).unwrap();
+    let call = engine.call_unforced("main", vec![]).await.unwrap();
 
     assert!(matches!(call, Value::Pending(_)));
-    assert_eq!(engine.force_fully(call).unwrap(), Value::U64(3));
+    assert_eq!(engine.force_fully(call).await.unwrap(), Value::U64(3));
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.control-demand]
 // r[verify eval.enter-functions]
-fn demand_only_reaches_the_taken_if_branch() {
+async fn demand_only_reaches_the_taken_if_branch() {
     let engine = engine(
         "fn choose(flag: Bool, unused: U64) { flag }
          fn branch(flag: Bool, poison: U64) {
@@ -4412,41 +4506,46 @@ fn demand_only_reaches_the_taken_if_branch() {
             "branch",
             vec![Value::Bool(true), engine.poison_value("dead branch")],
         )
+        .await
         .unwrap();
 
     assert!(matches!(call, Value::Pending(_)));
-    assert_eq!(engine.force_fully(call).unwrap(), Value::U64(1));
+    assert_eq!(engine.force_fully(call).await.unwrap(), Value::U64(1));
 }
 
-#[test]
+#[tokio::test]
 // r[verify error.fail]
-fn fail_poisons_when_forced() {
-    let err = eval(r#"fn main() { fail "boom" }"#, "main").unwrap_err();
+async fn fail_poisons_when_forced() {
+    let err = eval(r#"fn main() { fail "boom" }"#, "main")
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
     assert_eq!(err.message, "boom");
 }
 
-#[test]
+#[tokio::test]
 // r[verify error.fail]
 // r[verify eval.control-demand]
-fn untaken_fail_branch_is_not_forced() {
+async fn untaken_fail_branch_is_not_forced() {
     let value = eval(
         r#"fn main() { if true { 1 } else { fail "boom" } }"#,
         "main",
     )
+    .await
     .unwrap();
     assert_eq!(value, Value::U64(1));
 }
 
-#[test]
+#[tokio::test]
 // r[verify error.propagation]
-fn multiple_independent_poisons_are_collected_deterministically() {
+async fn multiple_independent_poisons_are_collected_deterministically() {
     let engine = engine("fn add(x: U64, y: U64) { x + y }");
     let err = engine
         .call(
             "add",
             vec![engine.poison_value("left"), engine.poison_value("right")],
         )
+        .await
         .unwrap_err();
 
     assert_eq!(err.kind, PoisonKind::Multiple);
@@ -4455,36 +4554,40 @@ fn multiple_independent_poisons_are_collected_deterministically() {
     assert_eq!(err.causes[1].message, "right");
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.demand-depth]
-fn circular_recursion_poisons_with_a_circular_dependency() {
+async fn circular_recursion_poisons_with_a_circular_dependency() {
     let err = eval(
         "fn loop_forever(n: U64) { loop_forever(n) }
          fn main() { loop_forever(1) }",
         "main",
     )
+    .await
     .unwrap_err();
 
     assert_eq!(err.kind, PoisonKind::CircularDependency);
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.demand-depth]
-fn deep_demand_chain_respects_the_configured_limit() {
+async fn deep_demand_chain_respects_the_configured_limit() {
     let engine = engine(
         "fn countdown(n: U64) {
            if n == 0 { 0 } else { countdown(n - 1) }
          }",
     )
     .with_max_demand_depth(4);
-    let err = engine.call("countdown", vec![Value::U64(10)]).unwrap_err();
+    let err = engine
+        .call("countdown", vec![Value::U64(10)])
+        .await
+        .unwrap_err();
 
     assert_eq!(err.kind, PoisonKind::DemandDepthExceeded);
     assert!(err.message.contains("depth limit of 4"));
 }
 
-#[test]
-fn missing_file_failures_keep_source_provenance_in_demand_chain() {
+#[tokio::test]
+async fn missing_file_failures_keep_source_provenance_in_demand_chain() {
     let source = r#"fn main(tree: Tree) { tree.file("missing.txt").utf8() }"#;
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
@@ -4500,7 +4603,7 @@ fn missing_file_failures_keep_source_provenance_in_demand_chain() {
     let outer_range = parsed_outer_call.syntax().text_range();
     let engine = engine_with_source_id(source, "/workspace/build.vx");
     let tree = Value::Tree(TreeValue::Inline(Arc::from([])));
-    let err = engine.call("main", vec![tree]).unwrap_err();
+    let err = engine.call("main", vec![tree]).await.unwrap_err();
 
     assert!(err.message.contains("missing file"));
     assert!(!err.demand_chain.entries.is_empty());
@@ -4518,8 +4621,8 @@ fn missing_file_failures_keep_source_provenance_in_demand_chain() {
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
-#[test]
-fn exec_handlers_receive_source_provenance_in_demand_chain() {
+#[tokio::test]
+async fn exec_handlers_receive_source_provenance_in_demand_chain() {
     let source = r#"
 fn observe(process: Process, tree: Tree) { process.exit_code }
 
@@ -4551,6 +4654,7 @@ fn build(input: Blob) {
 
     let value = engine
         .call("build", vec![Value::Blob(BlobValue::from_string("hello"))])
+        .await
         .unwrap();
     assert_eq!(value, Value::U64(0));
 
@@ -4572,8 +4676,8 @@ fn build(input: Blob) {
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
-#[test]
-fn discover_handlers_receive_source_provenance_in_demand_chain() {
+#[tokio::test]
+async fn discover_handlers_receive_source_provenance_in_demand_chain() {
     let source = r#"
 fn probe() {
   discover(executor_class("default"), (host) => host.read("/tmp/tool"))
@@ -4600,7 +4704,7 @@ fn probe() {
         }),
     );
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     assert_eq!(value, Value::Blob(BlobValue::from_string("probe result")));
 
     let request = captured
@@ -4621,8 +4725,8 @@ fn probe() {
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
-#[test]
-fn acquire_handlers_receive_keyword_payloads_and_source_provenance() {
+#[tokio::test]
+async fn acquire_handlers_receive_keyword_payloads_and_source_provenance() {
     let source = r#"
 fn fetch() {
   acquire("https://example.test/src.tar.gz") where {
@@ -4655,7 +4759,7 @@ fn fetch() {
         }),
     );
 
-    let value = engine.call("fetch", vec![]).unwrap();
+    let value = engine.call("fetch", vec![]).await.unwrap();
     assert_eq!(value, Value::Blob(BlobValue::from_string("cached source")));
 
     let request = captured
@@ -4683,8 +4787,8 @@ fn fetch() {
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
-#[test]
-fn render_handlers_receive_template_bindings_and_source_provenance() {
+#[tokio::test]
+async fn render_handlers_receive_template_bindings_and_source_provenance() {
     let source = r#"
 fn render_header() {
   return render(@templates/header.h) where {
@@ -4729,7 +4833,7 @@ fn render_header() {
         }),
     );
 
-    let value = engine.call("render_header", vec![]).unwrap();
+    let value = engine.call("render_header", vec![]).await.unwrap();
     assert!(
         captured.lock().unwrap().is_some(),
         "render handler should be called"
@@ -4777,8 +4881,8 @@ fn render_header() {
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
-#[test]
-fn stabilize_handlers_receive_snapshotted_witness_and_shipped_resolve() {
+#[tokio::test(flavor = "multi_thread")]
+async fn stabilize_handlers_receive_snapshotted_witness_and_shipped_resolve() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("input.txt"), "hello stabilize\n").unwrap();
 
@@ -4795,11 +4899,13 @@ fn build(workspace: Path) {
     let sink = Arc::clone(&captured);
     let engine = engine_with_source_id(source, "/workspace/build.vx").with_stabilize_handler(
         Arc::new(move |request| {
-            let resolved = Engine::invoke_shipped(
-                &request.module,
-                &request.resolve,
-                vec![request.witness.clone()],
-            )?;
+            let resolved = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(Engine::invoke_shipped(
+                    &request.module,
+                    &request.resolve,
+                    vec![request.witness.clone()],
+                ))
+            })?;
             *sink.lock().unwrap() = Some(request);
             Ok(resolved)
         }),
@@ -4812,6 +4918,7 @@ fn build(workspace: Path) {
                 workspace.path().to_string_lossy().as_ref(),
             ))],
         )
+        .await
         .unwrap();
     assert_eq!(value, Value::String(Arc::from("hello stabilize\n")));
 
@@ -4827,8 +4934,8 @@ fn build(workspace: Path) {
     assert!(!request.resolve.code_identity.is_empty());
 }
 
-#[test]
-fn render_preserves_obligations_from_discovered_bindings() {
+#[tokio::test]
+async fn render_preserves_obligations_from_discovered_bindings() {
     let source = r#"
 fn render_header(flag: Bool) {
   return render(@templates/header.h) where {
@@ -4869,7 +4976,7 @@ fn render_header(flag: Bool) {
         obligations: Arc::from([observation.clone()]),
     });
 
-    let value = engine.call("render_header", vec![flag]).unwrap();
+    let value = engine.call("render_header", vec![flag]).await.unwrap();
     assert_eq!(
         value,
         Value::Discovered(DiscoveredValue {
@@ -4879,9 +4986,9 @@ fn render_header(flag: Bool) {
     );
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 // r[verify eval.concurrency]
-fn independent_children_are_forced_concurrently() {
+async fn independent_children_are_forced_concurrently() {
     let engine = engine("fn pair(x: U64, y: U64) { Pair { left: x, right: y } }");
     let call = engine
         .call_unforced(
@@ -4891,10 +4998,11 @@ fn independent_children_are_forced_concurrently() {
                 engine.sleep_value(200, Value::U64(2)),
             ],
         )
+        .await
         .unwrap();
 
     let start = Instant::now();
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -4910,8 +5018,8 @@ fn independent_children_are_forced_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn call_boundary_forces_independent_children_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn call_boundary_forces_independent_children_concurrently() {
     let engine = engine("fn pair(x: U64, y: U64) { Pair { left: x, right: y } }");
 
     let start = Instant::now();
@@ -4923,6 +5031,7 @@ fn call_boundary_forces_independent_children_concurrently() {
                 engine.sleep_value(200, Value::U64(2)),
             ],
         )
+        .await
         .unwrap();
     let elapsed = start.elapsed();
 
@@ -4939,8 +5048,8 @@ fn call_boundary_forces_independent_children_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn array_map_schedules_callback_bodies_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn array_map_schedules_callback_bodies_concurrently() {
     let engine = engine(
         "struct Item { wait: U64, value: U64 }
          fn project(item: Item) {
@@ -4965,6 +5074,7 @@ fn array_map_schedules_callback_bodies_concurrently() {
                 item(engine.sleep_value(200, Value::U64(0)), Value::U64(2)),
             ]))],
         )
+        .await
         .unwrap();
     let elapsed = start.elapsed();
 
@@ -4975,8 +5085,8 @@ fn array_map_schedules_callback_bodies_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn force_fully_uses_scheduler_for_pending_call_nodes() {
+#[tokio::test(flavor = "multi_thread")]
+async fn force_fully_uses_scheduler_for_pending_call_nodes() {
     let engine = engine(
         "struct Item { wait: U64, value: U64 }
          fn project(item: Item) {
@@ -4999,10 +5109,11 @@ fn force_fully_uses_scheduler_for_pending_call_nodes() {
                 item(engine.sleep_value(200, Value::U64(0)), Value::U64(2)),
             ]))],
         )
+        .await
         .unwrap();
 
     let start = Instant::now();
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -5012,8 +5123,8 @@ fn force_fully_uses_scheduler_for_pending_call_nodes() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn array_flatten_schedules_item_containers_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn array_flatten_schedules_item_containers_concurrently() {
     let engine = engine("fn main(items: Array) { items.flatten() }");
 
     let start = Instant::now();
@@ -5025,6 +5136,7 @@ fn array_flatten_schedules_item_containers_concurrently() {
                 engine.sleep_value(200, Value::Array(Arc::from([Value::U64(2)]))),
             ]))],
         )
+        .await
         .unwrap();
     let elapsed = start.elapsed();
 
@@ -5035,8 +5147,8 @@ fn array_flatten_schedules_item_containers_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn exec_schedules_argument_resolution_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_schedules_argument_resolution_concurrently() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) { process.exit_code }
            fn build(args: Array) {
@@ -5054,6 +5166,7 @@ fn exec_schedules_argument_resolution_concurrently() {
                 Value::String(Arc::from("true")),
             ]))],
         )
+        .await
         .unwrap();
     let elapsed = start.elapsed();
 
@@ -5061,8 +5174,8 @@ fn exec_schedules_argument_resolution_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn array_merge_forces_tree_items_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(
         Arc::from("left.txt"),
@@ -5080,10 +5193,11 @@ fn array_merge_forces_tree_items_concurrently() {
                 engine.sleep_value(200, right),
             ]))],
         )
+        .await
         .unwrap();
 
     let start = Instant::now();
-    let value = engine.force_fully(call).unwrap();
+    let value = engine.force_fully(call).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -5102,8 +5216,8 @@ fn array_merge_forces_tree_items_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn fallible_suffix_schedules_independent_operands_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn fallible_suffix_schedules_independent_operands_concurrently() {
     let engine = engine("fn main(x: U64, y: U64) { [x?, y?] }");
 
     let start = Instant::now();
@@ -5115,6 +5229,7 @@ fn fallible_suffix_schedules_independent_operands_concurrently() {
                 engine.sleep_value(200, Value::U64(2)),
             ],
         )
+        .await
         .unwrap();
     let elapsed = start.elapsed();
 
@@ -5134,8 +5249,8 @@ fn fallible_suffix_schedules_independent_operands_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
-fn tree_constructor_schedules_map_key_resolution_concurrently() {
+#[tokio::test(flavor = "multi_thread")]
+async fn tree_constructor_schedules_map_key_resolution_concurrently() {
     let engine = engine("fn main(entries: Map) { Tree(entries) }");
     let entries = Value::Map(MapValue {
         entries: Arc::from([
@@ -5151,7 +5266,7 @@ fn tree_constructor_schedules_map_key_resolution_concurrently() {
     });
 
     let start = Instant::now();
-    let value = engine.call("main", vec![entries]).unwrap();
+    let value = engine.call("main", vec![entries]).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -5170,22 +5285,22 @@ fn tree_constructor_schedules_map_key_resolution_concurrently() {
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
 
-#[test]
+#[tokio::test]
 // r[verify fn.identity]
 // r[verify eval.memoization]
-fn transitive_callee_changes_update_the_caller_identity() {
+async fn transitive_callee_changes_update_the_caller_identity() {
     let source_a = "fn helper() { 1 } fn wrapper() { helper() }";
     let source_b = "fn helper() { 2 } fn wrapper() { helper() }";
 
-    let key_a = engine(source_a).function_key("wrapper").unwrap();
-    let key_b = engine(source_b).function_key("wrapper").unwrap();
+    let key_a = engine(source_a).function_key("wrapper").await.unwrap();
+    let key_b = engine(source_b).function_key("wrapper").await.unwrap();
 
     assert_ne!(key_a, key_b);
 }
 
-#[test]
+#[tokio::test]
 // r[verify fn.identity.overloads]
-fn all_visible_overloads_contribute_to_caller_identity() {
+async fn all_visible_overloads_contribute_to_caller_identity() {
     let source_a = "fn helper(x: U64) { 1 }
                     fn helper(x: Bool) { 2 }
                     fn wrapper() { helper(1) }";
@@ -5193,15 +5308,15 @@ fn all_visible_overloads_contribute_to_caller_identity() {
                     fn helper(x: Bool) { 99 }
                     fn wrapper() { helper(1) }";
 
-    let key_a = engine(source_a).function_key("wrapper").unwrap();
-    let key_b = engine(source_b).function_key("wrapper").unwrap();
+    let key_a = engine(source_a).function_key("wrapper").await.unwrap();
+    let key_b = engine(source_b).function_key("wrapper").await.unwrap();
 
     assert_ne!(key_a, key_b);
 }
 
-#[test]
+#[tokio::test]
 // r[verify fn.identity.stability]
-fn comments_and_whitespace_do_not_change_function_identity() {
+async fn comments_and_whitespace_do_not_change_function_identity() {
     let source_a = "fn helper() { 1 }\nfn wrapper() { helper() }";
     let source_b = r#"
 // wrapper should keep the same identity
@@ -5215,38 +5330,39 @@ fn wrapper() {
 }
 "#;
 
-    let key_a = engine(source_a).function_key("wrapper").unwrap();
-    let key_b = engine(source_b).function_key("wrapper").unwrap();
+    let key_a = engine(source_a).function_key("wrapper").await.unwrap();
+    let key_b = engine(source_b).function_key("wrapper").await.unwrap();
 
     assert_eq!(key_a, key_b);
 }
 
-#[test]
+#[tokio::test]
 // r[verify fn.identity.scc]
-fn mutually_recursive_functions_share_one_code_identity() {
+async fn mutually_recursive_functions_share_one_code_identity() {
     let source = "fn even(n: U64) { if n == 0 { true } else { odd(n - 1) } }
                   fn odd(n: U64) { if n == 0 { false } else { even(n - 1) } }";
     let engine = engine(source);
 
     assert_eq!(
-        engine.function_identity_string("even").unwrap(),
-        engine.function_identity_string("odd").unwrap()
+        engine.function_identity_string("even").await.unwrap(),
+        engine.function_identity_string("odd").await.unwrap()
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify store.path]
-fn path_values_join_with_normalized_slashes() {
+async fn path_values_join_with_normalized_slashes() {
     let engine = engine(r#"fn main(root: Path) { @({root}/src/./lib.rs) }"#);
     let value = engine
         .call("main", vec![Value::Path(PathValue::new("/workspace//"))])
+        .await
         .unwrap();
 
     assert_eq!(value, Value::Path(PathValue::new("/workspace/src/lib.rs")));
 }
 
-#[test]
-fn interpolated_path_literal_with_tree_yields_exec_path() {
+#[tokio::test]
+async fn interpolated_path_literal_with_tree_yields_exec_path() {
     let engine = engine(r#"fn main(input: Tree) { @({input}/include/lua.h) }"#);
     let input = TreeValue::Inline(Arc::from([(
         Arc::from("include"),
@@ -5257,6 +5373,7 @@ fn interpolated_path_literal_with_tree_yields_exec_path() {
     )]));
     let value = engine
         .call("main", vec![Value::Tree(input.clone())])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -5268,17 +5385,21 @@ fn interpolated_path_literal_with_tree_yields_exec_path() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify store.blob]
 // r[verify store.blob.utf8]
-fn blob_from_string_round_trips_text() {
-    let value = eval(r#"fn main() { Blob("hello").utf8() }"#, "main").unwrap();
+async fn blob_from_string_round_trips_text() {
+    let value = eval(r#"fn main() { Blob("hello").utf8() }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(value, Value::String(Arc::from("hello")));
 }
 
-#[test]
-fn blob_executable_marks_blob_as_executable() {
-    let value = eval(r#"fn main() { Blob("hello").executable() }"#, "main").unwrap();
+#[tokio::test]
+async fn blob_executable_marks_blob_as_executable() {
+    let value = eval(r#"fn main() { Blob("hello").executable() }"#, "main")
+        .await
+        .unwrap();
     assert_eq!(
         value,
         Value::Blob(BlobValue::Inline {
@@ -5288,10 +5409,10 @@ fn blob_executable_marks_blob_as_executable() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify store.tree]
 // r[verify store.tree.file]
-fn tree_of_and_file_only_force_the_selected_entry() {
+async fn tree_of_and_file_only_force_the_selected_entry() {
     let engine = engine(indoc! {r#"
         fn main(other: Blob) {
           Tree(%{
@@ -5302,13 +5423,14 @@ fn tree_of_and_file_only_force_the_selected_entry() {
     "#});
     let value = engine
         .call("main", vec![engine.poison_value("unused tree entry")])
+        .await
         .unwrap();
 
     assert_eq!(value, Value::String(Arc::from("alpha")));
 }
 
-#[test]
-fn tree_subtree_selects_nested_directories() {
+#[tokio::test]
+async fn tree_subtree_selects_nested_directories() {
     let value = eval(
         indoc! {r#"
             fn main() {
@@ -5321,13 +5443,14 @@ fn tree_subtree_selects_nested_directories() {
         "#},
         "main",
     )
+    .await
     .unwrap();
 
     assert_eq!(value, Value::String(Arc::from("header")));
 }
 
-#[test]
-fn tree_merge_combines_directories_recursively() {
+#[tokio::test]
+async fn tree_merge_combines_directories_recursively() {
     let value = eval(
         indoc! {r#"
             fn main() {
@@ -5353,6 +5476,7 @@ fn tree_merge_combines_directories_recursively() {
         "#},
         "main",
     )
+    .await
     .unwrap();
 
     assert_eq!(
@@ -5361,11 +5485,11 @@ fn tree_merge_combines_directories_recursively() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify store.tree]
 // r[verify store.tree.file]
 // r[verify store.blob.utf8]
-fn fs_backed_trees_read_files_on_demand() {
+async fn fs_backed_trees_read_files_on_demand() {
     let tempdir = TempDir::new().unwrap();
     let file_path = tempdir.path().join("hello.txt");
     fs::write(&file_path, "hello from fs").unwrap();
@@ -5374,13 +5498,13 @@ fn fs_backed_trees_read_files_on_demand() {
     let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
         tempdir.path().to_string_lossy(),
     )));
-    let value = engine.call("main", vec![tree]).unwrap();
+    let value = engine.call("main", vec![tree]).await.unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello from fs")));
 }
 
-#[test]
-fn tree_from_path_creates_a_lazy_fs_backed_tree() {
+#[tokio::test]
+async fn tree_from_path_creates_a_lazy_fs_backed_tree() {
     let tempdir = TempDir::new().unwrap();
     let file_path = tempdir.path().join("hello.txt");
     fs::write(&file_path, "hello from from_path").unwrap();
@@ -5393,14 +5517,15 @@ fn tree_from_path_creates_a_lazy_fs_backed_tree() {
                 tempdir.path().to_string_lossy(),
             ))],
         )
+        .await
         .unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello from from_path")));
 }
 
-#[test]
+#[tokio::test]
 // r[verify eval.entry]
-fn call_entry_passes_workspace_as_a_path() {
+async fn call_entry_passes_workspace_as_a_path() {
     let engine = engine(
         r#"fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
                Tree %{
@@ -5415,6 +5540,7 @@ fn call_entry_passes_workspace_as_a_path() {
             vec!["build".into()],
             BTreeMap::from([(String::from("MODE"), String::from("debug"))]),
         )
+        .await
         .unwrap();
 
     let Value::Tree(TreeValue::Inline(entries)) = value else {
@@ -5428,8 +5554,8 @@ fn call_entry_passes_workspace_as_a_path() {
     assert_eq!(blob, &BlobValue::from_string("/repo/src/main.rs"));
 }
 
-#[test]
-fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
+#[tokio::test]
+async fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
     let tempdir = TempDir::new().unwrap();
     fs::write(tempdir.path().join("input.txt"), "hello from workspace").unwrap();
 
@@ -5455,6 +5581,7 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
                 tempdir.path().to_string_lossy(),
             ))],
         )
+        .await
         .unwrap();
 
     let Value::Tree(TreeValue::Inline(entries)) = value else {
@@ -5477,8 +5604,8 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
     );
 }
 
-#[test]
-fn exec_verification_failures_poison_locally() {
+#[tokio::test]
+async fn exec_verification_failures_poison_locally() {
     let tempdir = TempDir::new().unwrap();
     let input_path = tempdir.path().join("tool.txt");
     fs::write(&input_path, "toolchain-v1").unwrap();
@@ -5499,18 +5626,18 @@ fn exec_verification_failures_poison_locally() {
         path = input_path.to_string_lossy(),
     );
     let engine = engine(&source);
-    let discovered = engine.call("probe", vec![]).unwrap();
+    let discovered = engine.call("probe", vec![]).await.unwrap();
     assert!(matches!(discovered, Value::Discovered(_)));
 
     fs::write(&input_path, "toolchain-v2").unwrap();
 
-    let err = engine.call("build", vec![discovered]).unwrap_err();
+    let err = engine.call("build", vec![discovered]).await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::VerificationFailure);
     assert!(err.message.contains("host.read"));
 }
 
-#[test]
-fn observer_functions_can_return_tree_results_for_exec() {
+#[tokio::test]
+async fn observer_functions_can_return_tree_results_for_exec() {
     let tempdir = TempDir::new().unwrap();
     fs::create_dir_all(tempdir.path().join("out")).unwrap();
     fs::write(
@@ -5543,7 +5670,7 @@ fn observer_functions_can_return_tree_results_for_exec() {
         tempdir.path().to_string_lossy(),
     )));
 
-    let value = engine.call("observe", vec![process, tree]).unwrap();
+    let value = engine.call("observe", vec![process, tree]).await.unwrap();
 
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected tree result");
@@ -5563,8 +5690,8 @@ fn observer_functions_can_return_tree_results_for_exec() {
     ));
 }
 
-#[test]
-fn exec_handler_receives_verification_obligations_from_discovered_values() {
+#[tokio::test]
+async fn exec_handler_receives_verification_obligations_from_discovered_values() {
     let tempdir = TempDir::new().unwrap();
     let input_path = tempdir.path().join("tool.txt");
     fs::write(&input_path, "toolchain-v1").unwrap();
@@ -5592,8 +5719,8 @@ fn exec_handler_receives_verification_obligations_from_discovered_values() {
         Ok(Value::U64(0))
     }));
 
-    let discovered = engine.call("probe", vec![]).unwrap();
-    let value = engine.call("build", vec![discovered]).unwrap();
+    let discovered = engine.call("probe", vec![]).await.unwrap();
+    let value = engine.call("build", vec![discovered]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -5611,8 +5738,8 @@ fn exec_handler_receives_verification_obligations_from_discovered_values() {
     );
 }
 
-#[test]
-fn exec_rejects_raw_path_mount_values() {
+#[tokio::test]
+async fn exec_rejects_raw_path_mount_values() {
     let tempdir = TempDir::new().unwrap();
     fs::write(tempdir.path().join("input.txt"), "hello from path mount").unwrap();
     let engine = engine(
@@ -5635,6 +5762,7 @@ fn exec_rejects_raw_path_mount_values() {
                 tempdir.path().to_string_lossy(),
             ))],
         )
+        .await
         .unwrap_err();
     assert_eq!(err.kind, PoisonKind::TypeError);
     assert!(
@@ -5643,8 +5771,8 @@ fn exec_rejects_raw_path_mount_values() {
     );
 }
 
-#[test]
-fn discover_records_host_obligations_for_demanded_values() {
+#[tokio::test]
+async fn discover_records_host_obligations_for_demanded_values() {
     let tempdir = TempDir::new().unwrap();
     let tool_path = tempdir.path().join("tool.sh");
     let tool_script = "#!/bin/sh\nprintf toolchain-v1\n";
@@ -5668,7 +5796,7 @@ fn discover_records_host_obligations_for_demanded_values() {
     );
     let engine = engine(&source);
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
@@ -5691,8 +5819,8 @@ fn discover_records_host_obligations_for_demanded_values() {
     );
 }
 
-#[test]
-fn host_which_poisons_by_default_and_fallible_calls_return_options() {
+#[tokio::test]
+async fn host_which_poisons_by_default_and_fallible_calls_return_options() {
     let tempdir = TempDir::new().unwrap();
     let tool_path = tempdir.path().join("tool.sh");
     let expected_script = "#!/bin/sh\nprintf tool\n";
@@ -5724,7 +5852,7 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
     );
     let engine = engine(&source);
 
-    let found = engine.call("found", vec![]).unwrap();
+    let found = engine.call("found", vec![]).await.unwrap();
     let Value::Discovered(found) = found else {
         panic!("expected discovered value");
     };
@@ -5746,11 +5874,11 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
         }]
     );
 
-    let err = engine.call("missing", vec![]).unwrap_err();
+    let err = engine.call("missing", vec![]).await.unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
     assert!(err.message.contains("host.which could not find"));
 
-    let missing_value = engine.call("missing_fallible", vec![]).unwrap();
+    let missing_value = engine.call("missing_fallible", vec![]).await.unwrap();
     let Value::Discovered(missing_value) = missing_value else {
         panic!("expected discovered value");
     };
@@ -5770,14 +5898,14 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
     );
 }
 
-#[test]
-fn host_os_returns_discovered_string() {
+#[tokio::test]
+async fn host_os_returns_discovered_string() {
     let source = r#"fn probe() #discover {
            discover(executor_class("default"), (host) => host.os())
          }"#;
     let engine = engine(source);
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
@@ -5799,14 +5927,14 @@ fn host_os_returns_discovered_string() {
     );
 }
 
-#[test]
-fn host_arch_returns_discovered_string() {
+#[tokio::test]
+async fn host_arch_returns_discovered_string() {
     let source = r#"fn probe() #discover {
            discover(executor_class("default"), (host) => host.arch())
          }"#;
     let engine = engine(source);
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
@@ -5822,8 +5950,8 @@ fn host_arch_returns_discovered_string() {
     );
 }
 
-#[test]
-fn discovered_if_condition_accepts_discovered_bool() {
+#[tokio::test]
+async fn discovered_if_condition_accepts_discovered_bool() {
     let source = r#"fn probe() #discover {
            discover(executor_class("default"), (host) => if host.os() == "windows" {
              Blob("windows")
@@ -5833,7 +5961,7 @@ fn discovered_if_condition_accepts_discovered_bool() {
          }"#;
     let engine = engine(source);
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
@@ -5855,8 +5983,8 @@ fn discovered_if_condition_accepts_discovered_bool() {
     );
 }
 
-#[test]
-fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
+#[tokio::test]
+async fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
     let tempdir = TempDir::new().unwrap();
     let input_path = tempdir.path().join("input.bin");
     let bytes = [0xff, 0xfe, 0xfd];
@@ -5870,7 +5998,7 @@ fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
     );
     let engine = engine(&source);
 
-    let value = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("probe", vec![]).await.unwrap();
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
@@ -5890,9 +6018,9 @@ fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify exec.arg.auto-mount]
-fn exec_implicitly_mounts_blob_args() {
+async fn exec_implicitly_mounts_blob_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
                process.stdout.collect().utf8()
@@ -5908,14 +6036,15 @@ fn exec_implicitly_mounts_blob_args() {
             "build",
             vec![Value::Blob(BlobValue::from_string("hello blob"))],
         )
+        .await
         .unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello blob")));
 }
 
-#[test]
+#[tokio::test]
 // r[verify exec.arg.auto-mount]
-fn exec_implicitly_mounts_tree_args() {
+async fn exec_implicitly_mounts_tree_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
                process.stdout.collect().utf8()
@@ -5932,14 +6061,14 @@ fn exec_implicitly_mounts_tree_args() {
         Value::Blob(BlobValue::from_string("hello tree")),
     )])));
 
-    let value = engine.call("build", vec![input]).unwrap();
+    let value = engine.call("build", vec![input]).await.unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello tree")));
 }
 
-#[test]
+#[tokio::test]
 // r[verify exec.arg.interpolation]
-fn exec_mounts_tree_paths_mentioned_in_path_literals() {
+async fn exec_mounts_tree_paths_mentioned_in_path_literals() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
                process.stdout.collect().utf8()
@@ -5954,14 +6083,14 @@ fn exec_mounts_tree_paths_mentioned_in_path_literals() {
         Value::Blob(BlobValue::from_string("hello via execpath")),
     )])));
 
-    let value = engine.call("build", vec![input]).unwrap();
+    let value = engine.call("build", vec![input]).await.unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello via execpath")));
 }
 
-#[test]
+#[tokio::test]
 // r[verify exec.arg.spread]
-fn exec_spreads_tree_args_in_canonical_path_order() {
+async fn exec_spreads_tree_args_in_canonical_path_order() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(
@@ -6001,7 +6130,7 @@ fn exec_spreads_tree_args_in_canonical_path_order() {
         ),
     ])));
 
-    let value = engine.call("build", vec![input]).unwrap();
+    let value = engine.call("build", vec![input]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -6036,8 +6165,8 @@ fn exec_spreads_tree_args_in_canonical_path_order() {
     );
 }
 
-#[test]
-fn exec_mounts_subtrees_instead_of_the_whole_tree() {
+#[tokio::test]
+async fn exec_mounts_subtrees_instead_of_the_whole_tree() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(indoc! {r#"
@@ -6073,7 +6202,7 @@ fn exec_mounts_subtrees_instead_of_the_whole_tree() {
         ),
     ])));
 
-    let value = engine.call("build", vec![input]).unwrap();
+    let value = engine.call("build", vec![input]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -6090,8 +6219,8 @@ fn exec_mounts_subtrees_instead_of_the_whole_tree() {
     assert_eq!(entries[1].0.as_ref(), "b.o");
 }
 
-#[test]
-fn exec_mounts_merged_trees() {
+#[tokio::test]
+async fn exec_mounts_merged_trees() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(indoc! {r#"
@@ -6134,7 +6263,7 @@ fn exec_mounts_merged_trees() {
         ),
     ])));
 
-    let value = engine.call("build", vec![base, overlay]).unwrap();
+    let value = engine.call("build", vec![base, overlay]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -6155,10 +6284,10 @@ fn exec_mounts_merged_trees() {
     );
 }
 
-#[test]
+#[tokio::test]
 // r[verify exec.arg.auto-mount]
 // r[verify exec.mount]
-fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
+async fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(
@@ -6180,6 +6309,7 @@ fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
             "build",
             vec![Value::Blob(BlobValue::from_string("hello blob"))],
         )
+        .await
         .unwrap();
     assert_eq!(value, Value::U64(0));
 
@@ -6208,8 +6338,8 @@ fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
     assert!(first.as_str().starts_with(".vx/implicit/"));
 }
 
-#[test]
-fn exec_can_be_routed_through_a_host_handler() {
+#[tokio::test]
+async fn exec_can_be_routed_through_a_host_handler() {
     let tempdir = TempDir::new().unwrap();
     fs::write(tempdir.path().join("input.txt"), "hello from handler").unwrap();
     let captured = Arc::new(Mutex::new(None));
@@ -6239,6 +6369,7 @@ fn exec_can_be_routed_through_a_host_handler() {
                 tempdir.path().to_string_lossy(),
             ))],
         )
+        .await
         .unwrap();
     assert_eq!(value, Value::U64(7));
 
@@ -6274,8 +6405,8 @@ fn exec_can_be_routed_through_a_host_handler() {
     assert_eq!(request.module.functions.len(), 2);
 }
 
-#[test]
-fn exec_captures_explicit_create_dirs() {
+#[tokio::test]
+async fn exec_captures_explicit_create_dirs() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(indoc! {r#"
@@ -6297,7 +6428,7 @@ fn exec_captures_explicit_create_dirs() {
         Ok(Value::U64(0))
     }));
 
-    let value = engine.call("build", vec![]).unwrap();
+    let value = engine.call("build", vec![]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -6309,8 +6440,8 @@ fn exec_captures_explicit_create_dirs() {
     assert_eq!(request.create_dirs, vec![PathValue::new("out/obj")]);
 }
 
-#[test]
-fn exec_infers_writable_roots_only_for_unmounted_paths() {
+#[tokio::test]
+async fn exec_infers_writable_roots_only_for_unmounted_paths() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(indoc! {r#"
@@ -6335,7 +6466,7 @@ fn exec_infers_writable_roots_only_for_unmounted_paths() {
         Ok(Value::U64(0))
     }));
 
-    let value = engine.call("build", vec![]).unwrap();
+    let value = engine.call("build", vec![]).await.unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured

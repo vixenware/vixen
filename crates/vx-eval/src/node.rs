@@ -177,7 +177,7 @@ pub enum Outcome {
 /// A waiter handle: when a node resolves, it sends the outcome through
 /// this channel to wake the waiting task.
 pub struct Waiter {
-    pub sender: crossbeam_channel::Sender<(NodeId, Outcome)>,
+    pub sender: tokio::sync::oneshot::Sender<(NodeId, Outcome)>,
 }
 
 // i[impl impl.persistent]

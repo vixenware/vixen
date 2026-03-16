@@ -3650,12 +3650,12 @@ name = "vx-eval"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "crossbeam-channel",
  "dashmap 6.1.0",
  "facet",
  "indoc",
  "parking_lot",
  "tempfile",
+ "tokio",
  "vx-parser",
  "vx-store-proto",
 ]
