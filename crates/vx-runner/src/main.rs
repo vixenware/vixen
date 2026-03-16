@@ -280,10 +280,21 @@ async fn boot_runner(
     let store = Arc::new(StoreClient::new(store_virtual));
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
     let vfs = VfsClient::new(vfsd_protocol, Arc::clone(&store));
+    let vfs_access_path = Utf8PathBuf::from(
+        vfs.access_path()
+            .await
+            .map_err(|e| eyre::eyre!("failed to get VFS access path from vx-vfsd: {e}"))?,
+    );
 
-    let exec = RunnerService::new(store, Arc::new(vfs), store_handle, vfsd_handle);
+    let exec = RunnerService::new(
+        store,
+        Arc::new(vfs),
+        vfs_access_path.clone(),
+        store_handle,
+        vfsd_handle,
+    );
 
-    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
+    tracing::info!("VFS provided by vx-vfsd at {}", vfs_access_path);
 
     Ok(exec)
 }
@@ -295,6 +306,9 @@ pub struct RunnerServiceInner {
 
     /// VFS client for hermetic action execution (via vx-vfsd RPC)
     pub(crate) vfs: Arc<VfsClient>,
+
+    /// Real filesystem access path for the mounted VFS session.
+    pub(crate) vfs_access_path: Utf8PathBuf,
 
     /// Retain the upstream root handles for the lifetime of the runner service.
     _store_handle: ServiceHandle,
@@ -335,6 +349,7 @@ impl RunnerService {
     pub fn new(
         cas: Arc<StoreClient>,
         vfs: Arc<VfsClient>,
+        vfs_access_path: Utf8PathBuf,
         store_handle: ServiceHandle,
         vfsd_handle: ServiceHandle,
     ) -> Self {
@@ -342,6 +357,7 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
+                vfs_access_path,
                 _store_handle: store_handle,
                 _vfsd_handle: vfsd_handle,
                 toolchain_flights: moire::sync::SyncMutex::new(
@@ -509,19 +525,19 @@ impl RunnerService {
             .any(|c| c.name == "rustc");
         if has_rustc {
             let rustc_bin = format!("bin/rustc{}", std::env::consts::EXE_SUFFIX);
-            let rustc_vfs_path = runner_mount_base().join(&prefix_id).join(&rustc_bin);
+            let rustc_vfs_path = self.vfs_access_path.join(&prefix_id).join(&rustc_bin);
             if !rustc_vfs_path.as_std_path().exists() {
-                let mount_base = runner_mount_base();
-                let mount_exists = mount_base.as_std_path().exists();
-                let prefix_exists = mount_base.join(&prefix_id).as_std_path().exists();
-                let bin_exists = mount_base
+                let access_path = &self.vfs_access_path;
+                let mount_exists = access_path.as_std_path().exists();
+                let prefix_exists = access_path.join(&prefix_id).as_std_path().exists();
+                let bin_exists = access_path
                     .join(&prefix_id)
                     .join("bin")
                     .as_std_path()
                     .exists();
                 tracing::error!(
                     %rustc_vfs_path,
-                    %mount_base,
+                    access_path = %access_path,
                     mount_exists,
                     prefix_exists,
                     bin_exists,
@@ -529,7 +545,7 @@ impl RunnerService {
                 );
                 return Err(RunnerError::VfsMount(format!(
                     "toolchain prefix {} created but bin/rustc not found at {} \
-                     (mount_base exists={}, prefix exists={}, bin/ exists={})",
+                     (access_path exists={}, prefix exists={}, bin/ exists={})",
                     prefix_id, rustc_vfs_path, mount_exists, prefix_exists, bin_exists,
                 )));
             }

@@ -144,6 +144,13 @@ impl VfsdClient {
             .map_err(|e| format!("{e:?}"))
     }
 
+    pub async fn access_path(&self) -> Result<String, String> {
+        self.client
+            .access_path()
+            .await
+            .map_err(|e| format!("{e:?}"))
+    }
+
     pub async fn describe_prefix_state(
         &self,
         prefix_id: &str,

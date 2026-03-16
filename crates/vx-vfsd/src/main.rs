@@ -470,7 +470,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
     let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, mount.clone()));
 
     // 3. Clean up, create mount dir, mount VFS, smoke test.
-    let mount_result: Result<()> = async {
+    let mount_result: Result<Utf8PathBuf> = async {
         platform::cleanup_stuck_mount(mount).await?;
 
         if platform::should_create_mount_dir(mount) {
@@ -562,10 +562,13 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                     }
                     tracing::error!("VFS session died unexpectedly at {}", vfs_mount_path);
                     std::process::exit(1);
-                }.named("vfs_death_watcher"));
+                }
+                .named("vfs_death_watcher"));
+
+                Ok(access_path)
             }
             Ok(VfsStart::Unsupported { platform }) => {
-                return Err(format!("VFS not supported on platform {platform}").into());
+                Err(format!("VFS not supported on platform {platform}").into())
             }
             Err(error) => {
                 use owo_colors::OwoColorize;
@@ -587,14 +590,16 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                         }
                     }
                 }
-                return Err(msg.into());
+                Err(msg.into())
             }
         }
-        Ok(())
     }
     .await;
 
-    if let Err(error) = mount_result {
+    let access_path = if let Ok(access_path) = mount_result {
+        access_path
+    } else {
+        let error = mount_result.unwrap_err();
         use std::time::Instant;
         let before = Instant::now();
         let diagnostics = platform::collect_vfs_diagnostics(mount).await;
@@ -615,10 +620,11 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         }
 
         return Err(error);
-    }
+    };
 
     Ok(VfsdService::new_with_store_connection(
         vfs,
+        access_path,
         Arc::new(store_root_caller),
         Arc::new(store_session_handle),
     ))

@@ -580,7 +580,7 @@ impl RunnerService {
     /// Create action execution context with prefix, paths, and sandbox config.
     async fn create_action_context(&self) -> ActionContext {
         let prefix_id = self.create_action_prefix().await;
-        let mount_base = crate::runner_mount_base();
+        let mount_base = self.vfs_access_path.clone();
         let prefix_path = mount_base.join(&prefix_id);
         let out_path = prefix_path.join("out");
 

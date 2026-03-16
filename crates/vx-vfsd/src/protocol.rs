@@ -73,6 +73,9 @@ pub trait Vfsd {
     /// - `prefix_id`: The prefix to dump (e.g., "build-xyz")
     async fn dump_state(&self, prefix_id: String) -> Result<(), String>;
 
+    /// Return the real filesystem access path for this VFS session.
+    async fn access_path(&self) -> Result<String, String>;
+
     /// Return a structured summary of VFS state for a specific prefix.
     ///
     /// This is useful for durable product diagnostics, since callers can log

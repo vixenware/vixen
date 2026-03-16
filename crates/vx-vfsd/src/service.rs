@@ -2,6 +2,7 @@
 
 use crate::protocol::{VfsPrefixStateSummary, Vfsd};
 use crate::vfs::CasVfs;
+use camino::Utf8PathBuf;
 use std::collections::HashSet;
 use std::sync::Arc;
 use vx_store_proto::{
@@ -12,6 +13,7 @@ use vx_store_proto::{
 #[derive(Clone)]
 pub struct VfsdService {
     vfs: Arc<CasVfs>,
+    access_path: Utf8PathBuf,
     _retained_store_connection: Option<Arc<StoreConnection>>,
 }
 
@@ -26,20 +28,23 @@ impl vx_io::boot::GracefulShutdown for VfsdService {
 
 impl VfsdService {
     #[allow(dead_code)]
-    pub fn new(vfs: Arc<CasVfs>) -> Self {
+    pub fn new(vfs: Arc<CasVfs>, access_path: Utf8PathBuf) -> Self {
         Self {
             vfs,
+            access_path,
             _retained_store_connection: None,
         }
     }
 
     pub fn new_with_store_connection(
         vfs: Arc<CasVfs>,
+        access_path: Utf8PathBuf,
         root_caller: Arc<roam_core::DriverCaller>,
         session_handle: Arc<roam_core::SessionHandle>,
     ) -> Self {
         Self {
             vfs,
+            access_path,
             _retained_store_connection: Some(Arc::new(StoreConnection {
                 _root_caller: Arc::unwrap_or_clone(root_caller),
                 _session_handle: Arc::unwrap_or_clone(session_handle),
@@ -348,6 +353,10 @@ impl VfsdService {
         Ok(())
     }
 
+    async fn access_path(&self) -> Result<String, String> {
+        Ok(self.access_path.as_str().to_string())
+    }
+
     async fn describe_prefix_state(
         &self,
         prefix_id: String,
@@ -379,6 +388,10 @@ impl Vfsd for VfsdService {
 
     async fn dump_state(&self, prefix_id: String) -> Result<(), String> {
         VfsdService::dump_state(self, prefix_id).await
+    }
+
+    async fn access_path(&self) -> Result<String, String> {
+        VfsdService::access_path(self).await
     }
 
     async fn describe_prefix_state(
@@ -552,7 +565,7 @@ mod tests {
                 None,
                 mount_path.path().to_string_lossy().into_owned().into(),
             ));
-            let service = VfsdService::new(vfs);
+            let service = VfsdService::new(vfs, Utf8PathBuf::from("/tmp/vx/vfs"));
 
             Self {
                 _store_root: store_root,
