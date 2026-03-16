@@ -32,6 +32,7 @@ use facet::Facet;
 use figue as args;
 use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
+use ignore::WalkBuilder;
 use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
@@ -1478,8 +1479,11 @@ exec "$dest" --stdio
 
 #[cfg(unix)]
 fn should_skip_local_bootstrap_source_path(relpath: &Utf8Path) -> bool {
+    if relpath.starts_with("apps/mac/xcode/build") || relpath.starts_with("apps/mac/dist") {
+        return true;
+    }
     relpath.components().enumerate().any(|(index, component)| {
-        if component.as_str() == ".build" {
+        if matches!(component.as_str(), ".build" | ".git" | "target") {
             return true;
         }
         index == 0
@@ -1508,16 +1512,27 @@ struct LocalBootstrapSourceManifestStats {
 #[cfg(unix)]
 fn collect_local_bootstrap_source_files(
     repo_root: &Utf8Path,
-    current: &Utf8Path,
     cached_manifest: &BTreeMap<String, SourceFileEntry>,
     files: &mut Vec<SourceFileEntry>,
     stats: &mut LocalBootstrapSourceManifestStats,
 ) -> Result<()> {
-    for entry in fs::read_dir(current).wrap_err_with(|| format!("failed to read {}", current))? {
-        let entry = entry.wrap_err_with(|| format!("failed to read entry under {}", current))?;
-        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+    let walker = WalkBuilder::new(repo_root)
+        .hidden(false)
+        .follow_links(false)
+        .require_git(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .ignore(true)
+        .build();
+    for entry in walker {
+        let entry = entry.wrap_err_with(|| format!("failed to walk {}", repo_root))?;
+        let path = Utf8PathBuf::from_path_buf(entry.into_path()).map_err(|path| {
             eyre::eyre!("non-utf8 path in Vixen source tree: {}", path.display())
         })?;
+        if path == repo_root {
+            continue;
+        }
         let relpath = path
             .strip_prefix(repo_root)
             .map_err(|error| eyre::eyre!("failed to strip {} from {}: {error}", repo_root, path))?;
@@ -1526,14 +1541,7 @@ fn collect_local_bootstrap_source_files(
         }
         let metadata =
             fs::symlink_metadata(&path).wrap_err_with(|| format!("failed to stat {}", path))?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            collect_local_bootstrap_source_files(repo_root, &path, cached_manifest, files, stats)?;
-            continue;
-        }
-        if !metadata.is_file() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
         let relpath_string = relpath.as_str().to_string();
@@ -1569,13 +1577,7 @@ fn local_bootstrap_source_files(
 ) -> Result<(Vec<SourceFileEntry>, LocalBootstrapSourceManifestStats)> {
     let mut files = Vec::new();
     let mut stats = LocalBootstrapSourceManifestStats::default();
-    collect_local_bootstrap_source_files(
-        repo_root,
-        repo_root,
-        cached_manifest,
-        &mut files,
-        &mut stats,
-    )?;
+    collect_local_bootstrap_source_files(repo_root, cached_manifest, &mut files, &mut stats)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok((files, stats))
 }

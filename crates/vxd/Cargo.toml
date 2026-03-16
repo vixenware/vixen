@@ -29,6 +29,7 @@ libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
 hex = { workspace = true }
+ignore = "0.4"
 base64 = "0.22"
 flate2 = "1"
 serde_json = "1"

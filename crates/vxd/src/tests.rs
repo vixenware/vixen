@@ -113,6 +113,49 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
 
 #[cfg(unix)]
 #[test]
+fn local_bootstrap_source_filter_skips_macos_generated_artifacts() {
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/xcode/build/DerivedData/foo")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/dist/0.6.0/staging/Vixen.app")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("zoo/libpng-src/.git/objects/pack/pack-foo")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("some/nested/target/debug/foo")
+    ));
+    assert!(!crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/xcode/project.yml")
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_bootstrap_source_files_respect_gitignore() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let repo_root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf8");
+    std::fs::write(repo_root.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+    std::fs::write(repo_root.join("kept.txt"), "kept").expect("write kept");
+    std::fs::write(repo_root.join("ignored.txt"), "ignored").expect("write ignored");
+
+    let (files, stats) =
+        crate::local_bootstrap_source_files(&repo_root, &BTreeMap::new()).expect("collect files");
+
+    assert_eq!(stats.hashed_count, 2);
+    assert_eq!(stats.reused_count, 0);
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".gitignore", "kept.txt"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
     assert_eq!(
         crate::ssh_bootstrap_paths("/home/amos", "ssh:orb"),
