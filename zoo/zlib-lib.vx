@@ -39,7 +39,7 @@ fn build(workspace: Path, class: ExecutorClass) {
     );
   let shared_link_name =
     if tc.os == "windows" (
-      @zlib.lib
+      @zlibwapi.lib
     ) else (
       shared_binary_name
     );
@@ -114,6 +114,7 @@ fn build(workspace: Path, class: ExecutorClass) {
     link_tree: Tree {
       @(static_name): static_build.file(static_name),
     },
+    link_inputs: [static_name],
     runtime_tree: Tree {},
     defines: [],
   };
@@ -123,6 +124,7 @@ fn build(workspace: Path, class: ExecutorClass) {
         link_tree: Tree {
           @(shared_link_name): shared_build.file(shared_link_name),
         },
+        link_inputs: [shared_link_name],
         runtime_tree: Tree {
           @(shared_binary_name): shared_build.file(shared_binary_name),
         },
@@ -133,6 +135,7 @@ fn build(workspace: Path, class: ExecutorClass) {
         link_tree: Tree {
           @(shared_link_name): shared_build.file(shared_binary_name),
         },
+        link_inputs: [shared_link_name],
         runtime_tree: Tree {
           @(shared_binary_name): shared_build.file(shared_binary_name),
         },

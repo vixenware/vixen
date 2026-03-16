@@ -7,6 +7,7 @@ struct Toolchain {
 
 struct CLibraryVariant {
   link_tree: Tree,
+  link_inputs: Array[Path],
   runtime_tree: Tree,
   defines: Array[String] = [],
 }

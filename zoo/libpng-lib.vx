@@ -25,7 +25,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
 
   let static_name =
     if tc.os == "windows" (
-      @libpng16.lib
+      @libpng16_static.lib
     ) else (
       @libpng16.a
     );
@@ -43,21 +43,6 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
     ) else (
       shared_binary_name
     );
-  let zlib_static_name =
-    if tc.os == "windows" (
-      @zlib.lib
-    ) else (
-      @libz.a
-    );
-  let zlib_shared_name =
-    if tc.os == "windows" (
-      @zlib.lib
-    ) else if tc.os == "darwin" (
-      @libz.dylib
-    ) else (
-      @libz.so
-    );
-
   let static_objects =
     rules.compile_objects(class, tc, src, libpng_core_sources) where {
       generated: { @pnglibconf.h: pnglibconf_h },
@@ -94,7 +79,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         "/LD",
         `/Feout\\${shared_binary_name}`,
         ..shared_objects,
-        @(deps/zlib-link/{zlib_shared_name}),
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
         "/link",
         `/IMPLIB:out\\${shared_link_name}`,
       ] where {
@@ -109,7 +94,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         @(out/{shared_binary_name}),
         "-Wl,-install_name,@rpath/libpng16.dylib",
         ..shared_objects,
-        @(deps/zlib-link/{zlib_shared_name}),
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
         mounts: { @deps/zlib-link: zlib.shared.link_tree },
         writable: [@out],
@@ -122,7 +107,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         @(out/{shared_binary_name}),
         "-Wl,-soname,libpng16.so",
         ..shared_objects,
-        @(deps/zlib-link/{zlib_shared_name}),
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
         mounts: { @deps/zlib-link: zlib.shared.link_tree },
         writable: [@out],
@@ -139,6 +124,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
     link_tree: Tree {
       @(static_name): static_build.file(static_name),
     },
+    link_inputs: [static_name],
     runtime_tree: Tree {},
     defines: [],
   };
@@ -148,6 +134,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         link_tree: Tree {
           @(shared_link_name): shared_build.file(shared_link_name),
         },
+        link_inputs: [shared_link_name],
         runtime_tree: [
           Tree {
             @(shared_binary_name): shared_build.file(shared_binary_name),
@@ -161,6 +148,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         link_tree: Tree {
           @(shared_link_name): shared_build.file(shared_binary_name),
         },
+        link_inputs: [shared_link_name],
         runtime_tree: [
           Tree {
             @(shared_binary_name): shared_build.file(shared_binary_name),

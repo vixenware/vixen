@@ -84,27 +84,6 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
     ) else (
       @pnggen-shared
     );
-  let libpng_static_name =
-    if tc.os == "windows" (
-      @libpng16.lib
-    ) else (
-      @libpng16.a
-    );
-  let libpng_shared_name =
-    if tc.os == "windows" (
-      @libpng16.lib
-    ) else if tc.os == "darwin" (
-      @libpng16.dylib
-    ) else (
-      @libpng16.so
-    );
-  let zlib_static_name =
-    if tc.os == "windows" (
-      @zlib.lib
-    ) else (
-      @libz.a
-    );
-
   let cexec = partial exec where {
     executor: class,
     observer: (proc, vfs) => (
@@ -125,8 +104,8 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         @src/pnggen.c,
         "/I", @deps/libpng,
         "/I", @deps/zlib,
-        @(deps/libpng-link/{libpng_static_name}),
-        @(deps/zlib-link/{zlib_static_name}),
+        ..libpng.static.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
         mounts: {
           @src: pnggen_source,
@@ -145,8 +124,8 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         @src/pnggen.c,
         "-I", @deps/libpng,
         "-I", @deps/zlib,
-        @(deps/libpng-link/{libpng_static_name}),
-        @(deps/zlib-link/{zlib_static_name}),
+        ..libpng.static.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
         "-lm",
       ] where {
         mounts: {
@@ -171,7 +150,7 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         "/I", @deps/zlib,
         ..libpng.shared.defines.map((define) => `/D${define}`),
         ..zlib.shared.defines.map((define) => `/D${define}`),
-        @(deps/libpng-link/{libpng_shared_name}),
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
       ] where {
         mounts: {
           @src: pnggen_source,
@@ -189,7 +168,7 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         @src/pnggen.c,
         "-I", @deps/libpng,
         "-I", @deps/zlib,
-        @(deps/libpng-link/{libpng_shared_name}),
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
         "-Wl,-rpath,@loader_path",
         "-lm",
       ] where {
@@ -209,7 +188,7 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         @src/pnggen.c,
         "-I", @deps/libpng,
         "-I", @deps/zlib,
-        @(deps/libpng-link/{libpng_shared_name}),
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
         "-Wl,-rpath,$ORIGIN",
         "-lm",
       ] where {
