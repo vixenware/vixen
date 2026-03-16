@@ -5563,7 +5563,11 @@ impl Engine {
                             root.as_str()
                         ))
                     })?;
-                    names.push(entry.file_name().to_string_lossy().to_string());
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("._") {
+                        continue;
+                    }
+                    names.push(name);
                 }
                 names.sort();
 
@@ -5821,7 +5825,11 @@ impl Engine {
         while let Some(entry) = entries.next().transpose().map_err(|error| {
             self.internal_error(&format!("failed to read {}: {error}", source.as_str()))
         })? {
-            names.push(entry.file_name().to_string_lossy().to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("._") {
+                continue;
+            }
+            names.push(name);
         }
         names.sort();
 
@@ -6190,7 +6198,12 @@ impl Engine {
         while let Some(entry) = read_dir.next().transpose().map_err(|error| {
             self.internal_error(&format!("failed to read {}: {error}", root.as_str()))
         })? {
-            names.push(entry.file_name().to_string_lossy().to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip macOS AppleDouble resource fork files
+            if name.starts_with("._") {
+                continue;
+            }
+            names.push(name);
         }
         names.sort();
 
@@ -6414,7 +6427,11 @@ impl Engine {
                             root.as_str()
                         ))
                     })?;
-                    names.push(entry.file_name().to_string_lossy().to_string());
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("._") {
+                        continue;
+                    }
+                    names.push(name);
                 }
                 names.sort();
 

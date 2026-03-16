@@ -251,7 +251,12 @@ fn commit_fs_tree<'a>(
         while let Some(entry) = read_dir.next().transpose().map_err(|error| {
             boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
         })? {
-            names.push(entry.file_name().to_string_lossy().to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip macOS AppleDouble resource fork files
+            if name.starts_with("._") {
+                continue;
+            }
+            names.push(name);
         }
         names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
