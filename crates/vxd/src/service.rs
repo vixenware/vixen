@@ -3327,7 +3327,7 @@ async fn load_stabilized_value_from_manifest(
 }
 
 impl BuildVxRuntime {
-    fn build_engine(&self, module: &EvalModule) -> Engine {
+    fn build_engine(&self, module: &EvalModule) -> Arc<Engine> {
         Engine::from_module(module).with_runtime(Arc::new(self.clone()))
     }
 
@@ -3535,6 +3535,39 @@ impl BuildRuntime for BuildVxRuntime {
 
     fn has_discover(&self) -> bool {
         true
+    }
+
+    fn run_batch(
+        &self,
+        engine: Arc<Engine>,
+        items: Vec<(vx_eval::NodeId, Vec<vx_eval::NodeId>)>,
+    ) -> std::result::Result<Vec<(vx_eval::NodeId, std::result::Result<Value, PoisonError>)>, ()>
+    {
+        // Run each node on tokio's blocking pool. This keeps worker threads
+        // free to drive async handler tasks spawned via spawn_on_runtime.
+        let handles: Vec<_> = items
+            .into_iter()
+            .map(|(node_id, chain)| {
+                let engine = Arc::clone(&engine);
+                let runtime = self.runtime_handle.clone();
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                runtime.spawn_blocking(move || {
+                    let _ = tx.send((
+                        node_id,
+                        engine.execute_pending_node_with_chain(node_id, &chain),
+                    ));
+                });
+                rx
+            })
+            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for rx in handles {
+            match rx.recv() {
+                Ok(result) => results.push(result),
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(results)
     }
 
     fn store_hydration(

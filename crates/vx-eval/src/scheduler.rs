@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::thread;
+use std::sync::Arc;
 
 use crate::node::NodeId;
 use crate::poison::PoisonError;
 use crate::value::Value;
 use crate::worker::Engine;
 
-pub(crate) struct Scheduler<'e> {
-    engine: &'e Engine,
+pub(crate) struct Scheduler {
+    engine: Arc<Engine>,
     initial_stack: Vec<NodeId>,
     deps: HashMap<NodeId, HashSet<NodeId>>,
     rdeps: HashMap<NodeId, Vec<NodeId>>,
@@ -18,8 +18,8 @@ pub(crate) struct Scheduler<'e> {
     demand_paths: HashMap<NodeId, Vec<NodeId>>,
 }
 
-impl<'e> Scheduler<'e> {
-    pub(crate) fn new(engine: &'e Engine) -> Self {
+impl Scheduler {
+    pub(crate) fn new(engine: Arc<Engine>) -> Self {
         Self {
             engine,
             initial_stack: Vec::new(),
@@ -33,7 +33,7 @@ impl<'e> Scheduler<'e> {
         }
     }
 
-    pub(crate) fn with_initial_stack(engine: &'e Engine, initial_stack: Vec<NodeId>) -> Self {
+    pub(crate) fn with_initial_stack(engine: Arc<Engine>, initial_stack: Vec<NodeId>) -> Self {
         Self {
             engine,
             initial_stack,
@@ -190,36 +190,23 @@ impl<'e> Scheduler<'e> {
                     self.engine.execute_pending_node_with_chain(node_id, &chain),
                 )]
             } else {
-                let engine = self.engine;
+                let engine = &self.engine;
                 let stalled_batch = batch.clone();
-                let demand_paths = self.demand_paths.clone();
-                thread::scope(|scope| {
-                    let handles = batch
-                        .iter()
-                        .copied()
-                        .map(|node_id| {
-                            let chain = demand_paths.get(&node_id).cloned().unwrap_or_default();
-                            scope.spawn(move || {
-                                (
-                                    node_id,
-                                    engine.execute_pending_node_with_chain(node_id, &chain),
-                                )
-                            })
-                        })
-                        .collect::<Vec<_>>();
-
-                    let mut results = Vec::with_capacity(handles.len());
-                    for handle in handles {
-                        match handle.join() {
-                            Ok(result) => results.push(result),
-                            Err(_) => {
-                                let stack = self.prefixed_stack(&[]);
-                                return Err(engine.stalled_error(&stack, &stalled_batch));
-                            }
-                        }
+                let items: Vec<_> = batch
+                    .iter()
+                    .copied()
+                    .map(|node_id| {
+                        let chain = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
+                        (node_id, chain)
+                    })
+                    .collect();
+                match engine.run_batch(items) {
+                    Ok(results) => results,
+                    Err(()) => {
+                        let stack = self.prefixed_stack(&[]);
+                        return Err(engine.stalled_error(&stack, &stalled_batch));
                     }
-                    Ok::<_, PoisonError>(results)
-                })?
+                }
             };
 
             for (node_id, result) in results {

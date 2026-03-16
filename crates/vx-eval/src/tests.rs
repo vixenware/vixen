@@ -31,11 +31,11 @@ fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> 
     engine.call(entry, vec![])
 }
 
-fn engine(source: &str) -> Engine {
+fn engine(source: &str) -> Arc<Engine> {
     engine_with_source_id(source, "<test>")
 }
 
-fn engine_with_source_id(source: &str, source_id: &str) -> Engine {
+fn engine_with_source_id(source: &str, source_id: &str) -> Arc<Engine> {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());

@@ -116,6 +116,7 @@ pub struct Engine {
     call_memo: DashMap<NodeKey, Arc<Node>>,
     max_demand_depth: usize,
     runtime: Option<Arc<dyn BuildRuntime>>,
+    self_ref: std::sync::OnceLock<std::sync::Weak<Engine>>,
 }
 
 impl Engine {
@@ -138,7 +139,7 @@ impl Engine {
     }
 
     /// Create a new engine from a lowered module.
-    pub fn from_module(module: &instr::Module) -> Self {
+    pub fn from_module(module: &instr::Module) -> Arc<Self> {
         let root_module_id = Arc::clone(&module.source_id);
         let modules = DashMap::new();
         modules.insert(
@@ -146,35 +147,78 @@ impl Engine {
             Arc::new(Self::build_module_state(module.clone())),
         );
 
-        Self {
+        let engine = Arc::new(Self {
             root_module_id,
             modules,
             nodes: DashMap::new(),
             call_memo: DashMap::new(),
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             runtime: None,
-        }
+            self_ref: std::sync::OnceLock::new(),
+        });
+        engine
+            .self_ref
+            .set(Arc::downgrade(&engine))
+            .ok()
+            .expect("self_ref already set");
+        engine
+    }
+
+    fn rewrap(mut this: Self) -> Arc<Self> {
+        this.self_ref = std::sync::OnceLock::new();
+        let arc = Arc::new(this);
+        arc.self_ref
+            .set(Arc::downgrade(&arc))
+            .ok()
+            .expect("self_ref already set");
+        arc
+    }
+
+    fn arc_self(&self) -> Arc<Self> {
+        self.self_ref
+            .get()
+            .expect("engine self_ref not set")
+            .upgrade()
+            .expect("engine Arc dropped while still in use")
     }
 
     // r[impl eval.demand-depth]
-    pub fn with_max_demand_depth(mut self, max_demand_depth: usize) -> Self {
-        self.max_demand_depth = max_demand_depth;
-        self
+    pub fn with_max_demand_depth(self: Arc<Self>, max_demand_depth: usize) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        this.max_demand_depth = max_demand_depth;
+        Self::rewrap(this)
     }
 
-    pub fn with_runtime(mut self, runtime: Arc<dyn BuildRuntime>) -> Self {
-        self.runtime = Some(runtime);
-        self
+    pub fn with_runtime(self: Arc<Self>, runtime: Arc<dyn BuildRuntime>) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        this.runtime = Some(runtime);
+        Self::rewrap(this)
     }
 
-    fn ensure_closure_runtime(&mut self) -> &mut ClosureRuntime {
-        if self.runtime.is_none() {
-            self.runtime = Some(Arc::new(ClosureRuntime::default()));
+    pub(crate) fn run_batch(
+        self: &Arc<Self>,
+        items: Vec<(crate::node::NodeId, Vec<crate::node::NodeId>)>,
+    ) -> Result<
+        Vec<(
+            crate::node::NodeId,
+            Result<Value, crate::poison::PoisonError>,
+        )>,
+        (),
+    > {
+        if let Some(runtime) = &self.runtime {
+            runtime.run_batch(Arc::clone(self), items)
+        } else {
+            ClosureRuntime::default().run_batch(Arc::clone(self), items)
         }
-        // Get a mutable reference to the ClosureRuntime inside the Arc.
-        // This is safe because we just created it (or it was set by a previous
-        // with_xxx_handler call) and no one else has a reference yet (we have &mut self).
-        let arc = self.runtime.as_mut().unwrap();
+    }
+
+    fn ensure_closure_runtime(this: &mut Self) -> &mut ClosureRuntime {
+        if this.runtime.is_none() {
+            this.runtime = Some(Arc::new(ClosureRuntime::default()));
+        }
+        let arc = this.runtime.as_mut().unwrap();
         Arc::get_mut(arc)
             .expect("cannot add closure handlers after runtime Arc has been shared")
             .as_any_mut()
@@ -182,39 +226,56 @@ impl Engine {
             .expect("cannot add closure handlers to a non-ClosureRuntime")
     }
 
-    pub fn with_acquire_handler(mut self, handler: SharedAcquireHandler) -> Self {
-        self.ensure_closure_runtime().acquire = Some(handler);
-        self
+    pub fn with_acquire_handler(self: Arc<Self>, handler: SharedAcquireHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).acquire = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_render_handler(mut self, handler: SharedRenderHandler) -> Self {
-        self.ensure_closure_runtime().render = Some(handler);
-        self
+    pub fn with_render_handler(self: Arc<Self>, handler: SharedRenderHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).render = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_stabilize_handler(mut self, handler: SharedStabilizeHandler) -> Self {
-        self.ensure_closure_runtime().stabilize = Some(handler);
-        self
+    pub fn with_stabilize_handler(self: Arc<Self>, handler: SharedStabilizeHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).stabilize = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_exec_handler(mut self, handler: SharedExecHandler) -> Self {
-        self.ensure_closure_runtime().exec = Some(handler);
-        self
+    pub fn with_exec_handler(self: Arc<Self>, handler: SharedExecHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).exec = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_discover_handler(mut self, handler: SharedDiscoverHandler) -> Self {
-        self.ensure_closure_runtime().discover = Some(handler);
-        self
+    pub fn with_discover_handler(self: Arc<Self>, handler: SharedDiscoverHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).discover = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_import_handler(mut self, handler: SharedImportHandler) -> Self {
-        self.ensure_closure_runtime().import = Some(handler);
-        self
+    pub fn with_import_handler(self: Arc<Self>, handler: SharedImportHandler) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).import = Some(handler);
+        Self::rewrap(this)
     }
 
-    pub fn with_store_hydration_handler(mut self, handler: SharedStoreHydrationHandler) -> Self {
-        self.ensure_closure_runtime().store_hydration = Some(handler);
-        self
+    pub fn with_store_hydration_handler(
+        self: Arc<Self>,
+        handler: SharedStoreHydrationHandler,
+    ) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        Self::ensure_closure_runtime(&mut this).store_hydration = Some(handler);
+        Self::rewrap(this)
     }
 
     // r[impl eval.forcing.boundary]
@@ -326,7 +387,7 @@ impl Engine {
         engine.invoke_discover_probe(Value::Function(function))
     }
 
-    fn from_transport_module(module: &TransportModule) -> Self {
+    fn from_transport_module(module: &TransportModule) -> Arc<Self> {
         let root: instr::Module = module.root_only().into();
         let engine = Self::from_module(&root);
         for imported in &module.loaded_modules {
@@ -341,7 +402,7 @@ impl Engine {
     }
 
     fn resolve_boundary_value(&self, value: Value) -> Result<Value, PoisonError> {
-        Scheduler::new(self).resolve_value(value)
+        Scheduler::new(self.arc_self()).resolve_value(value)
     }
 
     #[cfg(test)]
@@ -1182,7 +1243,7 @@ impl Engine {
             .collect()
     }
 
-    pub(crate) fn execute_pending_node_with_chain(
+    pub fn execute_pending_node_with_chain(
         &self,
         node_id: NodeId,
         chain: &[NodeId],
@@ -1371,8 +1432,9 @@ impl Engine {
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => {
-                let value = Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
-                    .resolve_node_shallow(node_id)?;
+                let value =
+                    Scheduler::with_initial_stack(self.arc_self(), self.current_demand_stack_ids())
+                        .resolve_node_shallow(node_id)?;
                 self.force_value(value)
             }
             Value::Discovered(discovered) => {
@@ -6662,7 +6724,7 @@ impl Engine {
     }
 
     fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
-        Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
+        Scheduler::with_initial_stack(self.arc_self(), self.current_demand_stack_ids())
             .resolve_node_shallow(node_id)
     }
 

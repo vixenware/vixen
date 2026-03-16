@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::instr;
+use crate::node::NodeId;
 use crate::poison::DemandChain;
 use crate::poison::PoisonError;
 use crate::transport::{ShippedFunction, TransportModule};
@@ -145,6 +146,40 @@ pub trait BuildRuntime: Send + Sync {
     /// should fall back to local probe invocation (false).
     fn has_discover(&self) -> bool {
         false
+    }
+
+    /// Run a batch of node executions in parallel and return all results.
+    ///
+    /// The default implementation uses `thread::scope`. Production runtimes
+    /// should override this with `tokio::task::spawn_blocking` or similar to
+    /// avoid deadlocking when work items call async handlers.
+    fn run_batch(
+        &self,
+        engine: Arc<crate::worker::Engine>,
+        items: Vec<(NodeId, Vec<NodeId>)>,
+    ) -> Result<Vec<(NodeId, Result<Value, PoisonError>)>, ()> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = items
+                .into_iter()
+                .map(|(node_id, chain)| {
+                    let engine = &engine;
+                    scope.spawn(move || {
+                        (
+                            node_id,
+                            engine.execute_pending_node_with_chain(node_id, &chain),
+                        )
+                    })
+                })
+                .collect();
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle.join() {
+                    Ok(result) => results.push(result),
+                    Err(_) => return Err(()),
+                }
+            }
+            Ok(results)
+        })
     }
 
     /// Downcast support for `ClosureRuntime` builder methods.
