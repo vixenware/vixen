@@ -24,10 +24,10 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
 use crate::exec::{
-    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, ImportRequest,
-    RenderRequest, SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler,
-    SharedImportHandler, SharedRenderHandler, SharedStabilizeHandler, SharedStoreHydrationHandler,
-    StabilizeRequest, StoreHydrationRequest,
+    AcquireRequest, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue, ExecMount,
+    ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler, SharedDiscoverHandler,
+    SharedExecHandler, SharedImportHandler, SharedRenderHandler, SharedStabilizeHandler,
+    SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -115,13 +115,7 @@ pub struct Engine {
     nodes: DashMap<NodeId, Arc<Node>>,
     call_memo: DashMap<NodeKey, Arc<Node>>,
     max_demand_depth: usize,
-    acquire_handler: Option<SharedAcquireHandler>,
-    stabilize_handler: Option<SharedStabilizeHandler>,
-    render_handler: Option<SharedRenderHandler>,
-    exec_handler: Option<SharedExecHandler>,
-    discover_handler: Option<SharedDiscoverHandler>,
-    import_handler: Option<SharedImportHandler>,
-    store_hydration_handler: Option<SharedStoreHydrationHandler>,
+    runtime: Option<Arc<dyn BuildRuntime>>,
 }
 
 impl Engine {
@@ -158,13 +152,7 @@ impl Engine {
             nodes: DashMap::new(),
             call_memo: DashMap::new(),
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
-            acquire_handler: None,
-            stabilize_handler: None,
-            render_handler: None,
-            exec_handler: None,
-            discover_handler: None,
-            import_handler: None,
-            store_hydration_handler: None,
+            runtime: None,
         }
     }
 
@@ -174,41 +162,58 @@ impl Engine {
         self
     }
 
-    pub fn with_acquire_handler(mut self, acquire_handler: SharedAcquireHandler) -> Self {
-        self.acquire_handler = Some(acquire_handler);
+    pub fn with_runtime(mut self, runtime: Arc<dyn BuildRuntime>) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
-    pub fn with_render_handler(mut self, render_handler: SharedRenderHandler) -> Self {
-        self.render_handler = Some(render_handler);
+    fn ensure_closure_runtime(&mut self) -> &mut ClosureRuntime {
+        if self.runtime.is_none() {
+            self.runtime = Some(Arc::new(ClosureRuntime::default()));
+        }
+        // Get a mutable reference to the ClosureRuntime inside the Arc.
+        // This is safe because we just created it (or it was set by a previous
+        // with_xxx_handler call) and no one else has a reference yet (we have &mut self).
+        let arc = self.runtime.as_mut().unwrap();
+        Arc::get_mut(arc)
+            .expect("cannot add closure handlers after runtime Arc has been shared")
+            .as_any_mut()
+            .downcast_mut::<ClosureRuntime>()
+            .expect("cannot add closure handlers to a non-ClosureRuntime")
+    }
+
+    pub fn with_acquire_handler(mut self, handler: SharedAcquireHandler) -> Self {
+        self.ensure_closure_runtime().acquire = Some(handler);
         self
     }
 
-    pub fn with_stabilize_handler(mut self, stabilize_handler: SharedStabilizeHandler) -> Self {
-        self.stabilize_handler = Some(stabilize_handler);
+    pub fn with_render_handler(mut self, handler: SharedRenderHandler) -> Self {
+        self.ensure_closure_runtime().render = Some(handler);
         self
     }
 
-    pub fn with_exec_handler(mut self, exec_handler: SharedExecHandler) -> Self {
-        self.exec_handler = Some(exec_handler);
+    pub fn with_stabilize_handler(mut self, handler: SharedStabilizeHandler) -> Self {
+        self.ensure_closure_runtime().stabilize = Some(handler);
         self
     }
 
-    pub fn with_discover_handler(mut self, discover_handler: SharedDiscoverHandler) -> Self {
-        self.discover_handler = Some(discover_handler);
+    pub fn with_exec_handler(mut self, handler: SharedExecHandler) -> Self {
+        self.ensure_closure_runtime().exec = Some(handler);
         self
     }
 
-    pub fn with_import_handler(mut self, import_handler: SharedImportHandler) -> Self {
-        self.import_handler = Some(import_handler);
+    pub fn with_discover_handler(mut self, handler: SharedDiscoverHandler) -> Self {
+        self.ensure_closure_runtime().discover = Some(handler);
         self
     }
 
-    pub fn with_store_hydration_handler(
-        mut self,
-        store_hydration_handler: SharedStoreHydrationHandler,
-    ) -> Self {
-        self.store_hydration_handler = Some(store_hydration_handler);
+    pub fn with_import_handler(mut self, handler: SharedImportHandler) -> Self {
+        self.ensure_closure_runtime().import = Some(handler);
+        self
+    }
+
+    pub fn with_store_hydration_handler(mut self, handler: SharedStoreHydrationHandler) -> Self {
+        self.ensure_closure_runtime().store_hydration = Some(handler);
         self
     }
 
@@ -525,12 +530,12 @@ impl Engine {
     fn hydrate_store_value(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         match value {
             Value::Blob(BlobValue::Store { .. }) | Value::Tree(TreeValue::Store(_)) => {
-                let Some(handler) = &self.store_hydration_handler else {
+                let Some(runtime) = &self.runtime else {
                     return Err(self.internal_error(&format!(
                         "{context} requires an external store hydration handler"
                     )));
                 };
-                let hydrated = handler(StoreHydrationRequest {
+                let hydrated = runtime.store_hydration(StoreHydrationRequest {
                     value,
                     demand_chain: self.current_demand_chain(None),
                 })?;
@@ -4653,11 +4658,11 @@ impl Engine {
             })
             .transpose()?;
 
-        let Some(acquire_handler) = &self.acquire_handler else {
+        let Some(runtime) = &self.runtime else {
             return Err(self.type_error("acquire requires an acquire handler"));
         };
 
-        acquire_handler(AcquireRequest {
+        runtime.acquire(AcquireRequest {
             url,
             digest,
             extract,
@@ -4670,13 +4675,13 @@ impl Engine {
         path: &str,
         provenance: Option<&instr::SourceProvenance>,
     ) -> Result<Value, PoisonError> {
-        let Some(import_handler) = &self.import_handler else {
+        let Some(runtime) = &self.runtime else {
             return Err(self.type_error("import requires an import handler"));
         };
         let from_source_id = provenance
             .map(|provenance| provenance.source_id.to_string())
             .ok_or_else(|| self.internal_error("import is missing source provenance"))?;
-        let module = import_handler(ImportRequest {
+        let module = runtime.import_module(ImportRequest {
             path: path.to_string(),
             from_source_id,
             demand_chain: self.current_demand_chain(None),
@@ -4722,12 +4727,12 @@ impl Engine {
         let bindings = self.materialize_value_deep(bindings, "forcing render bindings")?;
         self.collect_value_obligations(&bindings, &mut obligations);
 
-        let Some(render_handler) = &self.render_handler else {
+        let Some(runtime) = &self.runtime else {
             return Err(self.type_error("render requires a render handler"));
         };
 
         self.finish_obligated_result(
-            render_handler(RenderRequest {
+            runtime.render(RenderRequest {
                 template: template.as_str().to_string(),
                 bindings,
                 demand_chain: self.current_demand_chain(None),
@@ -4755,11 +4760,11 @@ impl Engine {
         let resolve = self.materialize_value_deep(args[1].clone(), "forcing stabilize resolve")?;
         let resolve = self.ship_function(resolve)?;
 
-        let Some(stabilize_handler) = &self.stabilize_handler else {
+        let Some(runtime) = &self.runtime else {
             return Err(self.type_error("stabilize requires a stabilize handler"));
         };
 
-        stabilize_handler(StabilizeRequest {
+        runtime.stabilize(StabilizeRequest {
             witness: witness_value,
             module: self.transport_module(),
             resolve,
@@ -4775,9 +4780,11 @@ impl Engine {
     ) -> Result<Value, PoisonError> {
         let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec")?;
         let request = self.parse_exec_request(args, &kwargs)?;
-        if let Some(exec_handler) = &self.exec_handler {
+        if let Some(runtime) = &self.runtime
+            && runtime.has_exec()
+        {
             let request = self.ship_exec_request(&request)?;
-            return exec_handler(request);
+            return runtime.exec(request);
         }
         self.exec_builtin_local(request)
     }
@@ -4797,14 +4804,16 @@ impl Engine {
         let executor = self.expect_executor_selector(&executor, "discover executor")?;
         let probe = self.materialize_value_deep(args[1].clone(), "forcing discover probe")?;
 
-        if let Some(discover_handler) = &self.discover_handler {
+        if let Some(runtime) = &self.runtime
+            && runtime.has_discover()
+        {
             let request = DiscoverRequest {
                 executor,
                 demand_chain: self.current_demand_chain(None),
                 module: self.transport_module(),
                 probe: self.ship_function(probe)?,
             };
-            return discover_handler(request);
+            return runtime.discover(request);
         }
 
         self.invoke_discover_probe(probe)

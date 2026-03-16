@@ -1618,7 +1618,7 @@ struct StoreTestEnv {
     _vx_home: TempDir,
     _binaries: TestServiceBinaries,
     _service: ServiceHandle,
-    client: StoreClient,
+    client: Arc<StoreClient>,
 }
 
 impl StoreTestEnv {
@@ -1648,7 +1648,7 @@ impl StoreTestEnv {
             _vx_home: vx_home,
             _binaries: binaries,
             _service: service,
-            client: StoreClient::new(virtual_handle),
+            client: Arc::new(StoreClient::new(virtual_handle)),
         }
     }
 }

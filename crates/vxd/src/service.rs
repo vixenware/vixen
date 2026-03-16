@@ -35,13 +35,14 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{
-    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
+    AcquireRequest as EvalAcquireRequest, BlobValue, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
     ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
     ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
     PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
-    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportBlob, TransportBuiltinValue,
-    TransportTree, TransportValue, TreeValue, Value, lower_source_file_with_source_id,
+    StabilizeRequest as EvalStabilizeRequest, StoreHydrationRequest as EvalStoreHydrationRequest,
+    StructValue, TransportBlob, TransportBuiltinValue, TransportTree, TransportValue, TreeValue,
+    Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -2531,7 +2532,7 @@ async fn publish_acquire_cache_entry(
 }
 
 pub(crate) async fn run_build_vx_acquire_via_store(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     request: EvalAcquireRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
@@ -2577,6 +2578,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
             Some(format) => {
                 let files = Arc::new(SyncMutex::new("vxd/acquire_file_info", HashMap::new()));
                 let files_for_extract = Arc::clone(&files);
+                let store_for_extract = Arc::clone(store);
                 let tree = vx_tarball::extract_to_tree(
                     std::io::Cursor::new(bytes),
                     format.compression(),
@@ -2584,7 +2586,8 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                     async move |data: Vec<u8>| {
                         let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
                         let prepared = prepare_blob(&data);
-                        let blob_ref = store_prepared_blob(store, &prepared, &data).await?;
+                        let blob_ref =
+                            store_prepared_blob(&store_for_extract, &prepared, &data).await?;
                         files_for_extract.lock().insert(content_hash.0, blob_ref);
                         Ok(content_hash.0)
                     },
@@ -2653,11 +2656,11 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         }
     };
 
-    hydrate_exec_value_from_store(store, acquired, &demand_chain).await
+    hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
 }
 
 async fn run_build_vx_exec_via_runner(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     executors: &BuildVxExecutors,
     activity_registry: &ActivityRegistry,
     exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
@@ -2732,7 +2735,7 @@ async fn run_build_vx_exec_via_runner(
         executor = %describe_executor_selector(&request.executor),
         tree_mount_count = prepared_mounts.tree_mounts.len(),
         file_mount_count = prepared_mounts.file_mounts.len(),
-        cross_store = !std::ptr::eq(target_store, store),
+        cross_store = !std::ptr::eq(target_store, &**store),
         store_supports_readthrough,
         "build.vx exec prepared mounts"
     );
@@ -2746,7 +2749,7 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    let prepared_mounts = if !std::ptr::eq(target_store, store) && !store_supports_readthrough {
+    let prepared_mounts = if !std::ptr::eq(target_store, &**store) && !store_supports_readthrough {
         let mirror_started = Instant::now();
         emit_build_vx_progress_activity(
             &progress_listener,
@@ -2805,7 +2808,7 @@ async fn run_build_vx_exec_via_runner(
         }
         .named("build_vx_exec_progress_fwd"),
     );
-    let observer = if std::ptr::eq(target_store, store) || store_supports_readthrough {
+    let observer = if std::ptr::eq(target_store, &**store) || store_supports_readthrough {
         request.observer
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.observer)
@@ -2918,7 +2921,7 @@ async fn run_build_vx_exec_via_runner(
     )
     .await;
     tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
-    let observer_value = if std::ptr::eq(target_store, store) {
+    let observer_value = if std::ptr::eq(target_store, &**store) {
         observer_value
     } else {
         mirror_transport_value_store_refs(target_store, store, observer_value)
@@ -2947,7 +2950,8 @@ async fn run_build_vx_exec_via_runner(
     )
     .await;
     tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
-    let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
+    let value =
+        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?;
     tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -2963,7 +2967,7 @@ async fn run_build_vx_exec_via_runner(
 }
 
 async fn run_build_vx_discover_via_runner(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     executors: &BuildVxExecutors,
     activity_registry: &ActivityRegistry,
     progress_listener: Option<Arc<ProgressListenerClient>>,
@@ -3003,7 +3007,7 @@ async fn run_build_vx_discover_via_runner(
     )
     .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
-    let probe = if std::ptr::eq(target_store, store) || store_supports_readthrough {
+    let probe = if std::ptr::eq(target_store, &**store) || store_supports_readthrough {
         request.probe
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.probe)
@@ -3035,7 +3039,7 @@ async fn run_build_vx_discover_via_runner(
         return Err(PoisonError::from(poison));
     }
 
-    let value = if std::ptr::eq(target_store, store) {
+    let value = if std::ptr::eq(target_store, &**store) {
         result.value.ok_or_else(|| {
             exec_bridge_poison(
                 PoisonKind::UserFail,
@@ -3071,7 +3075,8 @@ async fn run_build_vx_discover_via_runner(
         ),
     )
     .await;
-    let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
+    let value =
+        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?;
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -3180,6 +3185,7 @@ pub(crate) fn summarize_build_vx_import_request(request: &EvalImportRequest) -> 
 
 #[derive(Clone)]
 struct BuildVxRuntime {
+    runtime_handle: Handle,
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
     activity_registry: ActivityRegistry,
@@ -3191,12 +3197,20 @@ struct BuildVxRuntime {
     module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
 }
 
-fn block_on_runtime<T>(runtime: &Handle, future: impl Future<Output = T>) -> T {
-    if Handle::try_current().is_ok() {
-        block_in_place(|| runtime.block_on(future))
-    } else {
-        runtime.block_on(future)
-    }
+/// Run an async future to completion, blocking the calling thread.
+///
+/// Works from any thread (tokio worker, scoped OS thread, blocking pool thread)
+/// by spawning the future as a tokio task and waiting on a crossbeam channel.
+fn spawn_on_runtime<T: Send + 'static>(
+    runtime: &Handle,
+    future: impl Future<Output = T> + Send + 'static,
+) -> T {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    runtime.spawn(async move {
+        let _ = tx.send(future.await);
+    });
+    rx.recv()
+        .expect("spawn_on_runtime: spawned task was cancelled")
 }
 
 fn emit_build_vx_boundary_log(
@@ -3205,7 +3219,11 @@ fn emit_build_vx_boundary_log(
     message: &str,
 ) {
     if let Some(listener) = listener {
-        let _ = block_on_runtime(runtime, listener.log_message(message.to_string()));
+        let listener = Arc::clone(listener);
+        let message = message.to_string();
+        runtime.spawn(async move {
+            let _ = listener.log_message(message).await;
+        });
     }
 }
 
@@ -3310,119 +3328,11 @@ async fn load_stabilized_value_from_manifest(
 
 impl BuildVxRuntime {
     fn build_engine(&self, module: &EvalModule) -> Engine {
-        let runtime = Handle::current();
-        let hydration_store = Arc::clone(&self.store);
-        let hydration_runtime = runtime.clone();
-        let acquire_runtime_state = self.clone();
-        let acquire_runtime = runtime.clone();
-        let render_runtime_state = self.clone();
-        let render_runtime = runtime.clone();
-        let stabilize_runtime_state = self.clone();
-        let stabilize_runtime = runtime.clone();
-        let import_runtime_state = self.clone();
-        let import_runtime = runtime.clone();
-        let exec_store = Arc::clone(&self.store);
-        let exec_executors = Arc::clone(&self.executors);
-        let exec_activity_registry = self.activity_registry.clone();
-        let exec_mount_prep_inflight = Arc::clone(&self.exec_mount_prep_inflight);
-        let exec_fs_tree_snapshot_cache = Arc::clone(&self.exec_fs_tree_snapshot_cache);
-        let exec_runtime = runtime.clone();
-        let discover_store = Arc::clone(&self.store);
-        let discover_executors = Arc::clone(&self.executors);
-        let discover_activity_registry = self.activity_registry.clone();
-        let discover_runtime = runtime;
-        let progress_listener = self.progress_listener.clone();
-        let acquire_listener = progress_listener.clone();
-        let render_listener = progress_listener.clone();
-        let stabilize_listener = progress_listener.clone();
-        let import_listener = progress_listener.clone();
-        let exec_listener = progress_listener.clone();
-        let discover_listener = progress_listener;
+        Engine::from_module(module).with_runtime(Arc::new(self.clone()))
+    }
 
-        Engine::from_module(module)
-            .with_store_hydration_handler(Arc::new(move |request| {
-                let store = Arc::clone(&hydration_store);
-                let runtime = hydration_runtime.clone();
-                block_on_runtime(
-                    &runtime,
-                    hydrate_exec_value_from_store(&store, request.value, &request.demand_chain),
-                )
-            }))
-            .with_acquire_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_acquire_request(&request);
-                let runtime = acquire_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &acquire_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_acquire_via_store(&acquire_runtime_state.store, request),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_render_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_render_request(&request);
-                let runtime = render_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &render_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_render_via_store(
-                        &render_runtime_state.store,
-                        &render_runtime_state.workspace_root,
-                        request,
-                    ),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_stabilize_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_stabilize_request(&request);
-                let runtime = stabilize_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &stabilize_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    stabilize_runtime_state.run_stabilize_via_store(request),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_import_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_import_request(&request);
-                let runtime = import_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &import_listener, &summary);
-                block_on_runtime(&runtime, import_runtime_state.load_imported_module(request))
-                    .map_err(|error| error.with_context(summary))
-            }))
-            .with_exec_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_exec_request(&request);
-                let runtime = exec_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_exec_via_runner(
-                        &exec_store,
-                        &exec_executors,
-                        &exec_activity_registry,
-                        &exec_mount_prep_inflight,
-                        &exec_fs_tree_snapshot_cache,
-                        exec_listener.clone(),
-                        request,
-                    ),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_discover_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_discover_request(&request);
-                let runtime = discover_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_discover_via_runner(
-                        &discover_store,
-                        &discover_executors,
-                        &discover_activity_registry,
-                        discover_listener.clone(),
-                        request,
-                    ),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
+    fn emit_boundary_log(&self, message: &str) {
+        emit_build_vx_boundary_log(&self.runtime_handle, &self.progress_listener, message);
     }
 
     async fn load_imported_module(
@@ -3614,21 +3524,126 @@ impl BuildVxRuntime {
     }
 }
 
-fn hydrate_exec_value_from_store<'a>(
-    store: &'a StoreClient,
+impl BuildRuntime for BuildVxRuntime {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn has_exec(&self) -> bool {
+        true
+    }
+
+    fn has_discover(&self) -> bool {
+        true
+    }
+
+    fn store_hydration(
+        &self,
+        request: EvalStoreHydrationRequest,
+    ) -> std::result::Result<Value, PoisonError> {
+        let this = self.clone();
+        let value = request.value;
+        let demand_chain = request.demand_chain;
+        spawn_on_runtime(&self.runtime_handle, async move {
+            hydrate_exec_value_from_store(Arc::clone(&this.store), value, demand_chain).await
+        })
+    }
+
+    fn acquire(&self, request: EvalAcquireRequest) -> std::result::Result<Value, PoisonError> {
+        let summary = summarize_build_vx_acquire_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            run_build_vx_acquire_via_store(&this.store, request).await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+
+    fn import_module(
+        &self,
+        request: EvalImportRequest,
+    ) -> std::result::Result<EvalModule, PoisonError> {
+        let summary = summarize_build_vx_import_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            this.load_imported_module(request).await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+
+    fn render(&self, request: EvalRenderRequest) -> std::result::Result<Value, PoisonError> {
+        let summary = summarize_build_vx_render_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            run_build_vx_render_via_store(&this.store, &this.workspace_root, request).await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+
+    fn stabilize(&self, request: EvalStabilizeRequest) -> std::result::Result<Value, PoisonError> {
+        let summary = summarize_build_vx_stabilize_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            this.run_stabilize_via_store(request).await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+
+    fn exec(&self, request: ExecRequest) -> std::result::Result<Value, PoisonError> {
+        let summary = summarize_build_vx_exec_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            run_build_vx_exec_via_runner(
+                &this.store,
+                &this.executors,
+                &this.activity_registry,
+                &this.exec_mount_prep_inflight,
+                &this.exec_fs_tree_snapshot_cache,
+                this.progress_listener.clone(),
+                request,
+            )
+            .await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+
+    fn discover(&self, request: EvalDiscoverRequest) -> std::result::Result<Value, PoisonError> {
+        let summary = summarize_build_vx_discover_request(&request);
+        self.emit_boundary_log(&summary);
+        let this = self.clone();
+        spawn_on_runtime(&self.runtime_handle, async move {
+            run_build_vx_discover_via_runner(
+                &this.store,
+                &this.executors,
+                &this.activity_registry,
+                this.progress_listener.clone(),
+                request,
+            )
+            .await
+        })
+        .map_err(|error| error.with_context(summary))
+    }
+}
+
+fn hydrate_exec_value_from_store(
+    store: Arc<StoreClient>,
     value: Value,
-    demand_chain: &'a DemandChain,
-) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + 'a>> {
+    demand_chain: DemandChain,
+) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + Send>> {
     Box::pin(async move {
         match value {
             Value::Blob(BlobValue::Store {
                 blob_ref,
                 executable,
             }) => {
-                let bytes = fetch_store_blob_bytes(store, &blob_ref)
+                let bytes = fetch_store_blob_bytes(&store, &blob_ref)
                     .await
                     .map_err(|error| {
-                        exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                        exec_bridge_poison(PoisonKind::Internal, error.to_string(), &demand_chain)
                     })?;
                 Ok(Value::Blob(BlobValue::Inline {
                     bytes: Arc::from(bytes),
@@ -3636,8 +3651,8 @@ fn hydrate_exec_value_from_store<'a>(
                 }))
             }
             Value::Tree(TreeValue::Store(root)) => {
-                let directory = load_store_directory(store, root).await.map_err(|error| {
-                    exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                let directory = load_store_directory(&store, root).await.map_err(|error| {
+                    exec_bridge_poison(PoisonKind::Internal, error.to_string(), &demand_chain)
                 })?;
                 let mut entries = Vec::with_capacity(directory.entries.len());
                 for entry in directory.entries {
@@ -3652,12 +3667,12 @@ fn hydrate_exec_value_from_store<'a>(
                                 size,
                             };
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Blob(BlobValue::Store {
                                     blob_ref,
                                     executable,
                                 }),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
@@ -3673,20 +3688,20 @@ fn hydrate_exec_value_from_store<'a>(
                                 size,
                             };
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Blob(BlobValue::Store {
                                     blob_ref,
                                     executable,
                                 }),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
                         DirEntryKind::Dir { hash, .. } => {
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Tree(TreeValue::Store(hash)),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
@@ -3696,7 +3711,7 @@ fn hydrate_exec_value_from_store<'a>(
                                 format!(
                                     "store-backed symlink values are not supported in the build.vx evaluator bridge yet (target: {target})"
                                 ),
-                                demand_chain,
+                                &demand_chain,
                             ));
                         }
                     };
@@ -3705,8 +3720,12 @@ fn hydrate_exec_value_from_store<'a>(
                 Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
             }
             Value::Discovered(discovered) => {
-                let inner =
-                    hydrate_exec_value_from_store(store, *discovered.value, demand_chain).await?;
+                let inner = hydrate_exec_value_from_store(
+                    Arc::clone(&store),
+                    *discovered.value,
+                    demand_chain,
+                )
+                .await?;
                 Ok(Value::Discovered(DiscoveredValue {
                     value: Box::new(inner),
                     obligations: discovered.obligations,
@@ -3716,7 +3735,12 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     hydrated.push(
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     );
                 }
                 Ok(Value::Tuple(Arc::from(hydrated)))
@@ -3725,7 +3749,12 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     hydrated.push(
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     );
                 }
                 Ok(Value::Array(Arc::from(hydrated)))
@@ -3734,8 +3763,18 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut entries = Vec::with_capacity(map.entries.len());
                 for (key, value) in map.entries.iter() {
                     entries.push((
-                        hydrate_exec_value_from_store(store, key.clone(), demand_chain).await?,
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            key.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     ));
                 }
                 Ok(Value::Map(MapValue {
@@ -3747,7 +3786,12 @@ fn hydrate_exec_value_from_store<'a>(
                 for (name, value) in struct_value.fields.iter() {
                     fields.push((
                         name.clone(),
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     ));
                 }
                 Ok(Value::Struct(StructValue {
@@ -4299,6 +4343,7 @@ impl VxdService {
                 let root = SourceFile::cast_root(parse.syntax());
                 let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
                 let build_runtime = BuildVxRuntime {
+                    runtime_handle: Handle::current(),
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
                     activity_registry: self.activity_registry.clone(),

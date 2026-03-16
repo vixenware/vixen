@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
@@ -39,7 +40,7 @@ impl<'a> RenderContext<'a> {
 }
 
 pub(crate) async fn run_build_vx_render_via_store(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     workspace_root: &Utf8Path,
     request: EvalRenderRequest,
 ) -> std::result::Result<Value, PoisonError> {
@@ -130,7 +131,7 @@ pub(crate) async fn run_build_vx_render_via_store(
         })
     };
 
-    hydrate_exec_value_from_store(store, rendered, &demand_chain).await
+    hydrate_exec_value_from_store(Arc::clone(store), rendered, demand_chain).await
 }
 
 fn resolve_template_path(workspace_root: &Utf8Path, template: &str) -> Utf8PathBuf {
