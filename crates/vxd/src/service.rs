@@ -503,19 +503,18 @@ async fn mirror_chunk(
     dest: &StoreClient,
     hash: ChunkHash,
 ) -> std::result::Result<(), String> {
+    if dest
+        .has_chunk(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+    {
+        return Ok(());
+    }
     let data = source
         .get_chunk(hash)
         .await
         .map_err(|error| format!("{error:?}"))?
         .ok_or_else(|| format!("chunk {} not found in source store", hash.to_hex()))?;
-    if let Some(existing) = dest
-        .get_chunk(hash)
-        .await
-        .map_err(|error| format!("{error:?}"))?
-        && existing == data
-    {
-        return Ok(());
-    }
     dest.put_chunk(hash, data)
         .await
         .map_err(|error| format!("{error:?}"))?;
@@ -569,6 +568,13 @@ fn mirror_node<'a>(
     hash: NodeHash,
 ) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>> {
     Box::pin(async move {
+        if dest
+            .has_node(hash)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+        {
+            return Ok(());
+        }
         let bytes = source
             .get_node(hash)
             .await
@@ -593,15 +599,6 @@ fn mirror_node<'a>(
                 }
             }
             _ => {}
-        }
-
-        if let Some(existing) = dest
-            .get_node(hash)
-            .await
-            .map_err(|error| format!("{error:?}"))?
-            && existing == bytes
-        {
-            return Ok(());
         }
 
         dest.put_node(hash, bytes)

@@ -212,6 +212,14 @@ impl StoreService {
                     "store/rust_component_tree_flights",
                     std::collections::HashMap::new(),
                 ),
+                present_chunks: moire::sync::SyncMutex::new(
+                    "store/present_chunks",
+                    std::collections::HashSet::new(),
+                ),
+                present_nodes: moire::sync::SyncMutex::new(
+                    "store/present_nodes",
+                    std::collections::HashSet::new(),
+                ),
             }),
         }
     }

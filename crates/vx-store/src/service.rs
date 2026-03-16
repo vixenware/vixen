@@ -70,15 +70,28 @@ impl StoreService {
             .put_chunk(&hash, &data)
             .named("storage.put_chunk")
             .await
-            .map_err(|e| format!("storage error: {e}"))
+            .map_err(|e| format!("storage error: {e}"))?;
+        self.present_chunks.lock().insert(hash);
+        Ok(())
     }
 
     async fn get_chunk(&self, hash: ChunkHash) -> Option<Vec<u8>> {
-        self.storage.get_chunk(&hash).await.ok().flatten()
+        let data = self.storage.get_chunk(&hash).await.ok().flatten();
+        if data.is_some() {
+            self.present_chunks.lock().insert(hash);
+        }
+        data
     }
 
     async fn has_chunk(&self, hash: ChunkHash) -> bool {
-        self.storage.has_chunk(&hash).await.unwrap_or(false)
+        if self.present_chunks.lock().contains(&hash) {
+            return true;
+        }
+        let present = self.storage.has_chunk(&hash).await.unwrap_or(false);
+        if present {
+            self.present_chunks.lock().insert(hash);
+        }
+        present
     }
 
     async fn list_missing_chunks(&self, hashes: Vec<ChunkHash>) -> Vec<ChunkHash> {
@@ -95,8 +108,13 @@ impl StoreService {
 
         let mut missing = Vec::new();
         for hash in hashes {
+            if self.present_chunks.lock().contains(&hash) {
+                continue;
+            }
             match self.storage.has_chunk(&hash).await {
-                Ok(true) => {}
+                Ok(true) => {
+                    self.present_chunks.lock().insert(hash);
+                }
                 _ => missing.push(hash),
             }
         }
@@ -140,15 +158,28 @@ impl StoreService {
         self.storage
             .put_node(&hash, &data)
             .await
-            .map_err(|e| format!("storage error: {e}"))
+            .map_err(|e| format!("storage error: {e}"))?;
+        self.present_nodes.lock().insert(hash);
+        Ok(())
     }
 
     async fn get_node(&self, hash: NodeHash) -> Option<Vec<u8>> {
-        self.storage.get_node(&hash).await.ok().flatten()
+        let data = self.storage.get_node(&hash).await.ok().flatten();
+        if data.is_some() {
+            self.present_nodes.lock().insert(hash);
+        }
+        data
     }
 
     async fn has_node(&self, hash: NodeHash) -> bool {
-        self.storage.has_node(&hash).await.unwrap_or(false)
+        if self.present_nodes.lock().contains(&hash) {
+            return true;
+        }
+        let present = self.storage.has_node(&hash).await.unwrap_or(false);
+        if present {
+            self.present_nodes.lock().insert(hash);
+        }
+        present
     }
 
     // =========================================================================

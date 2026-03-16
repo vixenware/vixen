@@ -3,7 +3,8 @@ use std::sync::Arc;
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
 use vx_store_proto::{
-    BlobRef, EnsureRustToolchainComponentResult, RustComponent, ToolchainSpecKey,
+    BlobRef, ChunkHash, EnsureRustToolchainComponentResult, NodeHash, RustComponent,
+    ToolchainSpecKey,
 };
 
 use crate::{
@@ -63,4 +64,10 @@ pub(crate) struct StoreServiceInner {
 
     /// In-flight Rust component extractions by (spec_key, component)
     pub(crate) rust_component_tree_flights: SyncMutex<RustComponentFlightMap>,
+
+    /// Positive CAS presence cache for chunks known to exist in this store.
+    pub(crate) present_chunks: SyncMutex<std::collections::HashSet<ChunkHash>>,
+
+    /// Positive CAS presence cache for nodes known to exist in this store.
+    pub(crate) present_nodes: SyncMutex<std::collections::HashSet<NodeHash>>,
 }
