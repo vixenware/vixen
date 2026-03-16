@@ -69,46 +69,6 @@ fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
     }
 }
 
-fn is_sid_segment(value: &str) -> bool {
-    if value.len() == 32 {
-        return value.chars().all(|c| c.is_ascii_hexdigit());
-    }
-    if value.len() == 36 {
-        for (idx, c) in value.chars().enumerate() {
-            if matches!(idx, 8 | 13 | 18 | 23) {
-                if c != '-' {
-                    return false;
-                }
-            } else if !c.is_ascii_hexdigit() {
-                return false;
-            }
-        }
-        return true;
-    }
-    false
-}
-
-fn select_smoke_sid<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
-    entries
-        .into_iter()
-        .filter(|entry| is_sid_segment(entry))
-        .min()
-}
-
-fn smoke_canary_path(
-    mount_path: &Utf8PathBuf,
-    canary_name: &str,
-    root_entries: &[String],
-) -> std::result::Result<Utf8PathBuf, String> {
-    if cfg!(target_os = "macos") {
-        let sid = select_smoke_sid(root_entries.iter().map(String::as_str))
-            .ok_or_else(|| format!("no SID directory found under mount root {}", mount_path))?;
-        Ok(mount_path.join(sid).join(canary_name))
-    } else {
-        Ok(mount_path.join(canary_name))
-    }
-}
-
 impl SharedVfs {
     fn new(inner: Arc<CasVfs>) -> Self {
         let name = format!(".vfs-smoke-{:016x}", fastrand::u64(..));
@@ -531,52 +491,21 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         .await
         {
             Ok(VfsStart::Mounted {
+                access_path,
                 mount_path,
                 mut vfs_dead,
                 ..
             }) => {
-                tracing::debug!("VFS mounted at {mount_path}");
+                tracing::debug!("VFS mounted at {mount_path} (access path {access_path})");
 
                 // Smoke test: read the canary file through the real filesystem.
-                // On macOS the FSKit mount routes through a SID namespace
-                // (mount/<sid>/<canary>). On Linux and Windows the backend is
-                // still exposed directly at the mount root.
                 const MAX_ATTEMPTS: u32 = 10;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
                 let smoke_timeout = std::time::Duration::from_secs(5);
 
                 let mut smoke_err: Option<String> = None;
                 for attempt in 1..=MAX_ATTEMPTS {
-                    let mut dir_entries = tokio::fs::read_dir(mount_path.as_std_path())
-                        .await
-                        .map_err(|e| format!("failed to list mount root {mount_path}: {e}"))?;
-                    let mut names = Vec::new();
-                    while let Some(entry) = dir_entries
-                        .next_entry()
-                        .await
-                        .map_err(|e| format!("failed to read mount root {mount_path}: {e}"))?
-                    {
-                        if let Some(name) = entry.file_name().to_str() {
-                            names.push(name.to_string());
-                        }
-                    }
-
-                    let canary_fs_path =
-                        match smoke_canary_path(&mount_path, &canary.name, &names) {
-                            Ok(path) => path,
-                            Err(error) => {
-                                smoke_err = Some(error);
-                                if attempt < MAX_ATTEMPTS {
-                                    tracing::debug!(
-                                        attempt,
-                                        error = smoke_err.as_deref().unwrap_or("unknown"),
-                                        "canary read failed, retrying"
-                                    );
-                                    tokio::time::sleep(RETRY_DELAY).await;
-                                }
-                                continue;
-                            }
-                        };
+                    let canary_fs_path = access_path.join(&canary.name);
                     tracing::debug!(attempt, "Trying to read canary from {canary_fs_path}");
 
                     let read_result = tokio::time::timeout(
@@ -699,64 +628,13 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::{select_smoke_sid, smoke_canary_path};
-
     #[test]
-    fn select_smoke_sid_picks_hex_sid_over_non_sid_entries() {
-        let sid = select_smoke_sid([
-            ".vixenfs",
-            "readme",
-            "00112233445566778899aabbccddeeff",
-            "not-a-sid",
-        ])
-        .expect("must select SID");
+    fn access_path_appends_canary_name() {
+        let access_path = Utf8PathBuf::from("/tmp/vx/vfs/00112233445566778899aabbccddeeff");
 
-        assert_eq!(sid, "00112233445566778899aabbccddeeff");
-    }
-
-    #[test]
-    fn select_smoke_sid_accepts_uuid_format_sid() {
-        let sid = select_smoke_sid([".vixenfs", "123e4567-e89b-12d3-a456-426614174000"])
-            .expect("must select UUID-format SID");
-
-        assert_eq!(sid, "123e4567-e89b-12d3-a456-426614174000");
-    }
-
-    #[test]
-    fn select_smoke_sid_returns_none_without_valid_sid() {
-        let sid = select_smoke_sid([".vixenfs", "tmp", "not-a-sid"]);
-        assert!(sid.is_none());
-    }
-
-    #[test]
-    fn smoke_canary_path_uses_mount_root_off_macos() {
-        if cfg!(target_os = "macos") {
-            return;
-        }
-
-        let path = smoke_canary_path(
-            &Utf8PathBuf::from("/tmp/vx/vfs"),
-            ".vfs-smoke-test",
-            &["not-a-sid".to_string()],
-        )
-        .expect("non-macOS smoke path should not require sid");
-
-        assert_eq!(path, Utf8PathBuf::from("/tmp/vx/vfs/.vfs-smoke-test"));
-    }
-
-    #[test]
-    fn smoke_canary_path_requires_sid_on_macos() {
-        if !cfg!(target_os = "macos") {
-            return;
-        }
-
-        let error = smoke_canary_path(
-            &Utf8PathBuf::from("/tmp/vx/vfs"),
-            ".vfs-smoke-test",
-            &["not-a-sid".to_string()],
-        )
-        .expect_err("macOS smoke path should require sid");
-
-        assert!(error.contains("no SID directory found under mount root"));
+        assert_eq!(
+            access_path.join(".vfs-smoke-test"),
+            Utf8PathBuf::from("/tmp/vx/vfs/00112233445566778899aabbccddeeff/.vfs-smoke-test")
+        );
     }
 }

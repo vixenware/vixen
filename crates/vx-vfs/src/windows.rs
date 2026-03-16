@@ -423,6 +423,7 @@ where
 
             let _ = result_tx.send(Ok(VfsStart::Mounted {
                 mount_path,
+                access_path: mount_path.clone(),
                 vfs_dead: vfs_dead_rx,
             }));
 

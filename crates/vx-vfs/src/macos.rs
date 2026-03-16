@@ -145,8 +145,11 @@ where
     match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv()).await {
         Ok(Some(())) => {
             tracing::info!(mount_path = %config.mount_path, "VFS mounted and SHM connected");
+            let mount_path = config.mount_path;
+            let access_path = mount_path.join(&sid);
             Ok(VfsStart::Mounted {
-                mount_path: config.mount_path,
+                mount_path,
+                access_path,
                 vfs_dead: vfs_dead_rx,
             })
         }
