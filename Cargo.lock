@@ -3712,14 +3712,12 @@ dependencies = [
 name = "vx-reaper"
 version = "0.1.0"
 dependencies = [
- "camino",
  "facet",
  "figue",
  "jiff",
  "libc",
  "moire",
  "tokio",
- "vx-fskit",
 ]
 
 [[package]]

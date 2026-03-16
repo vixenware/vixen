@@ -141,7 +141,6 @@ fastrand = "2"
 
 # temp files
 tempfile = "3"
-async-tempfile = "0.7"
 
 # logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
