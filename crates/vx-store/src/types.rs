@@ -75,13 +75,6 @@ pub(crate) struct StoreServiceInner {
 }
 
 impl StoreService {
-    pub(crate) fn with_upstream_slot(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            upstream: Arc::new(SyncMutex::new("store/upstream", None)),
-        }
-    }
-
     pub(crate) fn set_upstream(&self, upstream: Arc<StoreClient>) {
         *self.upstream.lock() = Some(upstream);
     }

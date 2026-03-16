@@ -76,11 +76,7 @@ impl ConnectionAcceptor for StoreVirtualAcceptor {
             },
             metadata: vec![],
             setup: Box::new(move |handle| {
-                let connection_store = if wants_upstream {
-                    store.with_upstream_slot()
-                } else {
-                    store.clone()
-                };
+                let connection_store = store.clone();
                 let dispatcher = StoreDispatcher::new(connection_store.clone());
                 moire::task::spawn(
                     async move {
