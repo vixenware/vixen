@@ -52,8 +52,8 @@ use vx_report::{
 };
 use vx_rs::CrateGraph;
 use vx_runner_proto::{
-    DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunRequest,
-    RunTreeMount, RunnerClient,
+    DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
+    RunRequest, RunTreeMount, RunnerClient,
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
@@ -82,8 +82,20 @@ pub struct ToolchainInfo {
     pub manifest_date: Option<String>,
 }
 
-type ExecRootMountPrepResult = std::result::Result<Option<NodeHash>, String>;
-type ExecRootMountPrepFuture = Arc<moire::sync::OnceCell<ExecRootMountPrepResult>>;
+#[derive(Debug, Clone, Default)]
+struct PreparedExecMounts {
+    tree_mounts: Vec<RunTreeMount>,
+    file_mounts: Vec<RunFileMount>,
+}
+
+type ExecMountPrepResult = std::result::Result<PreparedExecMounts, String>;
+type ExecMountPrepFuture = Arc<moire::sync::OnceCell<ExecMountPrepResult>>;
+type BuildVxFsTreeSnapshotResult = std::result::Result<NodeHash, String>;
+type BuildVxFsTreeSnapshotFuture = Arc<moire::sync::OnceCell<BuildVxFsTreeSnapshotResult>>;
+type SnapshotTreeFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(NodeHash, u64), String>> + Send + 'a>>;
+type SnapshotTreeEntryFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(DirEntryKind, u64), String>> + Send + 'a>>;
 
 /// Acquired toolchains (manifest references only)
 pub struct AcquiredToolchains {
@@ -834,7 +846,7 @@ pub struct VxdService {
     activity_registry: ActivityRegistry,
 
     /// In-flight deduplication for identical exec root mount preparation.
-    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
@@ -1449,6 +1461,7 @@ fn exec_arg_to_run_arg(arg: &ExecArgValue) -> RunArg {
     }
 }
 
+#[cfg(test)]
 fn join_exec_mount_path(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -1477,28 +1490,67 @@ fn exec_blob_kind_from_blob_ref(blob_ref: &BlobRef, executable: bool) -> DirEntr
     }
 }
 
-async fn store_exec_blob(
+fn blob_ref_size(blob_ref: &BlobRef) -> u64 {
+    match blob_ref {
+        BlobRef::Small { size, .. } | BlobRef::Large { size, .. } => *size,
+    }
+}
+
+fn validate_tree_entry_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(format!("invalid tree entry name '{name}'"));
+    }
+    Ok(())
+}
+
+async fn store_directory_node(
+    store: &StoreClient,
+    entries: Vec<DirEntry>,
+    total_size: u64,
+) -> std::result::Result<(NodeHash, u64), String> {
+    let directory = CasNode::Directory(DirectoryNode {
+        entries,
+        total_size,
+    });
+    let (bytes, hash) = directory.to_bytes_and_hash();
+    store
+        .put_node(hash, bytes)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    Ok((hash, total_size))
+}
+
+async fn store_exec_blob_ref(
     store: &StoreClient,
     blob: &BlobValue,
-) -> std::result::Result<DirEntryKind, String> {
+) -> std::result::Result<(BlobRef, bool), String> {
     match blob {
         BlobValue::Inline { bytes, executable } => {
             let prepared = prepare_blob(bytes.as_ref());
             let blob_ref = store_prepared_blob(store, &prepared, bytes.as_ref()).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
+            Ok((blob_ref, *executable))
         }
         BlobValue::Store {
             blob_ref,
             executable,
-        } => Ok(exec_blob_kind_from_blob_ref(blob_ref, *executable)),
+        } => Ok((blob_ref.clone(), *executable)),
         BlobValue::FsFile { path, executable } => {
             let bytes = fs::read(path.as_str())
                 .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
             let prepared = prepare_blob(&bytes);
             let blob_ref = store_prepared_blob(store, &prepared, &bytes).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
+            Ok((blob_ref, *executable))
         }
     }
+}
+
+#[cfg(test)]
+async fn store_exec_blob(
+    store: &StoreClient,
+    blob: &BlobValue,
+) -> std::result::Result<DirEntryKind, String> {
+    let (blob_ref, executable) = store_exec_blob_ref(store, blob).await?;
+    Ok(exec_blob_kind_from_blob_ref(&blob_ref, executable))
 }
 
 #[cfg(unix)]
@@ -1513,6 +1565,275 @@ fn host_path_is_executable(_path: &PathValue) -> std::result::Result<bool, Strin
     Ok(false)
 }
 
+async fn snapshot_exec_fs_tree_cached(
+    store: &StoreClient,
+    cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    path: &PathValue,
+) -> BuildVxFsTreeSnapshotResult {
+    let key = path.as_str().to_string();
+    let (cell, inserted) = {
+        let mut cache = cache.lock();
+        match cache.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let cell = Arc::new(moire::sync::OnceCell::new("build_vx_fs_tree_snapshot"));
+                entry.insert(cell.clone());
+                (cell, true)
+            }
+        }
+    };
+
+    let result = cell
+        .get_or_init(|| snapshot_exec_fs_tree_uncached(store, path.clone()))
+        .await
+        .clone();
+
+    if result.is_err() || !inserted {
+        let mut cache = cache.lock();
+        if result.is_err() {
+            cache.remove(&key);
+        }
+    }
+
+    result
+}
+
+fn snapshot_exec_inline_tree<'a>(
+    store: &'a StoreClient,
+    cache: &'a Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    entries: &'a Arc<[(Arc<str>, Value)]>,
+) -> SnapshotTreeFuture<'a> {
+    Box::pin(async move {
+        let mut names = HashSet::new();
+        let mut sorted = entries.iter().cloned().collect::<Vec<_>>();
+        sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+
+        let mut dir_entries = Vec::with_capacity(sorted.len());
+        let mut total_size = 0u64;
+        for (name, value) in sorted {
+            validate_tree_entry_name(name.as_ref())?;
+            if !names.insert(name.to_string()) {
+                return Err(format!("duplicate tree entry '{name}'"));
+            }
+            let (kind, size) = snapshot_exec_tree_entry(store, cache, value).await?;
+            total_size += size;
+            dir_entries.push(DirEntry {
+                name: name.to_string(),
+                kind,
+            });
+        }
+        store_directory_node(store, dir_entries, total_size).await
+    })
+}
+
+fn snapshot_exec_fs_tree_uncached<'a>(
+    store: &'a StoreClient,
+    root: PathValue,
+) -> Pin<Box<dyn Future<Output = std::result::Result<NodeHash, String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut read_dir = fs::read_dir(root.as_str())
+            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?;
+        let mut names = Vec::new();
+        while let Some(entry) = read_dir
+            .next()
+            .transpose()
+            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?
+        {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        let mut dir_entries = Vec::with_capacity(names.len());
+        let mut total_size = 0u64;
+        for name in names {
+            validate_tree_entry_name(&name)?;
+            let child = root.join(&name);
+            let metadata = fs::metadata(child.as_str())
+                .map_err(|error| format!("failed to stat {}: {error}", child.as_str()))?;
+            let (kind, size) = if metadata.is_dir() {
+                let hash = snapshot_exec_fs_tree_uncached(store, child).await?;
+                let directory = load_store_directory(store, hash)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                (
+                    DirEntryKind::Dir {
+                        hash,
+                        total_size: directory.total_size,
+                    },
+                    directory.total_size,
+                )
+            } else {
+                let (blob_ref, executable) = store_exec_blob_ref(
+                    store,
+                    &BlobValue::FsFile {
+                        path: child,
+                        executable: host_path_is_executable(&root.join(&name))?,
+                    },
+                )
+                .await?;
+                let size = blob_ref_size(&blob_ref);
+                (exec_blob_kind_from_blob_ref(&blob_ref, executable), size)
+            };
+            total_size += size;
+            dir_entries.push(DirEntry { name, kind });
+        }
+        let (hash, _) = store_directory_node(store, dir_entries, total_size).await?;
+        Ok(hash)
+    })
+}
+
+fn snapshot_exec_tree_entry<'a>(
+    store: &'a StoreClient,
+    cache: &'a Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    value: Value,
+) -> SnapshotTreeEntryFuture<'a> {
+    Box::pin(async move {
+        match value {
+            Value::Discovered(discovered) => {
+                snapshot_exec_tree_entry(store, cache, *discovered.value).await
+            }
+            Value::Blob(blob) => {
+                let (blob_ref, executable) = store_exec_blob_ref(store, &blob).await?;
+                let size = blob_ref_size(&blob_ref);
+                Ok((exec_blob_kind_from_blob_ref(&blob_ref, executable), size))
+            }
+            Value::Tree(tree) => {
+                let (hash, total_size) = snapshot_exec_tree(store, cache, &tree).await?;
+                Ok((DirEntryKind::Dir { hash, total_size }, total_size))
+            }
+            other => Err(format!(
+                "tree entries must be Blob or Tree, got {}",
+                other.type_name()
+            )),
+        }
+    })
+}
+
+async fn snapshot_exec_tree(
+    store: &StoreClient,
+    cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    tree: &TreeValue,
+) -> std::result::Result<(NodeHash, u64), String> {
+    match tree {
+        TreeValue::Inline(entries) => snapshot_exec_inline_tree(store, cache, entries).await,
+        TreeValue::FsDir(path) => {
+            let hash = snapshot_exec_fs_tree_cached(store, cache, path).await?;
+            let directory = load_store_directory(store, hash)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok((hash, directory.total_size))
+        }
+        TreeValue::Store(root) => {
+            let directory = load_store_directory(store, *root)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok((*root, directory.total_size))
+        }
+    }
+}
+
+async fn snapshot_exec_blob_mount(
+    store: &StoreClient,
+    path: &str,
+    blob: &BlobValue,
+) -> std::result::Result<RunFileMount, String> {
+    let (blob_ref, executable) = store_exec_blob_ref(store, blob).await?;
+    let filename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("input")
+        .to_string();
+    let manifest = NodeManifest {
+        node_id: NodeId(format!("exec-input:{}", path.replace(['\\', '/'], "_"))),
+        cache_key: Blake3Hash([0; 32]),
+        produced_at: String::new(),
+        outputs: vec![OutputEntry {
+            logical: "blob".to_string(),
+            filename,
+            blob: output_blob_ref_from_blob_ref(&blob_ref),
+            executable,
+        }],
+    };
+    let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
+    store
+        .put_node(manifest_hash, node_bytes)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(RunFileMount {
+        path: path.to_string(),
+        manifest: manifest_hash.0,
+        logical: "blob".to_string(),
+    })
+}
+
+async fn prepare_exec_mounts_with_progress(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
+) -> ExecMountPrepResult {
+    let mut prepared = PreparedExecMounts::default();
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: preparing {} structural exec mounts",
+                executor_summary,
+                mounts.len()
+            ),
+        )
+        .await;
+    }
+
+    for mount in mounts {
+        let value = match &mount.value {
+            Value::Discovered(discovered) => discovered.value.as_ref(),
+            other => other,
+        };
+        match value {
+            Value::Tree(tree) => {
+                let (root, _) = snapshot_exec_tree(store, fs_tree_snapshot_cache, tree).await?;
+                prepared.tree_mounts.push(RunTreeMount {
+                    mount: mount.path.as_str().to_string(),
+                    manifest: root.0,
+                });
+            }
+            Value::Blob(blob) => {
+                prepared
+                    .file_mounts
+                    .push(snapshot_exec_blob_mount(store, mount.path.as_str(), blob).await?);
+            }
+            other => {
+                return Err(format!(
+                    "exec mount values must be Blob or Tree, got {}",
+                    other.type_name()
+                ));
+            }
+        }
+    }
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: prepared {} tree mounts and {} file mounts",
+                executor_summary,
+                prepared.tree_mounts.len(),
+                prepared.file_mounts.len()
+            ),
+        )
+        .await;
+    }
+
+    Ok(prepared)
+}
+
 #[cfg(test)]
 pub(crate) async fn store_exec_mounts(
     store: &StoreClient,
@@ -1522,6 +1843,7 @@ pub(crate) async fn store_exec_mounts(
     store_exec_mounts_with_progress(store, mounts, &no_listener, None, None).await
 }
 
+#[cfg(test)]
 async fn store_exec_mounts_with_progress(
     store: &StoreClient,
     mounts: &[ExecMount],
@@ -1714,16 +2036,18 @@ async fn store_exec_mounts_with_progress(
 async fn store_exec_mounts_deduped(
     store: &StoreClient,
     mounts: &[ExecMount],
+    fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
-    inflight: &Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
-) -> ExecRootMountPrepResult {
+    inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+) -> ExecMountPrepResult {
     let Some(key) = exec_mounts_singleflight_key(mounts) else {
-        tracing::info!("build.vx exec root mount singleflight bypassed: unresolved mount key");
-        return store_exec_mounts_with_progress(
+        tracing::info!("build.vx exec mount singleflight bypassed: unresolved mount key");
+        return prepare_exec_mounts_with_progress(
             store,
             mounts,
+            fs_tree_snapshot_cache,
             progress_listener,
             activity,
             executor_summary,
@@ -1747,7 +2071,7 @@ async fn store_exec_mounts_deduped(
         mount_key = %blake3::hash(key.as_bytes()).to_hex(),
         inserted,
         mount_count = mounts.len(),
-        "build.vx exec root mount singleflight"
+        "build.vx exec mount singleflight"
     );
 
     if !inserted && let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
@@ -1755,7 +2079,7 @@ async fn store_exec_mounts_deduped(
             progress_listener,
             activity,
             format!(
-                "build.vx executor {}: waiting for shared exec root mount prep",
+                "build.vx executor {}: waiting for shared exec mount prep",
                 executor_summary
             ),
         )
@@ -1765,9 +2089,10 @@ async fn store_exec_mounts_deduped(
     #[allow(clippy::redundant_closure)]
     let result = cell
         .get_or_init(|| {
-            store_exec_mounts_with_progress(
+            prepare_exec_mounts_with_progress(
                 store,
                 mounts,
+                fs_tree_snapshot_cache,
                 progress_listener,
                 activity,
                 executor_summary,
@@ -1915,6 +2240,20 @@ fn output_blob_ref_from_blob_ref(blob_ref: &BlobRef) -> OutputBlobRef {
             size: *size,
         },
     }
+}
+
+async fn mirror_prepared_exec_mounts(
+    source: &StoreClient,
+    dest: &StoreClient,
+    prepared: &PreparedExecMounts,
+) -> std::result::Result<PreparedExecMounts, String> {
+    for mount in &prepared.tree_mounts {
+        mirror_node(source, dest, NodeHash(mount.manifest)).await?;
+    }
+    for mount in &prepared.file_mounts {
+        mirror_node(source, dest, NodeHash(mount.manifest)).await?;
+    }
+    Ok(prepared.clone())
 }
 
 fn blob_ref_from_output_blob_ref(blob_ref: &OutputBlobRef) -> BlobRef {
@@ -2305,7 +2644,8 @@ async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
     activity_registry: &ActivityRegistry,
-    exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
+    exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    exec_fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
@@ -2347,19 +2687,20 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
-    let root_mount_started = Instant::now();
+    let mount_prep_started = Instant::now();
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
         format!(
-            "build.vx executor {}: assembling exec root mount",
+            "build.vx executor {}: preparing exec mounts",
             executor_summary
         ),
     )
     .await;
-    let root_mount = store_exec_mounts_deduped(
+    let prepared_mounts = store_exec_mounts_deduped(
         store,
         &request.mounts,
+        exec_fs_tree_snapshot_cache,
         &progress_listener,
         Some(&activity),
         Some(&executor_summary),
@@ -2369,47 +2710,49 @@ async fn run_build_vx_exec_via_runner(
     .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     tracing::info!(
         executor = %describe_executor_selector(&request.executor),
-        root_mount = ?root_mount.map(|hash| hash.0),
+        tree_mount_count = prepared_mounts.tree_mounts.len(),
+        file_mount_count = prepared_mounts.file_mounts.len(),
         cross_store = !std::ptr::eq(target_store, store),
-        "build.vx exec prepared root mount"
+        "build.vx exec prepared mounts"
     );
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
         format!(
-            "build.vx executor {}: exec root mount ready ({})",
+            "build.vx executor {}: exec mounts ready ({})",
             executor_summary,
-            format_progress_elapsed(root_mount_started.elapsed())
+            format_progress_elapsed(mount_prep_started.elapsed())
         ),
     )
     .await;
-    if !std::ptr::eq(target_store, store)
-        && let Some(root) = root_mount
-    {
+    let prepared_mounts = if !std::ptr::eq(target_store, store) {
         let mirror_started = Instant::now();
         emit_build_vx_progress_activity(
             &progress_listener,
             &activity,
             format!(
-                "build.vx executor {}: mirroring exec root mount",
+                "build.vx executor {}: mirroring exec mounts",
                 executor_summary
             ),
         )
         .await;
-        mirror_node(store, target_store, root)
+        let mirrored_mounts = mirror_prepared_exec_mounts(store, target_store, &prepared_mounts)
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
         emit_build_vx_progress_activity(
             &progress_listener,
             &activity,
             format!(
-                "build.vx executor {}: mirrored exec root mount ({})",
+                "build.vx executor {}: mirrored exec mounts ({})",
                 executor_summary,
                 format_progress_elapsed(mirror_started.elapsed())
             ),
         )
         .await;
-    }
+        mirrored_mounts
+    } else {
+        prepared_mounts
+    };
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -2463,14 +2806,8 @@ async fn run_build_vx_exec_via_runner(
                 program_rel: String::new(),
                 program: Some(exec_arg_to_run_arg(&program)),
                 args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
-                tree_mounts: root_mount
-                    .into_iter()
-                    .map(|root| RunTreeMount {
-                        mount: String::new(),
-                        manifest: root.0,
-                    })
-                    .collect(),
-                file_mounts: Vec::new(),
+                tree_mounts: prepared_mounts.tree_mounts,
+                file_mounts: prepared_mounts.file_mounts,
                 outputs: Vec::new(),
                 writable_roots: request
                     .writable_roots
@@ -2821,9 +3158,10 @@ struct BuildVxRuntime {
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
     activity_registry: ActivityRegistry,
-    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    exec_fs_tree_snapshot_cache: Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
     module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
 }
@@ -2962,6 +3300,7 @@ impl BuildVxRuntime {
         let exec_executors = Arc::clone(&self.executors);
         let exec_activity_registry = self.activity_registry.clone();
         let exec_mount_prep_inflight = Arc::clone(&self.exec_mount_prep_inflight);
+        let exec_fs_tree_snapshot_cache = Arc::clone(&self.exec_fs_tree_snapshot_cache);
         let exec_runtime = runtime.clone();
         let discover_store = Arc::clone(&self.store);
         let discover_executors = Arc::clone(&self.executors);
@@ -3036,6 +3375,7 @@ impl BuildVxRuntime {
                         &exec_executors,
                         &exec_activity_registry,
                         &exec_mount_prep_inflight,
+                        &exec_fs_tree_snapshot_cache,
                         exec_listener.clone(),
                         request,
                     ),
@@ -3940,6 +4280,10 @@ impl VxdService {
                     exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
+                    exec_fs_tree_snapshot_cache: Arc::new(SyncMutex::new(
+                        "build_vx_fs_tree_snapshot_cache",
+                        HashMap::new(),
+                    )),
                     module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
                     module_stack: Arc::new(SyncMutex::new("build_vx_module_stack", HashSet::new())),
                 };

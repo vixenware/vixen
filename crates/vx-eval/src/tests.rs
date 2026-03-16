@@ -6264,15 +6264,10 @@ fn exec_can_be_routed_through_a_host_handler() {
     );
     assert_eq!(request.mounts.len(), 1);
     assert_eq!(request.mounts[0].path, PathValue::new("src"));
-    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
-        panic!("expected shipped workspace tree");
+    let Value::Tree(TreeValue::FsDir(root)) = &request.mounts[0].value else {
+        panic!("expected preserved workspace tree handle");
     };
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].0.as_ref(), "input.txt");
-    assert_eq!(
-        entries[0].1,
-        Value::Blob(BlobValue::from_string("hello from handler"))
-    );
+    assert_eq!(root, &PathValue::new(tempdir.path().to_string_lossy()));
     assert!(request.writable_roots.is_empty());
     assert_eq!(request.observer.def.name, "observe");
     assert!(request.verification_obligations.is_empty());

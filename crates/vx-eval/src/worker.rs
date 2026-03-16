@@ -4994,7 +4994,7 @@ impl Engine {
                 .map(|(path, value)| {
                     Ok::<ExecMount, PoisonError>(ExecMount {
                         path: path.clone(),
-                        value: self.snapshot_value(value.clone())?,
+                        value: self.snapshot_exec_mount_value(value.clone())?,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -6074,6 +6074,86 @@ impl Engine {
                 let mut fields = Vec::with_capacity(struct_value.fields.len());
                 for (name, value) in struct_value.fields.iter() {
                     fields.push((name.clone(), self.snapshot_value(value.clone())?));
+                }
+                Ok(Value::Struct(StructValue {
+                    type_name: struct_value.type_name,
+                    fields: Arc::from(fields),
+                }))
+            }
+        }
+    }
+
+    fn snapshot_exec_mount_value(&self, value: Value) -> Result<Value, PoisonError> {
+        let value = self.force_value_shallow(value)?;
+        match value {
+            Value::Pending(node_id) => {
+                self.snapshot_exec_mount_value(self.force_value(Value::Pending(node_id))?)
+            }
+            Value::Host(_) => {
+                Err(self.internal_error("Host values cannot cross the local exec boundary"))
+            }
+            Value::Discovered(discovered) => {
+                let value = self.snapshot_exec_mount_value(*discovered.value)?;
+                Ok(self.attach_obligations(value, discovered.obligations.iter().cloned()))
+            }
+            Value::ExecPath(_) => {
+                Err(self.internal_error("ExecPath values cannot cross the local exec boundary"))
+            }
+            Value::Blob(BlobValue::Inline { .. })
+            | Value::Blob(BlobValue::FsFile { .. })
+            | Value::Blob(BlobValue::Store { .. })
+            | Value::Bytes(_)
+            | Value::Path(_)
+            | Value::Executor(_)
+            | Value::U64(_)
+            | Value::I64(_)
+            | Value::F64(_)
+            | Value::Bool(_)
+            | Value::String(_)
+            | Value::Unit
+            | Value::Function(_)
+            | Value::Partial(_)
+            | Value::Builtin(_) => Ok(value),
+            Value::Tree(TreeValue::Inline(entries)) => {
+                let mut snapshotted = Vec::with_capacity(entries.len());
+                for (name, value) in entries.iter() {
+                    snapshotted
+                        .push((name.clone(), self.snapshot_exec_mount_value(value.clone())?));
+                }
+                Ok(Value::Tree(TreeValue::Inline(Arc::from(snapshotted))))
+            }
+            Value::Tree(TreeValue::FsDir(path)) => Ok(Value::Tree(TreeValue::FsDir(path))),
+            Value::Tree(TreeValue::Store(root)) => Ok(Value::Tree(TreeValue::Store(root))),
+            Value::Tuple(values) => {
+                let mut snapshotted = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    snapshotted.push(self.snapshot_exec_mount_value(value.clone())?);
+                }
+                Ok(Value::Tuple(Arc::from(snapshotted)))
+            }
+            Value::Array(values) => {
+                let mut snapshotted = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    snapshotted.push(self.snapshot_exec_mount_value(value.clone())?);
+                }
+                Ok(Value::Array(Arc::from(snapshotted)))
+            }
+            Value::Map(map) => {
+                let mut snapshotted = Vec::with_capacity(map.entries.len());
+                for (key, value) in map.entries.iter() {
+                    snapshotted.push((
+                        self.snapshot_exec_mount_value(key.clone())?,
+                        self.snapshot_exec_mount_value(value.clone())?,
+                    ));
+                }
+                Ok(Value::Map(MapValue {
+                    entries: Arc::from(snapshotted),
+                }))
+            }
+            Value::Struct(struct_value) => {
+                let mut fields = Vec::with_capacity(struct_value.fields.len());
+                for (name, value) in struct_value.fields.iter() {
+                    fields.push((name.clone(), self.snapshot_exec_mount_value(value.clone())?));
                 }
                 Ok(Value::Struct(StructValue {
                     type_name: struct_value.type_name,

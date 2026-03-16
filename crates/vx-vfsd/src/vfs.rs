@@ -41,7 +41,9 @@ use vixenfs_proto::{
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
     errno, mode,
 };
-use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
+use vx_store_proto::{
+    Blake3Hash, BlobNode, CasNode, ChunkHash, DirEntryKind, NodeHash, StoreClient,
+};
 
 use crate::protocol::VfsPrefixStateSummary;
 
@@ -61,6 +63,10 @@ pub struct VfsItem {
     pub blob_node: Option<NodeHash>,
     /// For files: size in bytes
     pub size: u64,
+    /// For directories mounted from CAS, the backing subtree root.
+    pub dir_node: Option<NodeHash>,
+    /// Whether immediate children from `dir_node` have been populated into `items`.
+    pub dir_children_loaded: bool,
 }
 
 /// An action prefix - represents a build directory like `/build-01JFX.../`
@@ -85,6 +91,8 @@ pub struct PrefixEntry {
     pub size: u64,
     /// File mode (permissions)
     pub mode: u32,
+    /// For directories mounted from CAS, the backing subtree root.
+    pub dir_node: Option<NodeHash>,
 }
 
 const ROOT_ITEM_ID: ItemId = 1;
@@ -405,6 +413,8 @@ impl CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
+            dir_node: None,
+            dir_children_loaded: true,
         });
 
         Self {
@@ -805,6 +815,8 @@ impl CasVfs {
                 cas_hash: None,
                 blob_node: None,
                 size: 0,
+                dir_node: None,
+                dir_children_loaded: true,
             });
 
             // Register the prefix
@@ -821,57 +833,6 @@ impl CasVfs {
         (prefix_id, prefix_root_id)
     }
 
-    /// Add a file to a prefix from CAS
-    ///
-    /// `path` is relative to the prefix root, e.g., "toolchain/bin/cc"
-    pub async fn add_file_to_prefix(
-        &self,
-        prefix_id: &str,
-        path: &str,
-        cas_hash: Blake3Hash,
-        blob_node: Option<NodeHash>,
-        size: u64,
-        executable: bool,
-    ) -> Option<ItemId> {
-        tracing::trace!(
-            prefix_id = %prefix_id,
-            path = %path,
-            hash = %cas_hash,
-            size,
-            executable,
-            "VFS add_file_to_prefix"
-        );
-
-        let file_mode = if executable {
-            mode::FILE_EXECUTABLE
-        } else {
-            mode::FILE_REGULAR
-        };
-
-        let result = self
-            .add_entry_to_prefix(
-                prefix_id,
-                path,
-                PrefixEntry {
-                    item_type: ItemType::File,
-                    cas_hash: Some(cas_hash),
-                    blob_node,
-                    size,
-                    mode: file_mode,
-                },
-            )
-            .await;
-
-        tracing::trace!(
-            prefix_id = %prefix_id,
-            path = %path,
-            item_id = ?result,
-            "VFS add_file_to_prefix -> result"
-        );
-
-        result
-    }
-
     /// Add a directory to a prefix
     pub async fn add_dir_to_prefix(&self, prefix_id: &str, path: &str) -> Option<ItemId> {
         self.add_entry_to_prefix(
@@ -883,9 +844,113 @@ impl CasVfs {
                 blob_node: None,
                 size: 0,
                 mode: mode::DIRECTORY,
+                dir_node: None,
             },
         )
         .await
+    }
+
+    /// Mount a CAS-backed directory tree at a prefix-relative path.
+    pub async fn mount_tree_to_prefix(
+        &self,
+        prefix_id: &str,
+        path: &str,
+        dir_node: NodeHash,
+    ) -> Option<ItemId> {
+        let components: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+        let mut state = self.state.lock();
+        let prefix_root_id = state.prefixes.get(prefix_id)?.root_item_id;
+
+        if components.is_empty() {
+            let root = state.items.get_mut(&prefix_root_id)?;
+            root.dir_node = Some(dir_node);
+            root.dir_children_loaded = false;
+            if let Some(prefix) = state.prefixes.get_mut(prefix_id) {
+                prefix.path_mappings.insert(
+                    String::new(),
+                    PrefixEntry {
+                        item_type: ItemType::Directory,
+                        cas_hash: None,
+                        blob_node: None,
+                        size: 0,
+                        mode: mode::DIRECTORY,
+                        dir_node: Some(dir_node),
+                    },
+                );
+            }
+            return Some(prefix_root_id);
+        }
+
+        let mut current_parent = prefix_root_id;
+        for (i, component) in components.iter().enumerate() {
+            let is_last = i == components.len() - 1;
+            if let Some(existing) = state.items.lookup_child(current_parent, component) {
+                let existing_id = existing.id;
+                let existing_type = existing.item_type;
+                if is_last {
+                    if existing_type != ItemType::Directory {
+                        return None;
+                    }
+                    let item = state.items.get_mut(&existing_id)?;
+                    item.dir_node = Some(dir_node);
+                    item.dir_children_loaded = false;
+                    if let Some(prefix) = state.prefixes.get_mut(prefix_id) {
+                        prefix.path_mappings.insert(
+                            path.to_string(),
+                            PrefixEntry {
+                                item_type: ItemType::Directory,
+                                cas_hash: None,
+                                blob_node: None,
+                                size: 0,
+                                mode: mode::DIRECTORY,
+                                dir_node: Some(dir_node),
+                            },
+                        );
+                    }
+                    return Some(existing_id);
+                }
+                if existing_type != ItemType::Directory {
+                    return None;
+                }
+                current_parent = existing_id;
+                continue;
+            }
+
+            let new_id = self.alloc_id();
+            state.items.insert(VfsItem {
+                id: new_id,
+                parent_id: current_parent,
+                name: component.to_string(),
+                item_type: ItemType::Directory,
+                mode: mode::DIRECTORY,
+                cas_hash: None,
+                blob_node: None,
+                size: 0,
+                dir_node: is_last.then_some(dir_node),
+                dir_children_loaded: !is_last,
+            });
+
+            if is_last {
+                if let Some(prefix) = state.prefixes.get_mut(prefix_id) {
+                    prefix.path_mappings.insert(
+                        path.to_string(),
+                        PrefixEntry {
+                            item_type: ItemType::Directory,
+                            cas_hash: None,
+                            blob_node: None,
+                            size: 0,
+                            mode: mode::DIRECTORY,
+                            dir_node: Some(dir_node),
+                        },
+                    );
+                }
+                return Some(new_id);
+            }
+
+            current_parent = new_id;
+        }
+
+        None
     }
 
     /// Internal: add an entry (file or dir) to a prefix.
@@ -929,17 +994,28 @@ impl CasVfs {
 
             // Create the component
             let new_id = self.alloc_id();
-            let (item_type, item_mode, cas_hash, blob_node, size) = if is_last {
-                (
-                    entry.item_type,
-                    entry.mode,
-                    entry.cas_hash,
-                    entry.blob_node,
-                    entry.size,
-                )
-            } else {
-                (ItemType::Directory, mode::DIRECTORY, None, None, 0)
-            };
+            let (item_type, item_mode, cas_hash, blob_node, size, dir_node, dir_children_loaded) =
+                if is_last {
+                    (
+                        entry.item_type,
+                        entry.mode,
+                        entry.cas_hash,
+                        entry.blob_node,
+                        entry.size,
+                        entry.dir_node,
+                        entry.item_type != ItemType::Directory || entry.dir_node.is_none(),
+                    )
+                } else {
+                    (
+                        ItemType::Directory,
+                        mode::DIRECTORY,
+                        None,
+                        None,
+                        0,
+                        None,
+                        true,
+                    )
+                };
 
             state.items.insert(VfsItem {
                 id: new_id,
@@ -950,6 +1026,8 @@ impl CasVfs {
                 cas_hash,
                 blob_node,
                 size,
+                dir_node,
+                dir_children_loaded,
             });
 
             if is_last {
@@ -1005,15 +1083,189 @@ impl CasVfs {
 
         result
     }
+
+    async fn load_directory_entries(
+        &self,
+        dir_node: NodeHash,
+    ) -> Result<Vec<(String, PrefixEntry)>, String> {
+        let node_data = self
+            .cas
+            .get_node(dir_node)
+            .await
+            .map_err(|e| format!("failed to fetch DirectoryNode {dir_node}: {e:?}"))?
+            .ok_or_else(|| format!("DirectoryNode {dir_node} not found in CAS"))?;
+        let node = CasNode::from_bytes(&node_data).map_err(|e| {
+            format!(
+                "failed to deserialize DirectoryNode {} (len={}): {:?}",
+                dir_node,
+                node_data.len(),
+                e
+            )
+        })?;
+        let dir = match node {
+            CasNode::Directory(dir) => dir,
+            other => {
+                return Err(format!(
+                    "expected DirectoryNode for {}, got {other:?}",
+                    dir_node
+                ));
+            }
+        };
+
+        let mut entries = Vec::with_capacity(dir.entries.len());
+        for entry in dir.entries {
+            let prefix_entry = match entry.kind {
+                DirEntryKind::SmallFile {
+                    content_hash,
+                    size,
+                    executable,
+                } => PrefixEntry {
+                    item_type: ItemType::File,
+                    cas_hash: Some(content_hash.0),
+                    blob_node: None,
+                    size,
+                    mode: if executable {
+                        mode::FILE_EXECUTABLE
+                    } else {
+                        mode::FILE_REGULAR
+                    },
+                    dir_node: None,
+                },
+                DirEntryKind::LargeFile {
+                    content_hash,
+                    blob_node,
+                    size,
+                    executable,
+                } => PrefixEntry {
+                    item_type: ItemType::File,
+                    cas_hash: Some(content_hash.0),
+                    blob_node: Some(blob_node),
+                    size,
+                    mode: if executable {
+                        mode::FILE_EXECUTABLE
+                    } else {
+                        mode::FILE_REGULAR
+                    },
+                    dir_node: None,
+                },
+                DirEntryKind::Dir { hash, .. } => PrefixEntry {
+                    item_type: ItemType::Directory,
+                    cas_hash: None,
+                    blob_node: None,
+                    size: 0,
+                    mode: mode::DIRECTORY,
+                    dir_node: Some(hash),
+                },
+                DirEntryKind::Symlink { .. } => {
+                    tracing::warn!(name = %entry.name, "skipping symlink (not yet supported)");
+                    continue;
+                }
+            };
+            entries.push((entry.name, prefix_entry));
+        }
+
+        Ok(entries)
+    }
+
+    async fn ensure_dir_children_loaded(&self, item_id: ItemId) -> Result<(), String> {
+        let dir_node = {
+            let state = self.state.lock();
+            let Some(item) = state.items.get(&item_id) else {
+                return Ok(());
+            };
+            if item.item_type != ItemType::Directory || item.dir_children_loaded {
+                return Ok(());
+            }
+            item.dir_node
+        };
+
+        let Some(dir_node) = dir_node else {
+            let mut state = self.state.lock();
+            if let Some(item) = state.items.get_mut(&item_id) {
+                item.dir_children_loaded = true;
+            }
+            return Ok(());
+        };
+
+        let children = self.load_directory_entries(dir_node).await?;
+
+        let mut state = self.state.lock();
+        let (parent_id, parent_dir_node, already_loaded) = match state.items.get(&item_id) {
+            Some(item) => (item.id, item.dir_node, item.dir_children_loaded),
+            None => return Ok(()),
+        };
+        if already_loaded || parent_dir_node != Some(dir_node) {
+            return Ok(());
+        }
+
+        for (name, entry) in children {
+            if state.items.lookup_child(parent_id, &name).is_some() {
+                continue;
+            }
+            let child_id = self.alloc_id();
+            state.items.insert(VfsItem {
+                id: child_id,
+                parent_id,
+                name,
+                item_type: entry.item_type,
+                mode: entry.mode,
+                cas_hash: entry.cas_hash,
+                blob_node: entry.blob_node,
+                size: entry.size,
+                dir_node: entry.dir_node,
+                dir_children_loaded: entry.item_type != ItemType::Directory
+                    || entry.dir_node.is_none(),
+            });
+        }
+
+        if let Some(item) = state.items.get_mut(&item_id) {
+            item.dir_children_loaded = true;
+        }
+
+        Ok(())
+    }
 }
 
 impl CasVfs {
     pub(crate) async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
+        {
+            let state = self.state.lock();
+            if let Some(item) = state.items.lookup_child(parent_id, &name) {
+                tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
+                return LookupResult {
+                    attrs: ItemAttributes {
+                        item_id: item.id,
+                        item_type: item.item_type,
+                        size: item.size,
+                        modified_time: 0,
+                        created_time: 0,
+                        mode: item.mode,
+                    },
+                    error: errno::OK,
+                };
+            }
+        }
+
+        if let Err(err) = self.ensure_dir_children_loaded(parent_id).await {
+            tracing::error!(parent_id, name = %name, error = %err, "failed to populate mounted directory");
+            return LookupResult {
+                attrs: ItemAttributes {
+                    item_id: 0,
+                    item_type: ItemType::File,
+                    size: 0,
+                    modified_time: 0,
+                    created_time: 0,
+                    mode: 0,
+                },
+                error: errno::EIO,
+            };
+        }
+
         let state = self.state.lock();
         if let Some(item) = state.items.lookup_child(parent_id, &name) {
-            tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
+            tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found after populate");
             return LookupResult {
                 attrs: ItemAttributes {
                     item_id: item.id,
@@ -1108,6 +1360,16 @@ impl CasVfs {
     ) -> ReadDirResult {
         let started = Instant::now();
         tracing::trace!(item_id, cookie, verifier, "VFS read_dir.start");
+
+        if let Err(err) = self.ensure_dir_children_loaded(item_id).await {
+            tracing::error!(item_id, error = %err, "failed to populate mounted directory for read_dir");
+            return ReadDirResult {
+                entries: Vec::new(),
+                next_cookie: 0,
+                verifier: 0,
+                error: errno::EIO,
+            };
+        }
 
         let state = self.state.lock();
         let (result, child_count) = match state.items.get(&item_id) {
@@ -1390,6 +1652,7 @@ impl CasVfs {
             };
         }
 
+        let dir_children_loaded = item_type != ItemType::Directory;
         state.items.insert(VfsItem {
             id: new_id,
             parent_id,
@@ -1399,6 +1662,8 @@ impl CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
+            dir_node: None,
+            dir_children_loaded,
         });
 
         CreateResult {
@@ -1648,6 +1913,8 @@ impl VfsDiskNotify for CasVfs {
                     cas_hash: None,
                     blob_node: None,
                     size: 0,
+                    dir_node: None,
+                    dir_children_loaded: true,
                 });
                 tracing::debug!(
                     %prefix_id,
@@ -1675,6 +1942,7 @@ impl VfsDiskNotify for CasVfs {
         } else {
             ItemType::File
         };
+        let dir_children_loaded = item_type != ItemType::Directory;
         let item_id = self.alloc_id();
         state.items.insert(VfsItem {
             id: item_id,
@@ -1685,6 +1953,8 @@ impl VfsDiskNotify for CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
+            dir_node: None,
+            dir_children_loaded,
         });
         tracing::debug!(
             %prefix_id,
