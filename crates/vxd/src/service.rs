@@ -109,6 +109,7 @@ pub(crate) struct BuildVxExecutor {
     backend: ExecutorBackendKind,
     runner: Option<Arc<RunnerClient>>,
     store: Option<Arc<StoreClient>>,
+    store_supports_readthrough: bool,
     unavailable_reason: Option<String>,
     _runner_handle: Option<Arc<ServiceHandle>>,
     _store_handle: Option<Arc<ServiceHandle>>,
@@ -124,6 +125,7 @@ impl BuildVxExecutor {
             backend: ExecutorBackendKind::Local,
             runner: Some(runner),
             store: None,
+            store_supports_readthrough: false,
             unavailable_reason: None,
             _runner_handle: runner_handle,
             _store_handle: None,
@@ -140,6 +142,7 @@ impl BuildVxExecutor {
             backend: ExecutorBackendKind::Daemon,
             runner: Some(runner),
             store: None,
+            store_supports_readthrough: false,
             unavailable_reason: None,
             _runner_handle: runner_handle,
             _store_handle: None,
@@ -168,6 +171,7 @@ pub(crate) struct SshBootstrapExecutor {
     pub(crate) backend: ExecutorBackendKind,
     pub(crate) runner: Arc<RunnerClient>,
     pub(crate) store: Option<Arc<StoreClient>>,
+    pub(crate) store_supports_readthrough: bool,
     pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
     pub(crate) store_handle: Option<Arc<ServiceHandle>>,
 }
@@ -179,6 +183,7 @@ impl SshBootstrapExecutor {
             backend: self.backend,
             runner: Some(self.runner),
             store: self.store,
+            store_supports_readthrough: self.store_supports_readthrough,
             unavailable_reason: None,
             _runner_handle: self.runner_handle,
             _store_handle: self.store_handle,
@@ -227,6 +232,7 @@ impl BuildVxExecutors {
             backend: ExecutorBackendKind::Local,
             runner: Some(runner),
             store: Some(store),
+            store_supports_readthrough: false,
             unavailable_reason: None,
             _runner_handle: None,
             _store_handle: None,
@@ -323,6 +329,7 @@ impl BuildVxExecutors {
                 backend,
                 runner: Some(runner),
                 store,
+                store_supports_readthrough: false,
                 unavailable_reason: None,
                 _runner_handle: None,
                 _store_handle: None,
@@ -358,6 +365,7 @@ impl BuildVxExecutors {
                 backend,
                 runner: None,
                 store: None,
+                store_supports_readthrough: false,
                 unavailable_reason: Some(unavailable_reason.into()),
                 _runner_handle: None,
                 _store_handle: None,
@@ -495,6 +503,17 @@ impl BuildVxExecutors {
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
         Ok(executor.store.clone())
+    }
+
+    pub(crate) async fn store_supports_readthrough(
+        &self,
+        selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
+    ) -> std::result::Result<bool, String> {
+        self.ensure_executor(selector, progress_listener).await?;
+        let state = self.state.lock().expect("build_vx_executors poisoned");
+        let executor = self.resolve_executor_locked(&state, selector)?;
+        Ok(executor.store_supports_readthrough)
     }
 }
 
@@ -2669,6 +2688,10 @@ async fn run_build_vx_exec_via_runner(
         .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let store_supports_readthrough = executors
+        .store_supports_readthrough(&request.executor, progress_listener.clone())
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -2710,6 +2733,7 @@ async fn run_build_vx_exec_via_runner(
         tree_mount_count = prepared_mounts.tree_mounts.len(),
         file_mount_count = prepared_mounts.file_mounts.len(),
         cross_store = !std::ptr::eq(target_store, store),
+        store_supports_readthrough,
         "build.vx exec prepared mounts"
     );
     emit_build_vx_progress_activity(
@@ -2722,7 +2746,7 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    let prepared_mounts = if !std::ptr::eq(target_store, store) {
+    let prepared_mounts = if !std::ptr::eq(target_store, store) && !store_supports_readthrough {
         let mirror_started = Instant::now();
         emit_build_vx_progress_activity(
             &progress_listener,
@@ -2781,7 +2805,7 @@ async fn run_build_vx_exec_via_runner(
         }
         .named("build_vx_exec_progress_fwd"),
     );
-    let observer = if std::ptr::eq(target_store, store) {
+    let observer = if std::ptr::eq(target_store, store) || store_supports_readthrough {
         request.observer
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.observer)
@@ -2968,6 +2992,10 @@ async fn run_build_vx_discover_via_runner(
         .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let store_supports_readthrough = executors
+        .store_supports_readthrough(&request.executor, progress_listener.clone())
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -2975,7 +3003,7 @@ async fn run_build_vx_discover_via_runner(
     )
     .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
-    let probe = if std::ptr::eq(target_store, store) {
+    let probe = if std::ptr::eq(target_store, store) || store_supports_readthrough {
         request.probe
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.probe)

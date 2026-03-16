@@ -79,8 +79,17 @@ impl StoreService {
         let data = self.storage.get_chunk(&hash).await.ok().flatten();
         if data.is_some() {
             self.present_chunks.lock().insert(hash);
+            return data;
         }
-        data
+        let upstream = self.upstream();
+        let data = upstream?.get_chunk(hash).await.ok().flatten()?;
+        if StoreService::put_chunk(self, hash, data.clone())
+            .await
+            .is_ok()
+        {
+            return Some(data);
+        }
+        None
     }
 
     async fn has_chunk(&self, hash: ChunkHash) -> bool {
@@ -88,6 +97,14 @@ impl StoreService {
             return true;
         }
         let present = self.storage.has_chunk(&hash).await.unwrap_or(false);
+        if present {
+            self.present_chunks.lock().insert(hash);
+            return true;
+        }
+        let Some(upstream) = self.upstream() else {
+            return false;
+        };
+        let present = upstream.has_chunk(hash).await.unwrap_or(false);
         if present {
             self.present_chunks.lock().insert(hash);
         }
@@ -115,7 +132,15 @@ impl StoreService {
                 Ok(true) => {
                     self.present_chunks.lock().insert(hash);
                 }
-                _ => missing.push(hash),
+                _ => {
+                    if let Some(upstream) = self.upstream()
+                        && upstream.has_chunk(hash).await.unwrap_or(false)
+                    {
+                        self.present_chunks.lock().insert(hash);
+                        continue;
+                    }
+                    missing.push(hash);
+                }
             }
         }
         missing
@@ -167,8 +192,17 @@ impl StoreService {
         let data = self.storage.get_node(&hash).await.ok().flatten();
         if data.is_some() {
             self.present_nodes.lock().insert(hash);
+            return data;
         }
-        data
+        let upstream = self.upstream();
+        let data = upstream?.get_node(hash).await.ok().flatten()?;
+        if StoreService::put_node(self, hash, data.clone())
+            .await
+            .is_ok()
+        {
+            return Some(data);
+        }
+        None
     }
 
     async fn has_node(&self, hash: NodeHash) -> bool {
@@ -176,6 +210,14 @@ impl StoreService {
             return true;
         }
         let present = self.storage.has_node(&hash).await.unwrap_or(false);
+        if present {
+            self.present_nodes.lock().insert(hash);
+            return true;
+        }
+        let Some(upstream) = self.upstream() else {
+            return false;
+        };
+        let present = upstream.has_node(hash).await.unwrap_or(false);
         if present {
             self.present_nodes.lock().insert(hash);
         }

@@ -1998,6 +1998,7 @@ async fn build_vx_implicit_ssh_executor_does_not_synthesize_local_runner() {
                     backend: vx_eval::ExecutorBackendKind::SshBootstrap,
                     runner: Arc::new(RunnerClient::new(runner_virtual)),
                     store: None,
+                    store_supports_readthrough: false,
                     runner_handle: Some(runner_handle),
                     store_handle: None,
                 })
@@ -2278,6 +2279,7 @@ async fn build_vx_routes_implicit_ssh_executor_classes() {
                                     backend: vx_eval::ExecutorBackendKind::SshBootstrap,
                                     runner: Arc::new(RunnerClient::new(runner_virtual)),
                                     store: None,
+                                    store_supports_readthrough: false,
                                     runner_handle: Some(runner_handle),
                                     store_handle: None,
                                 })

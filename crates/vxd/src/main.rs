@@ -36,9 +36,13 @@ use flate2::write::GzEncoder;
 use ignore::WalkBuilder;
 use moire::task::FutureExt;
 use roam_core::acceptor;
-use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_core::{
+    AcceptedConnection, BareConduit, ConnectionAcceptor, Driver, DriverCaller, SessionHandle,
+};
 use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata};
+use roam_types::{
+    ConnectionSettings, Metadata, MetadataEntry, MetadataFlags, MetadataValue, Parity,
+};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fs;
@@ -62,7 +66,12 @@ use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerClient;
-use vx_store_proto::StoreClient;
+use vx_store_proto::{
+    EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureToolchainResult,
+    MaterializationPlan, PublishResult, RegistryCrateManifest, RegistrySpec, RustComponent,
+    RustToolchainSpec, ServiceVersion, Store as StoreRpc, StoreClient, StoreDispatcher,
+    StoreProgress, ToolchainManifest, ZigToolchainSpec,
+};
 use vxd_proto::{ProgressListenerClient, VxdDispatcher};
 
 use crate::activity::{ActivityHandle, ActivityRegistry};
@@ -72,7 +81,7 @@ pub use inputs::*;
 pub use queries::*;
 pub use service::VxdService;
 
-pub type UpstreamCaller = roam_core::DriverCaller;
+pub type UpstreamCaller = DriverCaller;
 
 const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
 const VIXEN_REPO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
@@ -2360,7 +2369,7 @@ async fn connect_endpoint_with_backoff(
     name: &str,
     endpoint: &Endpoint,
     timeout: Duration,
-) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
+) -> Result<(DriverCaller, SessionHandle)> {
     let deadline = tokio::time::Instant::now() + timeout;
     let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
     let mut last_err = None;
@@ -2390,6 +2399,303 @@ async fn connect_endpoint_with_backoff(
 
     let err_detail = last_err.unwrap_or_else(|| "unknown error".to_string());
     eyre::bail!("{name} unreachable after {timeout:?} at {endpoint}: {err_detail}");
+}
+
+#[cfg(unix)]
+const UPSTREAM_STORE_METADATA_KEY: &str = "vx-upstream-store";
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct ForwardingStore {
+    client: Arc<StoreClient>,
+}
+
+#[cfg(unix)]
+impl ForwardingStore {
+    fn new(client: Arc<StoreClient>) -> Self {
+        Self { client }
+    }
+}
+
+#[cfg(unix)]
+impl StoreRpc for ForwardingStore {
+    async fn version(&self) -> ServiceVersion {
+        self.client.version().await.unwrap_or(ServiceVersion {
+            service: "store-forwarder".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: vx_store_proto::STORE_PROTOCOL_VERSION,
+        })
+    }
+
+    async fn put_chunk(
+        &self,
+        hash: vx_store_proto::ChunkHash,
+        data: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        self.client
+            .put_chunk(hash, data)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    }
+
+    async fn get_chunk(&self, hash: vx_store_proto::ChunkHash) -> Option<Vec<u8>> {
+        self.client.get_chunk(hash).await.ok().flatten()
+    }
+
+    async fn has_chunk(&self, hash: vx_store_proto::ChunkHash) -> bool {
+        self.client.has_chunk(hash).await.unwrap_or(false)
+    }
+
+    async fn list_missing_chunks(
+        &self,
+        hashes: Vec<vx_store_proto::ChunkHash>,
+    ) -> Vec<vx_store_proto::ChunkHash> {
+        self.client
+            .list_missing_chunks(hashes)
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn put_node(
+        &self,
+        hash: vx_store_proto::NodeHash,
+        data: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        self.client
+            .put_node(hash, data)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    }
+
+    async fn get_node(&self, hash: vx_store_proto::NodeHash) -> Option<Vec<u8>> {
+        self.client.get_node(hash).await.ok().flatten()
+    }
+
+    async fn has_node(&self, hash: vx_store_proto::NodeHash) -> bool {
+        self.client.has_node(hash).await.unwrap_or(false)
+    }
+
+    async fn lookup(
+        &self,
+        cache_key: vx_store_proto::CacheKey,
+    ) -> Option<vx_store_proto::NodeHash> {
+        self.client.lookup(cache_key).await.ok().flatten()
+    }
+
+    async fn publish(
+        &self,
+        cache_key: vx_store_proto::CacheKey,
+        manifest_hash: vx_store_proto::NodeHash,
+    ) -> PublishResult {
+        self.client
+            .publish(cache_key, manifest_hash)
+            .await
+            .unwrap_or(PublishResult {
+                success: false,
+                error: Some("failed to forward publish".to_string()),
+            })
+    }
+
+    async fn unpublish(&self, cache_key: vx_store_proto::CacheKey) -> bool {
+        self.client.unpublish(cache_key).await.unwrap_or(false)
+    }
+
+    async fn ensure_rust_toolchain(
+        &self,
+        spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
+        self.client
+            .ensure_rust_toolchain(spec, progress)
+            .await
+            .unwrap_or(EnsureToolchainResult {
+                spec_key: None,
+                toolchain_id: None,
+                status: vx_store_proto::EnsureStatus::Failed,
+                manifest_hash: None,
+                error: Some("failed to forward ensure_rust_toolchain".to_string()),
+            })
+    }
+
+    async fn download_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        self.client
+            .download_rust_toolchain_component(spec, component.clone(), progress)
+            .await
+            .unwrap_or(EnsureRustToolchainComponentResult {
+                spec_key: None,
+                component,
+                status: vx_store_proto::EnsureStatus::Failed,
+                tarball: None,
+                tree_root: None,
+                error: Some("failed to forward download_rust_toolchain_component".to_string()),
+            })
+    }
+
+    async fn extract_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball: vx_store_proto::BlobRef,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        self.client
+            .extract_rust_toolchain_component(spec, component.clone(), tarball, progress)
+            .await
+            .unwrap_or(EnsureRustToolchainComponentResult {
+                spec_key: None,
+                component,
+                status: vx_store_proto::EnsureStatus::Failed,
+                tarball: None,
+                tree_root: None,
+                error: Some("failed to forward extract_rust_toolchain_component".to_string()),
+            })
+    }
+
+    async fn finalize_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult {
+        self.client
+            .finalize_rust_toolchain(spec)
+            .await
+            .unwrap_or(EnsureToolchainResult {
+                spec_key: None,
+                toolchain_id: None,
+                status: vx_store_proto::EnsureStatus::Failed,
+                manifest_hash: None,
+                error: Some("failed to forward finalize_rust_toolchain".to_string()),
+            })
+    }
+
+    async fn ensure_zig_toolchain(
+        &self,
+        spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
+        self.client
+            .ensure_zig_toolchain(spec, progress)
+            .await
+            .unwrap_or(EnsureToolchainResult {
+                spec_key: None,
+                toolchain_id: None,
+                status: vx_store_proto::EnsureStatus::Failed,
+                manifest_hash: None,
+                error: Some("failed to forward ensure_zig_toolchain".to_string()),
+            })
+    }
+
+    async fn get_toolchain_manifest(
+        &self,
+        manifest_hash: vx_store_proto::NodeHash,
+    ) -> Option<ToolchainManifest> {
+        self.client
+            .get_toolchain_manifest(manifest_hash)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn get_materialization_plan(
+        &self,
+        manifest_hash: vx_store_proto::NodeHash,
+    ) -> Option<MaterializationPlan> {
+        self.client
+            .get_materialization_plan(manifest_hash)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn lookup_toolchain_spec(
+        &self,
+        spec_key: vx_store_proto::ToolchainSpecKey,
+    ) -> Option<vx_store_proto::NodeHash> {
+        self.client
+            .lookup_toolchain_spec(spec_key)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn ensure_registry_crate(
+        &self,
+        spec: RegistrySpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRegistryCrateResult {
+        self.client
+            .ensure_registry_crate(spec, progress)
+            .await
+            .unwrap_or(EnsureRegistryCrateResult {
+                spec_key: None,
+                status: vx_store_proto::EnsureStatus::Failed,
+                manifest_hash: None,
+                error: Some("failed to forward ensure_registry_crate".to_string()),
+            })
+    }
+
+    async fn get_registry_manifest(
+        &self,
+        manifest_hash: vx_store_proto::NodeHash,
+    ) -> Option<RegistryCrateManifest> {
+        self.client
+            .get_registry_manifest(manifest_hash)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn lookup_registry_spec(
+        &self,
+        spec_key: vx_store_proto::Blake3Hash,
+    ) -> Option<vx_store_proto::NodeHash> {
+        self.client
+            .lookup_registry_spec(spec_key)
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
+#[cfg(unix)]
+async fn boot_and_connect_store_with_upstream(
+    caller: &DriverCaller,
+    session_handle: &SessionHandle,
+    upstream_store: Arc<StoreClient>,
+) -> Result<DriverCaller> {
+    let boot_client = vx_io::boot::BootClient::new(caller.clone());
+    let boot_result = boot_client.boot().await.map_err(|e| eyre::eyre!("{e:?}"))?;
+    if !boot_result.success {
+        let msg = boot_result
+            .error
+            .clone()
+            .unwrap_or_else(|| "unknown boot error".into());
+        eyre::bail!("{msg}");
+    }
+
+    let virtual_handle = session_handle
+        .open_connection(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+            },
+            vec![MetadataEntry {
+                key: UPSTREAM_STORE_METADATA_KEY,
+                value: MetadataValue::U64(1),
+                flags: MetadataFlags::NO_PROPAGATE,
+            }],
+        )
+        .await
+        .map_err(|e| eyre::eyre!("failed to open virtual connection: {e}"))?;
+
+    let dispatcher = StoreDispatcher::new(ForwardingStore::new(upstream_store));
+    let mut driver = Driver::new(virtual_handle, dispatcher);
+    let virtual_caller = driver.caller();
+    tokio::spawn(async move { driver.run().await });
+    Ok(virtual_caller)
 }
 
 #[cfg(unix)]
@@ -2712,6 +3018,7 @@ async fn bootstrap_ssh_executor(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
+    upstream_store: Arc<StoreClient>,
     boot_tx: Option<&BootTx>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
@@ -2743,7 +3050,12 @@ async fn bootstrap_ssh_executor(
         activity,
     )
     .await;
-    let store_virtual = store_handle.boot_and_connect().await?;
+    let store_virtual = boot_and_connect_store_with_upstream(
+        &store_handle.caller,
+        &store_handle.session_handle,
+        upstream_store,
+    )
+    .await?;
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
@@ -2766,6 +3078,7 @@ async fn bootstrap_ssh_executor(
         backend: vx_eval::ExecutorBackendKind::SshBootstrap,
         runner: Arc::new(RunnerClient::new(runner_virtual)),
         store: Some(Arc::new(StoreClient::new(store_virtual))),
+        store_supports_readthrough: true,
         runner_handle: Some(runner_handle),
         store_handle: Some(store_handle),
     })
@@ -2998,10 +3311,12 @@ async fn ensure_services(
     {
         let vx_home = args.vx_home.clone();
         let activity_registry = activity_registry.clone();
+        let local_store = Arc::clone(&local_store);
         build_vx_executors =
             build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target, listener| {
                 let vx_home = vx_home.clone();
                 let activity_registry = activity_registry.clone();
+                let local_store = Arc::clone(&local_store);
                 Box::pin(async move {
                     let activity = activity_registry.start(
                         "bootstrap",
@@ -3012,6 +3327,7 @@ async fn ensure_services(
                         &vx_home,
                         &class_label,
                         &target,
+                        local_store,
                         None,
                         listener,
                         Some(&activity),
@@ -3080,6 +3396,7 @@ async fn ensure_services(
                         &args.vx_home,
                         &config.class_label,
                         target,
+                        Arc::clone(&local_store),
                         Some(boot_tx),
                         None,
                         None,
