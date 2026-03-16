@@ -52,8 +52,8 @@ fn discover_toolchain(class: ExecutorClass) {
 }
 
 fn compile_objects(class: ExecutorClass, tc: Toolchain, src: Tree, sources: Array[Path]) where {
-  generated: Map[Path, Blob] = {},
-  mounts: Map[Path, TreeEntry] = {},
+  generated: Map[Path, Blob] = %{},
+  mounts: Map[Path, TreeEntry] = %{},
   includes: Array[Path] = [],
   defines: Array[String] = [],
   flags: Array[String] = [],
@@ -84,7 +84,7 @@ fn compile_objects(class: ExecutorClass, tc: Toolchain, src: Tree, sources: Arra
           "/O2",
           ..flags,
         ] where {
-          mounts: { @src: src, @gen: Tree(generated), ..mounts },
+          mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
           writable: [@out],
           create_dirs: [@out/obj],
         }
@@ -101,7 +101,7 @@ fn compile_objects(class: ExecutorClass, tc: Toolchain, src: Tree, sources: Arra
           ..if pic (["-fPIC"]) else ([]),
           ..flags,
         ] where {
-          mounts: { @src: src, @gen: Tree(generated), ..mounts },
+          mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
           writable: [@out],
         }
       )

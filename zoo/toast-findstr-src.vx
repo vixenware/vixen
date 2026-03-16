@@ -6,7 +6,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   let output =
     exec([findstr, "/r", "^", @src/lua.c]) where {
       executor: class,
-      mounts: { @src: Tree(workspace / @zoo/lua-src) },
+      mounts: %{ @src => Tree(workspace / @zoo/lua-src) },
       observer: (proc, _vfs) => (
         if proc.exit_code != 0 (
           fail `process failed`
@@ -16,7 +16,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
       ),
     };
 
-  Tree {
-    @probe.txt: output,
+  Tree %{
+    @probe.txt => output,
   }
 }

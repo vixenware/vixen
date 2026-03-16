@@ -69,8 +69,8 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
   };
 
   fn compile_objects(src: Tree, sources: Array[Path]) where {
-    generated: Map[Path, Blob] = {},
-    mounts: Map[Path, TreeEntry] = {},
+    generated: Map[Path, Blob] = %{},
+    mounts: Map[Path, TreeEntry] = %{},
     includes: Array[Path] = [],
     defines: Array[String] = [],
   } -> Tree (
@@ -87,7 +87,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             ..defines.map((define) => `/D${define}`),
             "/O2",
           ] where {
-            mounts: { @src: src, @gen: Tree(generated), ..mounts },
+            mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
             writable: [@out],
             create_dirs: [@out/obj],
           }
@@ -103,7 +103,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "-O2",
             "-fPIC",
           ] where {
-            mounts: { @src: src, @gen: Tree(generated), ..mounts },
+            mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
             writable: [@out],
           }
         )
@@ -138,23 +138,23 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
   let zlib_static = static_archive(zlib_archive_name, zlib_objects);
   let zlib_install =
     if tc.os == "windows" (
-      Tree {
-        @include/zlib.h: zlib_src.file @zlib.h,
-        @include/zconf.h: zlib_src.file @zconf.h,
-        @lib/zlib.lib: zlib_static.file(@zlib.lib),
+      Tree %{
+        @include/zlib.h => zlib_src.file @zlib.h,
+        @include/zconf.h => zlib_src.file @zconf.h,
+        @lib/zlib.lib => zlib_static.file(@zlib.lib),
       }
     ) else (
-      Tree {
-        @include/zlib.h: zlib_src.file @zlib.h,
-        @include/zconf.h: zlib_src.file @zconf.h,
-        @lib/libz.a: zlib_static.file(@libz.a),
+      Tree %{
+        @include/zlib.h => zlib_src.file @zlib.h,
+        @include/zconf.h => zlib_src.file @zconf.h,
+        @lib/libz.a => zlib_static.file(@libz.a),
       }
     );
 
   let libpng_objects =
     compile_objects(libpng_src, libpng_core_sources) where {
-      generated: { @pnglibconf.h: pnglibconf_h },
-      mounts: { @deps/zlib: zlib_install },
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
       defines: libpng_defines,
     };
@@ -168,23 +168,23 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
   let libpng_static = static_archive(libpng_archive_name, libpng_objects);
   let libpng_install =
     if tc.os == "windows" (
-      Tree {
-        @include/png.h: libpng_src.file @png.h,
-        @include/pngconf.h: libpng_src.file @pngconf.h,
-        @include/pnglibconf.h: pnglibconf_h,
-        @lib/libpng16.lib: libpng_static.file(@libpng16.lib),
+      Tree %{
+        @include/png.h => libpng_src.file @png.h,
+        @include/pngconf.h => libpng_src.file @pngconf.h,
+        @include/pnglibconf.h => pnglibconf_h,
+        @lib/libpng16.lib => libpng_static.file(@libpng16.lib),
       }
     ) else (
-      Tree {
-        @include/png.h: libpng_src.file @png.h,
-        @include/pngconf.h: libpng_src.file @pngconf.h,
-        @include/pnglibconf.h: pnglibconf_h,
-        @lib/libpng16.a: libpng_static.file(@libpng16.a),
+      Tree %{
+        @include/png.h => libpng_src.file @png.h,
+        @include/pngconf.h => libpng_src.file @pngconf.h,
+        @include/pnglibconf.h => pnglibconf_h,
+        @lib/libpng16.a => libpng_static.file(@libpng16.a),
       }
     );
 
-  let version_source = Tree {
-    @png-version.c: Blob(`
+  let version_source = Tree %{
+    @png-version.c => Blob(`
 #include <stdio.h>
 #include <png.h>
 
@@ -207,10 +207,10 @@ int main(void) {
         @deps/libpng/lib/libpng16.lib,
         @deps/zlib/lib/zlib.lib,
       ] where {
-        mounts: {
-          @src: version_source,
-          @deps/libpng: libpng_install,
-          @deps/zlib: zlib_install,
+        mounts: %{
+          @src => version_source,
+          @deps/libpng => libpng_install,
+          @deps/zlib => zlib_install,
         },
         writable: [@out],
       }
@@ -226,10 +226,10 @@ int main(void) {
         @deps/zlib/lib/libz.a,
         "-lm",
       ] where {
-        mounts: {
-          @src: version_source,
-          @deps/libpng: libpng_install,
-          @deps/zlib: zlib_install,
+        mounts: %{
+          @src => version_source,
+          @deps/libpng => libpng_install,
+          @deps/zlib => zlib_install,
         },
         writable: [@out],
       }
@@ -237,16 +237,16 @@ int main(void) {
 
   let installed_probe =
     if tc.os == "windows" (
-      Tree { @png-version.exe: version_program.file(@png-version.exe).executable() }
+      Tree %{ @png-version.exe => version_program.file(@png-version.exe).executable() }
     ) else (
-      Tree { @png-version: version_program.file(@png-version).executable() }
+      Tree %{ @png-version => version_program.file(@png-version).executable() }
     );
 
   let version_blob =
     if tc.os == "windows" (
       exec([@bin/png-version.exe]) where {
         executor: class,
-        mounts: { @bin: installed_probe },
+        mounts: %{ @bin => installed_probe },
         observer: (proc, _vfs) => (
           if proc.exit_code != 0 (
             fail `process failed`
@@ -258,7 +258,7 @@ int main(void) {
     ) else (
       exec([@bin/png-version]) where {
         executor: class,
-        mounts: { @bin: installed_probe },
+        mounts: %{ @bin => installed_probe },
         observer: (proc, _vfs) => (
           if proc.exit_code != 0 (
             fail `process failed`
@@ -269,17 +269,17 @@ int main(void) {
       }
     );
 
-  Tree {
-    @(artifacts/{tc.os}-{tc.arch}/zlib): zlib_install,
-    @(artifacts/{tc.os}-{tc.arch}/libpng): libpng_install,
-    @(artifacts/{tc.os}-{tc.arch}/probe): installed_probe,
-    @(artifacts/{tc.os}-{tc.arch}/version.txt): version_blob,
+  Tree %{
+    @(artifacts/{tc.os}-{tc.arch}/zlib) => zlib_install,
+    @(artifacts/{tc.os}-{tc.arch}/libpng) => libpng_install,
+    @(artifacts/{tc.os}-{tc.arch}/probe) => installed_probe,
+    @(artifacts/{tc.os}-{tc.arch}/version.txt) => version_blob,
   }
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @orb: build_libpng(workspace, executor_class("ssh:orb")),
-    @toast: build_libpng(workspace, executor_class("ssh:toast")),
+  Tree %{
+    @orb => build_libpng(workspace, executor_class("ssh:orb")),
+    @toast => build_libpng(workspace, executor_class("ssh:toast")),
   }
 }

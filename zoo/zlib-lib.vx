@@ -105,39 +105,39 @@ fn build(workspace: Path, class: ExecutorClass) {
       }
     );
 
-  let headers = Tree {
-    @zlib.h: src.file @zlib.h,
-    @zconf.h: src.file @zconf.h,
+  let headers = Tree %{
+    @zlib.h => src.file @zlib.h,
+    @zconf.h => src.file @zconf.h,
   };
 
   let static_variant = rules.CLibraryVariant {
-    link_tree: Tree {
-      @({static_name}): static_build.file(static_name),
+    link_tree: Tree %{
+      @({static_name}) => static_build.file(static_name),
     },
     link_inputs: [static_name],
-    runtime_tree: Tree {},
+    runtime_tree: Tree %{},
     defines: [],
   };
   let shared_variant =
     if tc.os == "windows" (
       rules.CLibraryVariant {
-        link_tree: Tree {
-          @({shared_link_name}): shared_build.file(shared_link_name),
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_link_name),
         },
         link_inputs: [shared_link_name],
-        runtime_tree: Tree {
-          @({shared_binary_name}): shared_build.file(shared_binary_name),
+        runtime_tree: Tree %{
+          @({shared_binary_name}) => shared_build.file(shared_binary_name),
         },
         defines: ["ZLIB_DLL"],
       }
     ) else (
       rules.CLibraryVariant {
-        link_tree: Tree {
-          @({shared_link_name}): shared_build.file(shared_binary_name),
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_binary_name),
         },
         link_inputs: [shared_link_name],
-        runtime_tree: Tree {
-          @({shared_binary_name}): shared_build.file(shared_binary_name),
+        runtime_tree: Tree %{
+          @({shared_binary_name}) => shared_build.file(shared_binary_name),
         },
         defines: [],
       }

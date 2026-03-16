@@ -12,8 +12,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> T
       if proc.exit_code != 0 (
         fail `process failed`
       ) else (
-        Tree {
-          @cc-version.txt: proc.stdout.collect().blob(),
+        Tree %{
+          @cc-version.txt => proc.stdout.collect().blob(),
         }
       )
     ),

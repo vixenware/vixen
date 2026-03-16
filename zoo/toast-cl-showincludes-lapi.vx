@@ -16,16 +16,16 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
       ]
     ) where {
       executor: class,
-      mounts: { @src: Tree(workspace / @zoo/lua-src) },
+      mounts: %{ @src => Tree(workspace / @zoo/lua-src) },
       writable: [@out],
       observer: (proc, _vfs) => (
-        Tree {
-          @stdout.txt: proc.stdout.collect().blob(),
+        Tree %{
+          @stdout.txt => proc.stdout.collect().blob(),
         }
       ),
     };
 
-  Tree {
-    @stdout.txt: output.file(@stdout.txt),
+  Tree %{
+    @stdout.txt => output.file(@stdout.txt),
   }
 }

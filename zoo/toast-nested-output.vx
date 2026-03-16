@@ -5,8 +5,8 @@ fn toolchain(class: ExecutorClass) {
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   let class = executor_class("ssh:toast");
   let cl = toolchain(class);
-  let source = Tree {
-    @hello.c: Blob(`
+  let source = Tree %{
+    @hello.c => Blob(`
 int main(void) {
   return 0;
 }
@@ -22,7 +22,7 @@ int main(void) {
       "/Foout\\obj\\hello.obj",
     ] where {
       executor: class,
-      mounts: { @src: source },
+      mounts: %{ @src => source },
       writable: [@out],
       create_dirs: [@out/obj],
       observer: (proc, vfs) => (
@@ -34,7 +34,7 @@ int main(void) {
       ),
     };
 
-  Tree {
-    @toast: objects,
+  Tree %{
+    @toast => objects,
   }
 }

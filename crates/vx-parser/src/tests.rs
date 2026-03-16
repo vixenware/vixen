@@ -344,9 +344,9 @@ fn partial_symbol_literals_and_uppercase_where_keys_parse() {
         r#"
 fn demo(exec: Fn(Array[String]) -> Tree) -> Tree (
   let tools = [:cc, :ar];
-  let common = {
-    TARGET: "linux-x86_64",
-    PNG_DEBUG: false,
+  let common = %{
+    TARGET => "linux-x86_64",
+    PNG_DEBUG => false,
   };
   let bound = partial exec where common;
   bound ["cc"]
@@ -479,7 +479,7 @@ fn build(
   name: String,
   path: String
 ) -> String {
-  exec_fn(args, defaults) where { ..defaults, mounts: { @bin/lua: blob } };
+  exec_fn(args, defaults) where { ..defaults, mounts: %{ @bin/lua => blob } };
   blob.utf8();
   stream.next()?;
   items.map($.utf8());
@@ -626,7 +626,7 @@ fn upper_ident_can_take_map_payload_by_juxtaposition() {
     let parse = parse(
         r#"
 fn build(exe: Blob) {
-  Tree { @bin/lua: exe }
+  Tree %{ @bin/lua => exe }
 }
 "#,
     );
@@ -660,7 +660,7 @@ fn record_and_map_literals_have_distinct_ast_nodes() {
         r#"
 fn demo(verifier: Verifier, value: U64) {
   { verifier, observer: make_observer() };
-  { @bin/lua: value, 80: value };
+  %{ @bin/lua => value, 80 => value };
 }
 "#,
     );
@@ -734,7 +734,7 @@ fn build(name: String) {
 fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
-  exec_fn(args)  where  { mounts: { @bin/lua: process.stdout() } };
+  exec_fn(args)  where  { mounts: %{ @bin/lua => process.stdout() } };
   process . stdout().trim()
 }
 "#;
@@ -743,7 +743,7 @@ fn build(process: Process, args: Array[String], defaults: Config) {
     let formatted = crate::format(parsed.tree().syntax());
 
     assert!(formatted.contains("exec_fn(args) where"));
-    assert!(formatted.contains("@bin/lua: process.stdout()"));
+    assert!(formatted.contains("@bin/lua => process.stdout()"));
     assert!(formatted.contains("process.stdout().trim()"));
 }
 
@@ -901,7 +901,7 @@ fn build(flag: Bool) -> U64 {
 fn semantic_tokens_classify_functions_keywords_and_properties() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) -> String {
-  exec(args) where { mounts: { @bin/lua: process.stdout() } }
+  exec(args) where { mounts: %{ @bin/lua => process.stdout() } }
 }
 "#;
 

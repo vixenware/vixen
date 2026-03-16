@@ -9,7 +9,7 @@ fn render_png(class: ExecutorClass, exe) {
   let static_blob =
     exec([@(run/{exe.static.program}), @(out/{static_name})]) where {
       executor: class,
-      mounts: { @run: exe.static.run_tree },
+      mounts: %{ @run => exe.static.run_tree },
       writable: [@out],
       observer: (proc, vfs) => (
         if proc.exit_code != 0 (
@@ -23,7 +23,7 @@ fn render_png(class: ExecutorClass, exe) {
   let shared_blob =
     exec([@(run/{exe.shared.program}), @(out/{shared_name})]) where {
       executor: class,
-      mounts: { @run: exe.shared.run_tree },
+      mounts: %{ @run => exe.shared.run_tree },
       writable: [@out],
       observer: (proc, vfs) => (
         if proc.exit_code != 0 (
@@ -34,9 +34,9 @@ fn render_png(class: ExecutorClass, exe) {
       ),
     };
 
-  Tree {
-    @({static_name}): static_blob,
-    @({shared_name}): shared_blob,
+  Tree %{
+    @({static_name}) => static_blob,
+    @({shared_name}) => shared_blob,
   }
 }
 
@@ -48,9 +48,9 @@ fn build_for(workspace: Path, class: ExecutorClass) {
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @local: build_for(workspace, executor_class("default")),
-    @orb: build_for(workspace, executor_class("ssh:orb")),
-    @toast: build_for(workspace, executor_class("ssh:toast")),
+  Tree %{
+    @local => build_for(workspace, executor_class("default")),
+    @orb => build_for(workspace, executor_class("ssh:orb")),
+    @toast => build_for(workspace, executor_class("ssh:toast")),
   }
 }

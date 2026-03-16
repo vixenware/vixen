@@ -45,7 +45,7 @@ fn engine_with_source_id(source: &str, source_id: &str) -> Engine {
 
 static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe.file(@bin/lua).executable(),\n    @lib/liblua.a: liblua.file(@liblua.a),\n  }\n";
+const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree %{\n    @bin/lua => lua_exe.file(@bin/lua).executable(),\n    @lib/liblua.a => liblua.file(@liblua.a),\n  }\n";
 
 fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
     fn walk_value(value: &Value, prefix: &str, out: &mut Vec<String>) {
@@ -172,13 +172,13 @@ fn string_methods_work() {
     let value = eval(
         r#"
 fn main() {
-  {
-    "starts": "arm64-apple-darwin".starts_with("arm64"),
-    "contains": "x86_64-unknown-linux-gnu".contains("linux"),
-    "split": "a,b,c".split(","),
-    "lines": "a\nb\n".lines(),
-    "trim": "  hi \n".trim(),
-    "lower": "PNG_ARM_NEON".to_lower(),
+  %{
+    "starts" => "arm64-apple-darwin".starts_with("arm64"),
+    "contains" => "x86_64-unknown-linux-gnu".contains("linux"),
+    "split" => "a,b,c".split(","),
+    "lines" => "a\nb\n".lines(),
+    "trim" => "  hi \n".trim(),
+    "lower" => "PNG_ARM_NEON".to_lower(),
   }
 }
 "#,
@@ -1995,7 +1995,7 @@ fn main(
     ..common_cflags,
     ..flags,
   ] where {
-    mounts: { @src: src, @gen: Tree(generated), ..mounts },
+    mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
   }
 }
 "#;
@@ -2499,7 +2499,7 @@ fn observe(proc: Process, tree: Tree) (
 fn build(input: Blob) (
   let common = {
     observer: observe,
-    mounts: { @src/input.txt: input },
+    mounts: %{ @src/input.txt => input },
   };
 
   let cexec = partial exec where common;
@@ -2735,9 +2735,9 @@ fn lowering_keeps_source_ids_for_local_function_provenance() {
 fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
     let parse = vx_parser::parse(indoc! {r#"
         fn main(other: Blob) {
-          Tree({
-            @a.txt: Blob("alpha"),
-            @b.txt: other,
+          Tree(%{
+            @a.txt => Blob("alpha"),
+            @b.txt => other,
           })
         }
     "#});
@@ -2903,7 +2903,7 @@ fn array_spread_forces_pending_trees_shallowly() {
     let value = eval(
         r#"
 fn objects() {
-  Tree { @artifact.o: Blob("x") }
+  Tree %{ @artifact.o => Blob("x") }
 }
 
 fn main() {
@@ -3172,12 +3172,12 @@ fn shipped_functions_preserve_global_calls_and_captures() {
 fn inline_values_round_trip_through_transport() {
     let engine = engine(indoc! {r#"
         fn pack(root: Path) {
-          {
-            "root": root,
-            "tree": Tree({
-              @hello.txt: Blob("hello"),
+          %{
+            "root" => root,
+            "tree" => Tree(%{
+              @hello.txt => Blob("hello"),
             }),
-            "values": [41, 42],
+            "values" => [41, 42],
           }
         }
     "#});
@@ -3501,7 +3501,7 @@ fn array_concat_map_merge_resolves_pending_tree_items() {
     let engine = engine(
         r#"
 fn object(file: Path) {
-  Tree { @(out/{file}.o): Blob("ok") }
+  Tree %{ @(out/{file}.o) => Blob("ok") }
 }
 
 fn main(extra: Array[Path]) {
@@ -3780,21 +3780,21 @@ fn compile_objects(src: Tree, sources: Array[Path]) where {
         ..common_cflags,
         ..flags,
       ] where {
-        mounts: { @src: src, @gen: Tree(generated), ..mounts },
+        mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
       }
     )
     .merge()
 );
 
 fn main(extra: Array[Path]) {
-  let src = Tree {
-    @core1.c: Blob("1"),
-    @core2.c: Blob("2"),
-    @arch1.c: Blob("3"),
+  let src = Tree %{
+    @core1.c => Blob("1"),
+    @core2.c => Blob("2"),
+    @arch1.c => Blob("3"),
   };
 
   compile_objects(src, [@core1.c, @core2.c] ++ extra) where {
-    generated: { @config.h: Blob("generated") },
+    generated: %{ @config.h => Blob("generated") },
     includes: [@gen, @src],
     defines: ["FOO=1"],
   }
@@ -3892,21 +3892,21 @@ fn compile_objects(cc: Tool, src: Tree, sources: Array[Path]) where {
         ..common_cflags,
         ..flags,
       ] where {
-        mounts: { @src: src, @gen: Tree(generated), ..mounts },
+        mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
       }
     )
     .merge()
 );
 
 fn main(extra: Array[Path], cc: Tool) {
-  let src = Tree {
-    @core1.c: Blob("1"),
-    @core2.c: Blob("2"),
-    @arch1.c: Blob("3"),
+  let src = Tree %{
+    @core1.c => Blob("1"),
+    @core2.c => Blob("2"),
+    @arch1.c => Blob("3"),
   };
 
   compile_objects(cc, src, [@core1.c, @core2.c] ++ extra) where {
-    generated: { @config.h: Blob("generated") },
+    generated: %{ @config.h => Blob("generated") },
     includes: [@gen, @src],
     defines: ["FOO=1"],
   }
@@ -4003,7 +4003,7 @@ fn compile_objects(src: Tree, sources: Array[Path]) where {
         ..includes.map((include) => ["-I", include]).flatten(),
         ..common_cflags,
       ] where {
-        mounts: { @src: src },
+        mounts: %{ @src => src },
       }
     )
     .merge()
@@ -4014,10 +4014,10 @@ fn main() {
     exec ["tool", "-dumpmachine"] where {
       observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
     };
-  let src = Tree {
-    @core1.c: Blob("1"),
-    @core2.c: Blob("2"),
-    @arch1.c: Blob("3"),
+  let src = Tree %{
+    @core1.c => Blob("1"),
+    @core2.c => Blob("2"),
+    @arch1.c => Blob("3"),
   };
   let extra =
     match target (
@@ -4688,9 +4688,9 @@ fn render_handlers_receive_template_bindings_and_source_provenance() {
     let source = r#"
 fn render_header() {
   return render(@templates/header.h) where {
-    bindings: {
-      NAME: "libpng",
-      ENABLED: true,
+    bindings: %{
+      "NAME" => "libpng",
+      "ENABLED" => true,
     },
   };
 }
@@ -4832,7 +4832,7 @@ fn render_preserves_obligations_from_discovered_bindings() {
     let source = r#"
 fn render_header(flag: Bool) {
   return render(@templates/header.h) where {
-    bindings: { FLAG: flag },
+    bindings: %{ "FLAG" => flag },
   };
 }
 "#;
@@ -5294,9 +5294,9 @@ fn blob_executable_marks_blob_as_executable() {
 fn tree_of_and_file_only_force_the_selected_entry() {
     let engine = engine(indoc! {r#"
         fn main(other: Blob) {
-          Tree({
-            @a.txt: Blob("alpha"),
-            @b.txt: other,
+          Tree(%{
+            @a.txt => Blob("alpha"),
+            @b.txt => other,
           }).file("a.txt").utf8()
         }
     "#});
@@ -5312,9 +5312,9 @@ fn tree_subtree_selects_nested_directories() {
     let value = eval(
         indoc! {r#"
             fn main() {
-              Tree({
-                @include: Tree({
-                  @lua.h: Blob("header"),
+              Tree(%{
+                @include => Tree(%{
+                  @lua.h => Blob("header"),
                 }),
               }).subtree("include").file("lua.h").utf8()
             }
@@ -5331,17 +5331,17 @@ fn tree_merge_combines_directories_recursively() {
     let value = eval(
         indoc! {r#"
             fn main() {
-              let base = Tree({
-                @include: Tree({
-                  @lua.h: Blob("lua header"),
+              let base = Tree(%{
+                @include => Tree(%{
+                  @lua.h => Blob("lua header"),
                 }),
-                @liblua.a: Blob("old archive"),
+                @liblua.a => Blob("old archive"),
               });
-              let overlay = Tree({
-                @include: Tree({
-                  @lauxlib.h: Blob("aux header"),
+              let overlay = Tree(%{
+                @include => Tree(%{
+                  @lauxlib.h => Blob("aux header"),
                 }),
-                @liblua.a: Blob("new archive"),
+                @liblua.a => Blob("new archive"),
               });
               let merged = base.merge(overlay);
               merged.file("include/lua.h").utf8()
@@ -5403,8 +5403,8 @@ fn tree_from_path_creates_a_lazy_fs_backed_tree() {
 fn call_entry_passes_workspace_as_a_path() {
     let engine = engine(
         r#"fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-               Tree {
-                 @workspace.txt: Blob @({workspace}/src/main.rs),
+               Tree %{
+                 @workspace.txt => Blob @({workspace}/src/main.rs),
                }
              }"#,
     );
@@ -5435,15 +5435,15 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
 
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               Tree {
-                 @stdout.txt: process.stdout.collect().blob(),
-                 @output.txt: tree.file("out/output.txt"),
+               Tree %{
+                 @stdout.txt => process.stdout.collect().blob(),
+                 @output.txt => tree.file("out/output.txt"),
                }
              }
 
              fn build(workspace: Path) {
                exec ["/bin/sh", "-c", "mkdir -p out && cat src/input.txt > out/output.txt; printf done"] where {
-                 mounts: { "src": Tree(workspace) },
+                 mounts: %{ "src" => Tree(workspace) },
                  observer: observe,
                }
              }"#,
@@ -5521,9 +5521,9 @@ fn observer_functions_can_return_tree_results_for_exec() {
 
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               Tree {
-                 @stdout.txt: process.stdout.collect().blob(),
-                 @output.txt: tree.file("out/output.txt"),
+               Tree %{
+                 @stdout.txt => process.stdout.collect().blob(),
+                 @output.txt => tree.file("out/output.txt"),
                }
              }"#,
     );
@@ -5622,7 +5622,7 @@ fn exec_rejects_raw_path_mount_values() {
 
              fn build(workspace: Path) {
                exec ["/bin/true"] where {
-                 mounts: { @src: workspace },
+                 mounts: %{ @src => workspace },
                  observer: observe,
                }
              }"#,
@@ -6221,8 +6221,8 @@ fn exec_can_be_routed_through_a_host_handler() {
 
              fn build(workspace: Path) {
                exec ["/bin/cp", "src/input.txt", "out/output.txt"] where {
-                 env: { "INPUT": "src/input.txt" },
-                 mounts: { "src": Tree(workspace) },
+                 env: %{ "INPUT" => "src/input.txt" },
+                 mounts: %{ "src" => Tree(workspace) },
                  observer: observe,
                }
              }"#,
@@ -6285,7 +6285,7 @@ fn exec_captures_explicit_create_dirs() {
 
             fn build() {
               exec(["cl.exe", "/nologo", "/c", @src/hello.c, "/Foout\\obj\\hello.obj"]) where {
-                mounts: { @src/hello.c: Blob("int main(void) { return 0; }\n") },
+                mounts: %{ @src/hello.c => Blob("int main(void) { return 0; }\n") },
                 writable: [@out],
                 create_dirs: [@out/obj],
                 observer: observe,
@@ -6319,9 +6319,9 @@ fn exec_infers_writable_roots_only_for_unmounted_paths() {
             }
 
             fn build() {
-              let objs = Tree {
-                @obj: Tree {
-                  @a.o: Blob("object"),
+              let objs = Tree %{
+                @obj => Tree %{
+                  @a.o => Blob("object"),
                 },
               };
 

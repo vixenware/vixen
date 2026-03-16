@@ -70,7 +70,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
         `/Foout\\obj\\${file}.obj`,
         @(src/{file}),
       ] where {
-        mounts: { @src: src_tree },
+        mounts: %{ @src => src_tree },
         writable: [@out],
     }
   );
@@ -92,13 +92,13 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
   let lua_obj = compile(@lua.c);
   let lua_exe = link(lua_obj, liblua);
 
-  let installed_bin = Tree { @lua.exe: lua_exe.file(@lua.exe).executable() };
-  let installed_lib = Tree { @liblua.lib: liblua.file(@liblua.lib) };
+  let installed_bin = Tree %{ @lua.exe => lua_exe.file(@lua.exe).executable() };
+  let installed_lib = Tree %{ @liblua.lib => liblua.file(@liblua.lib) };
 
   let version_blob =
     exec([@bin/lua.exe, "-e", "print(_VERSION)"]) where {
       executor: class,
-      mounts: { @bin: installed_bin },
+      mounts: %{ @bin => installed_bin },
       observer: (proc, _vfs) => (
         if proc.exit_code != 0 (
           fail `process failed`
@@ -108,10 +108,10 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
       ),
     };
 
-  Tree {
-    @(artifacts/{tc.os}-{tc.arch}/bin): installed_bin,
-    @(artifacts/{tc.os}-{tc.arch}/lib): installed_lib,
-    @(artifacts/{tc.os}-{tc.arch}/version.txt): version_blob,
+  Tree %{
+    @(artifacts/{tc.os}-{tc.arch}/bin) => installed_bin,
+    @(artifacts/{tc.os}-{tc.arch}/lib) => installed_lib,
+    @(artifacts/{tc.os}-{tc.arch}/version.txt) => version_blob,
   }
 }
 

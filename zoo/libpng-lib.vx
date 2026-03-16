@@ -45,15 +45,15 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
     );
   let static_objects =
     rules.compile_objects(class, tc, src, libpng_core_sources) where {
-      generated: { @pnglibconf.h: pnglibconf_h },
-      mounts: { @deps/zlib: zlib.headers },
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib.headers },
       includes: [@gen, @src, @deps/zlib],
       defines: [..common_defines, ..zlib.static.defines],
     };
   let shared_objects =
     rules.compile_objects(class, tc, src, libpng_core_sources) where {
-      generated: { @pnglibconf.h: pnglibconf_h },
-      mounts: { @deps/zlib: zlib.headers },
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib.headers },
       includes: [@gen, @src, @deps/zlib],
       defines: [..common_defines, ..shared_build_defines],
     };
@@ -83,7 +83,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         "/link",
         `/IMPLIB:out\\${shared_link_name}`,
       ] where {
-        mounts: { @deps/zlib-link: zlib.shared.link_tree },
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
         writable: [@out],
       }
     ) else if tc.os == "darwin" (
@@ -96,7 +96,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         ..shared_objects,
         ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
-        mounts: { @deps/zlib-link: zlib.shared.link_tree },
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
         writable: [@out],
       }
     ) else (
@@ -109,35 +109,35 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         ..shared_objects,
         ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
-        mounts: { @deps/zlib-link: zlib.shared.link_tree },
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
         writable: [@out],
       }
     );
 
-  let headers = Tree {
-    @png.h: src.file @png.h,
-    @pngconf.h: src.file @pngconf.h,
-    @pnglibconf.h: pnglibconf_h,
+  let headers = Tree %{
+    @png.h => src.file @png.h,
+    @pngconf.h => src.file @pngconf.h,
+    @pnglibconf.h => pnglibconf_h,
   };
 
   let static_variant = rules.CLibraryVariant {
-    link_tree: Tree {
-      @({static_name}): static_build.file(static_name),
+    link_tree: Tree %{
+      @({static_name}) => static_build.file(static_name),
     },
     link_inputs: [static_name],
-    runtime_tree: Tree {},
+    runtime_tree: Tree %{},
     defines: [],
   };
   let shared_variant =
     if tc.os == "windows" (
       rules.CLibraryVariant {
-        link_tree: Tree {
-          @({shared_link_name}): shared_build.file(shared_link_name),
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_link_name),
         },
         link_inputs: [shared_link_name],
         runtime_tree: [
-          Tree {
-            @({shared_binary_name}): shared_build.file(shared_binary_name),
+          Tree %{
+            @({shared_binary_name}) => shared_build.file(shared_binary_name),
           },
           zlib.shared.runtime_tree,
         ].merge(),
@@ -145,13 +145,13 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
       }
     ) else (
       rules.CLibraryVariant {
-        link_tree: Tree {
-          @({shared_link_name}): shared_build.file(shared_binary_name),
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_binary_name),
         },
         link_inputs: [shared_link_name],
         runtime_tree: [
-          Tree {
-            @({shared_binary_name}): shared_build.file(shared_binary_name),
+          Tree %{
+            @({shared_binary_name}) => shared_build.file(shared_binary_name),
           },
           zlib.shared.runtime_tree,
         ].merge(),

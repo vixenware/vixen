@@ -3,8 +3,8 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   let cl =
     discover(class, (host) => host.which("cl.exe"));
 
-  let source = Tree {
-    @lua.c: Blob(`
+  let source = Tree %{
+    @lua.c => Blob(`
 /*
 ** $Id: lua.c $
 ** Lua stand-alone interpreter
@@ -20,7 +20,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 #include <stdlib.h>
 #include <string.h>
 `),
-    @lprefix.h: Blob(`
+    @lprefix.h => Blob(`
 /*
 ** $Id: lprefix.h $
 ** Definitions for Lua code that must come before any other header file
@@ -81,8 +81,8 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
     ]
   ) where {
     executor: class,
-    mounts: {
-      @src: source,
+    mounts: %{
+      @src => source,
     },
     writable: [@out],
     observer: (_proc, _vfs) => (

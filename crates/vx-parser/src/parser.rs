@@ -1303,6 +1303,7 @@ fn application_arg_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
         SyntaxKind::COLON if p.nth(1) == SyntaxKind::LOWER_IDENT => symbol_literal_expr(p),
+        SyntaxKind::PERCENT_L_CURLY => map_expr(p),
         SyntaxKind::L_CURLY if looks_like_brace_literal(p) => brace_literal_expr(p),
         SyntaxKind::L_CURLY => block_expr(p),
         SyntaxKind::L_PAREN if looks_like_closure(p) => closure_expr(p), // r[expr.closure]
@@ -1354,15 +1355,8 @@ fn upper_expr(p: &mut Parser<'_>) -> CompletedMarker {
         p.bump();
     }
     if p.at(SyntaxKind::L_CURLY) {
-        if looks_like_struct_literal_body(p) {
-            struct_literal_body(p);
-            marker.complete(p, SyntaxKind::STRUCT_LITERAL_EXPR)
-        } else {
-            let callee = marker.complete(p, SyntaxKind::NAME_REF_EXPR);
-            let call = callee.precede(p);
-            brace_literal_expr(p);
-            call.complete(p, SyntaxKind::CALL_EXPR)
-        }
+        struct_literal_body(p);
+        marker.complete(p, SyntaxKind::STRUCT_LITERAL_EXPR)
     } else {
         marker.complete(p, SyntaxKind::NAME_REF_EXPR)
     }
@@ -1467,7 +1461,6 @@ fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn brace_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_CURLY);
-    let mut is_record = true;
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
         let entry = p.start();
         if p.at(SyntaxKind::DOT2) {
@@ -1479,25 +1472,35 @@ fn brace_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
             } else {
                 p.error("expected shorthand field name");
             }
-        } else if p.at(SyntaxKind::LOWER_IDENT)
-            && matches!(
-                p.nth(1),
-                SyntaxKind::COLON | SyntaxKind::COMMA | SyntaxKind::R_CURLY
-            )
-        {
+        } else if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
             if p.eat(SyntaxKind::COLON) {
                 expr(p);
             }
-        } else if p.at(SyntaxKind::UPPER_IDENT) && p.nth(1) == SyntaxKind::COLON {
-            is_record = false;
-            p.bump();
-            p.expect(SyntaxKind::COLON);
-            expr(p);
         } else {
-            is_record = false;
+            p.error("expected record field name");
+            p.bump();
+        }
+        entry.complete(p, SyntaxKind::MAP_ENTRY);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    marker.complete(p, SyntaxKind::RECORD_EXPR)
+}
+
+// r[expr.map]
+fn map_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::PERCENT_L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        let entry = p.start();
+        if p.at(SyntaxKind::DOT2) {
+            spread_expr(p);
+        } else {
             expr(p);
-            p.expect(SyntaxKind::COLON);
+            p.expect(SyntaxKind::FAT_ARROW);
             expr(p);
         }
         entry.complete(p, SyntaxKind::MAP_ENTRY);
@@ -1506,14 +1509,7 @@ fn brace_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     p.expect(SyntaxKind::R_CURLY);
-    marker.complete(
-        p,
-        if is_record {
-            SyntaxKind::RECORD_EXPR
-        } else {
-            SyntaxKind::MAP_EXPR
-        },
-    )
+    marker.complete(p, SyntaxKind::MAP_EXPR)
 }
 
 fn spread_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -1537,14 +1533,14 @@ fn struct_literal_body(p: &mut Parser<'_>) {
             } else {
                 p.error("expected shorthand field name");
             }
-        } else {
-            if p.at(SyntaxKind::LOWER_IDENT) {
-                p.bump();
-            } else {
-                p.error("expected struct field name");
+        } else if p.at(SyntaxKind::LOWER_IDENT) {
+            p.bump();
+            if p.eat(SyntaxKind::COLON) {
+                expr(p);
             }
-            p.expect(SyntaxKind::COLON);
-            expr(p);
+        } else {
+            p.error("expected struct field name");
+            p.bump();
         }
         field.complete(p, SyntaxKind::STRUCT_LITERAL_FIELD);
         if !p.eat(SyntaxKind::COMMA) {
@@ -1888,7 +1884,10 @@ fn looks_like_brace_literal(p: &Parser<'_>) -> bool {
 
     loop {
         match p.nth(offset) {
-            SyntaxKind::L_CURLY | SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET => {
+            SyntaxKind::L_CURLY
+            | SyntaxKind::PERCENT_L_CURLY
+            | SyntaxKind::L_PAREN
+            | SyntaxKind::L_BRACKET => {
                 depth += 1;
             }
             SyntaxKind::R_CURLY | SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET => {
@@ -1936,54 +1935,6 @@ fn looks_like_brace_literal(p: &Parser<'_>) -> bool {
     !saw_any || only_bare_labels
 }
 
-fn looks_like_struct_literal_body(p: &Parser<'_>) -> bool {
-    if !p.at(SyntaxKind::L_CURLY) {
-        return false;
-    }
-
-    let mut depth = 0usize;
-    let mut offset = 0usize;
-    let mut expecting_entry_start = false;
-
-    loop {
-        match p.nth(offset) {
-            SyntaxKind::L_CURLY | SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET => {
-                depth += 1;
-                if depth == 1 {
-                    expecting_entry_start = true;
-                }
-            }
-            SyntaxKind::R_CURLY | SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return true;
-                }
-            }
-            SyntaxKind::EOF => return false,
-            SyntaxKind::COMMA if depth == 1 => expecting_entry_start = true,
-            SyntaxKind::DOT2 if depth == 1 && expecting_entry_start => {
-                expecting_entry_start = false;
-            }
-            SyntaxKind::COLON if depth == 1 && expecting_entry_start => {
-                if p.nth(offset + 1) != SyntaxKind::LOWER_IDENT {
-                    return false;
-                }
-                expecting_entry_start = false;
-            }
-            SyntaxKind::LOWER_IDENT if depth == 1 && expecting_entry_start => {
-                if p.nth(offset + 1) != SyntaxKind::COLON {
-                    return false;
-                }
-                expecting_entry_start = false;
-            }
-            _ if depth == 1 && expecting_entry_start => return false,
-            _ => {}
-        }
-
-        offset += 1;
-    }
-}
-
 fn looks_like_paren_block_body(p: &Parser<'_>) -> bool {
     if !p.at(SyntaxKind::L_PAREN) {
         return false;
@@ -1993,7 +1944,10 @@ fn looks_like_paren_block_body(p: &Parser<'_>) -> bool {
     let mut offset = 0usize;
     loop {
         match p.nth(offset) {
-            SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET | SyntaxKind::L_CURLY => {
+            SyntaxKind::L_PAREN
+            | SyntaxKind::L_BRACKET
+            | SyntaxKind::L_CURLY
+            | SyntaxKind::PERCENT_L_CURLY => {
                 depth += 1;
             }
             SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET | SyntaxKind::R_CURLY => {
@@ -2040,6 +1994,7 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::L_PAREN
             | SyntaxKind::L_BRACKET
             | SyntaxKind::L_CURLY
+            | SyntaxKind::PERCENT_L_CURLY
             | SyntaxKind::AT
             | SyntaxKind::BACKTICK
             | SyntaxKind::INT
@@ -2057,6 +2012,7 @@ fn starts_application_arg(p: &Parser<'_>) -> bool {
         || (kind == SyntaxKind::L_CURLY
             && !p.disallow_block_application
             && p.has_significant_gap_before_current())
+        || (kind == SyntaxKind::PERCENT_L_CURLY && p.has_significant_gap_before_current())
 }
 
 fn starts_tight_type_arg_call(p: &Parser<'_>) -> bool {

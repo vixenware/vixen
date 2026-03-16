@@ -61,9 +61,9 @@ fn exec[T](
   args: Array[ExecInput]
 ) where {
   /// Additional environment variables for the sandboxed process.
-  env: Map[String, ExecInput] = {},
+  env: Map[String, ExecInput] = %{},
   /// Explicit VFS mounts, in addition to implicit mounts from args/env.
-  mounts: Map[Path, TreeEntry] = {},
+  mounts: Map[Path, TreeEntry] = %{},
   /// Executor class on which to run the process.
   executor: ExecutorClass = executor_class("default"),
   /// Executor-side observer evaluated with sandbox authority.

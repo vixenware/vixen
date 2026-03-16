@@ -3,15 +3,15 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   let cl =
     discover(class, (host) => host.which("cl.exe"));
 
-  let src = Tree {
-    @main.c: Blob(`
+  let src = Tree %{
+    @main.c => Blob(`
 #include "header.h"
 
 int answer(void) {
   return HEADER_VALUE;
 }
 `),
-    @header.h: Blob(`
+    @header.h => Blob(`
 #define HEADER_VALUE 42
 `),
   };
@@ -29,18 +29,18 @@ int answer(void) {
       ]
     ) where {
       executor: class,
-      mounts: { @src: src },
+      mounts: %{ @src => src },
       writable: [@out],
       observer: (proc, vfs) => (
-        Tree {
-          @stdout.txt: proc.stdout.collect().blob(),
-          @artifacts: vfs.subtree(@out),
+        Tree %{
+          @stdout.txt => proc.stdout.collect().blob(),
+          @artifacts => vfs.subtree(@out),
         }
       ),
     };
 
-  Tree {
-    @stdout.txt: output.file(@stdout.txt),
-    @artifacts: output.subtree(@artifacts),
+  Tree %{
+    @stdout.txt => output.file(@stdout.txt),
+    @artifacts => output.subtree(@artifacts),
   }
 }

@@ -1035,11 +1035,7 @@ impl MapEntry {
             .children_with_tokens()
             .filter_map(|child| child.into_token())
             .find(|token| !token.kind().is_trivia())?;
-        matches!(
-            token.kind(),
-            SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT
-        )
-        .then_some(token)
+        matches!(token.kind(), SyntaxKind::LOWER_IDENT).then_some(token)
     }
 
     pub fn spread(&self) -> Option<SpreadExpr> {

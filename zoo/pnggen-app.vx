@@ -1,7 +1,7 @@
 let rules = import("./c-rules");
 
-let pnggen_source = Tree {
-  @pnggen.c: Blob(`
+let pnggen_source = Tree %{
+  @pnggen.c => Blob(`
 #include <png.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -107,12 +107,12 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         ..libpng.static.link_inputs.map((path) => @(deps/libpng-link/{path})),
         ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
-        mounts: {
-          @src: pnggen_source,
-          @deps/libpng: libpng.headers,
-          @deps/zlib: zlib.headers,
-          @deps/libpng-link: libpng.static.link_tree,
-          @deps/zlib-link: zlib.static.link_tree,
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.static.link_tree,
+          @deps/zlib-link => zlib.static.link_tree,
         },
         writable: [@out],
       }
@@ -128,12 +128,12 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
         "-lm",
       ] where {
-        mounts: {
-          @src: pnggen_source,
-          @deps/libpng: libpng.headers,
-          @deps/zlib: zlib.headers,
-          @deps/libpng-link: libpng.static.link_tree,
-          @deps/zlib-link: zlib.static.link_tree,
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.static.link_tree,
+          @deps/zlib-link => zlib.static.link_tree,
         },
         writable: [@out],
       }
@@ -152,11 +152,11 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         ..zlib.shared.defines.map((define) => `/D${define}`),
         ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
       ] where {
-        mounts: {
-          @src: pnggen_source,
-          @deps/libpng: libpng.headers,
-          @deps/zlib: zlib.headers,
-          @deps/libpng-link: libpng.shared.link_tree,
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
         },
         writable: [@out],
       }
@@ -172,11 +172,11 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         "-Wl,-rpath,@loader_path",
         "-lm",
       ] where {
-        mounts: {
-          @src: pnggen_source,
-          @deps/libpng: libpng.headers,
-          @deps/zlib: zlib.headers,
-          @deps/libpng-link: libpng.shared.link_tree,
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
         },
         writable: [@out],
       }
@@ -192,11 +192,11 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
         "-Wl,-rpath,$ORIGIN",
         "-lm",
       ] where {
-        mounts: {
-          @src: pnggen_source,
-          @deps/libpng: libpng.headers,
-          @deps/zlib: zlib.headers,
-          @deps/libpng-link: libpng.shared.link_tree,
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
         },
         writable: [@out],
       }
@@ -205,15 +205,15 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
   rules.CExecutable {
     static: rules.CExecutableVariant {
       program: static_program_name,
-      run_tree: Tree {
-        @({static_program_name}): static_build.file(static_program_name).executable(),
+      run_tree: Tree %{
+        @({static_program_name}) => static_build.file(static_program_name).executable(),
       },
     },
     shared: rules.CExecutableVariant {
       program: shared_program_name,
       run_tree: [
-        Tree {
-          @({shared_program_name}): shared_build.file(shared_program_name).executable(),
+        Tree %{
+          @({shared_program_name}) => shared_build.file(shared_program_name).executable(),
         },
         libpng.shared.runtime_tree,
       ].merge(),

@@ -13,11 +13,11 @@ type CargoDependencySpec = String | CargoDependency
 #[rename_all = "kebab-case"]
 struct CargoManifest {
   package: CargoPackage,
-  dependencies: Map[String, CargoDependencySpec] = {},
-  dev_dependencies: Map[String, CargoDependencySpec] = {},
-  build_dependencies: Map[String, CargoDependencySpec] = {},
-  features: Map[String, Array[String]] = {},
-  target: Map[String, CargoTargetTable] = {},
+  dependencies: Map[String, CargoDependencySpec] = %{},
+  dev_dependencies: Map[String, CargoDependencySpec] = %{},
+  build_dependencies: Map[String, CargoDependencySpec] = %{},
+  features: Map[String, Array[String]] = %{},
+  target: Map[String, CargoTargetTable] = %{},
 }
 
 struct CargoPackage {
@@ -39,9 +39,9 @@ struct CargoDependency {
 
 #[rename_all = "kebab-case"]
 struct CargoTargetTable {
-  dependencies: Map[String, CargoDependencySpec] = {},
-  dev_dependencies: Map[String, CargoDependencySpec] = {},
-  build_dependencies: Map[String, CargoDependencySpec] = {},
+  dependencies: Map[String, CargoDependencySpec] = %{},
+  dev_dependencies: Map[String, CargoDependencySpec] = %{},
+  build_dependencies: Map[String, CargoDependencySpec] = %{},
 }
 
 struct CargoLock {
@@ -172,7 +172,7 @@ struct IndexEntry {
   name: String,
   vers: String,
   cksum: String,
-  features: Map[String, Array[String]] = {},
+  features: Map[String, Array[String]] = %{},
   yanked: Bool = false,
   deps: Array[IndexDependency] = [],
 }
@@ -799,8 +799,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   // Next layer, not modeled here:
   // - parse vendored Cargo.toml files
   // - compile the resolved crate graph by demanding root packages
-  Tree {
-    @vendor: vendor,
-    @Cargo.lock: lock_blob,
+  Tree %{
+    @vendor => vendor,
+    @Cargo.lock => lock_blob,
   }
 )
