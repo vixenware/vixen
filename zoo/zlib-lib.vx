@@ -1,4 +1,4 @@
-let rules = import "./c-rules";
+let rules = import("./c-rules");
 
 let zlib_sources = [
   @adler32.c, @compress.c, @crc32.c, @deflate.c,
@@ -115,6 +115,7 @@ fn build(workspace: Path, class: ExecutorClass) {
       @(static_name): static_build.file(static_name),
     },
     runtime_tree: Tree {},
+    defines: [],
   };
   let shared_variant =
     if tc.os == "windows" (
@@ -135,6 +136,7 @@ fn build(workspace: Path, class: ExecutorClass) {
         runtime_tree: Tree {
           @(shared_binary_name): shared_build.file(shared_binary_name),
         },
+        defines: [],
       }
     );
 

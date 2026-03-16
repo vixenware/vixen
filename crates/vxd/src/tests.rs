@@ -488,10 +488,13 @@ fn test_sanitize_id_component_replaces_non_identifier_chars() {
 #[test]
 fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
     let empty_module = vx_eval::TransportModule {
+        source_id: "/workspace/build.vx".to_string(),
         functions: Vec::new(),
         top_level: TransportBlock { stmts: Vec::new() },
+        loaded_modules: Vec::new(),
     };
     let empty_function = ShippedFunction {
+        module_id: "/workspace/build.vx".to_string(),
         code_identity: "observer".to_string(),
         def: TransportFnDef {
             name: "observer".to_string(),
@@ -565,10 +568,13 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
 #[test]
 fn build_vx_discover_summary_includes_executor_class() {
     let empty_module = vx_eval::TransportModule {
+        source_id: "/workspace/build.vx".to_string(),
         functions: Vec::new(),
         top_level: TransportBlock { stmts: Vec::new() },
+        loaded_modules: Vec::new(),
     };
     let probe = ShippedFunction {
+        module_id: "/workspace/build.vx".to_string(),
         code_identity: "probe".to_string(),
         def: TransportFnDef {
             name: "probe".to_string(),

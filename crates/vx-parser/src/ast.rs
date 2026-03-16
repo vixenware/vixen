@@ -141,6 +141,7 @@ ast_node!(NameRefExpr, SyntaxKind::NAME_REF_EXPR);
 ast_node!(LiteralExpr, SyntaxKind::LITERAL_EXPR);
 ast_node!(InterpolatedStringExpr, SyntaxKind::INTERPOLATED_STRING_EXPR);
 ast_node!(PathLiteralExpr, SyntaxKind::PATH_LITERAL_EXPR);
+ast_node!(ImportExpr, SyntaxKind::IMPORT_EXPR);
 ast_node!(StringInterpolation, SyntaxKind::STRING_INTERPOLATION);
 ast_node!(LetStmt, SyntaxKind::LET_STMT);
 ast_node!(AssignStmt, SyntaxKind::ASSIGN_STMT);
@@ -240,6 +241,7 @@ pub enum Expr {
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
     PathLiteral(PathLiteralExpr),
+    Import(ImportExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -397,6 +399,7 @@ impl AstNode for Expr {
                 | SyntaxKind::LITERAL_EXPR
                 | SyntaxKind::INTERPOLATED_STRING_EXPR
                 | SyntaxKind::PATH_LITERAL_EXPR
+                | SyntaxKind::IMPORT_EXPR
         )
     }
 
@@ -433,6 +436,7 @@ impl AstNode for Expr {
                 InterpolatedStringExpr::cast(node)?,
             )),
             SyntaxKind::PATH_LITERAL_EXPR => Some(Self::PathLiteral(PathLiteralExpr::cast(node)?)),
+            SyntaxKind::IMPORT_EXPR => Some(Self::Import(ImportExpr::cast(node)?)),
             _ => None,
         }
     }
@@ -466,6 +470,7 @@ impl AstNode for Expr {
             Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
             Self::PathLiteral(node) => node.syntax(),
+            Self::Import(node) => node.syntax(),
         }
     }
 }
@@ -1220,6 +1225,18 @@ impl PathLiteralExpr {
 
     pub fn interpolated(&self) -> Option<InterpolatedStringExpr> {
         child(self.syntax())
+    }
+}
+
+impl ImportExpr {
+    pub fn path(&self) -> Option<String> {
+        let token = self
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .find(|token| token.kind() == SyntaxKind::STRING)?;
+        let text = token.text();
+        Some(text[1..text.len() - 1].to_string())
     }
 }
 

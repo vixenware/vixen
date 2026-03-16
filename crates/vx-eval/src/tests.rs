@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
-use crate::exec::{AcquireRequest, ExecArgValue, RenderRequest, StabilizeRequest};
+use crate::exec::{AcquireRequest, ExecArgValue, ImportRequest, RenderRequest, StabilizeRequest};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
@@ -1535,7 +1535,6 @@ fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
     .unwrap();
     fs::write(libpng_src_dir.join("libpng.vers"), "{ global: *; };\n").unwrap();
 
-    let acquire_calls = Arc::new(Mutex::new(0usize));
     let zlib_root = NodeHash(Blake3Hash::from_bytes(b"mock-zlib-root"));
     let libpng_root = NodeHash(Blake3Hash::from_bytes(b"mock-libpng-root"));
     let engine = engine(&source)
@@ -1552,18 +1551,14 @@ fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
                 other => panic!("unexpected hydration request: {other:?}"),
             }
         }))
-        .with_acquire_handler(Arc::new({
-            let acquire_calls = Arc::clone(&acquire_calls);
-            move |_request| {
-                let mut calls = acquire_calls.lock().unwrap();
-                let value = match *calls {
-                    0 => Value::Tree(TreeValue::Store(zlib_root)),
-                    1 => Value::Tree(TreeValue::Store(libpng_root)),
-                    other => panic!("unexpected acquire call #{other}"),
-                };
-                *calls += 1;
-                Ok(value)
+        .with_acquire_handler(Arc::new(move |request| match request.url.as_ref() {
+            "https://zlib.net/fossils/zlib-1.3.1.tar.gz" => {
+                Ok(Value::Tree(TreeValue::Store(zlib_root)))
             }
+            "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz" => {
+                Ok(Value::Tree(TreeValue::Store(libpng_root)))
+            }
+            other => panic!("unexpected acquire url: {other}"),
         }))
         .with_render_handler(Arc::new(|_request| {
             Ok(Value::Blob(BlobValue::from_string("generated header")))
@@ -2606,6 +2601,75 @@ fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
 }
 
 #[test]
+fn lowering_keeps_import_expressions_in_function_bodies() {
+    let parse = vx_parser::parse(indoc! {r#"
+        fn main() {
+          import("./c-rules")
+        }
+    "#});
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    match body.statements().next().expect("import statement") {
+        vx_parser::Stmt::Expr(vx_parser::Expr::Import(_)) => {}
+        stmt => panic!("expected parsed import expr, got {stmt:?}"),
+    }
+
+    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx");
+    let body = &module.functions[0].body;
+    match body.stmts.as_slice() {
+        [crate::instr::Stmt::Expr(crate::instr::Expr::Import { path, provenance })] => {
+            assert_eq!(path, "./c-rules");
+            let provenance = provenance.as_ref().expect("import provenance");
+            assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+        }
+        other => panic!("unexpected lowered body: {other:?}"),
+    }
+}
+
+#[test]
+fn import_handler_returns_module_namespace_values() {
+    let captured = Arc::new(Mutex::new(None::<ImportRequest>));
+    let sink = Arc::clone(&captured);
+    let imported: crate::instr::Module = engine_with_source_id(
+        indoc! {r#"
+            let answer = 42;
+        "#},
+        "/workspace/c-rules.vx",
+    )
+    .transport_module()
+    .into();
+    let engine = engine_with_source_id(
+        indoc! {r#"
+            fn build() {
+              let rules = import("./c-rules");
+              rules.answer
+            }
+        "#},
+        "/workspace/build.vx",
+    )
+    .with_import_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(imported.clone())
+    }));
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::U64(42));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("import request should be captured");
+    assert_eq!(request.path, "./c-rules");
+    assert_eq!(request.from_source_id, "/workspace/build.vx");
+}
+
+#[test]
 fn lowering_keeps_call_provenance_with_source_spans() {
     let source = indoc! {r#"
         fn main(tree: Tree) {
@@ -2887,6 +2951,17 @@ fn if_with_condition() {
 fn function_call() {
     let val = eval(
         "fn double(x: U64) { x + x }
+         fn main() { double(21) }",
+        "main",
+    )
+    .unwrap();
+    assert_eq!(val, Value::U64(42));
+}
+
+#[test]
+fn function_parameters_can_omit_type_annotations() {
+    let val = eval(
+        "fn double(x) { x + x }
          fn main() { double(21) }",
         "main",
     )
@@ -3245,6 +3320,7 @@ fn collect_pending_walks_nested_runtime_values() {
         Value::Partial(Arc::new(PartialValue {
             function: Value::Pending(NodeId(5)),
             args: Arc::from([Value::Function(FunctionValue {
+                module_id: Arc::from("/tests/capture.vx"),
                 def: Arc::new(FnDef {
                     name: "capture".into(),
                     params: vec![],
@@ -3295,6 +3371,7 @@ fn node_job_pending_deps_cover_templates_calls_and_invokes() {
 
     let invoke = NodeJob::Invoke {
         function: FunctionValue {
+            module_id: Arc::from("/tests/invoke.vx"),
             def: Arc::new(FnDef {
                 name: "invoke".into(),
                 params: vec![],
@@ -3319,6 +3396,7 @@ fn node_job_if_only_depends_on_the_condition() {
             "ignored".into(),
             Value::Pending(NodeId(18)),
         )])),
+        scope_module_id: Arc::from("/tests/if.vx"),
         scope_identity: Arc::from("<test>"),
     };
 

@@ -622,8 +622,8 @@ fn parameter_clause(p: &mut Parser<'_>) {
             binding_pattern(p);
             if p.eat(SyntaxKind::COLON) {
                 slot_type(p);
-            } else if !shorthand_self {
-                p.error("expected COLON");
+            } else if shorthand_self {
+                // Allow namespace methods to omit the explicit `self: Type`.
             }
             param.complete(p, SyntaxKind::PARAMETER);
             if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::SEMICOLON) || p.at(SyntaxKind::R_PAREN)

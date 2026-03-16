@@ -67,6 +67,7 @@ pub enum NodeJob {
         then_branch: instr::Block,
         else_branch: instr::Block,
         bindings: Arc<HashMap<String, Value>>,
+        scope_module_id: Arc<str>,
         scope_identity: Arc<str>,
     },
     Fallible {
@@ -89,6 +90,7 @@ pub enum NodeJob {
     Field {
         receiver: Value,
         field: Arc<str>,
+        scope_module_id: Arc<str>,
     },
     Fail {
         message: Value,

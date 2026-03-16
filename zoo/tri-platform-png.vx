@@ -1,6 +1,6 @@
-let zlib = import "./zlib-lib";
-let libpng = import "./libpng-lib";
-let pnggen = import "./pnggen-app";
+let zlib = import("./zlib-lib");
+let libpng = import("./libpng-lib");
+let pnggen = import("./pnggen-app");
 
 fn render_png(class: ExecutorClass, exe) {
   let static_name = @static.png;

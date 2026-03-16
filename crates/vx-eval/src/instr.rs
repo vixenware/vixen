@@ -34,6 +34,7 @@ pub struct SourceProvenance {
 /// A lowered module — all top-level declarations from a source file.
 #[derive(Debug, Clone)]
 pub struct Module {
+    pub source_id: Arc<str>,
     pub functions: Vec<Arc<FnDef>>,
     pub top_level: Block,
 }
@@ -141,6 +142,11 @@ pub enum Expr {
     /// Path literal, possibly interpolated
     PathTemplate {
         parts: Vec<TemplatePart>,
+        provenance: Option<SourceProvenance>,
+    },
+    /// Module import expression: `import("./path")`
+    Import {
+        path: String,
         provenance: Option<SourceProvenance>,
     },
     /// Unit `()`

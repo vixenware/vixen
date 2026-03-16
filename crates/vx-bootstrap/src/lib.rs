@@ -718,6 +718,7 @@ pub fn build_source_tree(request: &BuildSourceTreeRequest) -> Result<BuildSource
         &request.scrub_line_contains,
     )?;
     let build_result = (|| {
+        stop_prior_bootstrap_processes()?;
         scrub_files(
             checkout_dir,
             &request.scrub_files,
@@ -967,6 +968,68 @@ fn run_command(program: &str, args: &[&str], current_dir: Option<&Utf8Path>) -> 
         detail.push_str(&format!("\nstderr:\n{stderr}"));
     }
     eyre::bail!(detail);
+}
+
+#[cfg(not(windows))]
+fn stop_prior_bootstrap_processes() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stop_prior_bootstrap_processes() -> Result<()> {
+    const IMAGE_NAMES: &[&str] = &["vx-store.exe", "vx-runner.exe", "vx-vfsd.exe"];
+
+    let mut kill = Command::new("taskkill");
+    kill.args(["/F", "/T"]);
+    for image in IMAGE_NAMES {
+        kill.args(["/IM", image]);
+    }
+    kill.stdin(Stdio::null());
+    let output = kill
+        .output()
+        .wrap_err("failed to spawn taskkill for bootstrap-owned processes")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("not found") && !stderr.contains("There are no running tasks") {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            eyre::bail!(
+                "taskkill failed with {} while stopping prior bootstrap processes\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+    }
+
+    for _ in 0..50 {
+        if !windows_processes_running(IMAGE_NAMES)? {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    eyre::bail!("timed out waiting for prior bootstrap processes to exit");
+}
+
+#[cfg(windows)]
+fn windows_processes_running(image_names: &[&str]) -> Result<bool> {
+    let output = Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .output()
+        .wrap_err("failed to spawn tasklist for bootstrap-owned processes")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eyre::bail!(
+            "tasklist failed with {} while checking bootstrap-owned processes\nstderr:\n{}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    Ok(image_names
+        .iter()
+        .any(|image| stdout.contains(&format!("\"{}\"", image.to_ascii_lowercase()))))
 }
 
 #[cfg(test)]

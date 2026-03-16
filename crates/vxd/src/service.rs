@@ -20,7 +20,7 @@ use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use sha2::{Digest as _, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::io::ErrorKind;
@@ -36,10 +36,11 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, ExecutorBackendKind, ExecutorSelector, MapValue, Module as EvalModule, PathValue,
-    PoisonError, PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
-    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportBlob, TransportBuiltinValue,
-    TransportTree, TransportValue, TreeValue, Value, lower_source_file_with_source_id,
+    ExecRequest, ExecutorBackendKind, ExecutorSelector, ImportRequest as EvalImportRequest,
+    MapValue, Module as EvalModule, PathValue, PoisonError, PoisonKind,
+    RenderRequest as EvalRenderRequest, ShippedFunction, StabilizeRequest as EvalStabilizeRequest,
+    StructValue, TransportBlob, TransportBuiltinValue, TransportTree, TransportValue, TreeValue,
+    Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -785,6 +786,7 @@ fn mirror_shipped_function_store_refs<'a>(
             ));
         }
         Ok(ShippedFunction {
+            module_id: function.module_id,
             code_identity: function.code_identity,
             def: function.def,
             captures,
@@ -2508,12 +2510,21 @@ pub(crate) fn summarize_build_vx_stabilize_request(request: &EvalStabilizeReques
     )
 }
 
+pub(crate) fn summarize_build_vx_import_request(request: &EvalImportRequest) -> String {
+    format!(
+        "build.vx import: path={} from={}",
+        request.path, request.from_source_id
+    )
+}
+
 #[derive(Clone)]
 struct BuildVxRuntime {
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
+    module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
 }
 
 fn block_on_runtime<T>(runtime: &Handle, future: impl Future<Output = T>) -> T {
@@ -2611,6 +2622,8 @@ impl BuildVxRuntime {
         let render_runtime = runtime.clone();
         let stabilize_runtime_state = self.clone();
         let stabilize_runtime = runtime.clone();
+        let import_runtime_state = self.clone();
+        let import_runtime = runtime.clone();
         let exec_store = Arc::clone(&self.store);
         let exec_executors = Arc::clone(&self.executors);
         let exec_runtime = runtime.clone();
@@ -2621,6 +2634,7 @@ impl BuildVxRuntime {
         let acquire_listener = progress_listener.clone();
         let render_listener = progress_listener.clone();
         let stabilize_listener = progress_listener.clone();
+        let import_listener = progress_listener.clone();
         let exec_listener = progress_listener.clone();
         let discover_listener = progress_listener;
 
@@ -2667,6 +2681,13 @@ impl BuildVxRuntime {
                 )
                 .map_err(|error| error.with_context(summary))
             }))
+            .with_import_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_import_request(&request);
+                let runtime = import_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &import_listener, &summary);
+                block_on_runtime(&runtime, import_runtime_state.load_imported_module(request))
+                    .map_err(|error| error.with_context(summary))
+            }))
             .with_exec_handler(Arc::new(move |request| {
                 let summary = summarize_build_vx_exec_request(&request);
                 let runtime = exec_runtime.clone();
@@ -2697,6 +2718,111 @@ impl BuildVxRuntime {
                 )
                 .map_err(|error| error.with_context(summary))
             }))
+    }
+
+    async fn load_imported_module(
+        &self,
+        request: EvalImportRequest,
+    ) -> std::result::Result<EvalModule, PoisonError> {
+        let module_path = self.resolve_import_path(&request)?;
+        if let Some(module) = self.module_cache.lock().get(&module_path).cloned() {
+            return Ok(module);
+        }
+
+        {
+            let mut stack = self.module_stack.lock();
+            if !stack.insert(module_path.clone()) {
+                return Err(exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("cyclic import detected while loading {}", module_path),
+                    &request.demand_chain,
+                ));
+            }
+        }
+
+        let outcome = async {
+            let source = fs::read_to_string(&module_path).map_err(|error| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("failed to read imported module {}: {error}", module_path),
+                    &request.demand_chain,
+                )
+            })?;
+
+            let parse = vx_parser::parse(&source);
+            if !parse.errors().is_empty() {
+                let joined = parse
+                    .errors()
+                    .iter()
+                    .map(|error| format!("{error:?}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!(
+                        "syntax error in imported module {}: {}",
+                        module_path, joined
+                    ),
+                    &request.demand_chain,
+                ));
+            }
+
+            let root = SourceFile::cast_root(parse.syntax());
+            Ok(lower_source_file_with_source_id(
+                &root,
+                module_path.as_str().to_string(),
+            ))
+        }
+        .await;
+
+        self.module_stack.lock().remove(&module_path);
+
+        let module = outcome?;
+        self.module_cache
+            .lock()
+            .insert(module_path.clone(), module.clone());
+        Ok(module)
+    }
+
+    fn resolve_import_path(
+        &self,
+        request: &EvalImportRequest,
+    ) -> std::result::Result<Utf8PathBuf, PoisonError> {
+        let from_source = Utf8Path::new(&request.from_source_id);
+        let from_dir = from_source.parent().ok_or_else(|| {
+            exec_bridge_poison(
+                PoisonKind::UserFail,
+                format!(
+                    "cannot resolve import {} from source {}",
+                    request.path, request.from_source_id
+                ),
+                &request.demand_chain,
+            )
+        })?;
+
+        let requested = Utf8Path::new(&request.path);
+        let candidates = if requested.extension().is_some() {
+            vec![from_dir.join(requested)]
+        } else {
+            vec![
+                from_dir.join(requested),
+                from_dir.join(format!("{}.vx", request.path)),
+            ]
+        };
+
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!(
+                        "import {} from {} did not resolve to a file",
+                        request.path, request.from_source_id
+                    ),
+                    &request.demand_chain,
+                )
+            })
     }
 
     async fn run_stabilize_via_store(
@@ -3464,6 +3590,8 @@ impl VxdService {
                     executors: Arc::clone(&self.build_vx_executors),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
+                    module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
+                    module_stack: Arc::new(SyncMutex::new("build_vx_module_stack", HashSet::new())),
                 };
                 let engine = build_runtime.build_engine(&module);
                 let output = engine

@@ -14,8 +14,21 @@ use crate::value::{
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct TransportModule {
+    pub source_id: String,
     pub functions: Vec<TransportFnDef>,
     pub top_level: TransportBlock,
+    pub loaded_modules: Vec<TransportModule>,
+}
+
+impl TransportModule {
+    pub fn root_only(&self) -> Self {
+        Self {
+            source_id: self.source_id.clone(),
+            functions: self.functions.clone(),
+            top_level: self.top_level.clone(),
+            loaded_modules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -128,6 +141,10 @@ pub enum TransportExpr {
         parts: Vec<TransportTemplatePart>,
         provenance: Option<TransportSourceProvenance>,
     },
+    Import {
+        path: String,
+        provenance: Option<TransportSourceProvenance>,
+    },
     Unit,
     Var(String),
     Binary {
@@ -214,6 +231,7 @@ pub enum TransportUnaryOp {
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct ShippedFunction {
+    pub module_id: String,
     pub code_identity: String,
     pub def: TransportFnDef,
     pub captures: Vec<(String, TransportValue)>,
@@ -327,12 +345,14 @@ pub enum TransportBuiltinValue {
 impl From<&instr::Module> for TransportModule {
     fn from(module: &instr::Module) -> Self {
         Self {
+            source_id: module.source_id.to_string(),
             functions: module
                 .functions
                 .iter()
                 .map(|function| TransportFnDef::from(function.as_ref()))
                 .collect(),
             top_level: TransportBlock::from(&module.top_level),
+            loaded_modules: Vec::new(),
         }
     }
 }
@@ -340,6 +360,7 @@ impl From<&instr::Module> for TransportModule {
 impl From<TransportModule> for instr::Module {
     fn from(module: TransportModule) -> Self {
         Self {
+            source_id: Arc::from(module.source_id),
             functions: module
                 .functions
                 .into_iter()
@@ -618,6 +639,10 @@ impl From<&instr::Expr> for TransportExpr {
                 parts: parts.iter().map(TransportTemplatePart::from).collect(),
                 provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
+            instr::Expr::Import { path, provenance } => Self::Import {
+                path: path.clone(),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
+            },
             instr::Expr::Unit => Self::Unit,
             instr::Expr::Var(name) => Self::Var(name.clone()),
             instr::Expr::Binary {
@@ -753,6 +778,10 @@ impl From<TransportExpr> for instr::Expr {
             },
             TransportExpr::PathTemplate { parts, provenance } => Self::PathTemplate {
                 parts: parts.into_iter().map(Into::into).collect(),
+                provenance: provenance.map(Into::into),
+            },
+            TransportExpr::Import { path, provenance } => Self::Import {
+                path,
                 provenance: provenance.map(Into::into),
             },
             TransportExpr::Unit => Self::Unit,
@@ -936,6 +965,7 @@ impl TryFrom<&FunctionValue> for ShippedFunction {
             .map(|(name, value)| Ok((name.to_string(), TransportValue::try_from(value)?)))
             .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
+            module_id: function.module_id.to_string(),
             code_identity: function.code_identity.to_string(),
             def: TransportFnDef::from(function.def.as_ref()),
             captures,
@@ -957,6 +987,7 @@ impl ShippedFunction {
             .collect::<Result<Vec<_>, String>>()?;
         Ok(FunctionValue {
             def: Arc::new(self.def.clone().into()),
+            module_id: Arc::from(self.module_id.as_str()),
             code_identity: Arc::from(self.code_identity.as_str()),
             captures: Arc::from(captures),
         })

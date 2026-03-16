@@ -11,10 +11,10 @@ pub use capability::CapabilitySet;
 mod exec;
 pub use exec::{
     AcquireHandler, AcquireRequest, DiscoverHandler, DiscoverRequest, ExecArgValue, ExecHandler,
-    ExecMount, ExecRequest, RenderHandler, RenderRequest, SharedAcquireHandler,
-    SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler, SharedStabilizeHandler,
-    SharedStoreHydrationHandler, StabilizeHandler, StabilizeRequest, StoreHydrationHandler,
-    StoreHydrationRequest,
+    ExecMount, ExecRequest, ImportHandler, ImportRequest, RenderHandler, RenderRequest,
+    SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler, SharedImportHandler,
+    SharedRenderHandler, SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeHandler,
+    StabilizeRequest, StoreHydrationHandler, StoreHydrationRequest,
 };
 
 mod instr;

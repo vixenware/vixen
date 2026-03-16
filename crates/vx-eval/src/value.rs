@@ -172,6 +172,7 @@ pub struct StructValue {
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
     pub def: Arc<FnDef>,
+    pub module_id: Arc<str>,
     pub code_identity: Arc<str>,
     /// Captured bindings from the enclosing scope, kept in sorted order.
     pub captures: Arc<[(Arc<str>, Value)]>,

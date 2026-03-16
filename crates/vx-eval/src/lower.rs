@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
-    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
-    LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter, PartialAppExpr,
-    PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt,
-    StringPart, StructDecl as AstStructDecl, StructLiteralExpr, StructLiteralField, SyntaxKind,
-    TupleExpr, WhereExpr,
+    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, ImportExpr, InterpolatedStringExpr,
+    InvokeExpr, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter,
+    PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile,
+    Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
+    StructLiteralField, SyntaxKind, TupleExpr, WhereExpr,
 };
 
 use crate::instr;
@@ -81,6 +81,7 @@ pub fn lower_source_file_with_source_id(
     functions.extend(ctx.namespace_methods);
 
     instr::Module {
+        source_id: Arc::clone(&ctx.source_id),
         functions,
         top_level: instr::Block { stmts: top_level },
     }
@@ -224,6 +225,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Literal(lit) => lower_literal(lit),
         AstExpr::InterpolatedString(string) => lower_interpolated_string(string, ctx),
         AstExpr::PathLiteral(path) => lower_path_literal(path, ctx),
+        AstExpr::Import(import) => lower_import(import, ctx),
         AstExpr::NameRef(name_ref) => {
             let name = name_ref.token()?.text().to_string();
             Some(instr::Expr::Var(name))
@@ -358,6 +360,13 @@ fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<inst
     let interpolated = expr.interpolated()?;
     let parts = lower_template_parts(interpolated.parts(), ctx)?;
     Some(instr::Expr::PathTemplate { parts, provenance })
+}
+
+fn lower_import(expr: &ImportExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    Some(instr::Expr::Import {
+        path: expr.path()?,
+        provenance: Some(ctx.provenance(expr, "import(..)")),
+    })
 }
 
 fn lower_template_parts(
@@ -592,6 +601,7 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
         | instr::Expr::LitString(_)
         | instr::Expr::StringTemplate { .. }
         | instr::Expr::PathTemplate { .. }
+        | instr::Expr::Import { .. }
         | instr::Expr::Unit => false,
     }
 }

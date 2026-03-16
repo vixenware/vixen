@@ -14,7 +14,7 @@ use std::mem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 #[cfg(test)]
 use std::time::Duration;
@@ -24,9 +24,10 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
 use crate::exec::{
-    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, RenderRequest,
-    SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler,
-    SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
+    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, ImportRequest,
+    RenderRequest, SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler,
+    SharedImportHandler, SharedRenderHandler, SharedStabilizeHandler, SharedStoreHydrationHandler,
+    StabilizeRequest, StoreHydrationRequest,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -91,25 +92,40 @@ struct ParsedExecRequest {
     verification_obligations: Vec<HostObservation>,
 }
 
-/// The evaluation engine.
-pub struct Engine {
+type ModuleId = Arc<str>;
+
+struct ModuleState {
     module: instr::Module,
-    nodes: DashMap<NodeId, Arc<Node>>,
-    call_memo: DashMap<NodeKey, Arc<Node>>,
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
     function_identities: HashMap<usize, Arc<str>>,
+    scope_state: Mutex<ModuleScopeState>,
+}
+
+enum ModuleScopeState {
+    Uninitialized,
+    Evaluating,
+    Ready(Arc<HashMap<String, Value>>),
+    Poisoned(PoisonError),
+}
+
+/// The evaluation engine.
+pub struct Engine {
+    root_module_id: ModuleId,
+    modules: DashMap<ModuleId, Arc<ModuleState>>,
+    nodes: DashMap<NodeId, Arc<Node>>,
+    call_memo: DashMap<NodeKey, Arc<Node>>,
     max_demand_depth: usize,
     acquire_handler: Option<SharedAcquireHandler>,
     stabilize_handler: Option<SharedStabilizeHandler>,
     render_handler: Option<SharedRenderHandler>,
     exec_handler: Option<SharedExecHandler>,
     discover_handler: Option<SharedDiscoverHandler>,
+    import_handler: Option<SharedImportHandler>,
     store_hydration_handler: Option<SharedStoreHydrationHandler>,
 }
 
 impl Engine {
-    /// Create a new engine from a lowered module.
-    pub fn from_module(module: &instr::Module) -> Self {
+    fn build_module_state(module: instr::Module) -> ModuleState {
         let mut functions = HashMap::new();
         for func in &module.functions {
             functions
@@ -117,20 +133,37 @@ impl Engine {
                 .or_insert_with(Vec::new)
                 .push(func.clone());
         }
-        let function_identities = compute_function_identities(&module.functions);
-
-        Self {
-            module: module.clone(),
-            nodes: DashMap::new(),
-            call_memo: DashMap::new(),
+        let function_identities =
+            compute_function_identities(&module.functions, module.source_id.as_ref());
+        ModuleState {
+            module,
             functions,
             function_identities,
+            scope_state: Mutex::new(ModuleScopeState::Uninitialized),
+        }
+    }
+
+    /// Create a new engine from a lowered module.
+    pub fn from_module(module: &instr::Module) -> Self {
+        let root_module_id = Arc::clone(&module.source_id);
+        let modules = DashMap::new();
+        modules.insert(
+            Arc::clone(&root_module_id),
+            Arc::new(Self::build_module_state(module.clone())),
+        );
+
+        Self {
+            root_module_id,
+            modules,
+            nodes: DashMap::new(),
+            call_memo: DashMap::new(),
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             acquire_handler: None,
             stabilize_handler: None,
             render_handler: None,
             exec_handler: None,
             discover_handler: None,
+            import_handler: None,
             store_hydration_handler: None,
         }
     }
@@ -166,6 +199,11 @@ impl Engine {
         self
     }
 
+    pub fn with_import_handler(mut self, import_handler: SharedImportHandler) -> Self {
+        self.import_handler = Some(import_handler);
+        self
+    }
+
     pub fn with_store_hydration_handler(
         mut self,
         store_hydration_handler: SharedStoreHydrationHandler,
@@ -177,13 +215,61 @@ impl Engine {
     // r[impl eval.forcing.boundary]
     /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.resolve_module_function(name)?;
+        let function = self.resolve_module_function(&self.root_module_id, name)?;
         let value = self.build_call(Value::Function(function), args, None);
         self.resolve_boundary_value(value)
     }
 
     pub fn transport_module(&self) -> TransportModule {
-        TransportModule::from(&self.module)
+        let root = self
+            .module_state(&self.root_module_id)
+            .expect("root module must exist");
+        let mut loaded_modules = self
+            .modules
+            .iter()
+            .filter_map(|entry| {
+                if entry.key().as_ref() == self.root_module_id.as_ref() {
+                    None
+                } else {
+                    Some(TransportModule::from(&entry.value().module))
+                }
+            })
+            .collect::<Vec<_>>();
+        loaded_modules.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let mut module = TransportModule::from(&root.module);
+        module.loaded_modules = loaded_modules;
+        module
+    }
+
+    pub fn module_namespace(&self) -> Result<Value, PoisonError> {
+        self.module_namespace_for(&self.root_module_id)
+    }
+
+    fn module_namespace_for(&self, module_id: &ModuleId) -> Result<Value, PoisonError> {
+        let bindings = self.eval_module_scope(module_id)?;
+        let mut entries = bindings
+            .iter()
+            .map(|(name, value)| (Value::String(Arc::from(name.as_str())), value.clone()))
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| {
+            let Value::String(left) = left else {
+                unreachable!("module exports are string-keyed")
+            };
+            let Value::String(right) = right else {
+                unreachable!("module exports are string-keyed")
+            };
+            left.cmp(right)
+        });
+        Ok(Value::Map(MapValue {
+            entries: Arc::from(entries),
+        }))
+    }
+
+    fn module_state(&self, module_id: &ModuleId) -> Result<Arc<ModuleState>, PoisonError> {
+        self.modules
+            .get(module_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| self.internal_error(&format!("missing module {}", module_id)))
     }
 
     pub fn ship_value(&self, value: Value) -> Result<TransportValue, PoisonError> {
@@ -216,8 +302,7 @@ impl Engine {
         function: &ShippedFunction,
         args: Vec<Value>,
     ) -> Result<Value, PoisonError> {
-        let module: instr::Module = module.clone().into();
-        let engine = Self::from_module(&module);
+        let engine = Self::from_transport_module(module);
         let function = function
             .to_runtime()
             .map_err(|message| engine.type_error(&message))?;
@@ -229,12 +314,25 @@ impl Engine {
         module: &TransportModule,
         function: &ShippedFunction,
     ) -> Result<Value, PoisonError> {
-        let module: instr::Module = module.clone().into();
-        let engine = Self::from_module(&module);
+        let engine = Self::from_transport_module(module);
         let function = function
             .to_runtime()
             .map_err(|message| engine.type_error(&message))?;
         engine.invoke_discover_probe(Value::Function(function))
+    }
+
+    fn from_transport_module(module: &TransportModule) -> Self {
+        let root: instr::Module = module.root_only().into();
+        let engine = Self::from_module(&root);
+        for imported in &module.loaded_modules {
+            let imported_module: instr::Module = imported.root_only().into();
+            let module_id = Arc::clone(&imported_module.source_id);
+            engine.modules.insert(
+                module_id,
+                Arc::new(Self::build_module_state(imported_module)),
+            );
+        }
+        engine
     }
 
     fn resolve_boundary_value(&self, value: Value) -> Result<Value, PoisonError> {
@@ -243,7 +341,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.resolve_module_function(name)?;
+        let function = self.resolve_module_function(&self.root_module_id, name)?;
         Ok(self.build_call(Value::Function(function), args, None))
     }
 
@@ -279,14 +377,16 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn function_key(&self, name: &str) -> Result<String, PoisonError> {
-        self.resolve_module_function(name)?
+        self.resolve_module_function(&self.root_module_id, name)?
             .key()
             .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
     }
 
     #[cfg(test)]
     pub(crate) fn function_identity_string(&self, name: &str) -> Result<String, PoisonError> {
-        Ok(self.resolve_module_function(name)?.identity())
+        Ok(self
+            .resolve_module_function(&self.root_module_id, name)?
+            .identity())
     }
 
     // r[impl eval.entry]
@@ -382,6 +482,23 @@ impl Engine {
         match result {
             Ok(value) => Ok(self.attach_obligations(value, items.iter().cloned())),
             Err(error) => Err(error.with_observations(items)),
+        }
+    }
+
+    fn finish_obligated_build_result(
+        &self,
+        result: BuildResult,
+        items: impl IntoIterator<Item = HostObservation>,
+    ) -> BuildResult {
+        let items = items.into_iter().collect::<Vec<_>>();
+        match result {
+            BuildResult::Value(value) => {
+                BuildResult::Value(self.attach_obligations(value, items.iter().cloned()))
+            }
+            BuildResult::Returned(value) => {
+                BuildResult::Returned(self.attach_obligations(value, items.iter().cloned()))
+            }
+            BuildResult::Poisoned(error) => BuildResult::Poisoned(error.with_observations(items)),
         }
     }
 
@@ -545,9 +662,10 @@ impl Engine {
         }
     }
 
-    fn global_function_value(&self, def: Arc<instr::FnDef>) -> FunctionValue {
+    fn global_function_value(&self, module_id: &ModuleId, def: Arc<instr::FnDef>) -> FunctionValue {
         FunctionValue {
-            code_identity: self.function_identity(&def),
+            module_id: Arc::clone(module_id),
+            code_identity: self.function_identity(module_id, &def),
             def,
             captures: Arc::from([]),
         }
@@ -555,11 +673,13 @@ impl Engine {
 
     fn local_function_value(
         &self,
+        module_id: &ModuleId,
         def: Arc<instr::FnDef>,
         captures: Arc<[(Arc<str>, Value)]>,
     ) -> FunctionValue {
         FunctionValue {
-            code_identity: self.function_identity(&def),
+            module_id: Arc::clone(module_id),
+            code_identity: self.function_identity(module_id, &def),
             def,
             captures,
         }
@@ -567,11 +687,13 @@ impl Engine {
 
     fn closure_function_value(
         &self,
+        module_id: &ModuleId,
         def: Arc<instr::FnDef>,
         code_identity: Arc<str>,
         captures: Arc<[(Arc<str>, Value)]>,
     ) -> FunctionValue {
         FunctionValue {
+            module_id: Arc::clone(module_id),
             code_identity,
             def,
             captures,
@@ -585,11 +707,15 @@ impl Engine {
         }))
     }
 
-    fn function_identity(&self, def: &Arc<instr::FnDef>) -> Arc<str> {
-        self.function_identities
+    fn function_identity(&self, module_id: &ModuleId, def: &Arc<instr::FnDef>) -> Arc<str> {
+        let module = self
+            .module_state(module_id)
+            .expect("function identity requires loaded module");
+        module
+            .function_identities
             .get(&fn_ptr(def))
             .cloned()
-            .unwrap_or_else(|| Arc::from(stable_fn_repr(def)))
+            .unwrap_or_else(|| Arc::from(format!("{module_id}::{}", stable_fn_repr(def))))
     }
 
     // r[impl eval.pending]
@@ -1506,6 +1632,7 @@ impl Engine {
                 }
                 Ok(InspectedValue {
                     value: Value::Function(FunctionValue {
+                        module_id: function.module_id,
                         def: function.def,
                         code_identity: function.code_identity,
                         captures: Arc::from(captures),
@@ -2080,21 +2207,34 @@ impl Engine {
                 then_branch,
                 else_branch,
                 bindings,
+                scope_module_id,
                 scope_identity,
             } => {
                 let cond = self.materialize_value_deep(cond.clone(), "forcing dependency")?;
                 let (cond, obligations) = self.split_obligations(cond);
                 match cond {
-                    Value::Bool(true) => self.finish_obligated_result(
-                        self.eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
-                            .into_value(),
-                        obligations,
-                    ),
-                    Value::Bool(false) => self.finish_obligated_result(
-                        self.eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
-                            .into_value(),
-                        obligations,
-                    ),
+                    Value::Bool(true) => self
+                        .finish_obligated_build_result(
+                            self.eval_block(
+                                then_branch,
+                                scope_module_id,
+                                bindings.as_ref(),
+                                scope_identity.as_ref(),
+                            ),
+                            obligations,
+                        )
+                        .into_value(),
+                    Value::Bool(false) => self
+                        .finish_obligated_build_result(
+                            self.eval_block(
+                                else_branch,
+                                scope_module_id,
+                                bindings.as_ref(),
+                                scope_identity.as_ref(),
+                            ),
+                            obligations,
+                        )
+                        .into_value(),
                     other => Err(self.type_error(&format!(
                         "if condition must be Bool, got {}",
                         other.type_name()
@@ -2125,9 +2265,13 @@ impl Engine {
             NodeJob::Invoke { function, args } => {
                 self.invoke_function(function, args.clone(), Arc::from([]))
             }
-            NodeJob::Field { receiver, field } => {
+            NodeJob::Field {
+                receiver,
+                field,
+                scope_module_id,
+            } => {
                 let receiver = self.demand_value_shallow(receiver.clone())?;
-                self.select_field(&receiver, field)
+                self.select_field_in_module(&receiver, field, scope_module_id)
             }
             NodeJob::Fail { message } => {
                 let message = self.materialize_value_deep(message.clone(), "forcing dependency")?;
@@ -2226,6 +2370,7 @@ impl Engine {
         args: Arc<[Value]>,
         kwargs: Arc<[(Arc<str>, Value)]>,
     ) -> Result<Value, PoisonError> {
+        let module = self.module_state(&function.module_id)?;
         let mut bindings = HashMap::new();
 
         for (name, value) in function.captures.iter() {
@@ -2245,11 +2390,13 @@ impl Engine {
             bindings.insert(param.name.clone(), arg.clone());
         }
 
-        for (name, overloads) in &self.functions {
+        for (name, overloads) in &module.functions {
             if !bindings.contains_key(name) {
                 bindings.insert(
                     name.clone(),
-                    Value::Function(self.global_function_value(overloads[0].clone())),
+                    Value::Function(
+                        self.global_function_value(&function.module_id, overloads[0].clone()),
+                    ),
                 );
             }
         }
@@ -2273,7 +2420,12 @@ impl Engine {
             };
 
             let value = self
-                .eval_expr(default, &bindings, function.code_identity.as_ref())
+                .eval_expr(
+                    default,
+                    &function.module_id,
+                    &bindings,
+                    function.code_identity.as_ref(),
+                )
                 .into_value()?;
             bindings.insert(param.name.clone(), value);
         }
@@ -2287,14 +2439,19 @@ impl Engine {
 
         self.eval_block(
             &function.def.body,
+            &function.module_id,
             &bindings,
             function.code_identity.as_ref(),
         )
         .into_value()
     }
 
-    fn resolve_module_function(&self, name: &str) -> Result<FunctionValue, PoisonError> {
-        let mut bindings = self.eval_module_scope()?;
+    fn resolve_module_function(
+        &self,
+        module_id: &ModuleId,
+        name: &str,
+    ) -> Result<FunctionValue, PoisonError> {
+        let mut bindings = (*self.eval_module_scope(module_id)?).clone();
         match bindings.remove(name) {
             Some(Value::Function(function)) => Ok(function),
             Some(other) => Err(self.type_error(&format!(
@@ -2305,61 +2462,113 @@ impl Engine {
         }
     }
 
-    fn eval_module_scope(&self) -> Result<HashMap<String, Value>, PoisonError> {
+    fn eval_module_scope(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<Arc<HashMap<String, Value>>, PoisonError> {
+        let module = self.module_state(module_id)?;
+        {
+            let state = module
+                .scope_state
+                .lock()
+                .expect("module scope state mutex poisoned");
+            match &*state {
+                ModuleScopeState::Ready(bindings) => return Ok(Arc::clone(bindings)),
+                ModuleScopeState::Poisoned(error) => return Err(error.clone()),
+                ModuleScopeState::Evaluating => {
+                    return Err(
+                        self.type_error(&format!("cyclic module import involving {}", module_id))
+                    );
+                }
+                ModuleScopeState::Uninitialized => {}
+            }
+        }
+        {
+            let mut state = module
+                .scope_state
+                .lock()
+                .expect("module scope state mutex poisoned");
+            *state = ModuleScopeState::Evaluating;
+        }
+
         let mut bindings = HashMap::new();
         let mut demanded_values = Vec::new();
 
-        for (name, overloads) in &self.functions {
+        for (name, overloads) in &module.functions {
             bindings.insert(
                 name.clone(),
-                Value::Function(self.global_function_value(overloads[0].clone())),
+                Value::Function(self.global_function_value(module_id, overloads[0].clone())),
             );
         }
 
-        for stmt in &self.module.top_level.stmts {
-            match stmt {
-                instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
-                    let value = self.eval_expr(value, &bindings, "<module>").into_value()?;
-                    bindings.insert(name.clone(), value);
-                }
-                instr::Stmt::LetPattern { pattern, value } => {
-                    let value = self.eval_expr(value, &bindings, "<module>").into_value()?;
-                    self.bind_pattern_into(pattern, value, &mut bindings)?;
-                }
-                instr::Stmt::Return(_) => {
-                    return Err(self.internal_error("return is not allowed at file scope"));
-                }
-                instr::Stmt::FnDecl(def) => {
-                    bindings.insert(
-                        def.name.clone(),
-                        Value::Function(self.local_function_value(
-                            def.clone(),
-                            capture_referenced_bindings(
-                                &bindings,
-                                &def.params,
-                                &def.keyword_params,
-                                &def.body,
-                            ),
-                        )),
-                    );
-                }
-                instr::Stmt::StructDecl(decl) => {
-                    bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
-                }
-                instr::Stmt::Expr(expr) => {
-                    let value = self.eval_expr(expr, &bindings, "<module>").into_value()?;
-                    demanded_values.push(value);
+        let outcome = (|| -> Result<Arc<HashMap<String, Value>>, PoisonError> {
+            for stmt in &module.module.top_level.stmts {
+                match stmt {
+                    instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
+                        let value = self
+                            .eval_expr(value, module_id, &bindings, module_id.as_ref())
+                            .into_value()?;
+                        bindings.insert(name.clone(), value);
+                    }
+                    instr::Stmt::LetPattern { pattern, value } => {
+                        let value = self
+                            .eval_expr(value, module_id, &bindings, module_id.as_ref())
+                            .into_value()?;
+                        self.bind_pattern_into(pattern, value, &mut bindings)?;
+                    }
+                    instr::Stmt::Return(_) => {
+                        return Err(self.internal_error("return is not allowed at file scope"));
+                    }
+                    instr::Stmt::FnDecl(def) => {
+                        bindings.insert(
+                            def.name.clone(),
+                            Value::Function(self.local_function_value(
+                                module_id,
+                                def.clone(),
+                                capture_referenced_bindings(
+                                    &bindings,
+                                    &def.params,
+                                    &def.keyword_params,
+                                    &def.body,
+                                ),
+                            )),
+                        );
+                    }
+                    instr::Stmt::StructDecl(decl) => {
+                        bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
+                    }
+                    instr::Stmt::Expr(expr) => {
+                        let value = self
+                            .eval_expr(expr, module_id, &bindings, module_id.as_ref())
+                            .into_value()?;
+                        demanded_values.push(value);
+                    }
                 }
             }
-        }
 
-        self.resolve_demanded_values(mem::take(&mut demanded_values))?;
-        Ok(bindings)
+            self.resolve_demanded_values(mem::take(&mut demanded_values))?;
+            Ok(Arc::new(bindings))
+        })();
+
+        let mut state = module
+            .scope_state
+            .lock()
+            .expect("module scope state mutex poisoned");
+        match &outcome {
+            Ok(bindings) => {
+                *state = ModuleScopeState::Ready(Arc::clone(bindings));
+            }
+            Err(error) => {
+                *state = ModuleScopeState::Poisoned(error.clone());
+            }
+        }
+        outcome
     }
 
     fn eval_block(
         &self,
         block: &instr::Block,
+        current_module_id: &ModuleId,
         bindings: &HashMap<String, Value>,
         current_code_identity: &str,
     ) -> BuildResult {
@@ -2370,7 +2579,12 @@ impl Engine {
             let is_last = index + 1 == block.stmts.len();
             match stmt {
                 instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
-                    match self.eval_expr(value, &local_bindings, current_code_identity) {
+                    match self.eval_expr(
+                        value,
+                        current_module_id,
+                        &local_bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => {
                             local_bindings.insert(name.clone(), value);
                         }
@@ -2380,7 +2594,12 @@ impl Engine {
                     }
                 }
                 instr::Stmt::LetPattern { pattern, value } => {
-                    match self.eval_expr(value, &local_bindings, current_code_identity) {
+                    match self.eval_expr(
+                        value,
+                        current_module_id,
+                        &local_bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => {
                             if let Err(error) =
                                 self.bind_pattern_into(pattern, value, &mut local_bindings)
@@ -2397,7 +2616,12 @@ impl Engine {
                     }
                 }
                 instr::Stmt::Return(expr) => {
-                    match self.eval_expr(expr, &local_bindings, current_code_identity) {
+                    match self.eval_expr(
+                        expr,
+                        current_module_id,
+                        &local_bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) | BuildResult::Returned(value) => {
                             return self.finish_demanded_result(
                                 BuildResult::Returned(value),
@@ -2416,6 +2640,7 @@ impl Engine {
                     local_bindings.insert(
                         def.name.clone(),
                         Value::Function(self.local_function_value(
+                            current_module_id,
                             def.clone(),
                             capture_referenced_bindings(
                                 &local_bindings,
@@ -2430,7 +2655,12 @@ impl Engine {
                     local_bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
                 }
                 instr::Stmt::Expr(expr) => {
-                    match self.eval_expr(expr, &local_bindings, current_code_identity) {
+                    match self.eval_expr(
+                        expr,
+                        current_module_id,
+                        &local_bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => {
                             if is_last {
                                 return self.finish_demanded_result(
@@ -2529,6 +2759,7 @@ impl Engine {
     fn eval_expr(
         &self,
         expr: &instr::Expr,
+        current_module_id: &ModuleId,
         bindings: &HashMap<String, Value>,
         current_code_identity: &str,
     ) -> BuildResult {
@@ -2541,6 +2772,7 @@ impl Engine {
                 TemplateKind::String,
                 parts,
                 provenance.as_ref(),
+                current_module_id,
                 bindings,
                 current_code_identity,
             ),
@@ -2548,18 +2780,26 @@ impl Engine {
                 TemplateKind::Path,
                 parts,
                 provenance.as_ref(),
+                current_module_id,
                 bindings,
                 current_code_identity,
             ),
+            instr::Expr::Import { path, provenance } => {
+                BuildResult::from_result(self.import_module(path, provenance.as_ref()))
+            }
             instr::Expr::Unit => BuildResult::Value(Value::Unit),
             instr::Expr::Var(name) => {
                 if let Some(value) = bindings.get(name) {
                     BuildResult::Value(value.clone())
                 } else if name == "None" {
                     BuildResult::Value(option_none())
-                } else if let Some(overloads) = self.functions.get(name) {
+                } else if let Some(overloads) = self
+                    .module_state(current_module_id)
+                    .ok()
+                    .and_then(|module| module.functions.get(name).cloned())
+                {
                     BuildResult::Value(Value::Function(
-                        self.global_function_value(overloads[0].clone()),
+                        self.global_function_value(current_module_id, overloads[0].clone()),
                     ))
                 } else if let Some(builtin) = builtin_namespace(name) {
                     BuildResult::Value(Value::Builtin(builtin))
@@ -2573,14 +2813,21 @@ impl Engine {
                 right,
                 provenance,
             } => {
-                let left = match self.eval_expr(left, bindings, current_code_identity) {
+                let left = match self.eval_expr(
+                    left,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
-                let right = match self.eval_expr(right, bindings, current_code_identity) {
-                    BuildResult::Value(value) => value,
-                    other => return other,
-                };
+                let right =
+                    match self.eval_expr(right, current_module_id, bindings, current_code_identity)
+                    {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
 
                 let concat_ready = if matches!(op, BinOp::Concat) {
                     let mut deps = Vec::new();
@@ -2610,7 +2857,12 @@ impl Engine {
                 operand,
                 provenance,
             } => {
-                let operand = match self.eval_expr(operand, bindings, current_code_identity) {
+                let operand = match self.eval_expr(
+                    operand,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -2625,7 +2877,9 @@ impl Engine {
                     ))
                 }
             }
-            instr::Expr::Block(block) => self.eval_block(block, bindings, current_code_identity),
+            instr::Expr::Block(block) => {
+                self.eval_block(block, current_module_id, bindings, current_code_identity)
+            }
             // r[impl eval.control-demand]
             instr::Expr::If {
                 cond,
@@ -2633,26 +2887,35 @@ impl Engine {
                 else_branch,
                 provenance,
             } => {
-                let cond = match self.eval_expr(cond, bindings, current_code_identity) {
+                let cond = match self.eval_expr(
+                    cond,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
                 let (cond, obligations) = self.split_obligations(cond);
 
                 match cond {
-                    Value::Bool(true) => BuildResult::from_result(
-                        self.finish_obligated_result(
-                            self.eval_block(then_branch, bindings, current_code_identity)
-                                .into_value(),
-                            obligations,
+                    Value::Bool(true) => self.finish_obligated_build_result(
+                        self.eval_block(
+                            then_branch,
+                            current_module_id,
+                            bindings,
+                            current_code_identity,
                         ),
+                        obligations,
                     ),
-                    Value::Bool(false) => BuildResult::from_result(
-                        self.finish_obligated_result(
-                            self.eval_block(else_branch, bindings, current_code_identity)
-                                .into_value(),
-                            obligations,
+                    Value::Bool(false) => self.finish_obligated_build_result(
+                        self.eval_block(
+                            else_branch,
+                            current_module_id,
+                            bindings,
+                            current_code_identity,
                         ),
+                        obligations,
                     ),
                     Value::Pending(_) => BuildResult::Value(self.pending_value(
                         NodeJob::If {
@@ -2660,6 +2923,7 @@ impl Engine {
                             then_branch: then_branch.clone(),
                             else_branch: else_branch.clone(),
                             bindings: Arc::new(bindings.clone()),
+                            scope_module_id: Arc::clone(current_module_id),
                             scope_identity: Arc::from(current_code_identity),
                         },
                         "if(..)".into(),
@@ -2675,6 +2939,7 @@ impl Engine {
             // r[impl fn.identity.closure]
             instr::Expr::Closure { closure_id, def } => {
                 BuildResult::Value(Value::Function(self.closure_function_value(
+                    current_module_id,
                     def.clone(),
                     Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
                     capture_referenced_bindings(
@@ -2692,20 +2957,25 @@ impl Engine {
                 kwargs_expr,
                 provenance,
             } => {
-                let function = match self.eval_expr(func, bindings, current_code_identity) {
+                let function = match self.eval_expr(
+                    func,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
                 let mut arg_values = Vec::with_capacity(args.len());
                 for arg in args {
-                    match self.eval_expr(arg, bindings, current_code_identity) {
+                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
                         BuildResult::Value(value) => arg_values.push(value),
                         other => return other,
                     }
                 }
                 let mut kwarg_values = Vec::with_capacity(kwargs.len());
                 for (name, arg) in kwargs {
-                    match self.eval_expr(arg, bindings, current_code_identity) {
+                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             kwarg_values.push((Arc::from(name.as_str()), value));
                         }
@@ -2713,7 +2983,12 @@ impl Engine {
                     }
                 }
                 let kwargs_expr_value = match kwargs_expr {
-                    Some(expr) => match self.eval_expr(expr, bindings, current_code_identity) {
+                    Some(expr) => match self.eval_expr(
+                        expr,
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => Some(value),
                         other => return other,
                     },
@@ -2734,20 +3009,25 @@ impl Engine {
                 kwargs_expr,
                 provenance: _,
             } => {
-                let function = match self.eval_expr(func, bindings, current_code_identity) {
+                let function = match self.eval_expr(
+                    func,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
                 let mut arg_values = Vec::with_capacity(args.len());
                 for arg in args {
-                    match self.eval_expr(arg, bindings, current_code_identity) {
+                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
                         BuildResult::Value(value) => arg_values.push(value),
                         other => return other,
                     }
                 }
                 let mut kwarg_values = Vec::with_capacity(kwargs.len());
                 for (name, arg) in kwargs {
-                    match self.eval_expr(arg, bindings, current_code_identity) {
+                    match self.eval_expr(arg, current_module_id, bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             kwarg_values.push((Arc::from(name.as_str()), value));
                         }
@@ -2755,7 +3035,12 @@ impl Engine {
                     }
                 }
                 let kwargs_expr_value = match kwargs_expr {
-                    Some(expr) => match self.eval_expr(expr, bindings, current_code_identity) {
+                    Some(expr) => match self.eval_expr(
+                        expr,
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => Some(value),
                         other => return other,
                     },
@@ -2771,7 +3056,12 @@ impl Engine {
             instr::Expr::StructLit { name, fields } => {
                 let mut values = Vec::with_capacity(fields.len());
                 for (field_name, field_expr) in fields {
-                    match self.eval_expr(field_expr, bindings, current_code_identity) {
+                    match self.eval_expr(
+                        field_expr,
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => {
                             values.push((Arc::from(field_name.as_str()), value));
                         }
@@ -2788,8 +3078,12 @@ impl Engine {
                 for item in items {
                     match item {
                         instr::RecordItem::Field { name, value } => {
-                            let value = match self.eval_expr(value, bindings, current_code_identity)
-                            {
+                            let value = match self.eval_expr(
+                                value,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            ) {
                                 BuildResult::Value(value) => value,
                                 other => return other,
                             };
@@ -2798,6 +3092,7 @@ impl Engine {
                         instr::RecordItem::Spread(spread_expr) => {
                             let spread_value = match self.eval_expr(
                                 spread_expr,
+                                current_module_id,
                                 bindings,
                                 current_code_identity,
                             ) {
@@ -2824,7 +3119,12 @@ impl Engine {
                 for item in items {
                     match item {
                         instr::ArrayItem::Expr(item_expr) => {
-                            match self.eval_expr(item_expr, bindings, current_code_identity) {
+                            match self.eval_expr(
+                                item_expr,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            ) {
                                 BuildResult::Value(value) => values.push(value),
                                 other => return other,
                             }
@@ -2832,6 +3132,7 @@ impl Engine {
                         instr::ArrayItem::Spread(spread_expr) => {
                             let spread_value = match self.eval_expr(
                                 spread_expr,
+                                current_module_id,
                                 bindings,
                                 current_code_identity,
                             ) {
@@ -2856,12 +3157,21 @@ impl Engine {
                 for entry in entries {
                     match entry {
                         instr::MapItem::Entry { key, value } => {
-                            let key = match self.eval_expr(key, bindings, current_code_identity) {
+                            let key = match self.eval_expr(
+                                key,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            ) {
                                 BuildResult::Value(value) => value,
                                 other => return other,
                             };
-                            let value = match self.eval_expr(value, bindings, current_code_identity)
-                            {
+                            let value = match self.eval_expr(
+                                value,
+                                current_module_id,
+                                bindings,
+                                current_code_identity,
+                            ) {
                                 BuildResult::Value(value) => value,
                                 other => return other,
                             };
@@ -2870,6 +3180,7 @@ impl Engine {
                         instr::MapItem::Spread(spread_expr) => {
                             let spread_value = match self.eval_expr(
                                 spread_expr,
+                                current_module_id,
                                 bindings,
                                 current_code_identity,
                             ) {
@@ -2896,7 +3207,12 @@ impl Engine {
                 field,
                 provenance,
             } => {
-                let receiver = match self.eval_expr(receiver, bindings, current_code_identity) {
+                let receiver = match self.eval_expr(
+                    receiver,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -2906,12 +3222,17 @@ impl Engine {
                         NodeJob::Field {
                             receiver,
                             field: Arc::from(field.as_str()),
+                            scope_module_id: Arc::clone(current_module_id),
                         },
                         format!("field(.{field})"),
                         provenance.clone(),
                     ))
                 } else {
-                    BuildResult::from_result(self.select_field(&receiver, field))
+                    BuildResult::from_result(self.select_field_in_module(
+                        &receiver,
+                        field,
+                        current_module_id,
+                    ))
                 }
             }
             // r[impl error.fail]
@@ -2919,7 +3240,12 @@ impl Engine {
                 message,
                 provenance,
             } => {
-                let message = match self.eval_expr(message, bindings, current_code_identity) {
+                let message = match self.eval_expr(
+                    message,
+                    current_module_id,
+                    bindings,
+                    current_code_identity,
+                ) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -2930,7 +3256,7 @@ impl Engine {
                 ))
             }
             instr::Expr::Fallible(expr) => {
-                match self.eval_expr(expr, bindings, current_code_identity) {
+                match self.eval_expr(expr, current_module_id, bindings, current_code_identity) {
                     BuildResult::Value(value) => {
                         BuildResult::Value(self.build_fallible_value(value))
                     }
@@ -2943,7 +3269,7 @@ impl Engine {
             instr::Expr::Tuple(elems) => {
                 let mut values = Vec::with_capacity(elems.len());
                 for elem in elems {
-                    match self.eval_expr(elem, bindings, current_code_identity) {
+                    match self.eval_expr(elem, current_module_id, bindings, current_code_identity) {
                         BuildResult::Value(value) => values.push(value),
                         other => return other,
                     }
@@ -2958,6 +3284,7 @@ impl Engine {
         kind: TemplateKind,
         parts: &[instr::TemplatePart],
         provenance: Option<&instr::SourceProvenance>,
+        current_module_id: &ModuleId,
         bindings: &HashMap<String, Value>,
         current_code_identity: &str,
     ) -> BuildResult {
@@ -2968,7 +3295,12 @@ impl Engine {
                     values.push(TemplatePartValue::Text(Arc::from(text.as_str())));
                 }
                 instr::TemplatePart::Expr(expr) => {
-                    let value = match self.eval_expr(expr, bindings, current_code_identity) {
+                    let value = match self.eval_expr(
+                        expr,
+                        current_module_id,
+                        bindings,
+                        current_code_identity,
+                    ) {
                         BuildResult::Value(value) => value,
                         other => return other,
                     };
@@ -3131,6 +3463,15 @@ impl Engine {
     }
 
     fn select_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
+        self.select_field_in_module(receiver, field, &self.root_module_id)
+    }
+
+    fn select_field_in_module(
+        &self,
+        receiver: &Value,
+        field: &str,
+        current_module_id: &ModuleId,
+    ) -> Result<Value, PoisonError> {
         let (receiver, obligations) = self.split_obligations_ref(receiver);
         let result = match receiver {
             Value::Struct(struct_value)
@@ -3149,7 +3490,12 @@ impl Engine {
                 .find(|(name, _)| name.as_ref() == field)
                 .map(|(_, value)| value.clone())
                 .or_else(|| {
-                    self.user_method_value(receiver, struct_value.type_name.as_ref(), field)
+                    self.user_method_value_in_module(
+                        receiver,
+                        struct_value.type_name.as_ref(),
+                        field,
+                        current_module_id,
+                    )
                 })
                 .ok_or_else(|| {
                     self.type_error(&format!(
@@ -3446,10 +3792,18 @@ impl Engine {
         self.finish_obligated_result(result, obligations.iter().cloned())
     }
 
-    fn user_method_value(&self, receiver: &Value, type_name: &str, field: &str) -> Option<Value> {
+    fn user_method_value_in_module(
+        &self,
+        receiver: &Value,
+        type_name: &str,
+        field: &str,
+        current_module_id: &ModuleId,
+    ) -> Option<Value> {
         let qualified = format!("{type_name}.{field}");
-        let overloads = self.functions.get(&qualified)?;
-        let function = Value::Function(self.global_function_value(overloads[0].clone()));
+        let module = self.module_state(current_module_id).ok()?;
+        let overloads = module.functions.get(&qualified)?;
+        let function =
+            Value::Function(self.global_function_value(current_module_id, overloads[0].clone()));
         Some(Value::Partial(Arc::new(PartialValue {
             function,
             args: Arc::from([receiver.clone()]),
@@ -4309,6 +4663,32 @@ impl Engine {
             extract,
             demand_chain: self.current_demand_chain(None),
         })
+    }
+
+    fn import_module(
+        &self,
+        path: &str,
+        provenance: Option<&instr::SourceProvenance>,
+    ) -> Result<Value, PoisonError> {
+        let Some(import_handler) = &self.import_handler else {
+            return Err(self.type_error("import requires an import handler"));
+        };
+        let from_source_id = provenance
+            .map(|provenance| provenance.source_id.to_string())
+            .ok_or_else(|| self.internal_error("import is missing source provenance"))?;
+        let module = import_handler(ImportRequest {
+            path: path.to_string(),
+            from_source_id,
+            demand_chain: self.current_demand_chain(None),
+        })?;
+        let module_id = Arc::<str>::from(module.source_id.as_ref());
+        match self.modules.entry(Arc::clone(&module_id)) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(Self::build_module_state(module)));
+            }
+        }
+        self.module_namespace_for(&module_id)
     }
 
     fn render_builtin(
@@ -6325,6 +6705,7 @@ fn collect_expr_capture_names(
         | instr::Expr::LitFloat(_)
         | instr::Expr::LitBool(_)
         | instr::Expr::LitString(_)
+        | instr::Expr::Import { .. }
         | instr::Expr::Unit => {}
         instr::Expr::StringTemplate { parts, .. } | instr::Expr::PathTemplate { parts, .. } => {
             for part in parts {
@@ -6587,6 +6968,9 @@ fn write_expr_repr(out: &mut String, expr: &instr::Expr) {
             out.push_str("path_template(");
             write_template_parts_repr(out, parts);
             out.push(')');
+        }
+        instr::Expr::Import { path, .. } => {
+            let _ = write!(out, "import({path:?})");
         }
         instr::Expr::Unit => out.push_str("unit"),
         instr::Expr::Var(name) => {
@@ -6966,7 +7350,10 @@ fn set_executable_if_needed(path: &str, executable: bool) -> std::io::Result<()>
 // r[impl fn.identity.scc]
 // r[impl fn.identity.stability]
 // r[impl eval.memoization]
-fn compute_function_identities(functions: &[Arc<instr::FnDef>]) -> HashMap<usize, Arc<str>> {
+fn compute_function_identities(
+    functions: &[Arc<instr::FnDef>],
+    module_id: &str,
+) -> HashMap<usize, Arc<str>> {
     let top_level_names = functions
         .iter()
         .map(|function| function.name.clone())
@@ -7012,9 +7399,12 @@ fn compute_function_identities(functions: &[Arc<instr::FnDef>]) -> HashMap<usize
         .map(|(index, function)| {
             (
                 fn_ptr(function),
-                component_identities[component_of[index]]
-                    .clone()
-                    .expect("component identity should be computed"),
+                Arc::from(format!(
+                    "{module_id}::{}",
+                    component_identities[component_of[index]]
+                        .clone()
+                        .expect("component identity should be computed")
+                )),
             )
         })
         .collect()
@@ -7226,6 +7616,7 @@ fn collect_expr_callee_names(
         | instr::Expr::LitFloat(_)
         | instr::Expr::LitBool(_)
         | instr::Expr::LitString(_)
+        | instr::Expr::Import { .. }
         | instr::Expr::Unit
         | instr::Expr::Var(_) => {}
         instr::Expr::StringTemplate { parts, .. } | instr::Expr::PathTemplate { parts, .. } => {

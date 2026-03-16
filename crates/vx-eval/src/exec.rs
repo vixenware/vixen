@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::instr;
 use crate::poison::DemandChain;
 use crate::poison::PoisonError;
 use crate::transport::{ShippedFunction, TransportModule};
@@ -58,6 +59,18 @@ pub type DiscoverHandler =
     dyn Fn(DiscoverRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
 
 pub type SharedDiscoverHandler = Arc<DiscoverHandler>;
+
+#[derive(Debug, Clone)]
+pub struct ImportRequest {
+    pub path: String,
+    pub from_source_id: String,
+    pub demand_chain: DemandChain,
+}
+
+pub type ImportHandler =
+    dyn Fn(ImportRequest) -> Result<instr::Module, PoisonError> + Send + Sync + 'static;
+
+pub type SharedImportHandler = Arc<ImportHandler>;
 
 #[derive(Debug, Clone)]
 pub struct AcquireRequest {

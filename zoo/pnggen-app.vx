@@ -1,4 +1,4 @@
-let rules = import "./c-rules";
+let rules = import("./c-rules");
 
 let pnggen_source = Tree {
   @pnggen.c: Blob(`
@@ -232,10 +232,12 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
     },
     shared: rules.CExecutableVariant {
       program: shared_program_name,
-      run_tree: Tree {
-        @(shared_program_name): shared_build.file(shared_program_name).executable(),
-        ..libpng.shared.runtime_tree,
-      },
+      run_tree: [
+        Tree {
+          @(shared_program_name): shared_build.file(shared_program_name).executable(),
+        },
+        libpng.shared.runtime_tree,
+      ].merge(),
     },
   }
 }
