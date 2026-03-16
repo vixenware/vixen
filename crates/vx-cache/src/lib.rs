@@ -490,6 +490,7 @@ mod tests {
         };
         let first_eval = RunEvalPayload {
             module: TransportModule {
+                source_id: "test://run-cache-key".to_string(),
                 functions: vec![TransportFnDef {
                     name: "observe".to_string(),
                     params: vec![],
@@ -499,12 +500,14 @@ mod tests {
                     },
                 }],
                 top_level: TransportBlock { stmts: vec![] },
+                loaded_modules: vec![],
             },
             observer: None,
             verification_obligations: vec![],
         };
         let second_eval = RunEvalPayload {
             module: TransportModule {
+                source_id: "test://run-cache-key".to_string(),
                 functions: vec![TransportFnDef {
                     name: "observe".to_string(),
                     params: vec![],
@@ -514,6 +517,7 @@ mod tests {
                     },
                 }],
                 top_level: TransportBlock { stmts: vec![] },
+                loaded_modules: vec![],
             },
             observer: None,
             verification_obligations: vec![],
@@ -586,10 +590,13 @@ mod tests {
             clear_env: false,
             eval: Some(RunEvalPayload {
                 module: TransportModule {
+                    source_id: "test://run-cache-key".to_string(),
                     functions: vec![],
                     top_level: TransportBlock { stmts: vec![] },
+                    loaded_modules: vec![],
                 },
                 observer: Some(ShippedFunction {
+                    module_id: "test://run-cache-key".to_string(),
                     code_identity: "observe:probe".to_string(),
                     def: TransportFnDef {
                         name: "observe".to_string(),
