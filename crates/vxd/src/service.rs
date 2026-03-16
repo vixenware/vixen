@@ -3205,12 +3205,23 @@ fn spawn_on_runtime<T: Send + 'static>(
     runtime: &Handle,
     future: impl Future<Output = T> + Send + 'static,
 ) -> T {
+    let timeout = std::time::Duration::from_secs(120);
     let (tx, rx) = crossbeam_channel::bounded(1);
     runtime.spawn(async move {
         let _ = tx.send(future.await);
     });
-    rx.recv()
-        .expect("spawn_on_runtime: spawned task was cancelled")
+    match rx.recv_timeout(timeout) {
+        Ok(value) => value,
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            panic!(
+                "spawn_on_runtime: async task did not complete within {timeout:?}, \
+                 this likely indicates a deadlock"
+            );
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            panic!("spawn_on_runtime: spawned task was cancelled");
+        }
+    }
 }
 
 fn emit_build_vx_boundary_log(
@@ -3560,11 +3571,21 @@ impl BuildRuntime for BuildVxRuntime {
                 rx
             })
             .collect();
+        let timeout = std::time::Duration::from_secs(120);
         let mut results = Vec::with_capacity(handles.len());
-        for rx in handles {
-            match rx.recv() {
+        for (i, rx) in handles.iter().enumerate() {
+            match rx.recv_timeout(timeout) {
                 Ok(result) => results.push(result),
-                Err(_) => return Err(()),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    tracing::error!(
+                        batch_size = handles.len(),
+                        stuck_index = i,
+                        "run_batch: node execution timed out after {timeout:?}, \
+                         this likely indicates a deadlock in the evaluator"
+                    );
+                    return Err(());
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Err(()),
             }
         }
         Ok(results)
