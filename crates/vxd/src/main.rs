@@ -1389,6 +1389,51 @@ fn local_vx_bootstrap_binary_path(
 }
 
 #[cfg(unix)]
+fn local_vx_bootstrap_stamp_path(binary_path: &Utf8Path) -> Utf8PathBuf {
+    binary_path.with_extension(format!(
+        "{}.stamp",
+        binary_path.extension().unwrap_or("bin")
+    ))
+}
+
+#[cfg(unix)]
+fn vx_bootstrap_binary_fingerprint(path: &Utf8Path) -> Result<String> {
+    let bytes = fs::read(path.as_std_path())
+        .wrap_err_with(|| format!("failed to read vx-bootstrap binary at {path}"))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+#[cfg(unix)]
+async fn ensure_local_host_vx_bootstrap_binary(repo_root: &Utf8Path) -> Result<Utf8PathBuf> {
+    let binary_path = repo_root
+        .join("target")
+        .join("release")
+        .join("vx-bootstrap");
+    let output = moire::process::Command::new("cargo")
+        .arg("build")
+        .arg("-p")
+        .arg("vx-bootstrap")
+        .arg("--release")
+        .current_dir(repo_root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "cargo build for host vx-bootstrap failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !binary_path.exists() {
+        eyre::bail!(
+            "cargo build for host vx-bootstrap completed, but {} was not produced",
+            binary_path
+        );
+    }
+    Ok(binary_path)
+}
+
+#[cfg(unix)]
 async fn ensure_local_unix_vx_bootstrap_binary(
     repo_root: &Utf8Path,
     arch: &str,
@@ -1426,8 +1471,17 @@ async fn ensure_local_windows_vx_bootstrap_binary(
     repo_root: &Utf8Path,
     arch: &str,
 ) -> Result<Utf8PathBuf> {
+    let host_binary = ensure_local_host_vx_bootstrap_binary(repo_root).await?;
+    let host_fingerprint = vx_bootstrap_binary_fingerprint(&host_binary)?;
     let target_triple = windows_bootstrap_target_triple(arch)?;
     let binary_path = local_vx_bootstrap_binary_path(repo_root, target_triple, "vx-bootstrap.exe");
+    let stamp_path = local_vx_bootstrap_stamp_path(&binary_path);
+    let current_stamp = fs::read_to_string(stamp_path.as_std_path())
+        .ok()
+        .map(|stamp| stamp.trim().to_string());
+    if binary_path.exists() && current_stamp.as_deref() == Some(host_fingerprint.as_str()) {
+        return Ok(binary_path);
+    }
     let output = moire::process::Command::new("cargo")
         .arg("xwin")
         .arg("build")
@@ -1452,6 +1506,8 @@ async fn ensure_local_windows_vx_bootstrap_binary(
             binary_path
         );
     }
+    fs::write(stamp_path.as_std_path(), format!("{host_fingerprint}\n"))
+        .wrap_err_with(|| format!("failed to write bootstrap stamp {}", stamp_path))?;
     Ok(binary_path)
 }
 

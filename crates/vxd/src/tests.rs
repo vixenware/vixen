@@ -265,6 +265,16 @@ fn windows_bootstrap_target_triple_maps_supported_arches() {
 
 #[cfg(unix)]
 #[test]
+fn local_vx_bootstrap_stamp_path_uses_sidecar_file() {
+    let path = Utf8Path::new("/tmp/vx-bootstrap.exe");
+    assert_eq!(
+        crate::local_vx_bootstrap_stamp_path(path),
+        Utf8Path::new("/tmp/vx-bootstrap.exe.stamp")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_windows_command_announces_endpoints() {
     let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
     let remote_home = r"C:\Users\faste";
