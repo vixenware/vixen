@@ -2139,6 +2139,16 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
+    let root_mount_started = Instant::now();
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: assembling exec root mount",
+            executor_summary
+        ),
+    )
+    .await;
     let root_mount = store_exec_mounts(store, &request.mounts)
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
@@ -2148,12 +2158,42 @@ async fn run_build_vx_exec_via_runner(
         cross_store = !std::ptr::eq(target_store, store),
         "build.vx exec prepared root mount"
     );
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: exec root mount ready ({})",
+            executor_summary,
+            format_progress_elapsed(root_mount_started.elapsed())
+        ),
+    )
+    .await;
     if !std::ptr::eq(target_store, store)
         && let Some(root) = root_mount
     {
+        let mirror_started = Instant::now();
+        emit_build_vx_progress_activity(
+            &progress_listener,
+            &activity,
+            format!(
+                "build.vx executor {}: mirroring exec root mount",
+                executor_summary
+            ),
+        )
+        .await;
         mirror_node(store, target_store, root)
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        emit_build_vx_progress_activity(
+            &progress_listener,
+            &activity,
+            format!(
+                "build.vx executor {}: mirrored exec root mount ({})",
+                executor_summary,
+                format_progress_elapsed(mirror_started.elapsed())
+            ),
+        )
+        .await;
     }
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -2194,6 +2234,12 @@ async fn run_build_vx_exec_via_runner(
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
 
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!("build.vx executor {}: calling runner.run", executor_summary),
+    )
+    .await;
     let result = exec
         .run(
             RunRequest {

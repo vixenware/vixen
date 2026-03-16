@@ -844,7 +844,10 @@ fn print_ps(snapshot: PsResult) {
                 );
             }
             _ => {
-                println!("    remote: -");
+                println!(
+                    "    remote: none yet ({})",
+                    format_duration_ms(entry.age_ms)
+                );
             }
         }
     }
