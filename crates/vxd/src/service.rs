@@ -1439,9 +1439,21 @@ fn host_path_is_executable(_path: &PathValue) -> std::result::Result<bool, Strin
     Ok(false)
 }
 
+#[cfg(test)]
 pub(crate) async fn store_exec_mounts(
     store: &StoreClient,
     mounts: &[ExecMount],
+) -> std::result::Result<Option<NodeHash>, String> {
+    let no_listener = None;
+    store_exec_mounts_with_progress(store, mounts, &no_listener, None, None).await
+}
+
+async fn store_exec_mounts_with_progress(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
 ) -> std::result::Result<Option<NodeHash>, String> {
     enum PendingMount {
         Value(String, Value),
@@ -1454,8 +1466,24 @@ pub(crate) async fn store_exec_mounts(
         .map(|mount| PendingMount::Value(mount.path.as_str().to_string(), mount.value.clone()))
         .collect::<Vec<_>>();
     let mut files = Vec::new();
+    let mut processed_items = 0usize;
+    let mut last_progress_emit = 0usize;
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: exec root mount expanding {} top-level mounts",
+                executor_summary,
+                mounts.len()
+            ),
+        )
+        .await;
+    }
 
     while let Some(item) = pending.pop() {
+        processed_items += 1;
         match item {
             PendingMount::Value(path, value) => match value {
                 Value::Discovered(discovered) => {
@@ -1568,10 +1596,40 @@ pub(crate) async fn store_exec_mounts(
                 }
             }
         }
+
+        if processed_items.saturating_sub(last_progress_emit) >= 128 {
+            if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+                emit_build_vx_progress_activity(
+                    progress_listener,
+                    activity,
+                    format!(
+                        "build.vx executor {}: exec root mount expanded {} items into {} files",
+                        executor_summary,
+                        processed_items,
+                        files.len()
+                    ),
+                )
+                .await;
+            }
+            last_progress_emit = processed_items;
+        }
     }
 
     if files.is_empty() {
         return Ok(None);
+    }
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: building synthetic exec root tree from {} files",
+                executor_summary,
+                files.len()
+            ),
+        )
+        .await;
     }
 
     crate::cas_tree::build_merkle_tree(store, files)
@@ -2149,9 +2207,15 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    let root_mount = store_exec_mounts(store, &request.mounts)
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let root_mount = store_exec_mounts_with_progress(
+        store,
+        &request.mounts,
+        &progress_listener,
+        Some(&activity),
+        Some(&executor_summary),
+    )
+    .await
+    .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     tracing::info!(
         executor = %describe_executor_selector(&request.executor),
         root_mount = ?root_mount.map(|hash| hash.0),
