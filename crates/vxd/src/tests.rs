@@ -31,8 +31,8 @@ use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
-    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecRequest, MapValue, PathValue,
-    RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
+    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecPathValue, ExecRequest, MapValue,
+    PathValue, RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
     TransportValue, TreeValue, Value,
 };
 use vx_io::boot::{BootDispatcher, BootGate, GracefulShutdown};
@@ -563,6 +563,53 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
         .expect("materialize stored mount tree");
 
     assert!(materialized.path().join("bin/tool").exists());
+}
+
+#[test]
+fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
+    let host_mounts = vec![
+        vx_eval::ExecMount {
+            path: PathValue::new("src"),
+            value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src"))),
+        },
+        vx_eval::ExecMount {
+            path: PathValue::new("gen"),
+            value: Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from("pnglibconf.h"),
+                Value::ExecPath(ExecPathValue::InTree {
+                    tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src")),
+                    suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
+                }),
+            )]))),
+        },
+    ];
+    let same_mounts = host_mounts.clone();
+    let reordered_mounts = vec![host_mounts[1].clone(), host_mounts[0].clone()];
+    let different_mounts = vec![
+        vx_eval::ExecMount {
+            path: PathValue::new("src"),
+            value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other"))),
+        },
+        vx_eval::ExecMount {
+            path: PathValue::new("gen"),
+            value: Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from("pnglibconf.h"),
+                Value::ExecPath(ExecPathValue::InTree {
+                    tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other")),
+                    suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
+                }),
+            )]))),
+        },
+    ];
+
+    let first = crate::service::exec_mounts_singleflight_key(&host_mounts).expect("key");
+    let second = crate::service::exec_mounts_singleflight_key(&same_mounts).expect("key");
+    let reordered = crate::service::exec_mounts_singleflight_key(&reordered_mounts).expect("key");
+    let different = crate::service::exec_mounts_singleflight_key(&different_mounts).expect("key");
+
+    assert_eq!(first, second);
+    assert_eq!(first, reordered);
+    assert_ne!(first, different);
 }
 
 #[test]

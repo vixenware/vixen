@@ -37,11 +37,11 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, ExecutorBackendKind, ExecutorSelector, ImportRequest as EvalImportRequest,
-    MapValue, Module as EvalModule, PathValue, PoisonError, PoisonKind,
-    RenderRequest as EvalRenderRequest, ShippedFunction, StabilizeRequest as EvalStabilizeRequest,
-    StructValue, TransportBlob, TransportBuiltinValue, TransportTree, TransportValue, TreeValue,
-    Value, lower_source_file_with_source_id,
+    ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
+    ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
+    PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
+    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportBlob, TransportBuiltinValue,
+    TransportTree, TransportValue, TreeValue, Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -81,6 +81,9 @@ pub struct ToolchainInfo {
     /// Manifest date (for reports)
     pub manifest_date: Option<String>,
 }
+
+type ExecRootMountPrepResult = std::result::Result<Option<NodeHash>, String>;
+type ExecRootMountPrepFuture = Arc<moire::sync::OnceCell<ExecRootMountPrepResult>>;
 
 /// Acquired toolchains (manifest references only)
 pub struct AcquiredToolchains {
@@ -830,6 +833,9 @@ pub struct VxdService {
     /// Shared daemon-side activity registry used by `vx ps`
     activity_registry: ActivityRegistry,
 
+    /// In-flight deduplication for identical exec root mount preparation.
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
+
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
 
@@ -848,6 +854,74 @@ pub(crate) struct VxdServiceDeps {
     pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
     pub(crate) activity_registry: ActivityRegistry,
+}
+
+pub(crate) fn exec_mounts_singleflight_key(mounts: &[ExecMount]) -> Option<String> {
+    let mut parts = Vec::with_capacity(mounts.len());
+    for mount in mounts {
+        parts.push(format!(
+            "{}={}",
+            mount.path.as_str(),
+            exec_mount_value_singleflight_key(&mount.value)?
+        ));
+    }
+    parts.sort();
+    Some(parts.join("\n"))
+}
+
+fn exec_mount_value_singleflight_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Discovered(discovered) => {
+            exec_mount_value_singleflight_key(discovered.value.as_ref())
+        }
+        Value::ExecPath(path) => exec_mount_exec_path_singleflight_key(path),
+        Value::Blob(blob) => exec_mount_blob_singleflight_key(blob),
+        Value::Tree(tree) => exec_mount_tree_singleflight_key(tree),
+        other => other.key(),
+    }
+}
+
+fn exec_mount_exec_path_singleflight_key(path: &ExecPathValue) -> Option<String> {
+    match path {
+        ExecPathValue::InTree { tree, suffix } => Some(format!(
+            "execpath:tree:{}:{}",
+            exec_mount_tree_singleflight_key(tree)?,
+            suffix.as_str()
+        )),
+        ExecPathValue::InBlob { blob, leaf } => Some(format!(
+            "execpath:blob:{}:{}",
+            exec_mount_blob_singleflight_key(blob)?,
+            leaf.as_str()
+        )),
+    }
+}
+
+fn exec_mount_blob_singleflight_key(blob: &BlobValue) -> Option<String> {
+    match blob {
+        BlobValue::Inline { .. } | BlobValue::Store { .. } => blob.key(),
+        BlobValue::FsFile { path, executable } => {
+            Some(format!("blob:fs:{executable}:{}", path.as_str()))
+        }
+    }
+}
+
+fn exec_mount_tree_singleflight_key(tree: &TreeValue) -> Option<String> {
+    match tree {
+        TreeValue::Inline(entries) => {
+            let mut parts = Vec::with_capacity(entries.len());
+            for (name, value) in entries.iter() {
+                parts.push(format!(
+                    "{}:{}",
+                    name.as_ref(),
+                    exec_mount_value_singleflight_key(value)?
+                ));
+            }
+            parts.sort();
+            Some(format!("tree:inline:{{{}}}", parts.join(",")))
+        }
+        TreeValue::FsDir(path) => Some(format!("tree:fsdir:{}", path.as_str())),
+        TreeValue::Store(root) => Some(format!("tree:store:{root}")),
+    }
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -1637,6 +1711,81 @@ async fn store_exec_mounts_with_progress(
         .map(|(root, _)| Some(root))
 }
 
+async fn store_exec_mounts_deduped(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
+    inflight: &Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
+) -> ExecRootMountPrepResult {
+    let Some(key) = exec_mounts_singleflight_key(mounts) else {
+        tracing::info!("build.vx exec root mount singleflight bypassed: unresolved mount key");
+        return store_exec_mounts_with_progress(
+            store,
+            mounts,
+            progress_listener,
+            activity,
+            executor_summary,
+        )
+        .await;
+    };
+
+    let (cell, inserted) = {
+        let mut flights = inflight.lock();
+        match flights.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let cell = Arc::new(moire::sync::OnceCell::new("vxd/exec_mount_prep_inflight"));
+                entry.insert(cell.clone());
+                (cell, true)
+            }
+        }
+    };
+
+    tracing::info!(
+        mount_key = %blake3::hash(key.as_bytes()).to_hex(),
+        inserted,
+        mount_count = mounts.len(),
+        "build.vx exec root mount singleflight"
+    );
+
+    if !inserted && let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: waiting for shared exec root mount prep",
+                executor_summary
+            ),
+        )
+        .await;
+    }
+
+    #[allow(clippy::redundant_closure)]
+    let result = cell
+        .get_or_init(|| {
+            store_exec_mounts_with_progress(
+                store,
+                mounts,
+                progress_listener,
+                activity,
+                executor_summary,
+            )
+        })
+        .await
+        .clone();
+
+    let mut flights = inflight.lock();
+    if let Some(existing) = flights.get(&key)
+        && Arc::ptr_eq(existing, &cell)
+    {
+        flights.remove(&key);
+    }
+
+    result
+}
+
 #[derive(Clone, Copy)]
 enum AcquireDigest {
     Sha256([u8; 32]),
@@ -2156,6 +2305,7 @@ async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
     activity_registry: &ActivityRegistry,
+    exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
@@ -2207,12 +2357,13 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    let root_mount = store_exec_mounts_with_progress(
+    let root_mount = store_exec_mounts_deduped(
         store,
         &request.mounts,
         &progress_listener,
         Some(&activity),
         Some(&executor_summary),
+        exec_mount_prep_inflight,
     )
     .await
     .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
@@ -2670,6 +2821,7 @@ struct BuildVxRuntime {
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
     activity_registry: ActivityRegistry,
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecRootMountPrepFuture>>>,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
@@ -2809,6 +2961,7 @@ impl BuildVxRuntime {
         let exec_store = Arc::clone(&self.store);
         let exec_executors = Arc::clone(&self.executors);
         let exec_activity_registry = self.activity_registry.clone();
+        let exec_mount_prep_inflight = Arc::clone(&self.exec_mount_prep_inflight);
         let exec_runtime = runtime.clone();
         let discover_store = Arc::clone(&self.store);
         let discover_executors = Arc::clone(&self.executors);
@@ -2882,6 +3035,7 @@ impl BuildVxRuntime {
                         &exec_store,
                         &exec_executors,
                         &exec_activity_registry,
+                        &exec_mount_prep_inflight,
                         exec_listener.clone(),
                         request,
                     ),
@@ -3551,6 +3705,10 @@ impl VxdService {
             )),
             spawn_tracker,
             activity_registry,
+            exec_mount_prep_inflight: Arc::new(SyncMutex::new(
+                "vxd/exec_mount_prep_inflight",
+                HashMap::new(),
+            )),
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
             active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
@@ -3573,6 +3731,7 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             activity_registry: self.activity_registry.clone(),
+            exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
             // Per-connection state: fresh for each session
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
@@ -3778,6 +3937,7 @@ impl VxdService {
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
                     activity_registry: self.activity_registry.clone(),
+                    exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
                     module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
