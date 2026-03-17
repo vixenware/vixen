@@ -17,6 +17,7 @@ use ::moire::sync::SyncMutex;
 use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
 use facet_postcard::{from_slice, to_vec};
+use facet_value::value;
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
@@ -49,8 +50,8 @@ fn executor_max_concurrency() -> usize {
 }
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
-    DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
+    DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, EventSink, ExecArgValue,
+    ExecMount, ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
     ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
     PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
     StabilizeRequest as EvalStabilizeRequest, StoreHydrationRequest as EvalStoreHydrationRequest,
@@ -2663,10 +2664,23 @@ async fn run_build_vx_exec_via_runner(
     exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
     exec_fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    event_recorder: Option<vx_eval::EventRecorder>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let executor_summary = describe_executor_selector(&request.executor);
+    let _exec_span = event_recorder.as_ref().map(|recorder| {
+        EventSink::begin_span_with_args(
+            recorder,
+            "exec.runtime",
+            value!({
+                "executor": ((executor_summary.clone())),
+                "mount_count": ((request.mounts.len() as u64)),
+                "writable_root_count": ((request.writable_roots.len() as u64)),
+                "create_dir_count": ((request.create_dirs.len() as u64))
+            }),
+        )
+    });
     let activity = start_build_vx_activity(
         activity_registry,
         "exec",
@@ -2680,18 +2694,30 @@ async fn run_build_vx_exec_via_runner(
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
-    let exec = executors
-        .runner_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    let exec_store = executors
-        .store_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    let store_supports_readthrough = executors
-        .store_supports_readthrough(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let (exec, exec_store, store_supports_readthrough) = {
+        let _resolve_executor_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.resolve_executor",
+                value!({
+                    "executor": ((executor_summary.clone()))
+                }),
+            )
+        });
+        let exec = executors
+            .runner_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let exec_store = executors
+            .store_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let store_supports_readthrough = executors
+            .store_supports_readthrough(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        (exec, exec_store, store_supports_readthrough)
+    };
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -2717,17 +2743,29 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    let prepared_mounts = store_exec_mounts_deduped(
-        store,
-        &request.mounts,
-        exec_fs_tree_snapshot_cache,
-        &progress_listener,
-        Some(&activity),
-        Some(&executor_summary),
-        exec_mount_prep_inflight,
-    )
-    .await
-    .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let prepared_mounts = {
+        let _mount_prep_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.mounts.prepare",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "mount_count": ((request.mounts.len() as u64))
+                }),
+            )
+        });
+        store_exec_mounts_deduped(
+            store,
+            &request.mounts,
+            exec_fs_tree_snapshot_cache,
+            &progress_listener,
+            Some(&activity),
+            Some(&executor_summary),
+            exec_mount_prep_inflight,
+        )
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
     tracing::info!(
         executor = %describe_executor_selector(&request.executor),
         tree_mount_count = prepared_mounts.tree_mounts.len(),
@@ -2757,9 +2795,24 @@ async fn run_build_vx_exec_via_runner(
             ),
         )
         .await;
-        let mirrored_mounts = mirror_prepared_exec_mounts(store, target_store, &prepared_mounts)
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let mirrored_mounts = {
+            let _mirror_span = event_recorder.as_ref().map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "exec.mounts.mirror",
+                    value!({
+                        "executor": ((executor_summary.clone())),
+                        "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
+                        "file_mount_count": ((prepared_mounts.file_mounts.len() as u64))
+                    }),
+                )
+            });
+            mirror_prepared_exec_mounts(store, target_store, &prepared_mounts)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+                })?
+        };
         emit_build_vx_progress_activity(
             &progress_listener,
             &activity,
@@ -2819,8 +2872,21 @@ async fn run_build_vx_exec_via_runner(
         format!("build.vx executor {}: calling runner.run", executor_summary),
     )
     .await;
-    let result = exec
-        .run(
+    let result = {
+        let _runner_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.runner.run",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
+                    "file_mount_count": ((prepared_mounts.file_mounts.len() as u64)),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store))),
+                    "store_supports_readthrough": ((store_supports_readthrough))
+                }),
+            )
+        });
+        exec.run(
             RunRequest {
                 executor: request.executor.clone(),
                 toolchain_manifest: Blake3Hash([0; 32]),
@@ -2859,7 +2925,8 @@ async fn run_build_vx_exec_via_runner(
         .await
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
-        })?;
+        })?
+    };
     let _ = progress_handle.await;
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -2917,13 +2984,27 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
-    tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
-    let observer_value = if std::ptr::eq(target_store, &**store) {
-        observer_value
-    } else {
-        mirror_transport_value_store_refs(target_store, store, observer_value)
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    let observer_value = {
+        let _observer_bridge_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.observer.bridge",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store)))
+                }),
+            )
+        });
+        tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
+        if std::ptr::eq(target_store, &**store) {
+            observer_value
+        } else {
+            mirror_transport_value_store_refs(target_store, store, observer_value)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+                })?
+        }
     };
     tracing::info!(executor = %executor_summary, "build.vx exec finished observer-value bridge");
     emit_build_vx_progress_activity(
@@ -2946,9 +3027,19 @@ async fn run_build_vx_exec_via_runner(
         format!("build.vx executor {}: hydrating result", executor_summary),
     )
     .await;
-    tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
-    let value =
-        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?;
+    let value = {
+        let _hydrate_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.result.hydrate",
+                value!({
+                    "executor": ((executor_summary.clone()))
+                }),
+            )
+        });
+        tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
+        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?
+    };
     tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -3590,6 +3681,7 @@ impl BuildRuntime for BuildVxRuntime {
                 &self.exec_mount_prep_inflight,
                 &self.exec_fs_tree_snapshot_cache,
                 self.progress_listener.clone(),
+                self.event_recorder.clone(),
                 request,
             )
             .await

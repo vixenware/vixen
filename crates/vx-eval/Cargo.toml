@@ -13,6 +13,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3 = { workspace = true }
 facet = { workspace = true }
+facet-json = { workspace = true }
+facet-value = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 vx-store-proto = { workspace = true }
 dashmap = "6"

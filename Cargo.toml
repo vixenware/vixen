@@ -47,6 +47,7 @@ facet-json = { version = "0.44.1" }
 facet-toml = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-cargo-toml = { version = "0.44.0" }
+facet-value = { version = "0.44.1" }
 
 # cmdline parsing
 figue = { version = "2.0.0" }

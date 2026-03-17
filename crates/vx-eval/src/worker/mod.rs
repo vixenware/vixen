@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use facet_value::value;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 
@@ -1380,6 +1381,43 @@ impl Engine {
             .collect()
     }
 
+    fn node_trace_args(node: &Node) -> facet_value::Value {
+        let provenance_source = node
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.source_id.to_string())
+            .unwrap_or_default();
+        let provenance_label = node
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.label.clone())
+            .unwrap_or_default();
+        let job_kind = match &node.job {
+            NodeJob::Binary { .. } => "binary",
+            NodeJob::Unary { .. } => "unary",
+            NodeJob::Template { .. } => "template",
+            NodeJob::If { .. } => "if",
+            NodeJob::Fallible { .. } => "fallible",
+            NodeJob::Demand { .. } => "demand",
+            NodeJob::Call { .. } => "call",
+            NodeJob::Invoke { .. } => "invoke",
+            NodeJob::Field { .. } => "field",
+            NodeJob::Fail { .. } => "fail",
+            #[cfg(test)]
+            NodeJob::Sleep { .. } => "sleep",
+            #[cfg(test)]
+            NodeJob::Poison(_) => "poison",
+        };
+
+        value!({
+            "node_id": ((node.id.0)),
+            "description": ((node.description.clone())),
+            "job_kind": ((job_kind)),
+            "source_id": ((provenance_source)),
+            "source_label": ((provenance_label))
+        })
+    }
+
     pub async fn execute_pending_node_with_chain(
         &self,
         node_id: NodeId,
@@ -1390,7 +1428,9 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let _span = self.event_sink.begin_span("node.execute");
+                let _span = self
+                    .event_sink
+                    .begin_span_with_args("node.execute", Self::node_trace_args(&node));
                 let result = self
                     .with_prefixed_demand_chain(chain, node_id, self.execute_node(&node))
                     .await;
@@ -1414,7 +1454,9 @@ impl Engine {
                 Err(error)
             }
             Err(None) => {
-                let _span = self.event_sink.begin_span("node.wait");
+                let _span = self
+                    .event_sink
+                    .begin_span_with_args("node.wait", Self::node_trace_args(&node));
                 match receiver.await {
                     Ok((_node_id, Outcome::Value(value))) => Ok(value),
                     Ok((_node_id, Outcome::Poison(error))) => Err(error),

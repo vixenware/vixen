@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+pub type EventArgs = facet_value::Value;
+
 /// Trait for recording structured engine events.
 ///
 /// Generic over the Engine so each engine instance can have its own sink.
@@ -19,8 +21,18 @@ pub trait EventSink: Send + Sync + 'static {
     /// Start a duration span. The returned guard emits an end event on drop.
     fn begin_span(&self, name: &'static str) -> Self::Span;
 
+    /// Start a duration span with structured arguments attached to the begin event.
+    fn begin_span_with_args(&self, name: &'static str, _args: EventArgs) -> Self::Span {
+        self.begin_span(name)
+    }
+
     /// Record a point-in-time event.
     fn instant(&self, name: &'static str);
+
+    /// Record a point-in-time event with structured arguments.
+    fn instant_with_args(&self, name: &'static str, _args: EventArgs) {
+        self.instant(name);
+    }
 
     /// Record a dependency: the current context caused `target` to be demanded.
     fn flow(&self, from: &'static str, to: &'static str);
@@ -43,6 +55,7 @@ pub struct RecordedEvent {
     pub name: &'static str,
     pub phase: EventPhase,
     pub timestamp_us: u64,
+    pub args: Option<EventArgs>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,11 +77,12 @@ impl RecorderInner {
         self.start.elapsed().as_micros() as u64
     }
 
-    fn push(&self, name: &'static str, phase: EventPhase) {
+    fn push(&self, name: &'static str, phase: EventPhase, args: Option<EventArgs>) {
         self.events.lock().unwrap().push(RecordedEvent {
             name,
             phase,
             timestamp_us: self.now_us(),
+            args,
         });
     }
 }
@@ -142,9 +156,11 @@ impl EventRecorder {
                 EventPhase::Begin => {
                     write!(
                         f,
-                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1",
                         event.name, event.timestamp_us
                     )?;
+                    write_trace_args(&mut f, event.args.as_ref())?;
+                    write!(f, "}}")?;
                 }
                 EventPhase::End => {
                     write!(
@@ -156,9 +172,11 @@ impl EventRecorder {
                 EventPhase::Instant => {
                     write!(
                         f,
-                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1",
                         event.name, event.timestamp_us
                     )?;
+                    write_trace_args(&mut f, event.args.as_ref())?;
+                    write!(f, "}}")?;
                 }
                 EventPhase::Flow { target } => {
                     write!(
@@ -182,7 +200,7 @@ pub struct RecorderSpan {
 
 impl Drop for RecorderSpan {
     fn drop(&mut self) {
-        self.inner.push(self.name, EventPhase::End);
+        self.inner.push(self.name, EventPhase::End, None);
     }
 }
 
@@ -190,7 +208,15 @@ impl EventSink for EventRecorder {
     type Span = RecorderSpan;
 
     fn begin_span(&self, name: &'static str) -> RecorderSpan {
-        self.inner.push(name, EventPhase::Begin);
+        self.inner.push(name, EventPhase::Begin, None);
+        RecorderSpan {
+            inner: Arc::clone(&self.inner),
+            name,
+        }
+    }
+
+    fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> RecorderSpan {
+        self.inner.push(name, EventPhase::Begin, Some(args));
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
@@ -198,11 +224,15 @@ impl EventSink for EventRecorder {
     }
 
     fn instant(&self, name: &'static str) {
-        self.inner.push(name, EventPhase::Instant);
+        self.inner.push(name, EventPhase::Instant, None);
+    }
+
+    fn instant_with_args(&self, name: &'static str, args: EventArgs) {
+        self.inner.push(name, EventPhase::Instant, Some(args));
     }
 
     fn flow(&self, from: &'static str, to: &'static str) {
-        self.inner.push(from, EventPhase::Flow { target: to });
+        self.inner.push(from, EventPhase::Flow { target: to }, None);
     }
 }
 
@@ -213,7 +243,9 @@ impl EventSink for EventRecorder {
 /// making Engine generic.
 pub trait ErasedEventSink: Send + Sync + 'static {
     fn begin_span(&self, name: &'static str) -> ErasedSpan;
+    fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> ErasedSpan;
     fn instant(&self, name: &'static str);
+    fn instant_with_args(&self, name: &'static str, args: EventArgs);
     fn flow(&self, from: &'static str, to: &'static str);
 }
 
@@ -235,11 +267,69 @@ where
         ErasedSpan(Some(Box::new(EventSink::begin_span(self, name))))
     }
 
+    fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> ErasedSpan {
+        ErasedSpan(Some(Box::new(EventSink::begin_span_with_args(
+            self, name, args,
+        ))))
+    }
+
     fn instant(&self, name: &'static str) {
         EventSink::instant(self, name);
     }
 
+    fn instant_with_args(&self, name: &'static str, args: EventArgs) {
+        EventSink::instant_with_args(self, name, args);
+    }
+
     fn flow(&self, from: &'static str, to: &'static str) {
         EventSink::flow(self, from, to);
+    }
+}
+
+fn write_trace_args(f: &mut impl std::io::Write, args: Option<&EventArgs>) -> std::io::Result<()> {
+    let Some(args) = args else {
+        return Ok(());
+    };
+    let json = facet_json::to_string(args).map_err(|error| {
+        std::io::Error::other(format!("failed to serialize trace args: {error}"))
+    })?;
+    write!(f, ",\"args\":{json}")
+}
+
+#[cfg(test)]
+mod tests {
+    use facet_value::value;
+
+    use super::*;
+
+    #[test]
+    fn chrome_trace_includes_span_args() {
+        let recorder = EventRecorder::new();
+        let span = EventSink::begin_span_with_args(
+            &recorder,
+            "node.execute",
+            value!({
+                "node_id": 7,
+                "description": "compile:cc"
+            }),
+        );
+        drop(span);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.json");
+        recorder
+            .write_chrome_trace(&path)
+            .expect("write chrome trace");
+
+        let trace = std::fs::read_to_string(path).expect("read trace");
+        assert!(
+            trace.contains("\"name\":\"node.execute\""),
+            "trace: {trace}"
+        );
+        assert!(trace.contains("\"args\":{\"node_id\":7"), "trace: {trace}");
+        assert!(
+            trace.contains("\"description\":\"compile:cc\""),
+            "trace: {trace}"
+        );
     }
 }
