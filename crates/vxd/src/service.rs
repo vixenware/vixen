@@ -2112,74 +2112,19 @@ async fn store_exec_mounts_deduped(
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
-    inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    _inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
 ) -> ExecMountPrepResult {
-    let Some(key) = exec_mounts_singleflight_key(mounts) else {
-        tracing::info!("build.vx exec mount singleflight bypassed: unresolved mount key");
-        return prepare_exec_mounts_with_progress(
-            store,
-            mounts,
-            fs_tree_snapshot_cache,
-            progress_listener,
-            activity,
-            executor_summary,
-        )
-        .await;
-    };
-
-    let (cell, inserted) = {
-        let mut flights = inflight.lock();
-        match flights.entry(key.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let cell = Arc::new(moire::sync::OnceCell::new("vxd/exec_mount_prep_inflight"));
-                entry.insert(cell.clone());
-                (cell, true)
-            }
-        }
-    };
-
-    tracing::info!(
-        mount_key = %blake3::hash(key.as_bytes()).to_hex(),
-        inserted,
-        mount_count = mounts.len(),
-        "build.vx exec mount singleflight"
-    );
-
-    if !inserted && let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
-        emit_build_vx_progress_activity(
-            progress_listener,
-            activity,
-            format!(
-                "build.vx executor {}: waiting for shared exec mount prep",
-                executor_summary
-            ),
-        )
-        .await;
-    }
-
-    #[allow(clippy::redundant_closure)]
-    let result = cell
-        .get_or_init(|| {
-            prepare_exec_mounts_with_progress(
-                store,
-                mounts,
-                fs_tree_snapshot_cache,
-                progress_listener,
-                activity,
-                executor_summary,
-            )
-        })
-        .await
-        .clone();
-
-    // Keep the completed cell in the map so subsequent execs with the same
-    // mount key reuse the cached result. Only evict on error to allow retry.
-    if result.is_err() {
-        inflight.lock().remove(&key);
-    }
-
-    result
+    // Singleflight temporarily disabled — the real fix is demand-driven
+    // caching in the evaluator so FsDir snapshots happen exactly once.
+    prepare_exec_mounts_with_progress(
+        store,
+        mounts,
+        fs_tree_snapshot_cache,
+        progress_listener,
+        activity,
+        executor_summary,
+    )
+    .await
 }
 
 #[derive(Clone, Copy)]
