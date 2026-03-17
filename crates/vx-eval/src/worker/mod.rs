@@ -31,6 +31,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
+use tokio::sync::Semaphore;
 
 use crate::exec::{
     AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue,
@@ -127,6 +128,7 @@ pub struct Engine {
     runtime: Option<Arc<dyn BuildRuntime>>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Engine>>,
     host_search_path: Option<Vec<std::path::PathBuf>>,
+    exec_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl Engine {
@@ -157,6 +159,12 @@ impl Engine {
             Arc::new(Self::build_module_state(module.clone())),
         );
 
+        let exec_semaphore = env::var("VX_EXEC_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .map(|n| Arc::new(Semaphore::new(n)));
+
         let engine = Arc::new(Self {
             root_module_id,
             modules,
@@ -166,6 +174,7 @@ impl Engine {
             runtime: None,
             self_ref: std::sync::OnceLock::new(),
             host_search_path: None,
+            exec_semaphore,
         });
         engine
             .self_ref

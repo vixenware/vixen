@@ -1145,6 +1145,10 @@ impl Engine {
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
+        let _permit = match &self.exec_semaphore {
+            Some(sem) => Some(sem.acquire().await.expect("exec semaphore closed")),
+            None => None,
+        };
         let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec").await?;
         let request = self.parse_exec_request(args, &kwargs).await?;
         if let Some(runtime) = &self.runtime
