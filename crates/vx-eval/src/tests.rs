@@ -48,7 +48,7 @@ const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).me
 fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
     fn walk_value(value: &Value, prefix: &str, out: &mut Vec<String>) {
         match value {
-            Value::Tree(TreeValue::Inline(entries)) => {
+            Value::Tree(TreeValue::Inline { entries, .. }) => {
                 for (name, child) in entries.iter() {
                     let next = if prefix.is_empty() {
                         name.to_string()
@@ -106,7 +106,7 @@ fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
 fn inline_tree_with_blob(path: &str, contents: &str) -> Value {
     let mut value = Value::Blob(BlobValue::from_string(contents));
     for segment in path.split('/').rev() {
-        value = Value::Tree(TreeValue::Inline(Arc::from([(Arc::from(segment), value)])));
+        value = Value::Tree(TreeValue::inline(Arc::from([(Arc::from(segment), value)])));
     }
     value
 }
@@ -456,9 +456,9 @@ async fn pending_kwarg_array_map_spread_shared_across_exec_callbacks_resolves() 
             .next()
             .expect("output path should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(file),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -1115,7 +1115,7 @@ printf 'fake cc 1.0\n'
         .await
         .unwrap();
 
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 1);
@@ -2440,16 +2440,16 @@ fn build(a: Tree, b: Tree) (
 )
 "#,
     );
-    let left = Value::Tree(TreeValue::Inline(Arc::from([(
+    let left = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("a.o"),
         Value::Blob(BlobValue::from_string("left")),
     )])));
-    let right = Value::Tree(TreeValue::Inline(Arc::from([(
+    let right = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("b.o"),
         Value::Blob(BlobValue::from_string("right")),
     )])));
     let value = engine.call("build", vec![left, right]).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 2);
@@ -3231,7 +3231,7 @@ async fn collect_pending_walks_nested_runtime_values() {
     let value = Value::Array(Arc::from([
         Value::Pending(NodeId(1)),
         Value::ExecPath(ExecPathValue::InTree {
-            tree: TreeValue::Inline(Arc::from([(Arc::from("bin"), Value::Pending(NodeId(2)))])),
+            tree: TreeValue::inline(Arc::from([(Arc::from("bin"), Value::Pending(NodeId(2)))])),
             suffix: PathValue::new("tool"),
         }),
         Value::Discovered(DiscoveredValue {
@@ -3458,13 +3458,17 @@ fn main(extra: Array[Path]) {
         .unwrap();
 
     let value = engine.force_fully(call).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.as_ref(), "out");
-    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+    let Value::Tree(TreeValue::Inline {
+        entries: out_entries,
+        ..
+    }) = &entries[0].1
+    else {
         panic!("expected merged out subtree");
     };
     assert_eq!(out_entries.len(), 3);
@@ -3503,9 +3507,9 @@ fn main(extra: Array[Path]) {
             .next()
             .expect("path argument should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(format!("{file}.o")),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -3523,12 +3527,16 @@ fn main(extra: Array[Path]) {
         .unwrap();
 
     let value = engine.force_fully(call).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.as_ref(), "out");
-    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+    let Value::Tree(TreeValue::Inline {
+        entries: out_entries,
+        ..
+    }) = &entries[0].1
+    else {
         panic!("expected merged out subtree");
     };
     assert_eq!(out_entries.len(), 3);
@@ -3565,9 +3573,9 @@ fn main(extra: Array[Path]) {
             .next()
             .expect("path argument should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(format!("{file}.o")),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -3585,12 +3593,16 @@ fn main(extra: Array[Path]) {
         .unwrap();
 
     let value = engine.force_fully(call).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.as_ref(), "out");
-    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+    let Value::Tree(TreeValue::Inline {
+        entries: out_entries,
+        ..
+    }) = &entries[0].1
+    else {
         panic!("expected merged out subtree");
     };
     assert_eq!(out_entries.len(), 3);
@@ -3641,9 +3653,9 @@ fn main(extra: Array[Path], cc: Tool) {
             .next()
             .expect("output path should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(file),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -3683,7 +3695,7 @@ fn main(extra: Array[Path], cc: Tool) {
         )
         .await
         .unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
@@ -3759,9 +3771,9 @@ fn main(extra: Array[Path]) {
             .next()
             .expect("output path should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(file),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -3779,12 +3791,16 @@ fn main(extra: Array[Path]) {
         .unwrap();
 
     let value = engine.force_fully(call).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.as_ref(), "out");
-    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+    let Value::Tree(TreeValue::Inline {
+        entries: out_entries,
+        ..
+    }) = &entries[0].1
+    else {
         panic!("expected merged out subtree");
     };
     assert_eq!(out_entries.len(), 3);
@@ -3872,9 +3888,9 @@ fn main(extra: Array[Path], cc: Tool) {
             .next()
             .expect("output path should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(file),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -3914,7 +3930,7 @@ fn main(extra: Array[Path], cc: Tool) {
         )
         .await
         .unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
@@ -3998,9 +4014,9 @@ fn main() {
             .next()
             .expect("output path should have a filename")
             .to_string();
-        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+        Ok(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("out"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from(file),
                 Value::Blob(BlobValue::from_string("ok")),
             )]))),
@@ -4008,12 +4024,16 @@ fn main() {
     }));
 
     let value = engine.call("main", vec![]).await.unwrap();
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected merged tree");
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].0.as_ref(), "out");
-    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+    let Value::Tree(TreeValue::Inline {
+        entries: out_entries,
+        ..
+    }) = &entries[0].1
+    else {
         panic!("expected merged out subtree");
     };
     assert_eq!(out_entries.len(), 3);
@@ -4119,15 +4139,15 @@ fn main(extra: Array[Path]) {
                     .next()
                     .expect("path argument should have a filename")
                     .to_string();
-                Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+                Ok(Value::Tree(TreeValue::inline(Arc::from([(
                     Arc::from("obj"),
-                    Value::Tree(TreeValue::Inline(Arc::from([(
+                    Value::Tree(TreeValue::inline(Arc::from([(
                         Arc::from(format!("{file}.o")),
                         Value::Blob(BlobValue::from_string("obj")),
                     )]))),
                 )]))))
             }
-            "archive-tool" => Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            "archive-tool" => Ok(Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from("lib.a"),
                 Value::Blob(BlobValue::from_string("archive")),
             )])))),
@@ -4225,9 +4245,9 @@ fn main(extra: Array[Path]) {
                     let root = NodeHash(Blake3Hash::from_bytes(file.as_bytes()));
                     stored_trees.lock().unwrap().insert(
                         root,
-                        Value::Tree(TreeValue::Inline(Arc::from([(
+                        Value::Tree(TreeValue::inline(Arc::from([(
                             Arc::from("obj"),
-                            Value::Tree(TreeValue::Inline(Arc::from([(
+                            Value::Tree(TreeValue::inline(Arc::from([(
                                 Arc::from(format!("{file}.o")),
                                 Value::Blob(BlobValue::from_string("obj")),
                             )]))),
@@ -4239,7 +4259,7 @@ fn main(extra: Array[Path]) {
                     let root = NodeHash(Blake3Hash::from_bytes(b"archive-root"));
                     stored_trees.lock().unwrap().insert(
                         root,
-                        Value::Tree(TreeValue::Inline(Arc::from([(
+                        Value::Tree(TreeValue::inline(Arc::from([(
                             Arc::from("lib.a"),
                             Value::Blob(BlobValue::from_string("archive")),
                         )]))),
@@ -4453,7 +4473,7 @@ async fn missing_file_failures_keep_source_provenance_in_demand_chain() {
     };
     let outer_range = trimmed_range(parsed_outer_call.syntax());
     let engine = engine_with_source_id(source, "/workspace/build.vx");
-    let tree = Value::Tree(TreeValue::Inline(Arc::from([])));
+    let tree = Value::Tree(TreeValue::inline(Arc::from([])));
     let err = engine.call("main", vec![tree]).await.unwrap_err();
 
     assert!(err.message.contains("missing file"));
@@ -5028,11 +5048,11 @@ async fn exec_schedules_argument_resolution_concurrently() {
 #[tokio::test(flavor = "multi_thread")]
 async fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
-    let left = Value::Tree(TreeValue::Inline(Arc::from([(
+    let left = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("left.txt"),
         Value::Blob(BlobValue::from_string("left")),
     )])));
-    let right = Value::Tree(TreeValue::Inline(Arc::from([(
+    let right = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("right.txt"),
         Value::Blob(BlobValue::from_string("right")),
     )])));
@@ -5053,7 +5073,7 @@ async fn array_merge_forces_tree_items_concurrently() {
 
     assert_eq!(
         value,
-        Value::Tree(TreeValue::Inline(Arc::from([
+        Value::Tree(TreeValue::inline(Arc::from([
             (
                 Arc::from("left.txt"),
                 Value::Blob(BlobValue::from_string("left")),
@@ -5122,7 +5142,7 @@ async fn tree_constructor_schedules_map_key_resolution_concurrently() {
 
     assert_eq!(
         value,
-        Value::Tree(TreeValue::Inline(Arc::from([
+        Value::Tree(TreeValue::inline(Arc::from([
             (
                 Arc::from("left.txt"),
                 Value::Blob(BlobValue::from_string("left")),
@@ -5215,9 +5235,9 @@ async fn path_values_join_with_normalized_slashes() {
 #[tokio::test]
 async fn interpolated_path_literal_with_tree_yields_exec_path() {
     let engine = engine(r#"fn main(input: Tree) { @({input}/include/lua.h) }"#);
-    let input = TreeValue::Inline(Arc::from([(
+    let input = TreeValue::inline(Arc::from([(
         Arc::from("include"),
-        Value::Tree(TreeValue::Inline(Arc::from([(
+        Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("lua.h"),
             Value::Blob(BlobValue::from_string("header")),
         )]))),
@@ -5394,7 +5414,7 @@ async fn call_entry_passes_workspace_as_a_path() {
         .await
         .unwrap();
 
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 1);
@@ -5435,7 +5455,7 @@ async fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
         .await
         .unwrap();
 
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 2);
@@ -5523,7 +5543,7 @@ async fn observer_functions_can_return_tree_results_for_exec() {
 
     let value = engine.call("observe", vec![process, tree]).await.unwrap();
 
-    let Value::Tree(TreeValue::Inline(entries)) = value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = value else {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 2);
@@ -5907,7 +5927,7 @@ async fn exec_implicitly_mounts_tree_args() {
                }
              }"#,
     );
-    let input = Value::Tree(TreeValue::Inline(Arc::from([(
+    let input = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("input.txt"),
         Value::Blob(BlobValue::from_string("hello tree")),
     )])));
@@ -5929,7 +5949,7 @@ async fn exec_mounts_tree_paths_mentioned_in_path_literals() {
                exec ["/bin/cat", @({input}/input.txt)] where { observer: observe }
              }"#,
     );
-    let input = Value::Tree(TreeValue::Inline(Arc::from([(
+    let input = Value::Tree(TreeValue::inline(Arc::from([(
         Arc::from("input.txt"),
         Value::Blob(BlobValue::from_string("hello via execpath")),
     )])));
@@ -5957,14 +5977,14 @@ async fn exec_spreads_tree_args_in_canonical_path_order() {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))
     }));
-    let input = Value::Tree(TreeValue::Inline(Arc::from([
+    let input = Value::Tree(TreeValue::inline(Arc::from([
         (
             Arc::from("z.o"),
             Value::Blob(BlobValue::from_string("z object")),
         ),
         (
             Arc::from("dir"),
-            Value::Tree(TreeValue::Inline(Arc::from([
+            Value::Tree(TreeValue::inline(Arc::from([
                 (
                     Arc::from("b.o"),
                     Value::Blob(BlobValue::from_string("nested b")),
@@ -6033,10 +6053,10 @@ async fn exec_mounts_subtrees_instead_of_the_whole_tree() {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))
     }));
-    let input = Value::Tree(TreeValue::Inline(Arc::from([
+    let input = Value::Tree(TreeValue::inline(Arc::from([
         (
             Arc::from("dir"),
-            Value::Tree(TreeValue::Inline(Arc::from([
+            Value::Tree(TreeValue::inline(Arc::from([
                 (
                     Arc::from("a.o"),
                     Value::Blob(BlobValue::from_string("nested a")),
@@ -6062,7 +6082,7 @@ async fn exec_mounts_subtrees_instead_of_the_whole_tree() {
         .clone()
         .expect("exec request should be captured");
     assert_eq!(request.mounts.len(), 1);
-    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = &request.mounts[0].value else {
         panic!("expected subtree mount");
     };
     assert_eq!(entries.len(), 2);
@@ -6087,10 +6107,10 @@ async fn exec_mounts_merged_trees() {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))
     }));
-    let base = Value::Tree(TreeValue::Inline(Arc::from([
+    let base = Value::Tree(TreeValue::inline(Arc::from([
         (
             Arc::from("include"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from("lua.h"),
                 Value::Blob(BlobValue::from_string("lua header")),
             )]))),
@@ -6100,10 +6120,10 @@ async fn exec_mounts_merged_trees() {
             Value::Blob(BlobValue::from_string("old archive")),
         ),
     ])));
-    let overlay = Value::Tree(TreeValue::Inline(Arc::from([
+    let overlay = Value::Tree(TreeValue::inline(Arc::from([
         (
             Arc::from("include"),
-            Value::Tree(TreeValue::Inline(Arc::from([(
+            Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from("lauxlib.h"),
                 Value::Blob(BlobValue::from_string("aux header")),
             )]))),
@@ -6123,7 +6143,7 @@ async fn exec_mounts_merged_trees() {
         .clone()
         .expect("exec request should be captured");
     assert_eq!(request.mounts.len(), 1);
-    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
+    let Value::Tree(TreeValue::Inline { entries, .. }) = &request.mounts[0].value else {
         panic!("expected merged tree mount");
     };
     assert_eq!(entries.len(), 2);

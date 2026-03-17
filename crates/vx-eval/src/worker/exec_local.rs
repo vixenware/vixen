@@ -711,7 +711,7 @@ impl Engine {
     ) -> BoxFuture<'a, Result<(), PoisonError>> {
         Box::pin(async move {
             match tree {
-                TreeValue::Inline(entries) => {
+                TreeValue::Inline { entries, .. } => {
                     let mut sorted = entries.iter().collect::<Vec<_>>();
                     sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
                     for (name, value) in sorted {

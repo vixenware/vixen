@@ -544,7 +544,7 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
     };
     let mounts = vec![vx_eval::ExecMount {
         path: PathValue::new("bin"),
-        value: Value::Tree(TreeValue::Inline(Arc::from([(
+        value: Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("tool"),
             Value::Discovered(vx_eval::DiscoveredValue {
                 value: Box::new(Value::Blob(blob)),
@@ -575,7 +575,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
         },
         vx_eval::ExecMount {
             path: PathValue::new("gen"),
-            value: Value::Tree(TreeValue::Inline(Arc::from([(
+            value: Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from("pnglibconf.h"),
                 Value::ExecPath(ExecPathValue::InTree {
                     tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src")),
@@ -593,7 +593,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
         },
         vx_eval::ExecMount {
             path: PathValue::new("gen"),
-            value: Value::Tree(TreeValue::Inline(Arc::from([(
+            value: Value::Tree(TreeValue::inline(Arc::from([(
                 Arc::from("pnglibconf.h"),
                 Value::ExecPath(ExecPathValue::InTree {
                     tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other")),
@@ -2323,7 +2323,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_accepts_discovered_top_level_trees() {
     let discovered = Value::Discovered(vx_eval::DiscoveredValue {
-        value: Box::new(Value::Tree(TreeValue::Inline(Arc::from([(
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("tool.txt"),
             Value::Blob(BlobValue::from_string("present")),
         )])))),
@@ -2507,7 +2507,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree
 fn collect_tree_paths(value: &Value) -> Vec<String> {
     fn walk(value: &Value, prefix: &str, out: &mut Vec<String>) {
         match value {
-            Value::Tree(TreeValue::Inline(entries)) => {
+            Value::Tree(TreeValue::Inline { entries, .. }) => {
                 for (name, child) in entries.iter() {
                     let next = if prefix.is_empty() {
                         name.to_string()

@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use facet::Facet;
 use vx_store_proto::{BlobRef, NodeHash};
@@ -99,9 +99,14 @@ pub enum BlobValue {
 }
 
 /// Tree storage.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TreeValue {
-    Inline(Arc<[(Arc<str>, Value)]>),
+    Inline {
+        entries: Arc<[(Arc<str>, Value)]>,
+        /// Lazily computed merkle root. Only valid when all children are
+        /// content-addressed (no Pending, no FsDir leaves).
+        cached_hash: Arc<OnceLock<NodeHash>>,
+    },
     FsDir(PathValue),
     Store(NodeHash),
 }
@@ -556,9 +561,25 @@ impl BlobValue {
 }
 
 impl TreeValue {
+    /// Create a new inline tree value.
+    pub fn inline(entries: Arc<[(Arc<str>, Value)]>) -> Self {
+        TreeValue::Inline {
+            entries,
+            cached_hash: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Returns the entries if this is an inline tree.
+    pub fn entries(&self) -> Option<&Arc<[(Arc<str>, Value)]>> {
+        match self {
+            TreeValue::Inline { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+
     fn collect_pending(&self, deps: &mut Vec<NodeId>) {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 for (_, value) in entries.iter() {
                     value.collect_pending(deps);
                 }
@@ -569,7 +590,7 @@ impl TreeValue {
 
     pub fn is_fully_resolved(&self) -> bool {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 entries.iter().all(|(_, value)| value.is_fully_resolved())
             }
             TreeValue::FsDir(_) => true,
@@ -579,7 +600,7 @@ impl TreeValue {
 
     pub fn key(&self) -> Option<String> {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 let parts = entries
                     .iter()
                     .map(|(name, value)| Some(format!("{name}:{}", value.key()?)))
@@ -1074,10 +1095,30 @@ impl Eq for BlobValue {}
 impl PartialEq for TreeValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TreeValue::Inline(a), TreeValue::Inline(b)) => a == b,
+            (TreeValue::Inline { entries: a, .. }, TreeValue::Inline { entries: b, .. }) => a == b,
             (TreeValue::FsDir(a), TreeValue::FsDir(b)) => a == b,
             (TreeValue::Store(a), TreeValue::Store(b)) => a == b,
             _ => false,
+        }
+    }
+}
+
+impl fmt::Debug for TreeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TreeValue::Inline {
+                entries,
+                cached_hash,
+            } => {
+                let mut d = f.debug_struct("Inline");
+                d.field("entries", entries);
+                if let Some(hash) = cached_hash.get() {
+                    d.field("hash", hash);
+                }
+                d.finish()
+            }
+            TreeValue::FsDir(path) => f.debug_tuple("FsDir").field(path).finish(),
+            TreeValue::Store(hash) => f.debug_tuple("Store").field(hash).finish(),
         }
     }
 }
@@ -1261,7 +1302,7 @@ impl fmt::Display for BlobValue {
 impl fmt::Display for TreeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TreeValue::Inline(entries) => write!(f, "<tree {} entries>", entries.len()),
+            TreeValue::Inline { entries, .. } => write!(f, "<tree {} entries>", entries.len()),
             TreeValue::FsDir(path) => write!(f, "<tree {}>", path.as_str()),
             TreeValue::Store(root) => write!(f, "<tree {root}>"),
         }

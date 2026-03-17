@@ -138,7 +138,7 @@ impl Engine {
     ) -> BoxFuture<'a, Result<(), PoisonError>> {
         Box::pin(async move {
             match tree {
-                TreeValue::Inline(entries) => {
+                TreeValue::Inline { entries, .. } => {
                     self.ensure_dir(destination)?;
                     for (name, value) in entries.iter() {
                         self.materialize_value_to_fs(value, &destination.join(name.as_ref()))
@@ -428,12 +428,12 @@ impl Engine {
                         executable,
                     }))
                 }
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     let mut snapshotted = Vec::with_capacity(entries.len());
                     for (name, value) in entries.iter() {
                         snapshotted.push((name.clone(), self.snapshot_value(value.clone()).await?));
                     }
-                    Ok(Value::Tree(TreeValue::Inline(Arc::from(snapshotted))))
+                    Ok(Value::Tree(TreeValue::inline(Arc::from(snapshotted))))
                 }
                 Value::Tree(TreeValue::FsDir(path)) => self.snapshot_fs_tree(&path).await,
                 Value::Tree(TreeValue::Store(root)) => Ok(Value::Tree(TreeValue::Store(root))),
@@ -513,7 +513,7 @@ impl Engine {
                 | Value::Function(_)
                 | Value::Partial(_)
                 | Value::Builtin(_) => Ok(value),
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     let mut snapshotted = Vec::with_capacity(entries.len());
                     for (name, value) in entries.iter() {
                         snapshotted.push((
@@ -521,7 +521,7 @@ impl Engine {
                             self.snapshot_exec_mount_value(value.clone()).await?,
                         ));
                     }
-                    Ok(Value::Tree(TreeValue::Inline(Arc::from(snapshotted))))
+                    Ok(Value::Tree(TreeValue::inline(Arc::from(snapshotted))))
                 }
                 Value::Tree(TreeValue::FsDir(path)) => Ok(Value::Tree(TreeValue::FsDir(path))),
                 Value::Tree(TreeValue::Store(root)) => Ok(Value::Tree(TreeValue::Store(root))),
@@ -609,7 +609,7 @@ impl Engine {
                 entries.push((Arc::from(name), value));
             }
 
-            Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+            Ok(Value::Tree(TreeValue::inline(Arc::from(entries))))
         })
     }
 
@@ -621,7 +621,7 @@ impl Engine {
     ) -> BoxFuture<'a, Result<Value, PoisonError>> {
         Box::pin(async move {
             match tree {
-                TreeValue::Inline(entries) => self.tree_file_inline(entries, &path).await,
+                TreeValue::Inline { entries, .. } => self.tree_file_inline(entries, &path).await,
                 TreeValue::FsDir(root) => {
                     let full_path = root.join(path.as_str());
                     let metadata = fs::metadata(full_path.as_str()).map_err(|error| {
@@ -681,7 +681,7 @@ impl Engine {
     ) -> BoxFuture<'a, Result<Value, PoisonError>> {
         Box::pin(async move {
             match tree {
-                TreeValue::Inline(entries) => self.tree_subtree_inline(entries, &path).await,
+                TreeValue::Inline { entries, .. } => self.tree_subtree_inline(entries, &path).await,
                 TreeValue::FsDir(root) => {
                     if path.as_str().is_empty() {
                         return Ok(Value::Tree(TreeValue::FsDir(root.clone())));
@@ -724,7 +724,7 @@ impl Engine {
             .filter(|segment| !segment.is_empty() && *segment != ".")
             .collect::<Vec<_>>();
         if segments.is_empty() {
-            return Ok(Value::Tree(TreeValue::Inline(Arc::from(entries.to_vec()))));
+            return Ok(Value::Tree(TreeValue::inline(Arc::from(entries.to_vec()))));
         }
         self.tree_subtree_inline_segments(entries, &segments, path)
             .await
@@ -766,7 +766,7 @@ impl Engine {
             }
 
             match value {
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     self.tree_subtree_inline_segments(
                         entries.as_ref(),
                         &segments[1..],
@@ -821,7 +821,7 @@ impl Engine {
                     }
                 }
             }
-            Ok(Value::Tree(TreeValue::Inline(Arc::from(
+            Ok(Value::Tree(TreeValue::inline(Arc::from(
                 merged.into_iter().collect::<Vec<_>>(),
             ))))
         })
@@ -833,7 +833,7 @@ impl Engine {
     ) -> BoxFuture<'a, Result<TreeEntries, PoisonError>> {
         Box::pin(async move {
             match tree {
-                TreeValue::Inline(entries) => {
+                TreeValue::Inline { entries, .. } => {
                     let mut result = Vec::with_capacity(entries.len());
                     for (name, value) in entries.iter() {
                         result.push((name.clone(), self.force_value_shallow(value.clone()).await?));
@@ -929,7 +929,7 @@ impl Engine {
             }
 
             match value {
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     self.tree_file_inline_segments(entries.as_ref(), &segments[1..], original_path)
                         .await
                 }

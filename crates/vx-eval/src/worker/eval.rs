@@ -83,7 +83,7 @@ impl Engine {
                     }))
                 }
                 Value::Tree(tree) => match tree {
-                    TreeValue::Inline(entries) => {
+                    TreeValue::Inline { entries, .. } => {
                         let names = entries
                             .iter()
                             .map(|(name, _)| name.clone())
@@ -94,7 +94,7 @@ impl Engine {
                             .collect::<Vec<_>>();
                         let forced = self.force_many(values).await?;
                         self.validate_tree_entries(&forced)?;
-                        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+                        Ok(Value::Tree(TreeValue::inline(Arc::from(
                             names.into_iter().zip(forced).collect::<Vec<_>>(),
                         ))))
                     }
@@ -409,7 +409,7 @@ impl Engine {
         visiting: &mut Vec<NodeId>,
     ) -> Result<InspectedValue, PoisonError> {
         match tree {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 let mut out = Vec::with_capacity(entries.len());
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
@@ -420,7 +420,7 @@ impl Engine {
                     out.push((name.clone(), value.value));
                 }
                 Ok(InspectedValue {
-                    value: Value::Tree(TreeValue::Inline(Arc::from(out))),
+                    value: Value::Tree(TreeValue::inline(Arc::from(out))),
                     pending,
                     errors,
                 })

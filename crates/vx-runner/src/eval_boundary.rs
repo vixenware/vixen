@@ -205,7 +205,7 @@ fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, 
 fn commit_tree<'a>(cas: &'a StoreClient, tree: TreeValue) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
         match tree {
-            TreeValue::Inline(entries) => commit_inline_tree(cas, entries).await,
+            TreeValue::Inline { entries, .. } => commit_inline_tree(cas, entries).await,
             TreeValue::FsDir(path) => commit_fs_tree(cas, path).await,
             TreeValue::Store(root) => Ok((root, directory_total_size(cas, root).await?)),
         }
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn inline_trees_commit_to_store_backed_transport() {
         let env = StoreTestEnv::new().await;
-        let value = Value::Tree(TreeValue::Inline(Arc::from([(
+        let value = Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("hello.txt"),
             Value::Blob(BlobValue::from_string("hello")),
         )])));

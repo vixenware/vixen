@@ -949,7 +949,7 @@ fn exec_mount_blob_singleflight_key(blob: &BlobValue) -> Option<String> {
 
 fn exec_mount_tree_singleflight_key(tree: &TreeValue) -> Option<String> {
     match tree {
-        TreeValue::Inline(entries) => {
+        TreeValue::Inline { entries, .. } => {
             let mut parts = Vec::with_capacity(entries.len());
             for (name, value) in entries.iter() {
                 parts.push(format!(
@@ -1739,7 +1739,7 @@ async fn snapshot_exec_tree(
     tree: &TreeValue,
 ) -> std::result::Result<(NodeHash, u64), String> {
     match tree {
-        TreeValue::Inline(entries) => snapshot_exec_inline_tree(store, cache, entries).await,
+        TreeValue::Inline { entries, .. } => snapshot_exec_inline_tree(store, cache, entries).await,
         TreeValue::FsDir(path) => {
             let hash = snapshot_exec_fs_tree_cached(store, cache, path).await?;
             let directory = load_store_directory(store, hash)
@@ -1913,7 +1913,7 @@ async fn store_exec_mounts_with_progress(
                     path,
                     kind: store_exec_blob(store, &blob).await?,
                 }),
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     let mut entries = entries.iter().cloned().collect::<Vec<_>>();
                     entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
                     for (name, value) in entries.into_iter().rev() {
@@ -3713,7 +3713,7 @@ fn hydrate_exec_value_from_store(
                     };
                     entries.push((Arc::from(entry.name), value));
                 }
-                Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+                Ok(Value::Tree(TreeValue::inline(Arc::from(entries))))
             }
             Value::Discovered(discovered) => {
                 let inner = hydrate_exec_value_from_store(
@@ -4455,7 +4455,7 @@ impl VxdService {
         })?;
 
         match tree {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 for (name, value) in entries.iter() {
                     self.materialize_build_vx_value(&output_root.join(name.as_ref()), value)?;
                 }
@@ -4483,7 +4483,7 @@ impl VxdService {
                     message: error.to_string(),
                 })?;
                 match tree {
-                    TreeValue::Inline(entries) => {
+                    TreeValue::Inline { entries, .. } => {
                         for (name, value) in entries.iter() {
                             self.materialize_build_vx_value(&path.join(name.as_ref()), value)?;
                         }

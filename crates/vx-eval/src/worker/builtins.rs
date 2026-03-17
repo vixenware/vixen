@@ -280,7 +280,9 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
                 self.require_no_kwargs("Tree.empty", kwargs)?;
                 self.check_arity("Tree.empty", args, 0)?;
-                Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
+                Ok(Value::Tree(TreeValue::inline(Arc::from(
+                    [] as [(Arc<str>, Value); 0]
+                ))))
             }
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
                 self.require_no_kwargs("Tree.from_path", kwargs)?;
@@ -754,17 +756,21 @@ impl Engine {
                 return Ok(());
             }
 
-            let child = entries
-                .entry(Arc::from(*head))
-                .or_insert_with(|| Value::Tree(TreeValue::Inline(Arc::from([]))));
+            let child = entries.entry(Arc::from(*head)).or_insert_with(|| {
+                Value::Tree(TreeValue::inline(
+                    Arc::from(Vec::<(Arc<str>, Value)>::new()),
+                ))
+            });
             match child {
-                Value::Tree(TreeValue::Inline(existing)) => {
+                Value::Tree(TreeValue::Inline {
+                    entries: existing, ..
+                }) => {
                     let mut nested = existing
                         .iter()
                         .cloned()
                         .collect::<BTreeMap<Arc<str>, Value>>();
                     insert_tree_path(engine, &mut nested, tail, value)?;
-                    *child = Value::Tree(TreeValue::Inline(Arc::from(
+                    *child = Value::Tree(TreeValue::inline(Arc::from(
                         nested.into_iter().collect::<Vec<_>>(),
                     )));
                     Ok(())
@@ -797,7 +803,7 @@ impl Engine {
             insert_tree_path(self, &mut nested, &segments, value.clone())?;
         }
         self.validate_tree_entries(&nested.values().cloned().collect::<Vec<_>>())?;
-        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+        Ok(Value::Tree(TreeValue::inline(Arc::from(
             nested.into_iter().collect::<Vec<_>>(),
         ))))
     }
@@ -891,7 +897,9 @@ impl Engine {
 
         if items.is_empty() {
             return Ok(self.attach_obligations(
-                Value::Tree(TreeValue::Inline(Arc::from([]))),
+                Value::Tree(TreeValue::inline(
+                    Arc::from(Vec::<(Arc<str>, Value)>::new()),
+                )),
                 receiver_obligations,
             ));
         }

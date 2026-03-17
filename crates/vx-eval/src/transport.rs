@@ -1177,7 +1177,7 @@ impl TryFrom<&TreeValue> for TransportTree {
 
     fn try_from(tree: &TreeValue) -> Result<Self, Self::Error> {
         match tree {
-            TreeValue::Inline(entries) => Ok(Self::Inline(
+            TreeValue::Inline { entries, .. } => Ok(Self::Inline(
                 entries
                     .iter()
                     .map(|(name, value)| Ok((name.to_string(), TransportValue::try_from(value)?)))
@@ -1197,7 +1197,7 @@ impl TryFrom<TransportTree> for TreeValue {
 
     fn try_from(tree: TransportTree) -> Result<Self, Self::Error> {
         match tree {
-            TransportTree::Inline(entries) => Ok(Self::Inline(Arc::from(
+            TransportTree::Inline(entries) => Ok(TreeValue::inline(Arc::from(
                 entries
                     .into_iter()
                     .map(|(name, value)| Ok((Arc::<str>::from(name), Value::try_from(value)?)))
