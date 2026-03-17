@@ -6386,10 +6386,13 @@ fn main() { [add(1, 2), add(1, 2)] }
     let executions = recorder.count_spans("node.execute");
     let cache_hits = recorder.count_instants("node.cache_hit");
 
-    // add(1, 2) should be memoized — called twice, executed once, one cache hit.
+    let waits = recorder.count_spans("node.wait");
+
+    // add(1, 2) should be memoized — called twice, executed once.
+    // The second demand should either be a cache hit or a wait (if concurrent).
     assert!(
-        cache_hits >= 1,
-        "expected at least 1 cache hit from memoized add(1,2), got {cache_hits} \
-        (executions: {executions})"
+        cache_hits + waits >= 1,
+        "expected at least 1 cache hit or wait from memoized add(1,2), \
+        got {cache_hits} cache hits, {waits} waits (executions: {executions})"
     );
 }
