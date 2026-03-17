@@ -887,7 +887,7 @@ impl Engine {
     ) -> Value {
         if let Value::Function(function_value) = &function
             && function_value.key().is_some()
-            && args.iter().all(|value| value.key().is_some())
+            && args.iter().all(|value| value.memo_key().is_some())
         {
             return Value::Pending(self.memoized_invoke_node(function_value.clone(), args));
         }
@@ -934,7 +934,7 @@ impl Engine {
                 "call:{}({})",
                 function.key().unwrap_or_else(|| "<unresolved>".into()),
                 args.iter()
-                    .map(|value| value.key().unwrap_or_else(|| "<pending>".into()))
+                    .map(|value| value.memo_key().unwrap_or_else(|| "<unknown>".into()))
                     .collect::<Vec<_>>()
                     .join(",")
             ),

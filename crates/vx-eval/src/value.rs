@@ -381,6 +381,17 @@ impl Value {
         }
     }
 
+    /// Returns a stable identity for memoization purposes.
+    /// Unlike `key()`, this returns `Some` for `Pending` values — a pending
+    /// node has a unique identity (the NodeId) even though its value isn't
+    /// resolved yet.
+    pub fn memo_key(&self) -> Option<String> {
+        match self {
+            Value::Pending(node_id) => Some(format!("pending:{}", node_id.0)),
+            other => other.key(),
+        }
+    }
+
     pub fn key(&self) -> Option<String> {
         match self {
             Value::Pending(_) => None,

@@ -1115,7 +1115,7 @@ impl Engine {
 
         if kwargs.is_empty()
             && function.key().is_some()
-            && args.iter().all(|value| value.key().is_some())
+            && args.iter().all(|value| value.memo_key().is_some())
         {
             let node_id = self.memoized_invoke_node(function, args.iter().cloned().collect());
             return Ok(self.attach_obligations(Value::Pending(node_id), function_obligations));
