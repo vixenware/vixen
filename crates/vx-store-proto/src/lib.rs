@@ -27,7 +27,7 @@ pub const CACHE_KEY_SCHEMA_VERSION: u32 = 1;
 
 /// CAS protocol version.
 /// Bump this when making breaking changes to the CAS RPC interface.
-pub const STORE_PROTOCOL_VERSION: u32 = 4;
+pub const STORE_PROTOCOL_VERSION: u32 = 5;
 
 /// Versioned postcard node format version.
 /// Node bytes are `[version: u32 LE][postcard payload]`.
@@ -627,6 +627,32 @@ impl fmt::Display for ServiceVersion {
 }
 
 /// Progress update streamed during long-running store operations (downloads, extraction).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+pub enum RemoteTracePhase {
+    Begin,
+    End,
+    Instant,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+pub enum RemoteTraceSpan {
+    RunnerPrepareVfs,
+    RunnerCommand,
+    RunnerObserver,
+    RunnerFlushOutputs,
+    RunnerStoreManifest,
+    RunnerCleanup,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct RemoteTraceEvent {
+    pub span: RemoteTraceSpan,
+    pub phase: RemoteTracePhase,
+}
+
+/// Progress update streamed during long-running store operations (downloads, extraction).
 #[derive(Debug, Clone, Facet)]
 pub struct StoreProgress {
     /// Human-readable phase description (e.g., "downloading rustc", "extracting rust-std")
@@ -635,6 +661,28 @@ pub struct StoreProgress {
     pub current: Option<u64>,
     /// Total bytes or items expected
     pub total: Option<u64>,
+    /// Optional structured trace event bridged back to the caller.
+    pub trace_event: Option<RemoteTraceEvent>,
+}
+
+impl StoreProgress {
+    pub fn message(message: impl Into<String>, current: Option<u64>, total: Option<u64>) -> Self {
+        Self {
+            message: message.into(),
+            current,
+            total,
+            trace_event: None,
+        }
+    }
+
+    pub fn trace(span: RemoteTraceSpan, phase: RemoteTracePhase) -> Self {
+        Self {
+            message: String::new(),
+            current: None,
+            total: None,
+            trace_event: Some(RemoteTraceEvent { span, phase }),
+        }
+    }
 }
 
 // =============================================================================

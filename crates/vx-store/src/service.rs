@@ -455,11 +455,11 @@ impl StoreService {
                 async move || {
                     send_progress_best_effort(
                         &progress,
-                        StoreProgress {
-                            message: format!("downloading {}@{}", spec.name, spec.version),
-                            current: None,
-                            total: None,
-                        },
+                        StoreProgress::message(
+                            format!("downloading {}@{}", spec.name, spec.version),
+                            None,
+                            None,
+                        ),
                     )
                     .await;
 
@@ -479,11 +479,11 @@ impl StoreService {
 
                     send_progress_best_effort(
                         &progress,
-                        StoreProgress {
-                            message: format!("storing {}@{}", spec.name, spec.version),
-                            current: None,
-                            total: None,
-                        },
+                        StoreProgress::message(
+                            format!("storing {}@{}", spec.name, spec.version),
+                            None,
+                            None,
+                        ),
                     )
                     .await;
 

@@ -9,7 +9,7 @@ mod capability;
 pub use capability::CapabilitySet;
 
 pub mod events;
-pub use events::{ErasedEventSink, ErasedSpan, EventRecorder, EventSink};
+pub use events::{ErasedEventSink, ErasedSpan, EventRecorder, EventSink, current_trace_track_id};
 
 mod exec;
 pub use exec::{

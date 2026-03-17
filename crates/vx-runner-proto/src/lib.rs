@@ -30,7 +30,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 12;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 13;
 
 // =============================================================================
 // Rust Compilation

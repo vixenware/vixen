@@ -37,7 +37,10 @@ const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
 const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+pub(crate) async fn send_progress_best_effort(
+    progress: &roam::Tx<StoreProgress>,
+    update: StoreProgress,
+) {
     let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
     loop {
         match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
@@ -119,7 +122,7 @@ pub async fn run_sandboxed_command(
     action_desc: &str,
     progress: roam::Tx<StoreProgress>,
     cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Result<CommandOutput, CommandError> {
+) -> (roam::Tx<StoreProgress>, Result<CommandOutput, CommandError>) {
     let timeout = action_timeout(kind);
 
     // Pipe stdout and stderr so we can stream them
@@ -142,7 +145,10 @@ pub async fn run_sandboxed_command(
         });
     }
 
-    let mut child = cmd.spawn().map_err(CommandError::SpawnFailed)?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return (progress, Err(CommandError::SpawnFailed(error))),
+    };
 
     // Tell the reaper about this child's process group (pgid == pid from setpgid(0,0))
     #[cfg(target_os = "macos")]
@@ -226,33 +232,6 @@ pub async fn run_sandboxed_command(
         .named("sandbox_stderr"),
     );
 
-    // Progress tick task: every 250ms, send the latest line if it changed
-    let latest_for_tick = latest_line.clone();
-    let action_desc_owned = action_desc.to_string();
-    let tick_task = moire::task::spawn(
-        async move {
-            let mut last_sent = String::new();
-            let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
-            loop {
-                interval.tick().await;
-                let current = latest_for_tick.lock().clone();
-                if current != last_sent && !current.is_empty() {
-                    send_progress_best_effort(
-                        &progress,
-                        StoreProgress {
-                            message: format!("{action_desc_owned}: {current}"),
-                            current: None,
-                            total: None,
-                        },
-                    )
-                    .await;
-                    last_sent = current;
-                }
-            }
-        }
-        .named("sandbox_tick"),
-    );
-
     // Grab the PID before wait (child.id() returns None after exit)
     let pid = child.id();
 
@@ -263,26 +242,63 @@ pub async fn run_sandboxed_command(
         Cancelled,
     }
 
-    let outcome = if let Some(ref cancel_token) = cancel {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => Outcome::Cancelled,
-            result = tokio::time::timeout(timeout, child.wait()) => {
-                match result {
-                    Ok(r) => Outcome::Exited(r),
-                    Err(_) => Outcome::TimedOut,
+    let outcome = {
+        let latest_for_tick = latest_line.clone();
+        let action_desc_owned = action_desc.to_string();
+        let mut last_sent = String::new();
+        let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+        let child_wait = child.wait();
+        tokio::pin!(child_wait);
+
+        loop {
+            if let Some(ref cancel_token) = cancel {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => break Outcome::Cancelled,
+                    _ = &mut timeout_sleep => break Outcome::TimedOut,
+                    result = &mut child_wait => break Outcome::Exited(result),
+                    _ = interval.tick() => {
+                        let current = latest_for_tick.lock().clone();
+                        if current != last_sent && !current.is_empty() {
+                            send_progress_best_effort(
+                                &progress,
+                                StoreProgress::message(
+                                    format!("{action_desc_owned}: {current}"),
+                                    None,
+                                    None,
+                                ),
+                            )
+                            .await;
+                            last_sent = current;
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = &mut timeout_sleep => break Outcome::TimedOut,
+                    result = &mut child_wait => break Outcome::Exited(result),
+                    _ = interval.tick() => {
+                        let current = latest_for_tick.lock().clone();
+                        if current != last_sent && !current.is_empty() {
+                            send_progress_best_effort(
+                                &progress,
+                                StoreProgress::message(
+                                    format!("{action_desc_owned}: {current}"),
+                                    None,
+                                    None,
+                                ),
+                            )
+                            .await;
+                            last_sent = current;
+                        }
+                    }
                 }
             }
         }
-    } else {
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(r) => Outcome::Exited(r),
-            Err(_) => Outcome::TimedOut,
-        }
     };
-
-    // Stop the tick task
-    tick_task.abort();
 
     match outcome {
         Outcome::Exited(Ok(exit_status)) => {
@@ -296,12 +312,15 @@ pub async fn run_sandboxed_command(
             let stdout = stdout_output.lock().clone();
             let stderr = stderr_output.lock().clone();
             let combined = combined_output.lock().clone();
-            Ok(CommandOutput {
-                exit_status,
-                stdout,
-                stderr,
-                combined_output: combined,
-            })
+            (
+                progress,
+                Ok(CommandOutput {
+                    exit_status,
+                    stdout,
+                    stderr,
+                    combined_output: combined,
+                }),
+            )
         }
         Outcome::Exited(Err(io_err)) => {
             if let Some(pid) = pid {
@@ -309,7 +328,7 @@ pub async fn run_sandboxed_command(
             }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            Err(CommandError::SpawnFailed(io_err))
+            (progress, Err(CommandError::SpawnFailed(io_err)))
         }
         Outcome::TimedOut => {
             // Timeout — gracefully terminate the process group (SIGTERM → SIGKILL)
@@ -329,11 +348,14 @@ pub async fn run_sandboxed_command(
             let _ = stderr_task.await;
             let partial = combined_output.lock().clone();
 
-            Err(CommandError::TimedOut {
-                action_desc: action_desc.to_string(),
-                timeout,
-                partial_output: partial,
-            })
+            (
+                progress,
+                Err(CommandError::TimedOut {
+                    action_desc: action_desc.to_string(),
+                    timeout,
+                    partial_output: partial,
+                }),
+            )
         }
         Outcome::Cancelled => {
             // Cancellation — graceful shutdown: SIGTERM → grace period → SIGKILL
@@ -352,10 +374,13 @@ pub async fn run_sandboxed_command(
             let _ = stderr_task.await;
             let partial = combined_output.lock().clone();
 
-            Err(CommandError::Cancelled {
-                action_desc: action_desc.to_string(),
-                partial_output: partial,
-            })
+            (
+                progress,
+                Err(CommandError::Cancelled {
+                    action_desc: action_desc.to_string(),
+                    partial_output: partial,
+                }),
+            )
         }
     }
 }
@@ -634,15 +659,15 @@ mod tests {
         cmd.arg("-c")
             .arg("printf 'stdout line\\n'; printf 'stderr line\\n' >&2");
 
-        let output = run_sandboxed_command(
+        let (_progress, output) = run_sandboxed_command(
             cmd,
             &ActionKind::CcCompile,
             "capture-test",
             Tx::<StoreProgress>::unbound(),
             None,
         )
-        .await
-        .expect("command should run");
+        .await;
+        let output = output.expect("command should run");
 
         assert_eq!(output.stdout, "stdout line\n");
         assert_eq!(output.stderr, "stderr line\n");

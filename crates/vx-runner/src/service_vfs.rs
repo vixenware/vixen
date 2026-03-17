@@ -7,6 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use jiff::Zoned;
 use moire::task::FutureExt;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info};
@@ -18,14 +19,37 @@ use vx_runner_proto::{
 };
 use vx_store_proto::{
     Blake3Hash, CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry,
-    StoreProgress,
+    RemoteTracePhase, RemoteTraceSpan, StoreProgress,
 };
 
 use crate::RunnerService;
 use crate::eval_boundary::{
     evaluate_shipped_discover, evaluate_shipped_observer, evaluate_shipped_verification,
 };
-use crate::sandbox::{ActionKind, CommandError};
+use crate::sandbox::{ActionKind, CommandError, send_progress_best_effort};
+
+async fn emit_runner_progress_trace(progress: &roam::Tx<StoreProgress>, span: RemoteTraceSpan) {
+    send_progress_best_effort(
+        progress,
+        StoreProgress::trace(span, RemoteTracePhase::Begin),
+    )
+    .await;
+}
+
+async fn end_runner_progress_trace(progress: &roam::Tx<StoreProgress>, span: RemoteTraceSpan) {
+    send_progress_best_effort(progress, StoreProgress::trace(span, RemoteTracePhase::End)).await;
+}
+
+async fn with_runner_progress_trace<T>(
+    progress: &roam::Tx<StoreProgress>,
+    span: RemoteTraceSpan,
+    future: impl Future<Output = T>,
+) -> T {
+    emit_runner_progress_trace(progress, span).await;
+    let result = future.await;
+    end_runner_progress_trace(progress, span).await;
+    result
+}
 
 fn is_relative_vfs_path(path: &str) -> bool {
     !path.is_empty() && !path.starts_with('/') && !path.split('/').any(|segment| segment == "..")
@@ -797,15 +821,15 @@ impl RunnerService {
 
         // 7. Run rustc with streaming output and timeout
         let action_desc = format!("rustc {}", request.crate_name);
-        let output = match crate::sandbox::run_sandboxed_command(
+        let (_progress, output) = crate::sandbox::run_sandboxed_command(
             cmd,
             &ActionKind::RustCompile,
             &action_desc,
             progress,
             None,
         )
-        .await
-        {
+        .await;
+        let output = match output {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
                 tracing::error!(
@@ -1118,15 +1142,15 @@ impl RunnerService {
 
         // 6. Run zig cc with streaming output and timeout
         let action_desc = format!("zig cc {}", request.source_path);
-        let output = match crate::sandbox::run_sandboxed_command(
+        let (_progress, output) = crate::sandbox::run_sandboxed_command(
             cmd,
             &ActionKind::CcCompile,
             &action_desc,
             progress,
             None,
         )
-        .await
-        {
+        .await;
+        let output = match output {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
                 self.remove_action_prefix(&action.prefix_id).await;
@@ -1535,15 +1559,15 @@ impl RunnerService {
         action.hermetic_env(&mut cmd);
 
         let action_desc = format!("link {}", request.binary_name);
-        let output = match crate::sandbox::run_sandboxed_command(
+        let (_progress, output) = crate::sandbox::run_sandboxed_command(
             cmd,
             &ActionKind::CcLink,
             &action_desc,
             progress,
             None,
         )
-        .await
-        {
+        .await;
+        let output = match output {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
                 self.remove_action_prefix(&action.prefix_id).await;
@@ -1733,6 +1757,7 @@ impl RunnerService {
             needs_toolchain,
             "preparing VFS run action"
         );
+        emit_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
 
         let toolchain_path = if needs_toolchain {
             let toolchain_prefix_id = match self
@@ -2209,6 +2234,7 @@ impl RunnerService {
                 .expect("zig toolchain requests must resolve a toolchain path");
             cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
         }
+        end_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
 
         let action_desc = format!(
             "{} {}",
@@ -2263,16 +2289,13 @@ impl RunnerService {
         );
         let command_start = Instant::now();
 
-        let output = match crate::sandbox::run_sandboxed_command(
-            cmd,
-            &action_kind,
-            &action_desc,
-            progress,
-            None,
-        )
-        .named("runner.run_vfs.run_sandboxed_command")
-        .await
-        {
+        emit_runner_progress_trace(&progress, RemoteTraceSpan::RunnerCommand).await;
+        let (progress, output) =
+            crate::sandbox::run_sandboxed_command(cmd, &action_kind, &action_desc, progress, None)
+                .named("runner.run_vfs.run_sandboxed_command")
+                .await;
+        end_runner_progress_trace(&progress, RemoteTraceSpan::RunnerCommand).await;
+        let output = match output {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
                 info!(
@@ -2359,22 +2382,25 @@ impl RunnerService {
             "starting shipped observer evaluation"
         );
         let observer_result: Result<Option<TransportValue>, TransportPoisonError> =
-            match request.eval.as_ref() {
-                Some(eval) => match evaluate_shipped_observer(
-                    self.cas.as_ref(),
-                    eval,
-                    exit_code,
-                    &output.stdout,
-                    &output.stderr,
-                    &PathValue::new(action.prefix_path.as_str()),
-                )
-                .await
-                {
-                    Ok(observer_value) => Ok(observer_value),
-                    Err(error) => Err(error),
-                },
-                None => Ok(None),
-            };
+            with_runner_progress_trace(&progress, RemoteTraceSpan::RunnerObserver, async {
+                match request.eval.as_ref() {
+                    Some(eval) => match evaluate_shipped_observer(
+                        self.cas.as_ref(),
+                        eval,
+                        exit_code,
+                        &output.stdout,
+                        &output.stderr,
+                        &PathValue::new(action.prefix_path.as_str()),
+                    )
+                    .await
+                    {
+                        Ok(observer_value) => Ok(observer_value),
+                        Err(error) => Err(error),
+                    },
+                    None => Ok(None),
+                }
+            })
+            .await;
         info!(
             action.prefix_id = %action.prefix_id,
             action_desc,
@@ -2468,10 +2494,13 @@ impl RunnerService {
             outputs = request.outputs.len(),
             "flushing VFS outputs"
         );
-        let flushed = self
-            .flush_prefix_outputs(&action.prefix_id)
-            .named("runner.run_vfs.flush_prefix_outputs")
-            .await;
+        let flushed = with_runner_progress_trace(
+            &progress,
+            RemoteTraceSpan::RunnerFlushOutputs,
+            self.flush_prefix_outputs(&action.prefix_id)
+                .named("runner.run_vfs.flush_prefix_outputs"),
+        )
+        .await;
         info!(
             action.prefix_id = %action.prefix_id,
             action_desc,
@@ -2530,7 +2559,13 @@ impl RunnerService {
         let cas_node = CasNode::Manifest(manifest);
         let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
         let manifest_hash = node_hash.0;
-        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+        let store_manifest_result = with_runner_progress_trace(
+            &progress,
+            RemoteTraceSpan::RunnerStoreManifest,
+            self.cas.put_node(node_hash, node_bytes),
+        )
+        .await;
+        if let Err(e) = store_manifest_result {
             self.remove_action_prefix(&action.prefix_id).await;
             return run_failure_result(
                 start,
@@ -2546,7 +2581,12 @@ impl RunnerService {
             action_desc,
             "removing action prefix"
         );
-        self.remove_action_prefix(&action.prefix_id).await;
+        with_runner_progress_trace(
+            &progress,
+            RemoteTraceSpan::RunnerCleanup,
+            self.remove_action_prefix(&action.prefix_id),
+        )
+        .await;
         info!(
             action.prefix_id = %action.prefix_id,
             action_desc,

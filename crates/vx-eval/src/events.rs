@@ -197,6 +197,40 @@ impl EventRecorder {
             .filter(|e| e.name == name && e.phase == EventPhase::Instant)
             .count()
     }
+
+    pub fn begin_detached_span(&self, track_id: u64, name: &'static str) -> DetachedRecorderSpan {
+        self.inner.push_now(name, EventPhase::Begin, track_id, None);
+        DetachedRecorderSpan {
+            inner: Arc::clone(&self.inner),
+            name,
+            track_id,
+        }
+    }
+
+    pub fn begin_detached_span_with_args(
+        &self,
+        track_id: u64,
+        name: &'static str,
+        args: EventArgs,
+    ) -> DetachedRecorderSpan {
+        self.inner
+            .push_now(name, EventPhase::Begin, track_id, Some(args));
+        DetachedRecorderSpan {
+            inner: Arc::clone(&self.inner),
+            name,
+            track_id,
+        }
+    }
+
+    pub fn instant_on_track(&self, track_id: u64, name: &'static str) {
+        self.inner
+            .push_now(name, EventPhase::Instant, track_id, None);
+    }
+
+    pub fn instant_on_track_with_args(&self, track_id: u64, name: &'static str, args: EventArgs) {
+        self.inner
+            .push_now(name, EventPhase::Instant, track_id, Some(args));
+    }
 }
 
 impl Default for EventRecorder {
@@ -293,6 +327,19 @@ impl Drop for RecorderSpan {
         if self.owns_track {
             self.inner.release_track_id(self.track_id);
         }
+    }
+}
+
+pub struct DetachedRecorderSpan {
+    inner: Arc<RecorderInner>,
+    name: &'static str,
+    track_id: u64,
+}
+
+impl Drop for DetachedRecorderSpan {
+    fn drop(&mut self) {
+        self.inner
+            .push_now(self.name, EventPhase::End, self.track_id, None);
     }
 }
 
@@ -405,6 +452,10 @@ fn write_trace_args(f: &mut impl std::io::Write, args: Option<&EventArgs>) -> st
         std::io::Error::other(format!("failed to serialize trace args: {error}"))
     })?;
     write!(f, ",\"args\":{json}")
+}
+
+pub fn current_trace_track_id() -> u64 {
+    current_track_id()
 }
 
 fn current_track_id() -> u64 {
@@ -530,6 +581,26 @@ mod tests {
         drop(first);
         let second = EventSink::begin_span(&recorder, "second");
         drop(second);
+
+        let begin_track_ids = recorder
+            .events()
+            .into_iter()
+            .filter(|event| event.phase == EventPhase::Begin)
+            .map(|event| event.track_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(begin_track_ids, vec![1, 1]);
+    }
+
+    #[test]
+    fn detached_spans_can_share_the_current_track() {
+        let recorder = EventRecorder::new();
+
+        let outer = EventSink::begin_span(&recorder, "outer");
+        let track_id = current_trace_track_id();
+        let inner = recorder.begin_detached_span(track_id, "inner");
+        drop(inner);
+        drop(outer);
 
         let begin_track_ids = recorder
             .events()

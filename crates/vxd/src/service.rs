@@ -56,7 +56,7 @@ use vx_eval::{
     PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
     StabilizeRequest as EvalStabilizeRequest, StoreHydrationRequest as EvalStoreHydrationRequest,
     StructValue, TransportBlob, TransportBuiltinValue, TransportTree, TransportValue, TreeValue,
-    Value, lower_source_file_with_source_id,
+    Value, current_trace_track_id, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -73,9 +73,9 @@ use vx_runner_proto::{
 use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind, DirectoryNode,
-    EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RustChannel,
-    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient, StoreProgress, TreeEntryKind,
-    TreeManifest,
+    EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RemoteTracePhase,
+    RemoteTraceSpan, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion, StoreClient,
+    StoreProgress, TreeEntryKind, TreeManifest,
 };
 use vxd_proto::{
     ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, PsResult,
@@ -2657,6 +2657,17 @@ pub(crate) async fn run_build_vx_acquire_via_store(
     hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
 }
 
+fn remote_trace_span_name(span: RemoteTraceSpan) -> &'static str {
+    match span {
+        RemoteTraceSpan::RunnerPrepareVfs => "exec.runner.prepare_vfs",
+        RemoteTraceSpan::RunnerCommand => "exec.runner.command",
+        RemoteTraceSpan::RunnerObserver => "exec.runner.observer",
+        RemoteTraceSpan::RunnerFlushOutputs => "exec.runner.flush_outputs",
+        RemoteTraceSpan::RunnerStoreManifest => "exec.runner.store_manifest",
+        RemoteTraceSpan::RunnerCleanup => "exec.runner.cleanup",
+    }
+}
+
 async fn run_build_vx_exec_via_runner(
     store: &Arc<StoreClient>,
     executors: &BuildVxExecutors,
@@ -2841,23 +2852,6 @@ async fn run_build_vx_exec_via_runner(
     let progress_listener_for_exec = progress_listener.clone();
     let executor_summary_for_progress = executor_summary.clone();
     let activity_for_progress = activity.clone();
-    let progress_handle = moire::task::spawn(
-        async move {
-            while let Ok(Some(update)) = progress_rx.recv().await {
-                let message = format!(
-                    "build.vx executor {}: {}",
-                    executor_summary_for_progress, update.message
-                );
-                emit_build_vx_remote_progress_activity(
-                    &progress_listener_for_exec,
-                    &activity_for_progress,
-                    message,
-                )
-                .await;
-            }
-        }
-        .named("build_vx_exec_progress_fwd"),
-    );
     let observer = if std::ptr::eq(target_store, &**store) || store_supports_readthrough {
         request.observer
     } else {
@@ -2886,48 +2880,96 @@ async fn run_build_vx_exec_via_runner(
                 }),
             )
         });
-        exec.run(
-            RunRequest {
-                executor: request.executor.clone(),
-                toolchain_manifest: Blake3Hash([0; 32]),
-                program_rel: String::new(),
-                program: Some(exec_arg_to_run_arg(&program)),
-                args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
-                tree_mounts: prepared_mounts.tree_mounts,
-                file_mounts: prepared_mounts.file_mounts,
-                outputs: Vec::new(),
-                writable_roots: request
-                    .writable_roots
-                    .iter()
-                    .map(|path| path.as_str().to_string())
-                    .collect(),
-                create_dirs: request
-                    .create_dirs
-                    .iter()
-                    .map(|path| path.as_str().to_string())
-                    .collect(),
-                cwd: None,
-                env: request
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
-                    .collect(),
-                clear_env: false,
-                eval: Some(RunEvalPayload {
-                    module: request.module,
-                    observer: Some(observer),
-                    verification_obligations: request.verification_obligations,
-                }),
-                macos_commandlinetools_version: None,
-            },
-            progress,
-        )
-        .await
-        .map_err(|error| {
+        let runner_track_id = current_trace_track_id();
+        let event_recorder_for_progress = event_recorder.clone();
+        let progress_handle = moire::task::spawn(
+            async move {
+                let mut remote_trace_spans =
+                    HashMap::<RemoteTraceSpan, vx_eval::events::DetachedRecorderSpan>::new();
+                while let Ok(Some(update)) = progress_rx.recv().await {
+                    if let Some(trace_event) = update.trace_event.as_ref()
+                        && let Some(recorder) = event_recorder_for_progress.as_ref()
+                    {
+                        match trace_event.phase {
+                            RemoteTracePhase::Begin => {
+                                let span = recorder.begin_detached_span(
+                                    runner_track_id,
+                                    remote_trace_span_name(trace_event.span),
+                                );
+                                remote_trace_spans.insert(trace_event.span, span);
+                            }
+                            RemoteTracePhase::End => {
+                                remote_trace_spans.remove(&trace_event.span);
+                            }
+                            RemoteTracePhase::Instant => {
+                                recorder.instant_on_track(
+                                    runner_track_id,
+                                    remote_trace_span_name(trace_event.span),
+                                );
+                            }
+                        }
+                    }
+
+                    if !update.message.is_empty() {
+                        let message = format!(
+                            "build.vx executor {}: {}",
+                            executor_summary_for_progress, update.message
+                        );
+                        emit_build_vx_remote_progress_activity(
+                            &progress_listener_for_exec,
+                            &activity_for_progress,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+                drop(remote_trace_spans);
+            }
+            .named("build_vx_exec_progress_fwd"),
+        );
+        let run_result = exec
+            .run(
+                RunRequest {
+                    executor: request.executor.clone(),
+                    toolchain_manifest: Blake3Hash([0; 32]),
+                    program_rel: String::new(),
+                    program: Some(exec_arg_to_run_arg(&program)),
+                    args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
+                    tree_mounts: prepared_mounts.tree_mounts,
+                    file_mounts: prepared_mounts.file_mounts,
+                    outputs: Vec::new(),
+                    writable_roots: request
+                        .writable_roots
+                        .iter()
+                        .map(|path| path.as_str().to_string())
+                        .collect(),
+                    create_dirs: request
+                        .create_dirs
+                        .iter()
+                        .map(|path| path.as_str().to_string())
+                        .collect(),
+                    cwd: None,
+                    env: request
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
+                        .collect(),
+                    clear_env: false,
+                    eval: Some(RunEvalPayload {
+                        module: request.module,
+                        observer: Some(observer),
+                        verification_obligations: request.verification_obligations,
+                    }),
+                    macos_commandlinetools_version: None,
+                },
+                progress,
+            )
+            .await;
+        let _ = progress_handle.await;
+        run_result.map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?
     };
-    let _ = progress_handle.await;
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
