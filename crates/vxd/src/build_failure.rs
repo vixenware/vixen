@@ -1450,7 +1450,7 @@ fn build() -> Tree (
         SourceProvenance {
             source_id: Arc::from(source_path.as_str()),
             span: SourceSpan::from_text_range(
-                rowan::TextRange::new(start.into(), end.into()),
+                vx_parser::TextRange::new(start.into(), end.into()),
                 &line_index,
             ),
             label: label.to_string(),

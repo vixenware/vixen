@@ -40,9 +40,8 @@ use vx_io::net::Listener;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
-    DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner, RunnerClient,
-    RunnerDispatcher, RustCompileRequest, RustCompileResult,
+    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
+    RunnerClient, RunnerDispatcher,
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
@@ -1679,30 +1678,6 @@ impl Runner for FakeRunner {
         }
     }
 
-    async fn compile_rust(
-        &self,
-        _request: RustCompileRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult {
-        panic!("fake runner compile_rust should not be used in daemon-only build.vx tests");
-    }
-
-    async fn compile_cc(
-        &self,
-        _request: CcCompileRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult {
-        panic!("fake runner compile_cc should not be used in daemon-only build.vx tests");
-    }
-
-    async fn link_cc(
-        &self,
-        _request: CcLinkRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult {
-        panic!("fake runner link_cc should not be used in daemon-only build.vx tests");
-    }
-
     async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
         match &self.behavior {
             FakeRunnerBehavior::PanicOnBoundaryUse => {
@@ -1715,7 +1690,6 @@ impl Runner for FakeRunner {
                 stderr: "fake runner was unexpectedly asked to run a build.vx exec request"
                     .to_string(),
                 duration_ms: 0,
-                output_manifest: None,
                 observer_value: None,
                 poison: None,
                 error_kind: None,

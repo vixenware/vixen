@@ -1,5 +1,5 @@
 use vx_runner_proto::{
-    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunArg, RunRequest, RunResult, Runner,
+    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
 };
 use vx_store_proto::{ServiceVersion, StoreProgress};
 

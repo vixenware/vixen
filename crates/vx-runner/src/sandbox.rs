@@ -56,7 +56,6 @@ pub(crate) async fn send_progress_best_effort(
 /// What kind of action is being executed (affects default timeout).
 #[derive(Debug)]
 pub enum ActionKind {
-    RustCompile,
     CcCompile,
     CcLink,
 }
@@ -67,9 +66,7 @@ pub enum ActionKind {
 /// - `VX_LINK_TIMEOUT_SECS` overrides link timeouts
 pub fn action_timeout(kind: &ActionKind) -> Duration {
     match kind {
-        ActionKind::RustCompile | ActionKind::CcCompile => {
-            env_timeout("VX_ACTION_TIMEOUT_SECS", DEFAULT_COMPILE_TIMEOUT)
-        }
+        ActionKind::CcCompile => env_timeout("VX_ACTION_TIMEOUT_SECS", DEFAULT_COMPILE_TIMEOUT),
         ActionKind::CcLink => env_timeout("VX_LINK_TIMEOUT_SECS", DEFAULT_LINK_TIMEOUT),
     }
 }
@@ -88,6 +85,7 @@ pub struct CommandOutput {
     pub exit_status: ExitStatus,
     pub stdout: String,
     pub stderr: String,
+    #[allow(dead_code)]
     pub combined_output: String,
 }
 
@@ -642,7 +640,6 @@ mod tests {
             prefix_id: "build-123".into(),
             mount_base: Utf8PathBuf::from("/tmp/vx/vfs"),
             prefix_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123"),
-            out_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
             write_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
             allowed_host_exec_paths: vec![Utf8PathBuf::from("/tmp/tools/cc")],
         };

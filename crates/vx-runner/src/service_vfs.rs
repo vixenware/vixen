@@ -9,14 +9,14 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
-use tracing::{debug, info};
+use tracing::info;
 use vx_eval::{HostObservation, PathValue, TransportPoisonError, Value};
 use vx_runner_proto::{
     DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunRequest, RunResult,
     RunTreeMount, TransportValue,
 };
 use vx_store_proto::{
-    Blake3Hash, CasNode, NodeHash, OutputBlobRef, RemoteTracePhase, RemoteTraceSpan, StoreProgress,
+    CasNode, NodeHash, OutputBlobRef, RemoteTracePhase, RemoteTraceSpan, StoreProgress,
 };
 
 use crate::RunnerService;
@@ -475,25 +475,11 @@ pub struct ActionContext {
     pub prefix_id: String,
     pub mount_base: Utf8PathBuf,
     pub prefix_path: Utf8PathBuf,
-    pub out_path: Utf8PathBuf,
     pub write_path: Utf8PathBuf,
     pub allowed_host_exec_paths: Vec<Utf8PathBuf>,
 }
 
 impl ActionContext {
-    /// VFS subdirectory name for source trees.
-    /// Distinct from "src" to avoid `sources/src/` when crate_root is "src/main.rs".
-    pub const SOURCES_DIR: &str = "sources";
-    pub const DEPS_DIR: &str = "deps";
-
-    pub fn sources_path(&self) -> Utf8PathBuf {
-        self.prefix_path.join(Self::SOURCES_DIR)
-    }
-
-    pub fn deps_path(&self) -> Utf8PathBuf {
-        self.prefix_path.join(Self::DEPS_DIR)
-    }
-
     /// Clear the environment and re-add only what's needed for hermetic builds.
     ///
     /// Sets PATH (linker discovery), HOME, and temp dirs. On Windows the temp
@@ -565,14 +551,10 @@ impl RunnerService {
     }
 
     // r[impl exec.arg]
-    fn expand_run_arg(arg: &RunArg, toolchain_path: Option<&str>) -> String {
-        let expanded = match toolchain_path {
-            Some(toolchain_path) => arg.as_str().replace("${VX_TOOLCHAIN}", toolchain_path),
-            None => arg.as_str().to_string(),
-        };
+    fn render_run_arg(arg: &RunArg) -> String {
         match arg {
-            RunArg::Literal(_) => expanded,
-            RunArg::Path(_) => RunArg::path(expanded).render_for_host(),
+            RunArg::Literal(value) => value.clone(),
+            RunArg::Path(_) => arg.render_for_host(),
         }
     }
 
@@ -587,7 +569,6 @@ impl RunnerService {
             prefix_id,
             mount_base,
             prefix_path,
-            out_path: out_path.clone(),
             write_path: out_path.clone(),
             allowed_host_exec_paths: Vec::new(),
         }
@@ -612,1085 +593,14 @@ impl RunnerService {
         paths.into_iter().collect()
     }
 
-    /// Compile a Rust crate using VFS-based execution
-    pub async fn compile_rust_vfs(
-        &self,
-        request: RustCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult {
-        let start = Instant::now();
-
-        info!(
-            crate_name = %request.crate_name,
-            crate_type = %request.crate_type,
-            deps_count = request.deps.len(),
-            "compiling rust crate (VFS mode)"
-        );
-
-        // 1. Create action context
-        let action = self
-            .create_action_context()
-            .named("runner.run_vfs.create_action_context")
-            .await;
-        debug!(action.prefix_id = %action.prefix_id, action.prefix_path = %action.prefix_path, "created action prefix");
-
-        // Helper to return an error result (cleanup is done before calling this)
-        let cleanup_and_error =
-            |_prefix_id: &str, error: String, start: Instant| RustCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(error),
-            };
-
-        // 2. Ensure toolchain prefix exists (stable, persists across compilations)
-        debug!(
-            toolchain_manifest = %request.toolchain_manifest,
-            "ensuring toolchain VFS prefix"
-        );
-        let before = Instant::now();
-        let toolchain_prefix_id = match self
-            .ensure_toolchain_prefix(request.toolchain_manifest)
-            .named("runner.run_vfs.ensure_toolchain_prefix")
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return cleanup_and_error(
-                    &action.prefix_id,
-                    format!("failed to ensure toolchain: {}", e),
-                    start,
-                );
-            }
-        };
-        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
-        info!(
-            toolchain_prefix = %toolchain_prefix_id,
-            "Rust toolchain ready in {:.2}s",
-            before.elapsed().as_secs_f32()
-        );
-
-        // 3. Add source tree to prefix
-        if let Err(e) = self
-            .add_source_tree_to_prefix(&action, request.source_manifest)
-            .await
-        {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return cleanup_and_error(
-                &action.prefix_id,
-                format!("failed to add sources: {}", e),
-                start,
-            );
-        }
-
-        // 4. Add dependencies to prefix
-        for dep in &request.deps {
-            if let Err(e) = self
-                .add_dep_to_prefix(&action, &dep.extern_name, dep.manifest_hash)
-                .await
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return cleanup_and_error(
-                    &action.prefix_id,
-                    format!("failed to add dep {}: {}", dep.extern_name, e),
-                    start,
-                );
-            }
-        }
-
-        // 5. Create output directory
-        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return cleanup_and_error(&action.prefix_id, e.to_string(), start);
-        }
-
-        // 6. Build rustc command
-        let rustc_path = toolchain_path.join(format!("bin/rustc{}", std::env::consts::EXE_SUFFIX));
-        let sysroot_path = toolchain_path.join("sysroot");
-        let src_path = action.sources_path();
-        let deps_path = action.deps_path();
-
-        let output_filename = if request.crate_type == "lib" {
-            format!("lib{}.rlib", request.crate_name)
-        } else {
-            request.crate_name.clone()
-        };
-        let output_file = action.out_path.join(&output_filename);
-
-        let crate_root = src_path.join(&request.crate_root);
-
-        let mut cmd = crate::sandbox::sandboxed_command(rustc_path.as_str(), &action);
-        cmd.arg("--sysroot").arg(sysroot_path.as_str());
-        cmd.arg("--crate-name").arg(&request.crate_name);
-        cmd.arg("--crate-type").arg(&request.crate_type);
-        cmd.arg("--edition").arg(&request.edition);
-        cmd.arg("-o").arg(output_file.as_str());
-
-        // Path remapping for reproducibility
-        cmd.arg(format!("--remap-path-prefix={}=/src", src_path));
-
-        // Add --extern flags for dependencies
-        for dep in &request.deps {
-            let rlib_path = deps_path.join(format!("lib{}.rlib", dep.extern_name));
-            cmd.arg("--extern");
-            cmd.arg(format!("{}={}", dep.extern_name, rlib_path));
-        }
-
-        // Profile-specific flags
-        if request.profile == "release" {
-            cmd.arg("-C").arg("opt-level=3");
-        }
-
-        // On Linux, use lld instead of GNU ld (which doesn't support Rust's
-        // __rustc:: namespaced allocator symbols introduced in Rust 1.91+).
-        if cfg!(target_os = "linux") {
-            cmd.arg("-C").arg("link-arg=-fuse-ld=lld");
-        }
-
-        // Crate root
-        cmd.arg(crate_root.as_str());
-
-        // Working directory
-        cmd.current_dir(action.prefix_path.as_str());
-
-        action.hermetic_env(&mut cmd);
-
-        debug!(
-            rustc = %rustc_path,
-            crate_name = %request.crate_name,
-            crate_root = %crate_root,
-            "executing rustc via VFS"
-        );
-
-        // Log full command details at trace level for debugging sandbox issues
-        {
-            let cmd_std = cmd.as_std();
-            let program = cmd_std.get_program().to_string_lossy();
-            let args: Vec<_> = cmd_std.get_args().map(|a| a.to_string_lossy()).collect();
-            let envs: Vec<_> = cmd_std
-                .get_envs()
-                .map(|(k, v)| {
-                    format!(
-                        "{}={}",
-                        k.to_string_lossy(),
-                        v.map(|v| v.to_string_lossy()).unwrap_or_default()
-                    )
-                })
-                .collect();
-            let cwd = cmd_std
-                .get_current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            tracing::trace!(
-                %program,
-                ?args,
-                ?envs,
-                cwd,
-                "rustc: full command before spawn"
-            );
-        }
-
-        // 7. Run rustc with streaming output and timeout
-        let action_desc = format!("rustc {}", request.crate_name);
-        let (_progress, output) = crate::sandbox::run_sandboxed_command(
-            cmd,
-            &ActionKind::RustCompile,
-            &action_desc,
-            progress,
-            None,
-        )
-        .await;
-        let output = match output {
-            Ok(o) => o,
-            Err(CommandError::SpawnFailed(e)) => {
-                tracing::error!(
-                    error = %e,
-                    error_kind = ?e.kind(),
-                    rustc_path = %rustc_path,
-                    "failed to spawn rustc process"
-                );
-                self.remove_action_prefix(&action.prefix_id).await;
-                return cleanup_and_error(
-                    &action.prefix_id,
-                    format!("failed to execute rustc: {}", e),
-                    start,
-                );
-            }
-            Err(CommandError::TimedOut {
-                action_desc,
-                timeout,
-                partial_output,
-                ..
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RustCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "action '{}' timed out after {}s (limit: {}s)",
-                        action_desc,
-                        timeout.as_secs(),
-                        timeout.as_secs()
-                    )),
-                };
-            }
-            Err(CommandError::Cancelled {
-                action_desc,
-                partial_output,
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RustCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("action '{}' cancelled", action_desc)),
-                };
-            }
-        };
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.exit_status.code().unwrap_or(-1);
-
-        if !output.exit_status.success() {
-            let mut stderr = if output.stderr.trim().is_empty() {
-                output.combined_output.clone()
-            } else {
-                output.stderr.clone()
-            };
-
-            // When sandbox-exec wraps the compiler, it can exit non-zero with no
-            // output if the inner program is missing. Add diagnostics so the
-            // error message is never empty.
-            if stderr.trim().is_empty() {
-                let rustc_exists = rustc_path.as_std_path().exists();
-                let crate_root_exists = crate_root.as_std_path().exists();
-                stderr = format!(
-                    "rustc exited with code {} but produced no output.\n\
-                     rustc_path={} (exists={})\n\
-                     crate_root={} (exists={})",
-                    exit_code, rustc_path, rustc_exists, crate_root, crate_root_exists,
-                );
-                tracing::error!(
-                    %rustc_path,
-                    rustc_exists,
-                    %crate_root,
-                    crate_root_exists,
-                    exit_code,
-                    "compilation failed with empty output"
-                );
-            }
-
-            self.remove_action_prefix(&action.prefix_id).await;
-            return RustCompileResult {
-                success: false,
-                exit_code,
-                stdout: output.stdout.clone(),
-                stderr,
-                duration_ms,
-                output_manifest: None,
-                error: None,
-            };
-        }
-
-        // 8. Flush outputs from VFS to CAS
-        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
-
-        // Find the output blob hash and size
-        let output_rel_path = format!("out/{}", output_filename);
-        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
-            Some(&(hash, size)) => (hash, size),
-            None => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return cleanup_and_error(
-                    &action.prefix_id,
-                    format!(
-                        "output {} not found in VFS after compilation",
-                        output_rel_path
-                    ),
-                    start,
-                );
-            }
-        };
-
-        // 9. Create and store output manifest
-        let logical = if request.crate_type == "lib" {
-            "rlib"
-        } else {
-            "bin"
-        };
-
-        let node_id = NodeId(format!(
-            "compile-{}:{}:{}:{}",
-            request.crate_type, request.crate_name, request.target_triple, request.profile
-        ));
-
-        let cache_key = vx_cache::rust_compile_cache_key(&request);
-
-        let manifest = NodeManifest {
-            node_id,
-            cache_key,
-            produced_at: Zoned::now().to_string(),
-            outputs: vec![OutputEntry {
-                logical: logical.to_string(),
-                filename: output_filename,
-                blob: OutputBlobRef::Small {
-                    chunk: ChunkHash(blob_hash),
-                    size: blob_size,
-                },
-                executable: request.crate_type == "bin",
-            }],
-        };
-
-        let cas_node = CasNode::Manifest(manifest);
-        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
-        let manifest_hash = node_hash.0;
-
-        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return cleanup_and_error(
-                &action.prefix_id,
-                format!("failed to store manifest: {:?}", e),
-                start,
-            );
-        }
-
-        // 10. Cleanup
-        self.remove_action_prefix(&action.prefix_id).await;
-
-        info!(
-            crate_name = %request.crate_name,
-            manifest_hash = %manifest_hash,
-            duration_ms,
-            "compilation complete (VFS mode)"
-        );
-
-        RustCompileResult {
-            success: true,
-            exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            duration_ms,
-            output_manifest: Some(manifest_hash),
-            error: None,
-        }
-    }
-
-    /// Compile a C source file using VFS-based execution
-    pub async fn compile_cc_vfs(
-        &self,
-        request: CcCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult {
-        let start = Instant::now();
-
-        info!(
-            source = %request.source_path,
-            target = %request.target_triple,
-            "compiling C source (VFS mode)"
-        );
-
-        // 1. Create action context
-        let action = self
-            .create_action_context()
-            .named("runner.run_vfs.create_action_context")
-            .await;
-
-        // 2. Ensure Zig toolchain prefix exists
-        let toolchain_prefix_id = match self
-            .ensure_toolchain_prefix(request.toolchain_manifest)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!("failed to ensure toolchain: {}", e)),
-                };
-            }
-        };
-        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
-
-        // 3. Add source tree to prefix
-        if let Err(e) = self
-            .add_source_tree_to_prefix(&action, request.source_manifest)
-            .await
-        {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: Some(format!("failed to add sources: {}", e)),
-            };
-        }
-
-        // 4. Create output directory
-        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: Some(e.to_string()),
-            };
-        }
-
-        // 5. Build zig cc command
-        let zig_path = toolchain_path.join("zig");
-        let src_path = action.sources_path();
-
-        let source_file = src_path.join(&request.source_path);
-        let object_filename = format!(
-            "{}.o",
-            request
-                .source_path
-                .strip_suffix(".c")
-                .unwrap_or(&request.source_path)
-        );
-        let object_file = action.out_path.join(&object_filename);
-
-        let mut cmd = crate::sandbox::sandboxed_command(zig_path.as_str(), &action);
-        cmd.arg("cc");
-        cmd.arg("-c");
-        cmd.arg(source_file.as_str());
-        cmd.arg("-o").arg(object_file.as_str());
-
-        // Profile-specific flags
-        if request.profile == "release" {
-            cmd.arg("-O3");
-        } else {
-            cmd.arg("-O0");
-            cmd.arg("-g");
-        }
-
-        // Add include paths (relative to src/)
-        for include_path in &request.include_paths {
-            cmd.arg("-I").arg(src_path.join(include_path).as_str());
-        }
-
-        // Add defines
-        for (key, value) in &request.defines {
-            if let Some(v) = value {
-                cmd.arg(format!("-D{}={}", key, v));
-            } else {
-                cmd.arg(format!("-D{}", key));
-            }
-        }
-
-        cmd.current_dir(action.prefix_path.as_str());
-
-        action.hermetic_env(&mut cmd);
-        cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
-
-        debug!(
-            zig = %zig_path,
-            source = %request.source_path,
-            output = %object_file,
-            "executing zig cc via VFS"
-        );
-
-        // 6. Run zig cc with streaming output and timeout
-        let action_desc = format!("zig cc {}", request.source_path);
-        let (_progress, output) = crate::sandbox::run_sandboxed_command(
-            cmd,
-            &ActionKind::CcCompile,
-            &action_desc,
-            progress,
-            None,
-        )
-        .await;
-        let output = match output {
-            Ok(o) => o,
-            Err(CommandError::SpawnFailed(e)) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!("failed to execute zig cc: {}", e)),
-                };
-            }
-            Err(CommandError::TimedOut {
-                action_desc,
-                timeout,
-                partial_output,
-                ..
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!(
-                        "action '{}' timed out after {}s (limit: {}s)",
-                        action_desc,
-                        timeout.as_secs(),
-                        timeout.as_secs()
-                    )),
-                };
-            }
-            Err(CommandError::Cancelled {
-                action_desc,
-                partial_output,
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!("action '{}' cancelled", action_desc)),
-                };
-            }
-        };
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.exit_status.code().unwrap_or(-1);
-
-        if !output.exit_status.success() {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcCompileResult {
-                success: false,
-                exit_code,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: None,
-            };
-        }
-
-        // 7. Flush outputs from VFS to CAS
-        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
-
-        let output_rel_path = format!("out/{}", object_filename);
-        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
-            Some(&(hash, size)) => (hash, size),
-            None => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: output.stdout.clone(),
-                    stderr: output.stderr.clone(),
-                    duration_ms,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!("output {} not found in VFS", output_rel_path)),
-                };
-            }
-        };
-
-        // 8. Create manifest
-        let node_id = NodeId(format!(
-            "compile-c:{}:{}:{}",
-            request.source_path, request.target_triple, request.profile
-        ));
-
-        let cache_key = vx_cache::cc_compile_cache_key(&request);
-
-        let manifest = NodeManifest {
-            node_id,
-            cache_key,
-            produced_at: Zoned::now().to_string(),
-            outputs: vec![OutputEntry {
-                logical: "object".to_string(),
-                filename: object_filename,
-                blob: OutputBlobRef::Small {
-                    chunk: ChunkHash(blob_hash),
-                    size: blob_size,
-                },
-                executable: false,
-            }],
-        };
-
-        let cas_node = CasNode::Manifest(manifest);
-        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
-        let manifest_hash = node_hash.0;
-
-        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: Some(format!("failed to store manifest: {:?}", e)),
-            };
-        }
-
-        // 9. Cleanup
-        self.remove_action_prefix(&action.prefix_id).await;
-
-        info!(
-            source = %request.source_path,
-            manifest_hash = %manifest_hash,
-            duration_ms,
-            "C compilation complete (VFS mode)"
-        );
-
-        CcCompileResult {
-            success: true,
-            exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            duration_ms,
-            output_manifest: Some(manifest_hash),
-            discovered_deps: vec![], // TODO: parse depfile if generated
-            error: None,
-        }
-    }
-
-    /// Link C object files into a binary using the VFS mount.
-    pub async fn link_cc_vfs(
-        &self,
-        request: CcLinkRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult {
-        let start = Instant::now();
-
-        let action = self
-            .create_action_context()
-            .named("runner.run_vfs.create_action_context")
-            .await;
-
-        let _toolchain_prefix_id = match self
-            .ensure_toolchain_prefix(request.toolchain_manifest)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("failed to ensure toolchain: {}", e)),
-                };
-            }
-        };
-
-        if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, "obj").await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!("failed to create object dir: {e}")),
-            };
-        }
-        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(e.to_string()),
-            };
-        }
-
-        // Build directory node with all object files
-        use vx_store_proto::{ContentHash, DirEntry, DirEntryKind, DirectoryNode};
-        let mut dir_entries = Vec::with_capacity(request.object_manifests.len());
-        let mut dir_total_size: u64 = 0;
-        let mut object_paths = Vec::with_capacity(request.object_manifests.len());
-
-        for (idx, manifest_hash) in request.object_manifests.iter().enumerate() {
-            let manifest = match self.cas.get_node(NodeHash(*manifest_hash)).await {
-                Ok(Some(data)) => match CasNode::from_bytes(&data) {
-                    Ok(CasNode::Manifest(m)) => m,
-                    Ok(_) => {
-                        self.remove_action_prefix(&action.prefix_id).await;
-                        return CcLinkResult {
-                            success: false,
-                            exit_code: -1,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            output_manifest: None,
-                            error: Some(format!(
-                                "object manifest {} is not a Manifest node",
-                                manifest_hash
-                            )),
-                        };
-                    }
-                    Err(e) => {
-                        self.remove_action_prefix(&action.prefix_id).await;
-                        return CcLinkResult {
-                            success: false,
-                            exit_code: -1,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            output_manifest: None,
-                            error: Some(format!(
-                                "failed to deserialize object manifest {}: {}",
-                                manifest_hash, e
-                            )),
-                        };
-                    }
-                },
-                Ok(None) => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return CcLinkResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!(
-                            "object manifest {} not found in CAS",
-                            manifest_hash
-                        )),
-                    };
-                }
-                Err(e) => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return CcLinkResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!("failed to fetch object manifest: {:?}", e)),
-                    };
-                }
-            };
-
-            let object_entry = match manifest.outputs.iter().find(|o| o.logical == "object") {
-                Some(entry) => entry,
-                None => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return CcLinkResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!("no object output in manifest {}", manifest_hash)),
-                    };
-                }
-            };
-
-            let obj_filename = format!("{idx:04}.o");
-            let obj_rel_path = format!("obj/{}", obj_filename);
-            let (blob_hash, blob_size) = match &object_entry.blob {
-                OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
-                OutputBlobRef::Large {
-                    content_hash, size, ..
-                } => (content_hash.0, *size),
-            };
-            dir_entries.push(DirEntry {
-                name: obj_filename,
-                kind: DirEntryKind::SmallFile {
-                    content_hash: ContentHash(blob_hash),
-                    size: blob_size,
-                    executable: false,
-                },
-            });
-            dir_total_size += blob_size;
-            object_paths.push(action.prefix_path.join(obj_rel_path));
-        }
-
-        // Sort entries by name for deterministic hashing
-        dir_entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-
-        // Wrap in an "obj" subdirectory node
-        let obj_dir_node = CasNode::Directory(DirectoryNode {
-            entries: dir_entries,
-            total_size: dir_total_size,
-        });
-        let (obj_node_bytes, obj_node_hash) = obj_dir_node.to_bytes_and_hash();
-
-        if let Err(e) = self.cas.put_node(obj_node_hash, obj_node_bytes).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!(
-                    "failed to store object files directory node to CAS: {:?}",
-                    e
-                )),
-            };
-        }
-
-        // Build root directory node containing "obj" subdirectory
-        let root_dir_node = CasNode::Directory(DirectoryNode {
-            entries: vec![DirEntry {
-                name: "obj".to_string(),
-                kind: DirEntryKind::Dir {
-                    hash: obj_node_hash,
-                },
-            }],
-            total_size: dir_total_size,
-        });
-        let (root_node_bytes, root_node_hash) = root_dir_node.to_bytes_and_hash();
-
-        if let Err(e) = self.cas.put_node(root_node_hash, root_node_bytes).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!(
-                    "failed to store root directory node to CAS: {:?}",
-                    e
-                )),
-            };
-        }
-
-        if let Err(e) = self
-            .vfs
-            .mount_tree(&action.prefix_id, "", root_node_hash.0)
-            .await
-        {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!(
-                    "failed to mount object files tree manifest in VFS: {}",
-                    e
-                )),
-            };
-        }
-
-        let output_rel_path = format!("out/{}", request.binary_name);
-        let output_path = action.prefix_path.join(&output_rel_path);
-
-        let mut cmd = crate::sandbox::sandboxed_command("cc", &action);
-        for object_path in &object_paths {
-            cmd.arg(object_path.as_str());
-        }
-        cmd.arg("-o").arg(output_path.as_str());
-        for lib in &request.libs {
-            cmd.arg(format!("-l{}", lib));
-        }
-        cmd.current_dir(action.prefix_path.as_str());
-        action.hermetic_env(&mut cmd);
-
-        let action_desc = format!("link {}", request.binary_name);
-        let (_progress, output) = crate::sandbox::run_sandboxed_command(
-            cmd,
-            &ActionKind::CcLink,
-            &action_desc,
-            progress,
-            None,
-        )
-        .await;
-        let output = match output {
-            Ok(o) => o,
-            Err(CommandError::SpawnFailed(e)) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("failed to execute linker: {}", e)),
-                };
-            }
-            Err(CommandError::TimedOut {
-                action_desc,
-                timeout,
-                partial_output,
-                ..
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "action '{}' timed out after {}s (limit: {}s)",
-                        action_desc,
-                        timeout.as_secs(),
-                        timeout.as_secs()
-                    )),
-                };
-            }
-            Err(CommandError::Cancelled {
-                action_desc,
-                partial_output,
-            }) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("action '{}' was cancelled", action_desc)),
-                };
-            }
-        };
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.exit_status.code().unwrap_or(-1);
-
-        if !output.exit_status.success() {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                error: None,
-            };
-        }
-
-        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
-        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
-            Some(&(hash, size)) => (hash, size),
-            None => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: output.stdout.clone(),
-                    stderr: output.stderr.clone(),
-                    duration_ms,
-                    output_manifest: None,
-                    error: Some(format!("output {} not found in VFS", output_rel_path)),
-                };
-            }
-        };
-
-        let node_id = NodeId(format!(
-            "link-c:{}:{}",
-            request.binary_name, request.target_triple
-        ));
-        let cache_key = vx_cache::cc_link_cache_key(&request);
-        let manifest = NodeManifest {
-            node_id,
-            cache_key,
-            produced_at: Zoned::now().to_string(),
-            outputs: vec![OutputEntry {
-                logical: "binary".to_string(),
-                filename: request.binary_name,
-                blob: OutputBlobRef::Small {
-                    chunk: ChunkHash(blob_hash),
-                    size: blob_size,
-                },
-                executable: true,
-            }],
-        };
-
-        let cas_node = CasNode::Manifest(manifest);
-        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
-        let manifest_hash = node_hash.0;
-
-        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                error: Some(format!("failed to store manifest: {:?}", e)),
-            };
-        }
-
-        self.remove_action_prefix(&action.prefix_id).await;
-
-        CcLinkResult {
-            success: true,
-            exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            duration_ms,
-            output_manifest: Some(manifest_hash),
-            error: None,
-        }
-    }
-
-    /// Run a sandboxed toolchain command with declared CAS/VFS inputs and outputs.
+    /// Run a sandboxed command with declared CAS/VFS inputs.
     pub async fn run_vfs(
         &self,
         request: RunRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> RunResult {
         let start = Instant::now();
-        let command_name = request
-            .program
-            .as_ref()
-            .map(RunArg::as_str)
-            .unwrap_or(&request.program_rel)
-            .to_string();
+        let command_name = request.program.as_str().to_string();
 
         let mut action = self
             .create_action_context()
@@ -1700,17 +610,6 @@ impl RunnerService {
             .map(|path| action.prefix_path.join(path))
             .unwrap_or_else(|| action.prefix_path.clone());
         action.allowed_host_exec_paths = Self::allowed_host_exec_paths(&request);
-
-        let needs_toolchain = request.program.is_none()
-            || request
-                .program
-                .as_ref()
-                .is_some_and(uses_toolchain_placeholder)
-            || request.args.iter().any(uses_toolchain_placeholder)
-            || request
-                .env
-                .iter()
-                .any(|(_, value)| uses_toolchain_placeholder(value));
 
         info!(
             action.prefix_id = %action.prefix_id,
@@ -1728,36 +627,10 @@ impl RunnerService {
             ),
             file_mounts = request.file_mounts.len(),
             writable_roots = request.writable_roots.len(),
-            outputs = request.outputs.len(),
-            needs_toolchain,
             "preparing VFS run action"
         );
         emit_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
 
-        let toolchain_path = if needs_toolchain {
-            let toolchain_prefix_id = match self
-                .ensure_toolchain_prefix(request.toolchain_manifest)
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return run_failure_result(
-                        start,
-                        -1,
-                        String::new(),
-                        String::new(),
-                        Some(format!("failed to ensure toolchain: {e}")),
-                    );
-                }
-            };
-            Some(action.mount_base.join(&toolchain_prefix_id))
-        } else {
-            None
-        };
-        let toolchain_path_str = toolchain_path
-            .as_ref()
-            .map(|path| path.as_str().to_string());
         let mount_start = Instant::now();
 
         for mount in &request.tree_mounts {
@@ -2057,30 +930,6 @@ impl RunnerService {
             }
         }
 
-        if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
-            let offending = request
-                .outputs
-                .iter()
-                .find(|out| {
-                    !request
-                        .writable_roots
-                        .iter()
-                        .any(|root| covers_path(root, &out.path))
-                })
-                .expect("offending output must exist when containment check fails");
-            self.remove_action_prefix(&action.prefix_id).await;
-            return run_failure_result(
-                start,
-                -1,
-                String::new(),
-                String::new(),
-                Some(format!(
-                    "output '{}' must be under a writable root (got '{}')",
-                    offending.logical, offending.path
-                )),
-            );
-        }
-
         for arg in &request.args {
             if let RunArg::Path(path) = arg
                 && !path_is_covered(
@@ -2153,31 +1002,16 @@ impl RunnerService {
             .map(|p| action.prefix_path.join(p))
             .unwrap_or_else(|| action.prefix_path.clone());
 
-        let program_path = match &request.program {
-            Some(program) => resolve_program_path(
-                program,
-                Self::expand_run_arg(program, toolchain_path_str.as_deref()),
-                &cwd,
-            ),
-            None => {
-                let toolchain_path = toolchain_path
-                    .as_ref()
-                    .expect("legacy run requests must resolve a toolchain path");
-                toolchain_path
-                    .join(format!(
-                        "{}{}",
-                        request.program_rel,
-                        std::env::consts::EXE_SUFFIX
-                    ))
-                    .as_str()
-                    .to_string()
-            }
-        };
+        let program_path = resolve_program_path(
+            &request.program,
+            Self::render_run_arg(&request.program),
+            &cwd,
+        );
         let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
         let expanded_args = request
             .args
             .iter()
-            .map(|arg| Self::expand_run_arg(arg, toolchain_path_str.as_deref()))
+            .map(Self::render_run_arg)
             .collect::<Vec<_>>();
         for arg in &expanded_args {
             cmd.arg(arg);
@@ -2191,33 +1025,16 @@ impl RunnerService {
         let expanded_env = request
             .env
             .iter()
-            .map(|(key, value)| {
-                format!(
-                    "{key}={}",
-                    Self::expand_run_arg(value, toolchain_path_str.as_deref())
-                )
-            })
+            .map(|(key, value)| format!("{key}={}", Self::render_run_arg(value)))
             .collect::<Vec<_>>();
         for (k, v) in &request.env {
-            cmd.env(k, Self::expand_run_arg(v, toolchain_path_str.as_deref()));
-        }
-
-        // Zig needs its lib dir set to locate libc and friends.
-        if request.program.is_none() && request.program_rel == "zig" {
-            let toolchain_path = toolchain_path
-                .as_ref()
-                .expect("zig toolchain requests must resolve a toolchain path");
-            cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
+            cmd.env(k, Self::render_run_arg(v));
         }
         end_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
 
         let action_desc = format!(
             "{} {}",
-            request
-                .program
-                .as_ref()
-                .map(RunArg::as_str)
-                .unwrap_or(&request.program_rel),
+            request.program.as_str(),
             request.args.first().map(RunArg::as_str).unwrap_or_default()
         );
 
@@ -2256,7 +1073,7 @@ impl RunnerService {
             action_desc,
             path_inputs = %summarize_windows_path_inputs(
                 &cwd,
-                request.program.as_ref(),
+                Some(&request.program),
                 &request.args,
                 &request.env,
             ),
@@ -2467,12 +1284,6 @@ impl RunnerService {
                 );
             }
         };
-        let uses_observer_boundary = request
-            .eval
-            .as_ref()
-            .and_then(|eval| eval.observer.as_ref())
-            .is_some();
-
         if !output.exit_status.success() && observer_value.is_none() {
             info!(
                 action.prefix_id = %action.prefix_id,
@@ -2481,116 +1292,6 @@ impl RunnerService {
             );
             self.remove_action_prefix(&action.prefix_id).await;
             return run_failure_result(start, exit_code, output.stdout, output.stderr, None);
-        }
-
-        if uses_observer_boundary && request.outputs.is_empty() {
-            info!(
-                action.prefix_id = %action.prefix_id,
-                action_desc,
-                "skipping legacy output flush and manifest storage for observer-driven run"
-            );
-            with_runner_progress_trace(
-                &progress,
-                RemoteTraceSpan::RunnerCleanup,
-                self.remove_action_prefix(&action.prefix_id),
-            )
-            .await;
-            return run_success_result(
-                start,
-                exit_code,
-                output.stdout,
-                output.stderr,
-                None,
-                observer_value,
-            );
-        }
-
-        info!(
-            action.prefix_id = %action.prefix_id,
-            action_desc,
-            outputs = request.outputs.len(),
-            "flushing VFS outputs"
-        );
-        let flushed = with_runner_progress_trace(
-            &progress,
-            RemoteTraceSpan::RunnerFlushOutputs,
-            self.flush_prefix_outputs(&action.prefix_id)
-                .named("runner.run_vfs.flush_prefix_outputs"),
-        )
-        .await;
-        info!(
-            action.prefix_id = %action.prefix_id,
-            action_desc,
-            flushed_entries = flushed.len(),
-            "finished flushing VFS outputs"
-        );
-
-        let mut outputs = Vec::new();
-        for out in &request.outputs {
-            let (blob, size) = match flushed.get(&out.path) {
-                Some(&(h, s)) => (h, s),
-                None => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return run_failure_result(
-                        start,
-                        -1,
-                        output.stdout.clone(),
-                        output.stderr.clone(),
-                        Some(format!("output {} not found in VFS", out.path)),
-                    );
-                }
-            };
-
-            let filename = out
-                .path
-                .rsplit_once('/')
-                .map(|(_, f)| f.to_string())
-                .unwrap_or_else(|| out.path.clone());
-
-            outputs.push(OutputEntry {
-                logical: out.logical.clone(),
-                filename,
-                blob: OutputBlobRef::Small {
-                    chunk: ChunkHash(blob),
-                    size,
-                },
-                executable: out.executable,
-            });
-        }
-
-        let cache_key = vx_cache::run_cache_key(&request);
-        let manifest = NodeManifest {
-            node_id: NodeId(format!(
-                "run:{}",
-                request
-                    .program
-                    .as_ref()
-                    .map(RunArg::as_str)
-                    .unwrap_or(&request.program_rel)
-            )),
-            cache_key,
-            produced_at: Zoned::now().to_string(),
-            outputs,
-        };
-
-        let cas_node = CasNode::Manifest(manifest);
-        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
-        let manifest_hash = node_hash.0;
-        let store_manifest_result = with_runner_progress_trace(
-            &progress,
-            RemoteTraceSpan::RunnerStoreManifest,
-            self.cas.put_node(node_hash, node_bytes),
-        )
-        .await;
-        if let Err(e) = store_manifest_result {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return run_failure_result(
-                start,
-                -1,
-                output.stdout.clone(),
-                output.stderr.clone(),
-                Some(format!("failed to store manifest: {:?}", e)),
-            );
         }
 
         info!(
@@ -2615,7 +1316,6 @@ impl RunnerService {
             exit_code,
             output.stdout,
             output.stderr,
-            Some(manifest_hash),
             observer_value,
         )
     }
@@ -2659,12 +1359,6 @@ mod tests {
             &file_mounts,
             &writable_roots,
         ));
-        assert!(path_is_covered(
-            "${VX_TOOLCHAIN}/sysroot",
-            &tree_mounts,
-            &file_mounts,
-            &writable_roots,
-        ));
         assert!(!path_is_covered(
             "tmp/scratch",
             &tree_mounts,
@@ -2691,45 +1385,10 @@ mod tests {
     }
 
     #[test]
-    // r[verify exec.writable]
-    fn outputs_must_stay_within_writable_roots() {
-        let outputs = vec![
-            RunOutput {
-                logical: "bin".to_string(),
-                path: "out/bin/app".to_string(),
-                executable: true,
-            },
-            RunOutput {
-                logical: "dep-info".to_string(),
-                path: "scratch/dep/app.d".to_string(),
-                executable: false,
-            },
-        ];
-        let writable_roots = vec!["out".to_string(), "scratch".to_string()];
-
-        assert!(outputs_stay_within_writable_roots(
-            &outputs,
-            &writable_roots,
-        ));
-
-        let uncovered = vec![RunOutput {
-            logical: "bin".to_string(),
-            path: "tmp/app".to_string(),
-            executable: true,
-        }];
-        assert!(!outputs_stay_within_writable_roots(
-            &uncovered,
-            &writable_roots,
-        ));
-    }
-
-    #[test]
     fn parent_dirs_are_derived_from_path_inputs() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("cc")),
+            program: RunArg::literal("cc"),
             args: vec![
                 RunArg::literal("-c"),
                 RunArg::path("src/lua.c"),
@@ -2738,11 +1397,6 @@ mod tests {
             ],
             tree_mounts: Vec::new(),
             file_mounts: Vec::new(),
-            outputs: vec![RunOutput {
-                logical: "object".to_string(),
-                path: "out/obj/lua.c.o".to_string(),
-                executable: false,
-            }],
             writable_roots: vec!["out".to_string()],
             create_dirs: Vec::new(),
             cwd: Some("build/tmp".to_string()),
@@ -2767,9 +1421,7 @@ mod tests {
     fn parent_dirs_skip_paths_already_provided_by_mounts() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("cc")),
+            program: RunArg::literal("cc"),
             args: vec![
                 RunArg::literal("-c"),
                 RunArg::path("src/lua.c"),
@@ -2784,11 +1436,6 @@ mod tests {
                 path: "gen/config.h".to_string(),
                 manifest: Blake3Hash([2; 32]),
                 logical: "config".to_string(),
-            }],
-            outputs: vec![RunOutput {
-                logical: "object".to_string(),
-                path: "out/obj/lua.c.o".to_string(),
-                executable: false,
             }],
             writable_roots: vec!["out".to_string()],
             create_dirs: Vec::new(),
@@ -2809,9 +1456,7 @@ mod tests {
     fn root_tree_mount_does_not_hide_nested_writable_dirs() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("cc")),
+            program: RunArg::literal("cc"),
             args: vec![
                 RunArg::literal("-c"),
                 RunArg::path("src/hello.c"),
@@ -2823,7 +1468,6 @@ mod tests {
                 manifest: Blake3Hash([1; 32]),
             }],
             file_mounts: Vec::new(),
-            outputs: Vec::new(),
             writable_roots: vec!["out".to_string()],
             create_dirs: Vec::new(),
             cwd: None,
@@ -2843,9 +1487,7 @@ mod tests {
     fn explicit_create_dirs_are_preserved() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("cl.exe")),
+            program: RunArg::literal("cl.exe"),
             args: vec![
                 RunArg::literal("/nologo"),
                 RunArg::literal("/c"),
@@ -2857,7 +1499,6 @@ mod tests {
                 manifest: Blake3Hash([1; 32]),
             }],
             file_mounts: Vec::new(),
-            outputs: Vec::new(),
             writable_roots: vec!["out".to_string()],
             create_dirs: vec![
                 "out/obj".to_string(),
@@ -2882,13 +1523,10 @@ mod tests {
     fn sandbox_write_root_uses_single_writable_root() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::path("bin/png-version")),
+            program: RunArg::path("bin/png-version"),
             args: Vec::new(),
             tree_mounts: Vec::new(),
             file_mounts: Vec::new(),
-            outputs: Vec::new(),
             writable_roots: vec!["bin".to_string()],
             create_dirs: Vec::new(),
             cwd: None,
@@ -2905,13 +1543,10 @@ mod tests {
     fn sandbox_write_root_uses_common_ancestor_for_multiple_roots() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("tool")),
+            program: RunArg::literal("tool"),
             args: Vec::new(),
             tree_mounts: Vec::new(),
             file_mounts: Vec::new(),
-            outputs: Vec::new(),
             writable_roots: vec!["out/bin".to_string(), "out/lib".to_string()],
             create_dirs: Vec::new(),
             cwd: None,
@@ -2928,13 +1563,10 @@ mod tests {
     fn sandbox_write_root_falls_back_when_roots_do_not_share_prefix() {
         let request = RunRequest {
             executor: ExecutorSelector::class("default"),
-            toolchain_manifest: Blake3Hash([0; 32]),
-            program_rel: String::new(),
-            program: Some(RunArg::literal("tool")),
+            program: RunArg::literal("tool"),
             args: Vec::new(),
             tree_mounts: Vec::new(),
             file_mounts: Vec::new(),
-            outputs: Vec::new(),
             writable_roots: vec!["out".to_string(), "bin".to_string()],
             create_dirs: Vec::new(),
             cwd: None,

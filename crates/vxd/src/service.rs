@@ -34,18 +34,6 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-fn executor_max_concurrency() -> usize {
-    if let Ok(val) = std::env::var("VX_MAX_CONCURRENCY") {
-        if let Ok(n) = val.parse::<usize>() {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
-    std::thread::available_parallelism()
-        .map(|n| n.get() * 2)
-        .unwrap_or(16)
-}
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, EventSink, ExecArgValue,
@@ -58,11 +46,10 @@ use vx_eval::{
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
-use vx_report::{
-    GraphTopology, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanFact, RulePlanFactId,
-    RulePlanNode, RulePlanNodeId, RulePlanNodeKind, RulePlanProvenance, RulePlanSource,
-    RulePlanSourceId, RulePlanSpan, RulePlanValue,
-};
+#[cfg(test)]
+use vx_report::{GraphTopology, RulePlan, RulePlanNodeKind};
+#[cfg(test)]
+use vx_rs::CrateGraph;
 use vx_runner_proto::{
     DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
     RunRequest, RunTreeMount, RunnerClient,
@@ -1012,50 +999,12 @@ fn hash_tree_value(hasher: &mut blake3::Hasher, tree: &TreeValue) -> Option<()> 
     }
 }
 
-fn rule_plan_bridge_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_BRIDGE")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn rule_plan_exec_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_EXEC")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn vx_rules_file() -> Option<camino::Utf8PathBuf> {
-    std::env::var("VX_RULES_FILE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(camino::Utf8PathBuf::from)
-}
-
-fn rule_plan_parity_strict_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_PARITY_STRICT")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
+#[cfg(test)]
 fn parity_focus_node_id(node_id: &str) -> bool {
     node_id.starts_with("compile-") || node_id.starts_with("acquire-registry:")
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RulePlanParityDiff {
     pub legacy_focus_count: usize,
@@ -1064,24 +1013,16 @@ pub(crate) struct RulePlanParityDiff {
     pub extra_in_rule_plan: Vec<String>,
 }
 
-impl RulePlanParityDiff {
-    fn has_drift(&self) -> bool {
-        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
-    }
-}
-
+#[cfg(test)]
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RulePlanParityEdgeDiff {
     pub missing_in_rule_plan: Vec<String>,
     pub extra_in_rule_plan: Vec<String>,
 }
 
-impl RulePlanParityEdgeDiff {
-    fn has_drift(&self) -> bool {
-        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
-    }
-}
-
+#[cfg(test)]
+#[cfg(test)]
 pub(crate) fn compare_rule_plan_parity(
     legacy_topology: &GraphTopology,
     rule_plan_topology: &GraphTopology,
@@ -1116,6 +1057,7 @@ pub(crate) fn compare_rule_plan_parity(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compare_rule_plan_edge_parity(
     legacy_topology: &GraphTopology,
     rule_plan_topology: &GraphTopology,
@@ -1268,12 +1210,12 @@ pub(crate) fn selected_crates_from_rule_plan(
                 selected.insert(*only);
             }
             _ => {
-                matches.sort_by_key(|id| id.short_hex());
+                matches.sort_by_key(|id: &CrateId| id.short_hex());
                 return Err(VxdError::InvalidManifest(format!(
                     "RulePlan selected crate '{crate_name}' type '{crate_type}' but it matched multiple crate IDs: {}",
                     matches
                         .into_iter()
-                        .map(|id| id.short_hex())
+                        .map(|id: CrateId| id.short_hex())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )));
@@ -1315,6 +1257,7 @@ pub(crate) fn transitive_closure_crates(
     closure
 }
 
+#[cfg(test)]
 pub(crate) fn sanitize_id_component(input: &str) -> String {
     input
         .chars()
@@ -1328,6 +1271,7 @@ pub(crate) fn sanitize_id_component(input: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn legacy_compile_node_id(crate_name: &str, crate_type: &str) -> String {
     format!("compile-{crate_type}:{crate_name}")
 }
@@ -3017,13 +2961,10 @@ async fn run_build_vx_exec_via_runner(
             .run(
                 RunRequest {
                     executor: request.executor.clone(),
-                    toolchain_manifest: Blake3Hash([0; 32]),
-                    program_rel: String::new(),
-                    program: Some(exec_arg_to_run_arg(&program)),
+                    program: exec_arg_to_run_arg(&program),
                     args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
                     tree_mounts: prepared_mounts.tree_mounts,
                     file_mounts: prepared_mounts.file_mounts,
-                    outputs: Vec::new(),
                     writable_roots: request
                         .writable_roots
                         .iter()
@@ -4013,14 +3954,6 @@ fn hydrate_exec_value_from_store(
 }
 
 impl VxdService {
-    async fn local_runner(&self) -> Result<Arc<RunnerClient>> {
-        let listener = self.progress_listener.lock().clone();
-        self.build_vx_executors
-            .runner_for(&ExecutorSelector::class("default"), listener)
-            .await
-            .map_err(VxdError::ExecRpc)
-    }
-
     /// Report progress to CLI if connected
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
         let listener = self.progress_listener.lock().clone();
