@@ -8,10 +8,10 @@ use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
     EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
     EnsureToolchainResult, KNOWN_CDC_PARAMS, MAX_CHUNKS_PER_BLOB, MAX_MISSING_CHUNKS_BATCH,
-    MAX_NODE_BYTES, MaterializationPlan, MaterializeStep, NodeHash, PublishResult,
-    REGISTRY_MANIFEST_SCHEMA_VERSION, RegistryCrateManifest, RegistrySpec, RegistrySpecKey,
-    RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, StoreProgress,
-    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
+    MAX_MISSING_NODES_BATCH, MAX_NODE_BYTES, MaterializationPlan, MaterializeStep, NodeHash,
+    PublishResult, REGISTRY_MANIFEST_SCHEMA_VERSION, RegistryCrateManifest, RegistrySpec,
+    RegistrySpecKey, RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion,
+    StoreProgress, ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
@@ -47,6 +47,20 @@ impl StoreService {
     // =========================================================================
 
     async fn put_chunk(&self, hash: ChunkHash, data: Vec<u8>) -> Result<(), String> {
+        if self.present_chunks.lock().contains(&hash) {
+            return Ok(());
+        }
+        if self
+            .storage
+            .has_chunk(&hash)
+            .named("storage.has_chunk")
+            .await
+            .map_err(|e| format!("storage error: {e}"))?
+        {
+            self.present_chunks.lock().insert(hash);
+            return Ok(());
+        }
+
         // Validate size
         if data.len() > CDC_MAX_CHUNK as usize {
             return Err(format!(
@@ -151,6 +165,20 @@ impl StoreService {
     // =========================================================================
 
     async fn put_node(&self, hash: NodeHash, data: Vec<u8>) -> Result<(), String> {
+        if self.present_nodes.lock().contains(&hash) {
+            return Ok(());
+        }
+        if self
+            .storage
+            .has_node(&hash)
+            .named("storage.has_node")
+            .await
+            .map_err(|e| format!("storage error: {e}"))?
+        {
+            self.present_nodes.lock().insert(hash);
+            return Ok(());
+        }
+
         // Validate size
         if data.len() > MAX_NODE_BYTES {
             return Err(format!(
@@ -222,6 +250,41 @@ impl StoreService {
             self.present_nodes.lock().insert(hash);
         }
         present
+    }
+
+    async fn list_missing_nodes(&self, hashes: Vec<NodeHash>) -> Vec<NodeHash> {
+        let hashes = if hashes.len() > MAX_MISSING_NODES_BATCH {
+            tracing::warn!(
+                count = hashes.len(),
+                max = MAX_MISSING_NODES_BATCH,
+                "list_missing_nodes: batch too large, truncating"
+            );
+            hashes.into_iter().take(MAX_MISSING_NODES_BATCH).collect()
+        } else {
+            hashes
+        };
+
+        let mut missing = Vec::new();
+        for hash in hashes {
+            if self.present_nodes.lock().contains(&hash) {
+                continue;
+            }
+            match self.storage.has_node(&hash).await {
+                Ok(true) => {
+                    self.present_nodes.lock().insert(hash);
+                }
+                _ => {
+                    if let Some(upstream) = self.upstream()
+                        && upstream.has_node(hash).await.unwrap_or(false)
+                    {
+                        self.present_nodes.lock().insert(hash);
+                        continue;
+                    }
+                    missing.push(hash);
+                }
+            }
+        }
+        missing
     }
 
     // =========================================================================
@@ -603,6 +666,10 @@ impl StoreRpc for StoreService {
 
     async fn has_node(&self, hash: NodeHash) -> bool {
         StoreService::has_node(self, hash).await
+    }
+
+    async fn list_missing_nodes(&self, hashes: Vec<NodeHash>) -> Vec<NodeHash> {
+        StoreService::list_missing_nodes(self, hashes).await
     }
 
     async fn lookup(&self, cache_key: CacheKey) -> Option<NodeHash> {

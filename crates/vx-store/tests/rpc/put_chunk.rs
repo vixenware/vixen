@@ -47,3 +47,29 @@ async fn put_chunk_rejects_oversized_payload() {
         "unexpected error: {err:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_chunk_duplicate_short_circuits_validation() {
+    let env = StoreTestEnv::new().await;
+    let original = b"stored chunk bytes".to_vec();
+    let hash = ChunkHash(Blake3Hash::from_bytes(&original));
+
+    env.client
+        .put_chunk(hash, original.clone())
+        .await
+        .expect("initial put_chunk call failed");
+
+    let duplicate = b"different bytes, same claimed hash".to_vec();
+    env.client
+        .put_chunk(hash, duplicate)
+        .await
+        .expect("duplicate put_chunk should short-circuit");
+
+    let fetched = env
+        .client
+        .get_chunk(hash)
+        .await
+        .expect("get_chunk RPC failed")
+        .expect("chunk missing after duplicate put");
+    assert_eq!(fetched, original);
+}

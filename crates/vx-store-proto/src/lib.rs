@@ -27,7 +27,7 @@ pub const CACHE_KEY_SCHEMA_VERSION: u32 = 1;
 
 /// CAS protocol version.
 /// Bump this when making breaking changes to the CAS RPC interface.
-pub const STORE_PROTOCOL_VERSION: u32 = 3;
+pub const STORE_PROTOCOL_VERSION: u32 = 4;
 
 /// Versioned postcard node format version.
 /// Node bytes are `[version: u32 LE][postcard payload]`.
@@ -67,6 +67,9 @@ pub const MAX_CHUNKS_PER_BLOB: usize = 4096;
 
 /// Maximum number of chunk hashes per list_missing_chunks call.
 pub const MAX_MISSING_CHUNKS_BATCH: usize = 4096;
+
+/// Maximum number of node hashes per list_missing_nodes call.
+pub const MAX_MISSING_NODES_BATCH: usize = 4096;
 
 /// Maximum serialized node size in bytes (16 MB).
 /// Prevents OOM from huge directory nodes or adversarial payloads.
@@ -693,6 +696,12 @@ pub trait Store {
 
     /// Check if a node exists.
     async fn has_node(&self, hash: NodeHash) -> bool;
+
+    /// Batch existence check: given a list of node hashes, return the subset
+    /// that the store does NOT have. Enables upload dedup for blob nodes,
+    /// directory nodes, manifests, and other node payloads.
+    /// Capped at MAX_MISSING_NODES_BATCH hashes per call.
+    async fn list_missing_nodes(&self, hashes: Vec<NodeHash>) -> Vec<NodeHash>;
 
     // =========================================================================
     // Cache key operations

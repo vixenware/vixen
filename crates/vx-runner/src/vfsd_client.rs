@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    chunking::put_node_if_missing,
 };
 use vx_vfsd::protocol::VfsPrefixStateSummary;
 
@@ -84,10 +85,9 @@ impl VfsdClient {
             total_size: size,
         });
         let (leaf_bytes, leaf_hash) = leaf_node.to_bytes_and_hash();
-        self.cas
-            .put_node(leaf_hash, leaf_bytes)
+        put_node_if_missing(self.cas.as_ref(), leaf_hash, leaf_bytes)
             .await
-            .map_err(|e| format!("failed to store DirectoryNode for {}: {:?}", path, e))?;
+            .map_err(|e| format!("failed to store DirectoryNode for {}: {}", path, e))?;
 
         // Build parent directories from inside out (skip the filename)
         let mut current_hash = leaf_hash;
@@ -101,9 +101,9 @@ impl VfsdClient {
                 total_size: current_size,
             });
             let (dir_bytes, dir_hash) = dir_node.to_bytes_and_hash();
-            self.cas.put_node(dir_hash, dir_bytes).await.map_err(|e| {
-                format!("failed to store parent DirectoryNode for {}: {:?}", path, e)
-            })?;
+            put_node_if_missing(self.cas.as_ref(), dir_hash, dir_bytes)
+                .await
+                .map_err(|e| format!("failed to store parent DirectoryNode for {}: {}", path, e))?;
             current_hash = dir_hash;
         }
 

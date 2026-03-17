@@ -70,6 +70,9 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
+        if self.has_chunk(hash).await? {
+            return Ok(());
+        }
         atomic_write(&self.chunk_path_for(hash), data, false).await
     }
 
@@ -93,6 +96,9 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
+        if self.has_node(hash).await? {
+            return Ok(());
+        }
         atomic_write(&self.node_path_for(hash), data, false).await
     }
 

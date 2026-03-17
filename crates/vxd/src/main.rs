@@ -2477,6 +2477,16 @@ impl StoreRpc for ForwardingStore {
         self.client.has_node(hash).await.unwrap_or(false)
     }
 
+    async fn list_missing_nodes(
+        &self,
+        hashes: Vec<vx_store_proto::NodeHash>,
+    ) -> Vec<vx_store_proto::NodeHash> {
+        self.client
+            .list_missing_nodes(hashes)
+            .await
+            .unwrap_or_default()
+    }
+
     async fn lookup(
         &self,
         cache_key: vx_store_proto::CacheKey,

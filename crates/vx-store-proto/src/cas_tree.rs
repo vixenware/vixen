@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::{CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient};
+use crate::{
+    CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    chunking::put_nodes_if_missing,
+};
 
 /// A file to include in the directory tree.
 pub struct MerkleTreeFile {
@@ -78,6 +81,7 @@ pub async fn build_merkle_tree(
     });
 
     let mut dir_hashes: BTreeMap<String, (NodeHash, u64)> = BTreeMap::new();
+    let mut pending_nodes = Vec::with_capacity(dir_list.len());
 
     for dir_path in &dir_list {
         let entries = dir_entries.get_mut(dir_path).unwrap();
@@ -111,9 +115,7 @@ pub async fn build_merkle_tree(
         });
 
         let (node_bytes, node_hash) = dir_node.to_bytes_and_hash();
-        cas.put_node(node_hash, node_bytes)
-            .await
-            .map_err(|e| format!("failed to store DirectoryNode for '{}': {e:?}", dir_path))?;
+        pending_nodes.push((node_hash, node_bytes));
 
         dir_hashes.insert(dir_path.clone(), (node_hash, total_size));
 
@@ -129,6 +131,10 @@ pub async fn build_merkle_tree(
                 });
         }
     }
+
+    put_nodes_if_missing(cas, pending_nodes)
+        .await
+        .map_err(|e| format!("failed to store Merkle directory nodes: {e}"))?;
 
     dir_hashes
         .get("")

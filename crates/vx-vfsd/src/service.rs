@@ -404,6 +404,7 @@ mod tests {
     use vx_store_proto::{
         Blake3Hash, CasNode, ChunkHash, ContentHash, DirEntry as CasDirEntry, DirEntryKind,
         DirectoryNode, StoreClient,
+        chunking::{put_chunk_if_missing, put_node_if_missing},
     };
 
     use super::*;
@@ -569,7 +570,7 @@ mod tests {
             total_size,
         });
         let (bytes, hash) = node.to_bytes_and_hash();
-        cas.put_node(hash, bytes)
+        put_node_if_missing(cas, hash, bytes)
             .await
             .expect("failed to store DirectoryNode");
         hash.0
@@ -577,7 +578,7 @@ mod tests {
 
     async fn store_small_file_tree(cas: &StoreClient, rel_path: &str, data: &[u8]) -> Blake3Hash {
         let content_hash = Blake3Hash::from_bytes(data);
-        cas.put_chunk(ChunkHash(content_hash), data.to_vec())
+        put_chunk_if_missing(cas, ChunkHash(content_hash), data.to_vec())
             .await
             .expect("failed to store file chunk");
 

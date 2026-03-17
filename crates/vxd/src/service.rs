@@ -69,7 +69,7 @@ use vx_runner_proto::{
     DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
     RunRequest, RunTreeMount, RunnerClient,
 };
-use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
+use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind, DirectoryNode,
     EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RustChannel,
@@ -1591,10 +1591,7 @@ async fn store_directory_node(
         total_size,
     });
     let (bytes, hash) = directory.to_bytes_and_hash();
-    store
-        .put_node(hash, bytes)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
+    put_node_if_missing(store, hash, bytes).await?;
     Ok((hash, total_size))
 }
 
@@ -1828,10 +1825,7 @@ async fn snapshot_exec_blob_mount(
         }],
     };
     let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
-    store
-        .put_node(manifest_hash, node_bytes)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
+    put_node_if_missing(store, manifest_hash, node_bytes).await?;
     Ok(RunFileMount {
         path: path.to_string(),
         manifest: manifest_hash.0,

@@ -17,7 +17,7 @@ use vx_eval::{
     StructValue, TransportPoisonError, TransportValue, TreeValue, Value, verify_host_obligations,
 };
 use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
-use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
+use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
 use vx_store_proto::{
     BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
 };
@@ -350,9 +350,9 @@ async fn store_directory_node(
         total_size,
     });
     let (bytes, hash) = directory.to_bytes_and_hash();
-    cas.put_node(hash, bytes)
+    put_node_if_missing(cas, hash, bytes)
         .await
-        .map_err(|error| boundary_user_poison(format!("{error:?}")))?;
+        .map_err(boundary_user_poison)?;
     Ok((hash, total_size))
 }
 
