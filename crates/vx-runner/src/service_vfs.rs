@@ -11,7 +11,7 @@ use std::future::Future;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info};
-use vx_eval::{HostObservation, PathValue, TransportPoisonError};
+use vx_eval::{HostObservation, PathValue, TransportPoisonError, Value};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
     DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunOutput, RunRequest, RunResult,
@@ -24,7 +24,8 @@ use vx_store_proto::{
 
 use crate::RunnerService;
 use crate::eval_boundary::{
-    evaluate_shipped_discover, evaluate_shipped_observer, evaluate_shipped_verification,
+    commit_value_to_transport, evaluate_shipped_discover, evaluate_shipped_verification,
+    invoke_shipped_observer,
 };
 use crate::sandbox::{ActionKind, CommandError, send_progress_best_effort};
 
@@ -2384,19 +2385,34 @@ impl RunnerService {
         let observer_result: Result<Option<TransportValue>, TransportPoisonError> =
             with_runner_progress_trace(&progress, RemoteTraceSpan::RunnerObserver, async {
                 match request.eval.as_ref() {
-                    Some(eval) => match evaluate_shipped_observer(
-                        self.cas.as_ref(),
-                        eval,
-                        exit_code,
-                        &output.stdout,
-                        &output.stderr,
-                        &PathValue::new(action.prefix_path.as_str()),
-                    )
-                    .await
-                    {
-                        Ok(observer_value) => Ok(observer_value),
-                        Err(error) => Err(error),
-                    },
+                    Some(eval) => {
+                        let observed: Option<Value> = with_runner_progress_trace(
+                            &progress,
+                            RemoteTraceSpan::RunnerObserverInvoke,
+                            invoke_shipped_observer(
+                                eval,
+                                exit_code,
+                                &output.stdout,
+                                &output.stderr,
+                                &PathValue::new(action.prefix_path.as_str()),
+                            ),
+                        )
+                        .await?;
+                        match observed {
+                            Some(observed) => with_runner_progress_trace(
+                                &progress,
+                                RemoteTraceSpan::RunnerObserverCommit,
+                                commit_value_to_transport(
+                                    self.cas.as_ref(),
+                                    observed,
+                                    Some(&progress),
+                                ),
+                            )
+                            .await
+                            .map(Some),
+                            None => Ok(None),
+                        }
+                    }
                     None => Ok(None),
                 }
             })
@@ -2477,6 +2493,11 @@ impl RunnerService {
                 );
             }
         };
+        let uses_observer_boundary = request
+            .eval
+            .as_ref()
+            .and_then(|eval| eval.observer.as_ref())
+            .is_some();
 
         if !output.exit_status.success() && observer_value.is_none() {
             info!(
@@ -2486,6 +2507,28 @@ impl RunnerService {
             );
             self.remove_action_prefix(&action.prefix_id).await;
             return run_failure_result(start, exit_code, output.stdout, output.stderr, None);
+        }
+
+        if uses_observer_boundary && request.outputs.is_empty() {
+            info!(
+                action.prefix_id = %action.prefix_id,
+                action_desc,
+                "skipping legacy output flush and manifest storage for observer-driven run"
+            );
+            with_runner_progress_trace(
+                &progress,
+                RemoteTraceSpan::RunnerCleanup,
+                self.remove_action_prefix(&action.prefix_id),
+            )
+            .await;
+            return run_success_result(
+                start,
+                exit_code,
+                output.stdout,
+                output.stderr,
+                None,
+                observer_value,
+            );
         }
 
         info!(
