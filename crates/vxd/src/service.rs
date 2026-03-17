@@ -2107,19 +2107,58 @@ async fn store_exec_mounts_deduped(
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
-    _inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
 ) -> ExecMountPrepResult {
-    // Singleflight temporarily disabled — the real fix is demand-driven
-    // caching in the evaluator so FsDir snapshots happen exactly once.
-    prepare_exec_mounts_with_progress(
-        store,
-        mounts,
-        fs_tree_snapshot_cache,
-        progress_listener,
-        activity,
-        executor_summary,
-    )
-    .await
+    let Some(key) = exec_mounts_singleflight_key(mounts) else {
+        return prepare_exec_mounts_with_progress(
+            store,
+            mounts,
+            fs_tree_snapshot_cache,
+            progress_listener,
+            activity,
+            executor_summary,
+        )
+        .await;
+    };
+
+    let (cell, inserted) = {
+        let mut inflight = inflight.lock();
+        match inflight.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let cell = Arc::new(moire::sync::OnceCell::new("build_vx_exec_mount_prep"));
+                entry.insert(cell.clone());
+                (cell, true)
+            }
+        }
+    };
+
+    let result = cell
+        .get_or_init(|| {
+            prepare_exec_mounts_with_progress(
+                store,
+                mounts,
+                fs_tree_snapshot_cache,
+                progress_listener,
+                activity,
+                executor_summary,
+            )
+        })
+        .await
+        .clone();
+
+    if result.is_err() || inserted {
+        let mut inflight = inflight.lock();
+        if result.is_err()
+            || inflight
+                .get(&key)
+                .is_some_and(|existing| Arc::ptr_eq(existing, &cell))
+        {
+            inflight.remove(&key);
+        }
+    }
+
+    result
 }
 
 #[derive(Clone, Copy)]
