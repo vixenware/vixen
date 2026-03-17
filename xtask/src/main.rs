@@ -224,7 +224,6 @@ fn smoke(raw_args: &[String]) {
             .display()
             .to_string()
     });
-    eprintln!("Using VX_HOME={vx_home}");
 
     let mut cmd = Command::new(workspace_root.join("target/debug/vx"));
     cmd.arg("build").arg("--no-tui").arg("-f").arg(build_file);
@@ -232,6 +231,7 @@ fn smoke(raw_args: &[String]) {
         cmd.arg(arg);
     }
     cmd.current_dir(&workspace_root).env("VX_HOME", &vx_home);
+    eprintln!("Launching: {cmd:?}");
 
     let status = cmd.status().expect("Failed to run vx smoke build");
     if !status.success() {

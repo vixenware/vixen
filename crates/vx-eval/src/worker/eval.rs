@@ -1143,12 +1143,15 @@ impl Engine {
         }
 
         if args.len() != function.def.params.len() {
-            return Err(self.type_error(&format!(
-                "function '{}' expects {} positional argument(s), got {}",
-                function.def.name,
-                function.def.params.len(),
-                args.len()
-            )));
+            return Err(self.type_error_at(
+                &format!(
+                    "function '{}' expects {} positional argument(s), got {}",
+                    function.def.name,
+                    function.def.params.len(),
+                    args.len()
+                ),
+                function.def.provenance.clone(),
+            ));
         }
 
         for (param, arg) in function.def.params.iter().zip(args.iter()) {

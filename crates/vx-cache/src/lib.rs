@@ -498,6 +498,7 @@ mod tests {
                     body: TransportBlock {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(1))],
                     },
+                    provenance: None,
                 }],
                 top_level: TransportBlock { stmts: vec![] },
                 loaded_modules: vec![],
@@ -515,6 +516,7 @@ mod tests {
                     body: TransportBlock {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(2))],
                     },
+                    provenance: None,
                 }],
                 top_level: TransportBlock { stmts: vec![] },
                 loaded_modules: vec![],
@@ -621,6 +623,7 @@ mod tests {
                                 provenance: None,
                             })],
                         },
+                        provenance: None,
                     },
                     captures: vec![],
                 }),

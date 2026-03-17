@@ -46,6 +46,8 @@ pub struct FnDef {
     pub params: Vec<Param>,
     pub keyword_params: Vec<KeywordParam>,
     pub body: Block,
+    /// Where this function was defined in the source.
+    pub provenance: Option<SourceProvenance>,
 }
 
 #[derive(Debug, Clone)]

@@ -123,11 +123,13 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
         None => instr::Block { stmts: vec![] },
     };
 
+    let provenance = Some(ctx.provenance(f, format!("fn {name}")));
     Some(instr::FnDef {
         name: name.to_string(),
         params,
         keyword_params,
         body,
+        provenance,
     })
 }
 
@@ -1156,6 +1158,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
         },
     };
 
+    let provenance = Some(ctx.provenance(closure, format!("<closure#{closure_id}>")));
     Some(instr::Expr::Closure {
         closure_id,
         def: Arc::new(instr::FnDef {
@@ -1163,6 +1166,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
             params,
             keyword_params: Vec::new(),
             body,
+            provenance,
         }),
     })
 }

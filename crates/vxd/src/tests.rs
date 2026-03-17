@@ -501,6 +501,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
             params: Vec::new(),
             keyword_params: Vec::new(),
             body: TransportBlock { stmts: Vec::new() },
+            provenance: None,
         },
         captures: Vec::new(),
     };
@@ -628,6 +629,7 @@ fn build_vx_discover_summary_includes_executor_class() {
             params: Vec::new(),
             keyword_params: Vec::new(),
             body: TransportBlock { stmts: Vec::new() },
+            provenance: None,
         },
         captures: Vec::new(),
     };

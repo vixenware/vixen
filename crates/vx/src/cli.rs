@@ -65,7 +65,7 @@ pub(crate) struct BuildArgs {
     pub(crate) release: bool,
 
     /// Pass an environment variable to the build (KEY=VALUE)
-    #[facet(args::named, args::short = 'e')]
+    #[facet(args::named, args::short = 'e', default)]
     pub(crate) env: Vec<String>,
 }
 

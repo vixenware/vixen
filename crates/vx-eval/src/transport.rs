@@ -37,6 +37,7 @@ pub struct TransportFnDef {
     pub params: Vec<TransportParam>,
     pub keyword_params: Vec<TransportKeywordParam>,
     pub body: TransportBlock,
+    pub provenance: Option<TransportSourceProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -382,6 +383,7 @@ impl From<&instr::FnDef> for TransportFnDef {
                 .map(TransportKeywordParam::from)
                 .collect(),
             body: TransportBlock::from(&def.body),
+            provenance: def.provenance.as_ref().map(TransportSourceProvenance::from),
         }
     }
 }
@@ -393,6 +395,7 @@ impl From<TransportFnDef> for instr::FnDef {
             params: def.params.into_iter().map(Into::into).collect(),
             keyword_params: def.keyword_params.into_iter().map(Into::into).collect(),
             body: def.body.into(),
+            provenance: def.provenance.map(Into::into),
         }
     }
 }

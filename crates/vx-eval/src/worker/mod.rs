@@ -285,7 +285,8 @@ impl Engine {
                 let function = self
                     .resolve_module_function(&self.root_module_id, name)
                     .await?;
-                let value = self.build_call(Value::Function(function), args, None);
+                let provenance = function.def.provenance.clone();
+                let value = self.build_call(Value::Function(function), args, provenance);
                 self.resolve_boundary_value(value).await
             })
             .await
@@ -1601,6 +1602,22 @@ impl Engine {
             message,
             self.current_demand_chain(None),
         )
+    }
+
+    fn type_error_at(
+        &self,
+        message: &str,
+        provenance: Option<instr::SourceProvenance>,
+    ) -> PoisonError {
+        let mut chain = self.current_demand_chain(None);
+        if let Some(provenance) = provenance {
+            chain.push(
+                NodeId(u64::MAX),
+                format!("{} (defined here)", provenance.label),
+                Some(provenance),
+            );
+        }
+        PoisonError::new(PoisonKind::TypeError, message, chain)
     }
 
     fn arithmetic_error(&self, message: &str) -> PoisonError {
