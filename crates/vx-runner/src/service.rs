@@ -1,7 +1,5 @@
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
-    DiscoverResult, RUNNER_PROTOCOL_VERSION, RunArg, RunRequest, RunResult, Runner,
-    RustCompileRequest, RustCompileResult,
+    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunArg, RunRequest, RunResult, Runner,
 };
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
@@ -17,37 +15,8 @@ impl RunnerService {
         }
     }
 
-    async fn compile_rust(
-        &self,
-        request: RustCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult {
-        self.compile_rust_vfs(request, progress).await
-    }
-
-    async fn compile_cc(
-        &self,
-        request: CcCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult {
-        self.compile_cc_vfs(request, progress).await
-    }
-
-    async fn link_cc(
-        &self,
-        request: CcLinkRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult {
-        self.link_cc_vfs(request, progress).await
-    }
-
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
-        let command = request
-            .program
-            .as_ref()
-            .map(RunArg::as_str)
-            .unwrap_or(&request.program_rel)
-            .to_string();
+        let command = request.program.as_str().to_string();
         tracing::info!(command, "runner.run starting");
         let result = self
             .run_vfs(request, progress)
@@ -72,30 +41,6 @@ impl RunnerService {
 impl Runner for RunnerService {
     async fn version(&self) -> ServiceVersion {
         RunnerService::version(self).await
-    }
-
-    async fn compile_rust(
-        &self,
-        request: RustCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult {
-        RunnerService::compile_rust(self, request, progress).await
-    }
-
-    async fn compile_cc(
-        &self,
-        request: CcCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult {
-        RunnerService::compile_cc(self, request, progress).await
-    }
-
-    async fn link_cc(
-        &self,
-        request: CcLinkRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult {
-        RunnerService::link_cc(self, request, progress).await
     }
 
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {

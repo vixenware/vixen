@@ -30,202 +30,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 13;
-
-// =============================================================================
-// Rust Compilation
-// =============================================================================
-
-/// A dependency for Rust compilation
-#[derive(Debug, Clone, Facet)]
-pub struct RustDep {
-    /// Extern crate name (used in --extern flag)
-    pub extern_name: String,
-    /// Manifest hash of the dependency's rlib in CAS
-    pub manifest_hash: ManifestHash,
-    /// For registry dependencies: manifest hash of the registry crate tarball
-    /// If present, runner must materialize and compile the source before using the rlib
-    pub registry_crate_manifest: Option<ManifestHash>,
-}
-
-/// Request to compile a Rust crate
-///
-/// All paths are relative to the source tree root.
-/// All artifacts are identified by CAS manifest hashes.
-#[derive(Debug, Clone, Facet)]
-pub struct RustCompileRequest {
-    /// Toolchain manifest hash (runner materializes locally)
-    pub toolchain_manifest: ManifestHash,
-
-    /// Source tree manifest hash (all source files).
-    /// Ignored if registry_crate_manifest is set.
-    pub source_manifest: ManifestHash,
-
-    /// Crate root within source tree (e.g., "src/lib.rs").
-    /// Ignored if registry_crate_manifest is set (runner reads Cargo.toml).
-    pub crate_root: String,
-
-    /// Crate name (with underscores, as rustc expects)
-    pub crate_name: String,
-
-    /// Crate type: "lib" or "bin"
-    pub crate_type: String,
-
-    /// Rust edition: "2015", "2018", "2021", "2024".
-    /// Ignored if registry_crate_manifest is set (runner reads Cargo.toml).
-    pub edition: String,
-
-    /// Target triple (e.g., "aarch64-apple-darwin")
-    pub target_triple: String,
-
-    /// Profile: "debug" or "release"
-    pub profile: String,
-
-    /// Dependencies (runner materializes rlibs from CAS)
-    pub deps: Vec<RustDep>,
-
-    /// If set, this is a registry crate compilation.
-    /// Runner will extract the tarball, parse Cargo.toml for edition/lib_path,
-    /// and ignore source_manifest/crate_root/edition from above.
-    pub registry_crate_manifest: Option<ManifestHash>,
-}
-
-/// Result of compiling a Rust crate
-#[derive(Debug, Clone, Facet)]
-pub struct RustCompileResult {
-    /// Whether compilation succeeded
-    pub success: bool,
-
-    /// Exit code from rustc
-    pub exit_code: i32,
-
-    /// Captured stdout
-    pub stdout: String,
-
-    /// Captured stderr
-    pub stderr: String,
-
-    /// Duration in milliseconds
-    pub duration_ms: u64,
-
-    /// Manifest hash of the build output in CAS (if successful)
-    /// For libs: contains the rlib blob
-    /// For bins: contains the executable blob
-    pub output_manifest: Option<ManifestHash>,
-
-    /// Error message (if failed before rustc ran)
-    pub error: Option<String>,
-}
-
-// =============================================================================
-// C/C++ Compilation
-// =============================================================================
-
-/// Request to compile a C/C++ translation unit
-#[derive(Debug, Clone, Facet)]
-pub struct CcCompileRequest {
-    /// Zig toolchain manifest hash
-    pub toolchain_manifest: ManifestHash,
-
-    /// Source tree manifest hash
-    pub source_manifest: ManifestHash,
-
-    /// Source file within tree (e.g., "src/main.c")
-    pub source_path: String,
-
-    /// Target triple
-    pub target_triple: String,
-
-    /// Profile: "debug" or "release"
-    pub profile: String,
-
-    /// Include paths (relative to source tree root)
-    pub include_paths: Vec<String>,
-
-    /// Preprocessor defines
-    pub defines: Vec<(String, Option<String>)>,
-
-    /// CommandLineTools version on macOS (for cache key)
-    /// This ensures different CommandLineTools versions produce different cache keys
-    pub macos_commandlinetools_version: Option<String>,
-}
-
-/// Result of compiling a C/C++ translation unit
-#[derive(Debug, Clone, Facet)]
-pub struct CcCompileResult {
-    /// Whether compilation succeeded
-    pub success: bool,
-
-    /// Exit code
-    pub exit_code: i32,
-
-    /// Captured stdout
-    pub stdout: String,
-
-    /// Captured stderr
-    pub stderr: String,
-
-    /// Duration in milliseconds
-    pub duration_ms: u64,
-
-    /// Manifest hash of the object file in CAS
-    pub output_manifest: Option<ManifestHash>,
-
-    /// Discovered dependencies from depfile (paths relative to source tree)
-    /// Used by daemon to update incremental state
-    pub discovered_deps: Vec<String>,
-
-    /// Error message if failed
-    pub error: Option<String>,
-}
-
-/// Request to link C/C++ objects into a binary
-#[derive(Debug, Clone, Facet)]
-pub struct CcLinkRequest {
-    /// Zig toolchain manifest hash
-    pub toolchain_manifest: ManifestHash,
-
-    /// Object file manifest hashes (from CAS)
-    pub object_manifests: Vec<ManifestHash>,
-
-    /// Binary name (without extension)
-    pub binary_name: String,
-
-    /// Target triple
-    pub target_triple: String,
-
-    /// Libraries to link against (e.g., "c", "m")
-    pub libs: Vec<String>,
-
-    /// CommandLineTools version on macOS (for cache key)
-    /// This ensures different CommandLineTools versions produce different cache keys
-    pub macos_commandlinetools_version: Option<String>,
-}
-
-/// Result of linking C/C++ objects
-#[derive(Debug, Clone, Facet)]
-pub struct CcLinkResult {
-    /// Whether linking succeeded
-    pub success: bool,
-
-    /// Exit code
-    pub exit_code: i32,
-
-    /// Captured stdout
-    pub stdout: String,
-
-    /// Captured stderr
-    pub stderr: String,
-
-    /// Duration in milliseconds
-    pub duration_ms: u64,
-
-    /// Manifest hash of the binary in CAS
-    pub output_manifest: Option<ManifestHash>,
-
-    /// Error message if failed
-    pub error: Option<String>,
-}
+pub const RUNNER_PROTOCOL_VERSION: u32 = 15;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -292,16 +97,6 @@ pub struct RunFileMount {
     pub logical: String,
 }
 
-#[derive(Debug, Clone, Facet)]
-pub struct RunOutput {
-    /// Logical output name (e.g. "object", "bin").
-    pub logical: String,
-    /// Path within the action prefix (must be under one of the writable roots).
-    pub path: String,
-    /// Whether the output should be marked executable in CAS.
-    pub executable: bool,
-}
-
 /// Executor-side evaluator payload shipped with a generic run request.
 #[derive(Debug, Clone, Facet)]
 pub struct RunEvalPayload {
@@ -338,25 +133,15 @@ pub enum RunFailureKind {
     VerificationFailure,
 }
 
-/// Request to run a sandboxed toolchain command.
-///
-/// This is the generic building block that language-specific front-ends can lower into.
+/// Request to run a sandboxed command.
 #[derive(Debug, Clone, Facet)]
 pub struct RunRequest {
     /// Target executor selector. Current runners may ignore this if they are the selected executor.
     pub executor: ExecutorSelector,
 
-    /// Toolchain manifest hash (runner materializes locally).
-    /// Ignored when `program` is set and no `${VX_TOOLCHAIN}` placeholders are used.
-    pub toolchain_manifest: ManifestHash,
-
-    /// Program path relative to the toolchain root (e.g. "zig").
-    /// Used by legacy action-graph runs when `program` is `None`.
-    pub program_rel: String,
-
-    /// Direct program path for executor-side `exec` requests.
+    /// Program path for executor-side `exec` requests.
     /// Literal paths are passed through as-is; `Path` values are resolved inside the VFS.
-    pub program: Option<RunArg>,
+    pub program: RunArg,
 
     /// Arguments passed to the program (no shell parsing).
     pub args: Vec<RunArg>,
@@ -366,9 +151,6 @@ pub struct RunRequest {
 
     /// Individual output files from other node manifests to materialize into the action prefix.
     pub file_mounts: Vec<RunFileMount>,
-
-    /// Outputs that must be produced (and will be flushed to CAS).
-    pub outputs: Vec<RunOutput>,
 
     // r[impl exec.writable]
     /// Writable directories to create within the action prefix.
@@ -401,7 +183,6 @@ pub struct RunResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
-    pub output_manifest: Option<ManifestHash>,
     pub observer_value: Option<TransportValue>,
     pub poison: Option<TransportPoisonError>,
     pub error_kind: Option<RunFailureKind>,
@@ -432,40 +213,6 @@ pub trait Runner {
     /// 6. Return the output manifest hash
     ///
     /// Progress channel receives merged stdout/stderr lines during compilation.
-    async fn compile_rust(
-        &self,
-        request: RustCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult;
-
-    /// Compile a C/C++ translation unit
-    ///
-    /// Similar to compile_rust but for C/C++ via zig cc.
-    /// Returns discovered dependencies for incremental builds.
-    ///
-    /// Progress channel receives merged stdout/stderr lines during compilation.
-    async fn compile_cc(
-        &self,
-        request: CcCompileRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult;
-
-    /// Link C/C++ object files into a binary
-    ///
-    /// Runner will:
-    /// 1. Materialize the Zig toolchain from CAS
-    /// 2. Materialize all object files from CAS
-    /// 3. Run zig cc to link them
-    /// 4. Ingest the binary to CAS
-    /// 5. Return the binary manifest hash
-    ///
-    /// Progress channel receives merged stdout/stderr lines during linking.
-    async fn link_cc(
-        &self,
-        request: CcLinkRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult;
-
     /// Run a sandboxed command with hermetic inputs/outputs via CAS/VFS.
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
 

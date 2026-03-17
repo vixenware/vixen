@@ -11,8 +11,6 @@ use crate::activity::{ActivityHandle, ActivityRegistry};
 use crate::build_failure;
 use crate::db::Database;
 use crate::error::{Result, VxdError};
-use crate::executor::Executor;
-use crate::inputs::*;
 use ::moire::sync::SyncMutex;
 use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
@@ -61,11 +59,10 @@ use vx_eval::{
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
 use vx_report::{
-    BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
-    RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
-    RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
+    GraphTopology, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanFact, RulePlanFactId,
+    RulePlanNode, RulePlanNodeId, RulePlanNodeKind, RulePlanProvenance, RulePlanSource,
+    RulePlanSourceId, RulePlanSpan, RulePlanValue,
 };
-use vx_rs::CrateGraph;
 use vx_runner_proto::{
     DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
     RunRequest, RunTreeMount, RunnerClient,
@@ -2108,6 +2105,7 @@ async fn store_exec_mounts_deduped(
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
     inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    event_recorder: Option<&vx_eval::EventRecorder>,
 ) -> ExecMountPrepResult {
     let Some(key) = exec_mounts_singleflight_key(mounts) else {
         return prepare_exec_mounts_with_progress(
@@ -2133,19 +2131,47 @@ async fn store_exec_mounts_deduped(
         }
     };
 
-    let result = cell
-        .get_or_init(|| {
-            prepare_exec_mounts_with_progress(
-                store,
-                mounts,
-                fs_tree_snapshot_cache,
-                progress_listener,
-                activity,
-                executor_summary,
-            )
+    let track_id = current_trace_track_id();
+    let result = if inserted {
+        cell.get_or_init(|| {
+            let compute_span = event_recorder.map(|recorder| {
+                recorder.begin_detached_span(track_id, "exec.mounts.prepare.compute")
+            });
+            async move {
+                let result = prepare_exec_mounts_with_progress(
+                    store,
+                    mounts,
+                    fs_tree_snapshot_cache,
+                    progress_listener,
+                    activity,
+                    executor_summary,
+                )
+                .await;
+                drop(compute_span);
+                result
+            }
         })
         .await
-        .clone();
+        .clone()
+    } else {
+        let wait_span = event_recorder
+            .map(|recorder| recorder.begin_detached_span(track_id, "exec.mounts.prepare.wait"));
+        let result = cell
+            .get_or_init(|| {
+                prepare_exec_mounts_with_progress(
+                    store,
+                    mounts,
+                    fs_tree_snapshot_cache,
+                    progress_listener,
+                    activity,
+                    executor_summary,
+                )
+            })
+            .await
+            .clone();
+        drop(wait_span);
+        result
+    };
 
     if result.is_err() || inserted {
         let mut inflight = inflight.lock();
@@ -2701,10 +2727,23 @@ fn remote_trace_span_name(span: RemoteTraceSpan) -> &'static str {
         RemoteTraceSpan::RunnerPrepareVfs => "exec.runner.prepare_vfs",
         RemoteTraceSpan::RunnerCommand => "exec.runner.command",
         RemoteTraceSpan::RunnerObserver => "exec.runner.observer",
+        RemoteTraceSpan::RunnerObserverInvoke => "exec.runner.observer.invoke",
+        RemoteTraceSpan::RunnerObserverCommit => "exec.runner.observer.commit",
+        RemoteTraceSpan::RunnerObserverCommitTree => "exec.runner.observer.commit_tree",
+        RemoteTraceSpan::RunnerObserverCommitStoreBlob => "exec.runner.observer.store_blob",
+        RemoteTraceSpan::RunnerObserverCommitStoreNode => "exec.runner.observer.store_node",
         RemoteTraceSpan::RunnerFlushOutputs => "exec.runner.flush_outputs",
         RemoteTraceSpan::RunnerStoreManifest => "exec.runner.store_manifest",
         RemoteTraceSpan::RunnerCleanup => "exec.runner.cleanup",
     }
+}
+
+fn exec_argv_strings(args: &[ExecArgValue]) -> Vec<String> {
+    args.iter().map(|arg| arg.as_str().to_string()).collect()
+}
+
+fn format_exec_command(argv: &[String]) -> String {
+    argv.join(" ")
 }
 
 async fn run_build_vx_exec_via_runner(
@@ -2719,12 +2758,17 @@ async fn run_build_vx_exec_via_runner(
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let executor_summary = describe_executor_selector(&request.executor);
+    let command_argv = exec_argv_strings(&request.args);
+    let command = format_exec_command(&command_argv);
+    let command_preview = summarize_items(&command_argv, 12);
     let _exec_span = event_recorder.as_ref().map(|recorder| {
         EventSink::begin_span_with_args(
             recorder,
             "exec.runtime",
             value!({
                 "executor": ((executor_summary.clone())),
+                "command": ((command.clone())),
+                "command_preview": ((command_preview.clone())),
                 "mount_count": ((request.mounts.len() as u64)),
                 "writable_root_count": ((request.writable_roots.len() as u64)),
                 "create_dir_count": ((request.create_dirs.len() as u64))
@@ -2812,6 +2856,7 @@ async fn run_build_vx_exec_via_runner(
             Some(&activity),
             Some(&executor_summary),
             exec_mount_prep_inflight,
+            event_recorder.as_ref(),
         )
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
@@ -2912,6 +2957,8 @@ async fn run_build_vx_exec_via_runner(
                 "exec.runner.run",
                 value!({
                     "executor": ((executor_summary.clone())),
+                    "command": ((command.clone())),
+                    "command_preview": ((command_preview.clone())),
                     "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
                     "file_mount_count": ((prepared_mounts.file_mounts.len() as u64)),
                     "cross_store": ((!std::ptr::eq(target_store, &**store))),
@@ -3965,200 +4012,6 @@ fn hydrate_exec_value_from_store(
     })
 }
 
-fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
-    let source_id = RulePlanSourceId::from("rust_planner".to_string());
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut facts = Vec::new();
-
-    let base_provenance = |rule: &str, line: u32| RulePlanProvenance {
-        rule_id: RuleId::from(rule.to_string()),
-        source_id: source_id.clone(),
-        span: RulePlanSpan {
-            line,
-            column: 1,
-            end_line: line,
-            end_column: 1,
-        },
-        comment: None,
-        metadata: std::collections::BTreeMap::new(),
-    };
-
-    let group_id = RulePlanNodeId::from("n_group_build".to_string());
-    nodes.push(RulePlanNode {
-        id: group_id.clone(),
-        kind: RulePlanNodeKind::Group,
-        label: "build".to_string(),
-        provenance: base_provenance("rule.group.build", 1),
-    });
-
-    let fact_node_id = RulePlanNodeId::from("n_fact_workspace_changed".to_string());
-    nodes.push(RulePlanNode {
-        id: fact_node_id.clone(),
-        kind: RulePlanNodeKind::Fact,
-        label: "workspace_changed".to_string(),
-        provenance: base_provenance("rule.fact.workspace_changed", 2),
-    });
-    facts.push(RulePlanFact {
-        id: RulePlanFactId::from("f_workspace_changed".to_string()),
-        node_id: fact_node_id.clone(),
-        value: RulePlanValue::from("true".to_string()),
-        provenance: base_provenance("rule.fact.workspace_changed", 3),
-    });
-
-    let mut crate_nodes = graph.nodes.values().collect::<Vec<_>>();
-    crate_nodes.sort_by(|a, b| {
-        a.crate_name
-            .cmp(&b.crate_name)
-            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-    });
-
-    let mut artifact_by_crate_id = std::collections::HashMap::new();
-    let mut action_by_crate_id = std::collections::HashMap::new();
-    let mut registry_artifact_by_name_version = std::collections::HashMap::new();
-
-    let mut registry_crates = graph.iter_registry_crates().collect::<Vec<_>>();
-    registry_crates.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.version.cmp(&b.version))
-            .then_with(|| a.checksum.cmp(&b.checksum))
-    });
-    for (idx, registry) in registry_crates.iter().enumerate() {
-        let key = format!(
-            "{}_{}",
-            sanitize_id_component(&registry.name),
-            sanitize_id_component(&registry.version)
-        );
-        let node_id = RulePlanNodeId::from(format!("n_registry_artifact_{key}"));
-        let registry_action_node_id =
-            format!("acquire-registry:{}:{}", registry.name, registry.version);
-        let mut provenance = base_provenance("rule.registry.artifact", 6 + idx as u32);
-        provenance.metadata.insert(
-            "legacy_node_id".to_string(),
-            registry_action_node_id.clone(),
-        );
-        provenance
-            .metadata
-            .insert("registry_name".to_string(), registry.name.clone());
-        provenance
-            .metadata
-            .insert("registry_version".to_string(), registry.version.clone());
-        provenance
-            .metadata
-            .insert("registry_checksum".to_string(), registry.checksum.clone());
-        nodes.push(RulePlanNode {
-            id: node_id.clone(),
-            kind: RulePlanNodeKind::Artifact,
-            label: registry_action_node_id,
-            provenance,
-        });
-        registry_artifact_by_name_version
-            .insert((registry.name.clone(), registry.version.clone()), node_id);
-    }
-
-    for (idx, crate_node) in crate_nodes.iter().enumerate() {
-        let key = format!(
-            "{}_{}_{}",
-            sanitize_id_component(&crate_node.crate_name),
-            crate_node.crate_type.as_str(),
-            sanitize_id_component(&crate_node.id.to_string())
-        );
-        let action_id = RulePlanNodeId::from(format!("n_action_{key}"));
-        let artifact_id = RulePlanNodeId::from(format!("n_artifact_{key}"));
-        let legacy_node_id =
-            legacy_compile_node_id(&crate_node.crate_name, crate_node.crate_type.as_str());
-        let mut action_provenance = base_provenance("rule.rust.compile", 10 + idx as u32);
-        action_provenance
-            .metadata
-            .insert("legacy_node_id".to_string(), legacy_node_id.clone());
-        action_provenance
-            .metadata
-            .insert("crate_name".to_string(), crate_node.crate_name.clone());
-        action_provenance.metadata.insert(
-            "crate_type".to_string(),
-            crate_node.crate_type.as_str().to_string(),
-        );
-
-        nodes.push(RulePlanNode {
-            id: action_id.clone(),
-            kind: RulePlanNodeKind::Action,
-            label: legacy_node_id,
-            provenance: action_provenance,
-        });
-        nodes.push(RulePlanNode {
-            id: artifact_id.clone(),
-            kind: RulePlanNodeKind::Artifact,
-            label: format!("artifact:{}", crate_node.crate_name),
-            provenance: base_provenance("rule.rust.artifact", 30 + idx as u32),
-        });
-
-        edges.push(RulePlanEdge {
-            from: group_id.clone(),
-            to: action_id.clone(),
-            kind: RulePlanEdgeKind::Always,
-            provenance: base_provenance("rule.group.depends-on-action", 50 + idx as u32),
-        });
-        edges.push(RulePlanEdge {
-            from: fact_node_id.clone(),
-            to: action_id.clone(),
-            kind: RulePlanEdgeKind::IfChanged,
-            provenance: base_provenance("rule.fact.triggers-action", 70 + idx as u32),
-        });
-        edges.push(RulePlanEdge {
-            from: action_id.clone(),
-            to: artifact_id.clone(),
-            kind: RulePlanEdgeKind::IfWritten,
-            provenance: base_provenance("rule.action.writes-artifact", 90 + idx as u32),
-        });
-
-        artifact_by_crate_id.insert(crate_node.id, artifact_id);
-        action_by_crate_id.insert(crate_node.id, action_id);
-    }
-
-    for (idx, crate_node) in crate_nodes.iter().enumerate() {
-        if let Some(action_id) = action_by_crate_id.get(&crate_node.id) {
-            for dep in &crate_node.deps {
-                if let Some(dep_artifact_id) = artifact_by_crate_id.get(&dep.crate_id) {
-                    edges.push(RulePlanEdge {
-                        from: dep_artifact_id.clone(),
-                        to: action_id.clone(),
-                        kind: RulePlanEdgeKind::IfChanged,
-                        provenance: base_provenance(
-                            "rule.dep-artifact.triggers-action",
-                            120 + idx as u32,
-                        ),
-                    });
-                }
-            }
-
-            if let vx_rs::crate_graph::CrateSource::Registry { name, version, .. } =
-                &crate_node.source
-                && let Some(registry_artifact_id) =
-                    registry_artifact_by_name_version.get(&(name.clone(), version.clone()))
-            {
-                edges.push(RulePlanEdge {
-                    from: registry_artifact_id.clone(),
-                    to: action_id.clone(),
-                    kind: RulePlanEdgeKind::IfChanged,
-                    provenance: base_provenance("rule.registry.triggers-action", 140 + idx as u32),
-                });
-            }
-        }
-    }
-
-    RulePlan {
-        sources: vec![RulePlanSource {
-            id: source_id,
-            path: Utf8PathBuf::from("planner/rust-static.edn"),
-        }],
-        nodes,
-        edges,
-        facts,
-    }
-}
-
 impl VxdService {
     async fn local_runner(&self) -> Result<Arc<RunnerClient>> {
         let listener = self.progress_listener.lock().clone();
@@ -4770,315 +4623,10 @@ impl VxdService {
         Ok(())
     }
 
-    /// Build from vx.styx manifest (C, Rust, or mixed projects)
-    async fn build_from_vx_styx(
-        &self,
-        _request: BuildRequest,
-        vx_styx_path: camino::Utf8PathBuf,
-    ) -> Result<BuildResult> {
-        use vx_project::{Language, VxManifest};
-
-        // Parse vx.styx
-        let manifest = VxManifest::from_path(&vx_styx_path)
-            .map_err(|e| VxdError::InvalidManifest(format!("Failed to parse vx.styx: {}", e)))?;
-
-        manifest
-            .validate()
-            .map_err(|e| VxdError::InvalidManifest(format!("Invalid vx.styx: {}", e)))?;
-
-        // Determine project language
-        let language = manifest.project.language().ok_or_else(|| {
-            VxdError::InvalidManifest(format!("Unknown language: {}", manifest.project.lang))
-        })?;
-
-        match language {
-            Language::C => {
-                info!(
-                    project = %manifest.project.name,
-                    bins = manifest.bins.len(),
-                    "C project detected"
-                );
-
-                // Get target triple from request or use default
-                let rust_target_triple = self.exec_host_triple.clone();
-
-                // Convert Rust target triple to Zig target format
-                let target_triple = rust_target_triple
-                    .replace("apple-darwin", "macos")
-                    .replace("unknown-linux-gnu", "linux-gnu")
-                    .replace("pc-windows-msvc", "windows");
-                let profile = if _request.release { "release" } else { "debug" };
-
-                // Ingest source tree to CAS
-                // For C projects, we need to collect all source files and ingest them
-                let project_dir = vx_styx_path.parent().unwrap();
-
-                // Collect all .c and .h files (simple approach for MVP)
-                // Ingest each file as a chunk and build a Merkle directory tree
-                let mut tree_files = Vec::new();
-
-                for bin in &manifest.bins {
-                    let source_path = project_dir.join(&bin.sources);
-                    if source_path.exists() {
-                        let contents = ::moire::fs::read(&source_path).await.map_err(|e| {
-                            VxdError::FileRead {
-                                path: source_path.clone(),
-                                message: e.to_string(),
-                            }
-                        })?;
-
-                        let size = contents.len() as u64;
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&contents));
-                        let chunk_hash = ChunkHash(content_hash.0);
-
-                        // Store as chunk
-                        self.store
-                            .put_chunk(chunk_hash, contents)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
-
-                        tree_files.push(crate::cas_tree::TreeFile {
-                            path: bin.sources.clone(),
-                            kind: DirEntryKind::SmallFile {
-                                content_hash,
-                                size,
-                                executable: false,
-                            },
-                        });
-                    }
-                }
-
-                // Build recursive Merkle directory tree
-                let (node_hash, _total_size) =
-                    crate::cas_tree::build_merkle_tree(&self.store, tree_files)
-                        .await
-                        .map_err(VxdError::CasRpc)?;
-
-                let source_manifest = node_hash.0;
-
-                info!(
-                    source_manifest = %source_manifest,
-                    "Source tree ingested"
-                );
-
-                // Create action graph for C project
-                use crate::action_graph::{Action, ActionGraph};
-                let mut graph = ActionGraph::new();
-
-                // Add AcquireZigToolchain action (root node)
-                let zig_version = "0.15.2".to_string();
-                let zig_node = graph.add_action(Action::AcquireZigToolchain {
-                    version: zig_version.clone(),
-                });
-
-                // Process each binary target
-                for bin in &manifest.bins {
-                    // Parse source files (simple glob for now - just one file)
-                    let sources = vec![bin.sources.clone()];
-
-                    // Add run actions for each source file -> produces logical "object"
-                    let mut object_nodes = Vec::new();
-                    for source in &sources {
-                        let output =
-                            format!(".vx/obj/{}.o", source.replace('/', "_").replace(".c", ""));
-                        let object_filename = output
-                            .rsplit_once('/')
-                            .map(|(_, f)| f.to_string())
-                            .unwrap_or_else(|| output.clone());
-                        let out_rel = format!("out/{object_filename}");
-
-                        let mut args = vec![
-                            vx_runner_proto::RunArg::literal("cc"),
-                            vx_runner_proto::RunArg::literal("-c"),
-                            vx_runner_proto::RunArg::path(format!("src/{source}")),
-                            vx_runner_proto::RunArg::literal("-o"),
-                            vx_runner_proto::RunArg::path(out_rel.clone()),
-                            vx_runner_proto::RunArg::literal("-target"),
-                            vx_runner_proto::RunArg::literal(target_triple.clone()),
-                        ];
-
-                        if profile == "release" {
-                            args.push(vx_runner_proto::RunArg::literal("-O3"));
-                        } else {
-                            args.push(vx_runner_proto::RunArg::literal("-O0"));
-                            args.push(vx_runner_proto::RunArg::literal("-g"));
-                        }
-
-                        let compile_node = graph.add_action(Action::Run {
-                            label: format!("cc {source}"),
-                            kind: crate::action_graph::RunKind::Generic,
-                            toolchain: crate::action_graph::RunToolchain::Zig,
-                            program_rel: "zig".to_string(),
-                            args,
-                            env: vec![],
-                            cwd: None,
-                            clear_env: true,
-                            tree_mounts: vec![vx_runner_proto::RunTreeMount {
-                                mount: "src".to_string(),
-                                manifest: source_manifest,
-                            }],
-                            dep_tree_mounts: vec![],
-                            file_mounts: vec![],
-                            dep_file_mounts: vec![],
-                            collect_file_mounts: vec![],
-                            outputs: vec![vx_runner_proto::RunOutput {
-                                logical: "object".to_string(),
-                                path: out_rel,
-                                executable: false,
-                            }],
-                            writable_roots: vec!["out".to_string()],
-                            materialize: vec![],
-                        });
-
-                        // Depends on Zig toolchain
-                        graph.add_edge(zig_node, compile_node);
-                        object_nodes.push(compile_node);
-                    }
-
-                    // Add run action to link -> produces logical "binary"
-                    let binary_output = format!("bin/{}", bin.name);
-                    let binary_filename = binary_output
-                        .rsplit_once('/')
-                        .map(|(_, f)| f.to_string())
-                        .unwrap_or_else(|| binary_output.clone());
-                    let out_rel = format!("out/{binary_filename}");
-
-                    let mut args = vec![
-                        vx_runner_proto::RunArg::literal("cc"),
-                        vx_runner_proto::RunArg::literal("-target"),
-                        vx_runner_proto::RunArg::literal(target_triple.clone()),
-                    ];
-                    for (idx, _) in sources.iter().enumerate() {
-                        args.push(vx_runner_proto::RunArg::path(format!("obj/{idx:04}.o")));
-                    }
-                    args.push(vx_runner_proto::RunArg::literal("-o"));
-                    args.push(vx_runner_proto::RunArg::path(out_rel.clone()));
-
-                    let link_node = graph.add_action(Action::Run {
-                        label: format!("link {}", bin.name),
-                        kind: crate::action_graph::RunKind::Generic,
-                        toolchain: crate::action_graph::RunToolchain::Zig,
-                        program_rel: "zig".to_string(),
-                        args,
-                        env: vec![],
-                        cwd: None,
-                        clear_env: true,
-                        tree_mounts: vec![],
-                        dep_tree_mounts: vec![],
-                        file_mounts: vec![],
-                        dep_file_mounts: vec![],
-                        collect_file_mounts: vec![crate::action_graph::RunCollectInput {
-                            logical: "object".to_string(),
-                            path_prefix: "obj/".to_string(),
-                            path_suffix: ".o".to_string(),
-                            pad_width: 4,
-                        }],
-                        outputs: vec![vx_runner_proto::RunOutput {
-                            logical: "binary".to_string(),
-                            path: out_rel,
-                            executable: true,
-                        }],
-                        writable_roots: vec!["out".to_string()],
-                        materialize: vec![crate::action_graph::RunMaterialize {
-                            logical: "binary".to_string(),
-                            workspace_rel_path: binary_output.clone(),
-                        }],
-                    });
-
-                    // Depends on all object files and Zig toolchain
-                    graph.add_edge(zig_node, link_node);
-                    for obj_node in object_nodes {
-                        graph.add_edge(obj_node, link_node);
-                    }
-                }
-
-                // Dump graph for debugging
-                graph.dump_graph();
-
-                // Set total number of actions for progress tracking
-                let total_actions = graph.node_count();
-                self.report_set_total(total_actions as u64).await;
-
-                // Execute action graph
-                let max_concurrency = executor_max_concurrency();
-
-                let progress_listener = self.progress_listener.lock().clone();
-                let session_id = self.session_id().await;
-                let exec = self.local_runner().await?;
-
-                let mut executor = crate::executor::Executor::new(
-                    graph,
-                    progress_listener,
-                    self.store.clone(),
-                    exec,
-                    self.db.clone(),
-                    project_dir.to_path_buf(),
-                    target_triple.clone(),
-                    profile.to_string(),
-                    session_id,
-                    max_concurrency,
-                );
-
-                // Register the executor's cancel token so signal handlers can cancel this build
-                *self.active_build_cancel.lock() = Some(executor.cancel_token());
-
-                let build_start = std::time::Instant::now();
-                let exec_result = executor.execute().await;
-                let duration = build_start.elapsed();
-
-                // Clear the cancel token now that the build is done
-                *self.active_build_cancel.lock() = None;
-                exec_result?;
-
-                // Get execution statistics
-                let exec_stats = executor.get_stats();
-
-                info!(
-                    duration_ms = duration.as_millis(),
-                    cache_hits = exec_stats.cache_hits,
-                    rebuilt = exec_stats.rebuilt,
-                    "C build completed successfully"
-                );
-
-                Ok(BuildResult {
-                    success: true,
-                    message: format!("Built {} C binary targets", manifest.bins.len()),
-                    cached: exec_stats.cache_hits == total_actions,
-                    duration_ms: duration.as_millis() as u64,
-                    output_path: exec_stats.bin_output,
-                    error: None,
-                    failure: None,
-                    total_actions,
-                    cache_hits: exec_stats.cache_hits,
-                    rebuilt: exec_stats.rebuilt,
-                    cancelled: exec_stats.cancelled,
-                })
-            }
-            Language::Rust => {
-                // TODO: Convert vx.styx Rust project to Cargo.toml path
-                // For now, fail with helpful message
-                Err(VxdError::InvalidManifest(
-                    "Rust projects via vx.styx not yet supported - use Cargo.toml for now"
-                        .to_string(),
-                ))
-            }
-        }
-    }
-
     /// Build a project.
     pub async fn do_build(&self, request: BuildRequest) -> Result<BuildResult> {
         let project_path = &request.project_path;
         let total_start = std::time::Instant::now();
-
-        let target_triple = self.exec_host_triple.clone();
-
-        // Check for vx.styx first (unified project manifest)
-        let vx_styx_path = project_path.join("vx.styx");
-        if vx_styx_path.exists() {
-            info!("Found vx.styx, using unified project manifest");
-            return self.build_from_vx_styx(request, vx_styx_path).await;
-        }
 
         let build_vx_path = request
             .build_file_path
@@ -5097,497 +4645,9 @@ impl VxdService {
                 build_vx_path
             )));
         }
-
-        let cargo_manifest_path = project_path.join("Cargo.toml");
-        if !cargo_manifest_path.exists() {
-            return Err(VxdError::InvalidManifest(
-                "expected vx.styx or Cargo.toml at the project root".to_string(),
-            ));
-        }
-
-        // r[impl eval.entry.cargo-compat]
-        // Fall back to Cargo.toml (Rust-only projects) only when no build.vx exists.
-        // Build the crate graph with lockfile support
-        let graph = CrateGraph::build_with_lockfile(project_path)
-            .map_err(|e| VxdError::CrateGraph(format!("{e:?}")))?;
-
-        let profile = if request.release { "release" } else { "debug" };
-
-        info!(
-            workspace_root = %graph.workspace_root,
-            path_crate_count = graph.nodes.len(),
-            registry_crate_count = graph.iter_registry_crates().count(),
-            "resolved crate graph, building action graph"
-        );
-
-        let mut rule_plan_plan: Option<RulePlan> = None;
-        let mut rule_plan_topology: Option<vx_report::GraphTopology> = None;
-        if rule_plan_bridge_enabled() {
-            info!(
-                "VX_RULE_PLAN_BRIDGE is enabled; validating/lowering RulePlan and using RulePlan topology in report"
-            );
-            let plan = if let Some(rules_file) = vx_rules_file() {
-                let rules_path = if rules_file.is_absolute() {
-                    rules_file
-                } else {
-                    graph.workspace_root.join(rules_file)
-                };
-                let source_rel = rules_path
-                    .strip_prefix(&graph.workspace_root)
-                    .ok()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| rules_path.clone());
-
-                info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
-                let contents = ::moire::fs::read_to_string(&rules_path)
-                    .await
-                    .map_err(|e| VxdError::FileRead {
-                        path: rules_path.clone(),
-                        message: e.to_string(),
-                    })?;
-
-                let source_id =
-                    vx_plan::RulePlanSourceId::from(format!("vx:{}", source_rel.as_str()));
-                let source = vx_plan::RulePlanSource {
-                    id: source_id.clone(),
-                    path: source_rel.clone(),
-                };
-
-                let program = vx_plan::vx_lang::parse_vx_program(
-                    rules_path.as_path(),
-                    source_id.clone(),
-                    &contents,
-                )
-                .map_err(|e| {
-                    VxdError::InvalidManifest(format!("failed to parse {}: {}", source_rel, e))
-                })?;
-
-                struct VxdRulesHost<'a> {
-                    inner: vx_plan::runtime::RulePlanHost,
-                    crate_graph: &'a CrateGraph,
-                }
-
-                impl<'a> VxdRulesHost<'a> {
-                    fn into_inner(self) -> vx_plan::runtime::RulePlanHost {
-                        self.inner
-                    }
-                }
-
-                impl<'a> vx_plan::runtime::PlannerHost for VxdRulesHost<'a> {
-                    fn register_builtin(
-                        &mut self,
-                        builtin: vx_plan::runtime::PlannerBuiltin,
-                    ) -> std::result::Result<(), String> {
-                        self.inner.register_builtin(builtin)
-                    }
-
-                    fn invoke_builtin(
-                        &mut self,
-                        builtin: vx_plan::runtime::PlannerBuiltinId,
-                        args: vx_plan::runtime::PlannerBuiltinArgs,
-                        site: &vx_plan::runtime::PlannerCallSite,
-                    ) -> std::result::Result<vx_plan::runtime::PlannerValue, String>
-                    {
-                        use vx_plan::runtime::{PlannerBuiltinArgs, PlannerBuiltinId};
-
-                        match (builtin, args) {
-                            (
-                                PlannerBuiltinId::RustCrateGraph,
-                                PlannerBuiltinArgs::RustCrateGraph,
-                            ) => Ok(crate_graph_to_planner_value(self.crate_graph)),
-                            (builtin, args) => self.inner.invoke_builtin(builtin, args, site),
-                        }
-                    }
-                }
-
-                fn crate_graph_to_planner_value(
-                    crate_graph: &CrateGraph,
-                ) -> vx_plan::runtime::PlannerValue {
-                    use vx_plan::runtime::PlannerValue;
-
-                    let mut crates = crate_graph.nodes.values().collect::<Vec<_>>();
-                    crates.sort_by(|a, b| {
-                        a.crate_name
-                            .cmp(&b.crate_name)
-                            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
-                            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-                    });
-
-                    let crates_value = crates
-                        .into_iter()
-                        .map(|node| {
-                            let deps = {
-                                let mut deps = node
-                                    .deps
-                                    .iter()
-                                    .map(|d| d.crate_id.to_string())
-                                    .collect::<Vec<_>>();
-                                deps.sort();
-                                deps.into_iter()
-                                    .map(PlannerValue::String)
-                                    .collect::<Vec<_>>()
-                            };
-
-                            let mut source = std::collections::BTreeMap::new();
-                            match &node.source {
-                                vx_rs::crate_graph::CrateSource::Path { workspace_rel } => {
-                                    source.insert(
-                                        "kind".to_string(),
-                                        PlannerValue::Keyword("path".to_string()),
-                                    );
-                                    source.insert(
-                                        "workspace_rel".to_string(),
-                                        PlannerValue::String(workspace_rel.to_string()),
-                                    );
-                                }
-                                vx_rs::crate_graph::CrateSource::Registry {
-                                    name,
-                                    version,
-                                    checksum,
-                                } => {
-                                    source.insert(
-                                        "kind".to_string(),
-                                        PlannerValue::Keyword("registry".to_string()),
-                                    );
-                                    source.insert(
-                                        "name".to_string(),
-                                        PlannerValue::String(name.clone()),
-                                    );
-                                    source.insert(
-                                        "version".to_string(),
-                                        PlannerValue::String(version.clone()),
-                                    );
-                                    source.insert(
-                                        "checksum".to_string(),
-                                        PlannerValue::String(checksum.clone()),
-                                    );
-                                }
-                            }
-
-                            let mut m = std::collections::BTreeMap::new();
-                            m.insert("id".to_string(), PlannerValue::String(node.id.to_string()));
-                            m.insert(
-                                "name".to_string(),
-                                PlannerValue::String(node.crate_name.clone()),
-                            );
-                            m.insert(
-                                "type".to_string(),
-                                PlannerValue::String(node.crate_type.as_str().to_string()),
-                            );
-                            m.insert("deps".to_string(), PlannerValue::Vector(deps));
-                            m.insert("source".to_string(), PlannerValue::Map(source));
-                            PlannerValue::Map(m)
-                        })
-                        .collect::<Vec<_>>();
-
-                    let topo = crate_graph
-                        .topo_order
-                        .iter()
-                        .map(|id| PlannerValue::String(id.to_string()))
-                        .collect::<Vec<_>>();
-
-                    let mut out = std::collections::BTreeMap::new();
-                    out.insert(
-                        "workspace_root".to_string(),
-                        PlannerValue::String(crate_graph.workspace_root.to_string()),
-                    );
-                    out.insert(
-                        "root".to_string(),
-                        PlannerValue::String(crate_graph.root_crate.to_string()),
-                    );
-                    out.insert("topo".to_string(), PlannerValue::Vector(topo));
-                    out.insert("crates".to_string(), PlannerValue::Vector(crates_value));
-
-                    PlannerValue::Map(out)
-                }
-
-                let mut inner = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
-                inner.set_env_profile(profile.to_string());
-                inner.set_env_target_triple(target_triple.to_string());
-
-                let host = VxdRulesHost {
-                    inner,
-                    crate_graph: &graph,
-                };
-
-                let mut runtime = vx_plan::runtime::PlannerRuntime::new(
-                    host,
-                    vx_plan::runtime::PlannerPolicy::deterministic(),
-                    vx_plan::runtime::planner_builtins_with_rust(),
-                )
-                .map_err(VxdError::InvalidManifest)?;
-
-                runtime.evaluate_program(&program).map_err(|e| {
-                    VxdError::InvalidManifest(format!("VX rules runtime error: {e}"))
-                })?;
-                let host = runtime.into_host().into_inner();
-                let plan = host.into_plan();
-                plan.validate()
-                    .map_err(|e| VxdError::InvalidManifest(e.to_string()))?;
-                plan
-            } else {
-                build_rule_plan_from_crate_graph(&graph)
-            };
-            rule_plan_plan = Some(plan.clone());
-            let lowered = crate::action_graph::ActionGraph::from_rule_plan(&plan)
-                .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?;
-            rule_plan_topology = Some(lowered.to_topology());
-        }
-
-        use crate::action_graph::ActionGraph;
-        // Execution remains on the real Rust action graph while RulePlan evolves.
-        // This keeps behavior stable while letting us move planner semantics forward.
-        let placeholder_hash = Blake3Hash([0u8; 32]);
-        let toolchain = RustToolchain::new(
-            &*self.db,
-            placeholder_hash,
-            placeholder_hash,
-            target_triple.clone(),
-            target_triple.clone(),
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        RustToolchainManifest::set(&*self.db, placeholder_hash)
-            .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        let session_id = self.session_id().await;
-        let build_key = BuildConfig::compute_key(
-            profile,
-            &target_triple,
-            graph.workspace_root.as_ref(),
-            &session_id,
-        );
-        let config = BuildConfig::new(
-            &*self.db,
-            build_key,
-            profile.to_string(),
-            target_triple.clone(),
-            graph.workspace_root.to_string(),
-            session_id,
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        use vx_store_proto::RustChannel;
-        let action_graph = if rule_plan_exec_enabled() {
-            if !rule_plan_bridge_enabled() {
-                return Err(VxdError::InvalidManifest(
-                    "VX_RULE_PLAN_EXEC requires VX_RULE_PLAN_BRIDGE=1".to_string(),
-                ));
-            }
-            let Some(plan) = rule_plan_plan.as_ref() else {
-                return Err(VxdError::InvalidManifest(
-                    "VX_RULE_PLAN_EXEC is enabled but RulePlan was not produced".to_string(),
-                ));
-            };
-            info!(
-                nodes = plan.nodes.len(),
-                edges = plan.edges.len(),
-                "RulePlan execution enabled; executing ActionGraph lowered from RulePlan"
-            );
-            ActionGraph::from_rule_plan_executable(
-                plan,
-                &graph,
-                RustChannel::Stable,
-                target_triple.clone(),
-                toolchain,
-                config,
-                &self.db,
-            )
-            .map_err(|e| {
-                VxdError::InvalidManifest(format!("RulePlan executable lowering failed: {e}"))
-            })?
-        } else {
-            ActionGraph::from_crate_graph(
-                &graph,
-                RustChannel::Stable,
-                target_triple.clone(),
-                toolchain,
-                config,
-                &self.db,
-            )?
-        };
-
-        // In exec mode, the executed graph is the topology we want to report.
-        if rule_plan_exec_enabled() {
-            rule_plan_topology = Some(action_graph.to_topology());
-        }
-
-        // Parity harness compares the legacy crate-graph planner to RulePlan topology. Once we are
-        // executing RulePlan directly, parity is no longer meaningful (and will drift by design).
-        let legacy_topology = action_graph.to_topology();
-        if !rule_plan_exec_enabled()
-            && let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref()
-        {
-            let parity = compare_rule_plan_parity(&legacy_topology, rule_plan_topology_ref);
-            if parity.has_drift() {
-                let max_examples = 5;
-                warn!(
-                    missing = ?parity
-                        .missing_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    extra = ?parity
-                        .extra_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    legacy_focus_count = parity.legacy_focus_count,
-                    rule_plan_focus_count = parity.rule_plan_focus_count,
-                    "RulePlan parity drift detected for compile/registry nodes"
-                );
-                if rule_plan_parity_strict_enabled() {
-                    return Err(VxdError::InvalidManifest(
-                            "RulePlan parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                                .to_string(),
-                        ));
-                }
-            } else {
-                info!(
-                    focus_node_count = parity.legacy_focus_count,
-                    "RulePlan parity check passed for compile/registry nodes"
-                );
-            }
-
-            let edge_parity =
-                compare_rule_plan_edge_parity(&legacy_topology, rule_plan_topology_ref);
-            if edge_parity.has_drift() {
-                let max_examples = 5;
-                warn!(
-                    missing = ?edge_parity
-                        .missing_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    extra = ?edge_parity
-                        .extra_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    "RulePlan edge parity drift detected for compile/registry node dependencies"
-                );
-                if rule_plan_parity_strict_enabled() {
-                    return Err(VxdError::InvalidManifest(
-                            "RulePlan edge parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                                .to_string(),
-                        ));
-                }
-            } else {
-                info!("RulePlan edge parity check passed for compile/registry node dependencies");
-            }
-        }
-
-        // Dump graph for debugging
-        action_graph.dump_graph();
-
-        // Set total number of actions for progress tracking
-        // Total = 1 toolchain + N registry crates + M compilations
-        let total_actions = action_graph.node_count();
-        self.report_set_total(total_actions as u64).await;
-
-        let max_concurrency = executor_max_concurrency();
-        tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
-
-        // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
-        let progress_listener = self.progress_listener.lock().clone();
-        let session_id = self.session_id().await;
-        let exec = self.local_runner().await?;
-
-        let mut executor = Executor::new(
-            action_graph,
-            progress_listener,
-            self.store.clone(),
-            exec,
-            self.db.clone(),
-            graph.workspace_root.clone(),
-            target_triple.clone(),
-            profile.to_string(),
-            session_id,
-            max_concurrency,
-        );
-
-        // Register the executor's cancel token so signal handlers can cancel this build
-        *self.active_build_cancel.lock() = Some(executor.cancel_token());
-
-        tracing::debug!("calling executor.execute()");
-        let exec_result = executor.execute().await;
-        tracing::debug!("executor.execute() completed");
-
-        // Clear the cancel token now that the build is done
-        *self.active_build_cancel.lock() = None;
-        exec_result?;
-
-        // Append changes to WAL after build (incremental persistence)
-        // Take the writer out of the mutex so we don't hold the guard across await
-        let wal_writer = self.wal_writer.lock().take();
-        if let Some(mut wal) = wal_writer {
-            match self.db.append_to_wal(&mut wal).await {
-                Ok(count) if count > 0 => {
-                    info!(path = %self.picante_wal, entries = count, "appended changes to WAL");
-                    if let Err(e) = wal.flush() {
-                        warn!(path = %self.picante_wal, error = %e, "failed to flush WAL");
-                    }
-                }
-                Ok(_) => {
-                    debug!("no WAL changes to persist");
-                }
-                Err(e) => {
-                    warn!(path = %self.picante_wal, error = %e, "failed to append to WAL");
-                }
-            }
-            // Put it back
-            *self.wal_writer.lock() = Some(wal);
-        }
-
-        // Get execution statistics
-        let mut exec_stats = executor.get_stats();
-        if let Some(rule_plan_graph) = rule_plan_topology {
-            exec_stats.graph_topology = Some(rule_plan_graph);
-        }
-        let duration = total_start.elapsed();
-
-        // Create and save build report
-        let mut report = BuildReport::new(
-            graph.workspace_root.to_string(),
-            profile.to_string(),
-            target_triple.clone(),
-        );
-
-        // Add node reports from execution
-        for node_report in exec_stats.node_reports.iter() {
-            report.add_node(node_report.clone());
-        }
-
-        // Add graph topology
-        report.graph = exec_stats.graph_topology;
-
-        // Finalize the report
-        report.finalize(true, None);
-
-        // Save the report to the project's .vx/runs/ directory
-        let report_store = ReportStore::new(&graph.workspace_root);
-        if let Err(e) = report_store.save(&report).await {
-            warn!(error = %e, "failed to save build report");
-        } else {
-            debug!(run_id = %report.run_id, "saved build report");
-        }
-
-        Ok(BuildResult {
-            success: true,
-            message: format!(
-                "Build completed: {} rebuilt, {} cached",
-                exec_stats.rebuilt, exec_stats.cache_hits
-            ),
-            cached: exec_stats.rebuilt == 0 && exec_stats.cache_hits > 0,
-            duration_ms: duration.as_millis() as u64,
-            output_path: exec_stats.bin_output,
-            error: None,
-            failure: None,
-            total_actions,
-            cache_hits: exec_stats.cache_hits,
-            rebuilt: exec_stats.rebuilt,
-            cancelled: exec_stats.cancelled,
-        })
+        Err(VxdError::InvalidManifest(
+            "expected build.vx at the project root".to_string(),
+        ))
     }
 }
 

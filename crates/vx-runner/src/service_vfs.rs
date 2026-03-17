@@ -4,7 +4,6 @@
 //! Files are served lazily from CAS via the Vixen mount.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use jiff::Zoned;
 use moire::task::FutureExt;
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -13,13 +12,11 @@ use tokio::task::spawn_blocking;
 use tracing::{debug, info};
 use vx_eval::{HostObservation, PathValue, TransportPoisonError, Value};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
-    DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunOutput, RunRequest, RunResult,
-    RunTreeMount, RustCompileRequest, RustCompileResult, TransportValue,
+    DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunRequest, RunResult,
+    RunTreeMount, TransportValue,
 };
 use vx_store_proto::{
-    Blake3Hash, CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry,
-    RemoteTracePhase, RemoteTraceSpan, StoreProgress,
+    Blake3Hash, CasNode, NodeHash, OutputBlobRef, RemoteTracePhase, RemoteTraceSpan, StoreProgress,
 };
 
 use crate::RunnerService;
@@ -74,23 +71,11 @@ fn path_is_covered(
     file_mounts: &[RunFileMount],
     writable_roots: &[String],
 ) -> bool {
-    if path.starts_with("${VX_TOOLCHAIN}/") {
-        return true;
-    }
-
     tree_mounts
         .iter()
         .any(|mount| covers_path(&mount.mount, path))
         || file_mounts.iter().any(|mount| mount.path == path)
         || writable_roots.iter().any(|root| covers_path(root, path))
-}
-
-fn outputs_stay_within_writable_roots(outputs: &[RunOutput], writable_roots: &[String]) -> bool {
-    outputs.iter().all(|out| {
-        writable_roots
-            .iter()
-            .any(|root| covers_path(root, &out.path))
-    })
 }
 
 fn parent_dir(path: &str) -> Option<&str> {
@@ -101,15 +86,14 @@ fn parent_dir(path: &str) -> Option<&str> {
 fn parent_dirs_for_request(request: &RunRequest) -> Vec<String> {
     let mut dirs = BTreeSet::new();
     let mut record = |path: &str| {
-        if !path.starts_with("${VX_TOOLCHAIN}/")
-            && let Some(parent) = parent_dir(path)
+        if let Some(parent) = parent_dir(path)
             && is_relative_vfs_path(parent)
         {
             dirs.insert(parent.to_string());
         }
     };
 
-    if let Some(RunArg::Path(path)) = &request.program {
+    if let RunArg::Path(path) = &request.program {
         record(path);
     }
     for arg in &request.args {
@@ -124,9 +108,6 @@ fn parent_dirs_for_request(request: &RunRequest) -> Vec<String> {
     }
     if let Some(cwd) = &request.cwd {
         record(cwd);
-    }
-    for output in &request.outputs {
-        record(&output.path);
     }
 
     dirs.into_iter().collect()
@@ -277,10 +258,6 @@ fn summarize_windows_path_inputs(
         .join("; ")
 }
 
-fn uses_toolchain_placeholder(value: &RunArg) -> bool {
-    value.as_str().contains("${VX_TOOLCHAIN}")
-}
-
 fn summarize_list(items: &[String], limit: usize) -> String {
     if items.is_empty() {
         return "-".to_string();
@@ -319,7 +296,6 @@ fn run_failure_result_with_kind(
         stdout,
         stderr,
         duration_ms: start.elapsed().as_millis() as u64,
-        output_manifest: None,
         observer_value: None,
         poison,
         error_kind,
@@ -332,7 +308,6 @@ fn run_success_result(
     exit_code: i32,
     stdout: String,
     stderr: String,
-    output_manifest: Option<Blake3Hash>,
     observer_value: Option<TransportValue>,
 ) -> RunResult {
     RunResult {
@@ -341,7 +316,6 @@ fn run_success_result(
         stdout,
         stderr,
         duration_ms: start.elapsed().as_millis() as u64,
-        output_manifest,
         observer_value,
         poison: None,
         error_kind: None,

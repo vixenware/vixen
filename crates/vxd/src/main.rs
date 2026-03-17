@@ -10,13 +10,11 @@
 //! - Send compile requests to execd
 //! - Materialize final outputs locally (via execd or direct store fetch)
 
-mod action_graph;
 mod activity;
 mod build_failure;
 mod cas_tree;
 mod db;
 mod error;
-mod executor;
 mod inputs;
 mod queries;
 mod service;

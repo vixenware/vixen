@@ -19,32 +19,56 @@ use vx_eval::{
 use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
 use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
 use vx_store_proto::{
-    BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash,
+    RemoteTracePhase, RemoteTraceSpan, StoreClient, StoreProgress,
 };
+
+use crate::sandbox::send_progress_best_effort;
 
 type BoundaryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransportPoisonError>> + Send + 'a>>;
+
+async fn emit_remote_trace(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    phase: RemoteTracePhase,
+) {
+    if let Some(progress) = progress {
+        send_progress_best_effort(progress, StoreProgress::trace(span, phase)).await;
+    }
+}
+
+async fn with_remote_trace<T>(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    future: impl Future<Output = Result<T, TransportPoisonError>>,
+) -> Result<T, TransportPoisonError> {
+    emit_remote_trace(progress, span, RemoteTracePhase::Begin).await;
+    let result = future.await;
+    emit_remote_trace(progress, span, RemoteTracePhase::End).await;
+    result
+}
 
 // r[impl exec.observer.materialization]
 pub fn commit_value_to_transport<'a>(
     cas: &'a StoreClient,
     value: Value,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
-        let value = commit_value(cas, value).await?;
+        let value = commit_value(cas, value, progress).await?;
         TransportValue::try_from(&value).map_err(boundary_user_poison)
     })
 }
 
 // r[impl exec.observer.simple]
-pub fn evaluate_shipped_observer<'a>(
-    cas: &'a StoreClient,
+pub fn invoke_shipped_observer<'a>(
     eval: &'a RunEvalPayload,
     exit_code: i32,
     stdout: &'a str,
     stderr: &'a str,
     sandbox_root: &'a PathValue,
-) -> BoundaryFuture<'a, Option<TransportValue>> {
+) -> BoundaryFuture<'a, Option<Value>> {
     Box::pin(async move {
         let Some(observer) = &eval.observer else {
             return Ok(None);
@@ -61,7 +85,30 @@ pub fn evaluate_shipped_observer<'a>(
         .await
         .map_err(|error| TransportPoisonError::from(&error))?;
 
-        commit_value_to_transport(cas, observed).await.map(Some)
+        Ok(Some(observed))
+    })
+}
+
+// r[impl exec.observer.simple]
+#[cfg(test)]
+pub fn evaluate_shipped_observer<'a>(
+    cas: &'a StoreClient,
+    eval: &'a RunEvalPayload,
+    exit_code: i32,
+    stdout: &'a str,
+    stderr: &'a str,
+    sandbox_root: &'a PathValue,
+) -> BoundaryFuture<'a, Option<TransportValue>> {
+    Box::pin(async move {
+        let Some(observed) =
+            invoke_shipped_observer(eval, exit_code, stdout, stderr, sandbox_root).await?
+        else {
+            return Ok(None);
+        };
+
+        commit_value_to_transport(cas, observed, None)
+            .await
+            .map(Some)
     })
 }
 
@@ -79,7 +126,7 @@ pub fn evaluate_shipped_discover<'a>(
         let discovered = Engine::invoke_shipped_discover(&request.module, &request.probe)
             .await
             .map_err(|error| TransportPoisonError::from(&error))?;
-        commit_value_to_transport(cas, discovered).await
+        commit_value_to_transport(cas, discovered, None).await
     })
 }
 
@@ -91,7 +138,11 @@ fn boundary_user_poison(message: impl Into<String>) -> TransportPoisonError {
     ))
 }
 
-fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
+fn commit_value<'a>(
+    cas: &'a StoreClient,
+    value: Value,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, Value> {
     Box::pin(async move {
         match value {
             Value::Pending(_) => Err(boundary_user_poison(
@@ -105,28 +156,40 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 "Host values cannot cross the executor boundary",
             )),
             Value::Discovered(discovered) => {
-                let value = commit_value(cas, *discovered.value).await?;
+                let value = commit_value(cas, *discovered.value, progress).await?;
                 Ok(Value::Discovered(DiscoveredValue {
                     value: Box::new(value),
                     obligations: discovered.obligations,
                 }))
             }
-            Value::Blob(blob) => Ok(Value::Blob(commit_blob(cas, blob).await?)),
+            Value::Blob(blob) => Ok(Value::Blob(
+                with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+                    commit_blob(cas, blob, progress),
+                )
+                .await?,
+            )),
             Value::Tree(tree) => {
-                let (root, _) = commit_tree(cas, tree).await?;
+                let (root, _) = with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitTree,
+                    commit_tree(cas, tree, progress),
+                )
+                .await?;
                 Ok(Value::Tree(TreeValue::Store(root)))
             }
             Value::Tuple(values) => {
                 let mut committed = Vec::with_capacity(values.len());
                 for value in values.iter().cloned() {
-                    committed.push(commit_value(cas, value).await?);
+                    committed.push(commit_value(cas, value, progress).await?);
                 }
                 Ok(Value::Tuple(Arc::from(committed)))
             }
             Value::Array(values) => {
                 let mut committed = Vec::with_capacity(values.len());
                 for value in values.iter().cloned() {
-                    committed.push(commit_value(cas, value).await?);
+                    committed.push(commit_value(cas, value, progress).await?);
                 }
                 Ok(Value::Array(Arc::from(committed)))
             }
@@ -134,8 +197,8 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 let mut committed = Vec::with_capacity(map.entries.len());
                 for (key, value) in map.entries.iter() {
                     committed.push((
-                        commit_value(cas, key.clone()).await?,
-                        commit_value(cas, value.clone()).await?,
+                        commit_value(cas, key.clone(), progress).await?,
+                        commit_value(cas, value.clone(), progress).await?,
                     ));
                 }
                 Ok(Value::Map(MapValue {
@@ -145,7 +208,10 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
             Value::Struct(struct_value) => {
                 let mut fields = Vec::with_capacity(struct_value.fields.len());
                 for (name, value) in struct_value.fields.iter() {
-                    fields.push((name.clone(), commit_value(cas, value.clone()).await?));
+                    fields.push((
+                        name.clone(),
+                        commit_value(cas, value.clone(), progress).await?,
+                    ));
                 }
                 Ok(Value::Struct(StructValue {
                     type_name: struct_value.type_name,
@@ -178,17 +244,22 @@ fn sandbox_tree_value(sandbox_root: &PathValue) -> Value {
     Value::Tree(TreeValue::FsDir(sandbox_root.clone()))
 }
 
-fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, BlobValue> {
+fn commit_blob<'a>(
+    cas: &'a StoreClient,
+    blob: BlobValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, BlobValue> {
     Box::pin(async move {
         let (blob_ref, executable) = match blob {
-            BlobValue::Inline { bytes, executable } => {
-                (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
-            }
+            BlobValue::Inline { bytes, executable } => (
+                store_blob_bytes(cas, bytes.as_ref(), progress).await?,
+                executable,
+            ),
             BlobValue::FsFile { path, executable } => {
                 let bytes = fs::read(path.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", path.as_str()))
                 })?;
-                (store_blob_bytes(cas, &bytes).await?, executable)
+                (store_blob_bytes(cas, &bytes, progress).await?, executable)
             }
             BlobValue::Store {
                 blob_ref,
@@ -202,11 +273,15 @@ fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, 
     })
 }
 
-fn commit_tree<'a>(cas: &'a StoreClient, tree: TreeValue) -> BoundaryFuture<'a, (NodeHash, u64)> {
+fn commit_tree<'a>(
+    cas: &'a StoreClient,
+    tree: TreeValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
         match tree {
-            TreeValue::Inline { entries, .. } => commit_inline_tree(cas, entries).await,
-            TreeValue::FsDir(path) => commit_fs_tree(cas, path).await,
+            TreeValue::Inline { entries, .. } => commit_inline_tree(cas, entries, progress).await,
+            TreeValue::FsDir(path) => commit_fs_tree(cas, path, progress).await,
             TreeValue::Store(root) => Ok((root, directory_total_size(cas, root).await?)),
         }
     })
@@ -215,6 +290,7 @@ fn commit_tree<'a>(cas: &'a StoreClient, tree: TreeValue) -> BoundaryFuture<'a, 
 fn commit_inline_tree<'a>(
     cas: &'a StoreClient,
     entries: Arc<[(Arc<str>, Value)]>,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
         let mut names = BTreeSet::new();
@@ -230,20 +306,21 @@ fn commit_inline_tree<'a>(
                     "duplicate tree entry '{name}'"
                 )));
             }
-            let (kind, size) = commit_tree_entry(cas, value).await?;
+            let (kind, size) = commit_tree_entry(cas, value, progress).await?;
             total_size += size;
             dir_entries.push(DirEntry {
                 name: name.to_string(),
                 kind,
             });
         }
-        store_directory_node(cas, dir_entries, total_size).await
+        store_directory_node(cas, dir_entries, total_size, progress).await
     })
 }
 
 fn commit_fs_tree<'a>(
     cas: &'a StoreClient,
     root: PathValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(root.as_str()).map_err(|error| {
@@ -271,13 +348,18 @@ fn commit_fs_tree<'a>(
                 boundary_user_poison(format!("failed to stat {}: {error}", child.as_str()))
             })?;
             let (kind, size) = if metadata.is_dir() {
-                let (hash, total_size) = commit_fs_tree(cas, child).await?;
+                let (hash, total_size) = commit_fs_tree(cas, child, progress).await?;
                 (DirEntryKind::Dir { hash }, total_size)
             } else {
                 let bytes = fs::read(child.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", child.as_str()))
                 })?;
-                let blob_ref = store_blob_bytes(cas, &bytes).await?;
+                let blob_ref = with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+                    store_blob_bytes(cas, &bytes, progress),
+                )
+                .await?;
                 let executable =
                     is_executable_path(child.as_str()).map_err(boundary_user_poison)?;
                 let size = blob_ref_size(&blob_ref);
@@ -286,21 +368,28 @@ fn commit_fs_tree<'a>(
             total_size += size;
             dir_entries.push(DirEntry { name, kind });
         }
-        store_directory_node(cas, dir_entries, total_size).await
+        store_directory_node(cas, dir_entries, total_size, progress).await
     })
 }
 
 fn commit_tree_entry<'a>(
     cas: &'a StoreClient,
     value: Value,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (DirEntryKind, u64)> {
     Box::pin(async move {
         match value {
             Value::Blob(blob) => {
                 let (blob_ref, executable) = match blob {
-                    BlobValue::Inline { bytes, executable } => {
-                        (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
-                    }
+                    BlobValue::Inline { bytes, executable } => (
+                        with_remote_trace(
+                            progress,
+                            RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+                            store_blob_bytes(cas, bytes.as_ref(), progress),
+                        )
+                        .await?,
+                        executable,
+                    ),
                     BlobValue::FsFile { path, executable } => {
                         let bytes = fs::read(path.as_str()).map_err(|error| {
                             boundary_user_poison(format!(
@@ -308,7 +397,15 @@ fn commit_tree_entry<'a>(
                                 path.as_str()
                             ))
                         })?;
-                        (store_blob_bytes(cas, &bytes).await?, executable)
+                        (
+                            with_remote_trace(
+                                progress,
+                                RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+                                store_blob_bytes(cas, &bytes, progress),
+                            )
+                            .await?,
+                            executable,
+                        )
                     }
                     BlobValue::Store {
                         blob_ref,
@@ -319,7 +416,12 @@ fn commit_tree_entry<'a>(
                 Ok((dir_entry_kind_from_blob_ref(&blob_ref, executable), size))
             }
             Value::Tree(tree) => {
-                let (hash, total_size) = commit_tree(cas, tree).await?;
+                let (hash, total_size) = with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitTree,
+                    commit_tree(cas, tree, progress),
+                )
+                .await?;
                 Ok((DirEntryKind::Dir { hash }, total_size))
             }
             other => Err(boundary_user_poison(format!(
@@ -333,6 +435,7 @@ fn commit_tree_entry<'a>(
 async fn store_blob_bytes(
     cas: &StoreClient,
     bytes: &[u8],
+    _progress: Option<&roam::Tx<StoreProgress>>,
 ) -> Result<BlobRef, TransportPoisonError> {
     let prepared = prepare_blob(bytes);
     store_prepared_blob(cas, &prepared, bytes)
@@ -344,15 +447,24 @@ async fn store_directory_node(
     cas: &StoreClient,
     entries: Vec<DirEntry>,
     total_size: u64,
+    progress: Option<&roam::Tx<StoreProgress>>,
 ) -> Result<(NodeHash, u64), TransportPoisonError> {
     let directory = CasNode::Directory(DirectoryNode {
         entries,
         total_size,
     });
     let (bytes, hash) = directory.to_bytes_and_hash();
-    put_node_if_missing(cas, hash, bytes)
-        .await
-        .map_err(boundary_user_poison)?;
+    with_remote_trace(
+        progress,
+        RemoteTraceSpan::RunnerObserverCommitStoreNode,
+        async {
+            put_node_if_missing(cas, hash, bytes)
+                .await
+                .map_err(boundary_user_poison)?;
+            Ok(())
+        },
+    )
+    .await?;
     Ok((hash, total_size))
 }
 
@@ -491,7 +603,7 @@ mod tests {
             Value::Blob(BlobValue::from_string("hello")),
         )])));
 
-        let transport = commit_value_to_transport(&env.client, value)
+        let transport = commit_value_to_transport(&env.client, value, None)
             .await
             .expect("tree should commit");
 
@@ -541,9 +653,10 @@ mod tests {
     #[tokio::test]
     async fn bare_paths_do_not_cross_the_executor_boundary() {
         let env = StoreTestEnv::new().await;
-        let error = commit_value_to_transport(&env.client, Value::Path(PathValue::new("src")))
-            .await
-            .expect_err("path should be rejected");
+        let error =
+            commit_value_to_transport(&env.client, Value::Path(PathValue::new("src")), None)
+                .await
+                .expect_err("path should be rejected");
 
         assert!(error.message.contains("Path values cannot cross"));
     }
