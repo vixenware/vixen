@@ -10,8 +10,8 @@ mod exec_local;
 mod identity;
 mod tree_ops;
 
-pub use identity::verify_host_obligations;
 use identity::*;
+pub use identity::{verify_host_obligations, verify_host_obligations_with_search_path};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -126,6 +126,7 @@ pub struct Engine {
     max_demand_depth: usize,
     runtime: Option<Arc<dyn BuildRuntime>>,
     self_ref: std::sync::OnceLock<std::sync::Weak<Engine>>,
+    host_search_path: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Engine {
@@ -164,11 +165,11 @@ impl Engine {
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             runtime: None,
             self_ref: std::sync::OnceLock::new(),
+            host_search_path: None,
         });
         engine
             .self_ref
             .set(Arc::downgrade(&engine))
-            .ok()
             .expect("self_ref already set");
         engine
     }
@@ -178,7 +179,6 @@ impl Engine {
         let arc = Arc::new(this);
         arc.self_ref
             .set(Arc::downgrade(&arc))
-            .ok()
             .expect("self_ref already set");
         arc
     }
@@ -196,6 +196,13 @@ impl Engine {
         let mut this =
             Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
         this.max_demand_depth = max_demand_depth;
+        Self::rewrap(this)
+    }
+
+    pub fn with_host_search_path(self: Arc<Self>, path: Vec<std::path::PathBuf>) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        this.host_search_path = Some(path);
         Self::rewrap(this)
     }
 

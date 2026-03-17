@@ -606,6 +606,13 @@ pub(super) fn option_none() -> Value {
 }
 
 pub fn verify_host_obligations(obligations: &[HostObservation]) -> Result<(), String> {
+    verify_host_obligations_with_search_path(obligations, None)
+}
+
+pub fn verify_host_obligations_with_search_path(
+    obligations: &[HostObservation],
+    search_path: Option<&[std::path::PathBuf]>,
+) -> Result<(), String> {
     for obligation in obligations {
         match obligation {
             HostObservation::Os { value } => {
@@ -624,7 +631,7 @@ pub fn verify_host_obligations(obligations: &[HostObservation]) -> Result<(), St
                 name,
                 expected_path,
             } => {
-                let actual = resolve_host_which(name);
+                let actual = resolve_host_which_with_search_path(name, search_path);
                 match (expected_path.as_deref(), actual.as_deref()) {
                     (Some(expected), Some(actual)) if expected == actual => {}
                     (Some(expected), Some(actual)) => {
@@ -692,13 +699,24 @@ pub(super) fn host_lookup_candidate(name: &str) -> Option<&Path> {
     }
 }
 
-pub(super) fn resolve_host_which(name: &str) -> Option<String> {
+pub(super) fn resolve_host_which_with_search_path(
+    name: &str,
+    search_path: Option<&[std::path::PathBuf]>,
+) -> Option<String> {
     if host_lookup_candidate(name).is_some_and(host_path_is_executable) {
         return Some(name.to_string());
     }
 
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
+    let owned_dirs;
+    let dirs: &[std::path::PathBuf] = if let Some(custom) = search_path {
+        custom
+    } else {
+        let path = env::var_os("PATH")?;
+        owned_dirs = env::split_paths(&path).collect::<Vec<_>>();
+        &owned_dirs
+    };
+
+    for dir in dirs {
         let candidate = dir.join(name);
         if host_path_is_executable(&candidate) {
             return Some(candidate.to_string_lossy().to_string());

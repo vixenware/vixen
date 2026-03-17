@@ -1,5 +1,7 @@
 use super::*;
 
+type TreeEntries = Vec<(Arc<str>, Value)>;
+
 impl Engine {
     pub(super) fn exec_blob_leaf_name(&self, blob: &BlobValue) -> String {
         match blob {
@@ -306,19 +308,25 @@ impl Engine {
             return Ok(self.attach_obligations(Value::String(Arc::from(name)), [observation]));
         }
 
-        let Some(path) = env::var_os("PATH") else {
-            let observation = HostObservation::Which {
-                name: name.to_string(),
-                expected_path: None,
+        let search_dirs: Vec<std::path::PathBuf> = if let Some(ref custom) = self.host_search_path {
+            custom.clone()
+        } else {
+            let Some(path) = env::var_os("PATH") else {
+                let observation = HostObservation::Which {
+                    name: name.to_string(),
+                    expected_path: None,
+                };
+                return Err(PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("host.which could not find {name}"),
+                    self.current_demand_chain(None),
+                )
+                .with_observations([observation]));
             };
-            return Err(PoisonError::new(
-                PoisonKind::UserFail,
-                format!("host.which could not find {name}"),
-                self.current_demand_chain(None),
-            )
-            .with_observations([observation]));
+            env::split_paths(&path).collect()
         };
-        for dir in env::split_paths(&path) {
+
+        for dir in &search_dirs {
             let candidate = dir.join(name);
             if host_path_is_executable(&candidate) {
                 let candidate = candidate.to_string_lossy().to_string();
@@ -822,7 +830,7 @@ impl Engine {
     pub(super) fn tree_entries<'a>(
         &'a self,
         tree: &'a TreeValue,
-    ) -> BoxFuture<'a, Result<Vec<(Arc<str>, Value)>, PoisonError>> {
+    ) -> BoxFuture<'a, Result<TreeEntries, PoisonError>> {
         Box::pin(async move {
             match tree {
                 TreeValue::Inline(entries) => {

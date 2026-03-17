@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use blake3::hash as blake3_hash;
@@ -42,8 +42,6 @@ fn engine_with_source_id(source: &str, source_id: &str) -> Arc<Engine> {
     let module = lower_source_file_with_source_id(&root, source_id);
     Engine::from_module(&module)
 }
-
-static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree %{\n    @bin/lua => lua_exe.file(@bin/lua).executable(),\n    @lib/liblua.a => liblua.file(@liblua.a),\n  }\n";
 
@@ -853,16 +851,7 @@ printf 'archive\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -876,15 +865,6 @@ printf 'archive\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     let leafs = collect_tree_leaf_paths(&value);
@@ -919,8 +899,7 @@ async fn lua_sketch_compile_single_file_returns_tree() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -937,29 +916,34 @@ printf 'artifact\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ar_script, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(
+        &libtool_script,
+        r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+"#,
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -973,15 +957,6 @@ printf 'artifact\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     assert!(
@@ -1073,16 +1048,7 @@ printf 'artifact\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -1096,15 +1062,6 @@ printf 'artifact\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     let Value::Array(items) = value else {
@@ -1146,16 +1103,7 @@ printf 'fake cc 1.0\n'
         fs::set_permissions(&cc_script, perms).unwrap();
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let value = engine
         .call_entry(
@@ -1166,15 +1114,6 @@ printf 'fake cc 1.0\n'
         )
         .await
         .unwrap();
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let Value::Tree(TreeValue::Inline(entries)) = value else {
         panic!("expected tree result");
@@ -1273,16 +1212,7 @@ printf 'artifact\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -1296,15 +1226,6 @@ printf 'artifact\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     assert!(
@@ -1414,16 +1335,7 @@ printf 'archive\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -1437,15 +1349,6 @@ printf 'archive\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     assert!(
@@ -2152,16 +2055,7 @@ printf 'archive\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -2175,15 +2069,6 @@ printf 'archive\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     let Value::Array(items) = value else {
@@ -2298,16 +2183,7 @@ printf 'archive\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -2321,15 +2197,6 @@ printf 'archive\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     assert!(
@@ -2440,16 +2307,7 @@ printf 'archive\n' > "$out"
         }
     }
 
-    let _env_guard = ENV_MUTEX.lock().unwrap();
-    let old_path = std::env::var_os("PATH");
-    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
-    if let Some(existing) = &old_path {
-        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
-    }
-    let joined = std::env::join_paths(path_entries).unwrap();
-    unsafe {
-        std::env::set_var("PATH", &joined);
-    }
+    let engine = engine.with_host_search_path(vec![tools_dir.clone()]);
 
     let result = engine
         .call(
@@ -2463,15 +2321,6 @@ printf 'archive\n' > "$out"
             ],
         )
         .await;
-
-    match old_path {
-        Some(path) => unsafe {
-            std::env::set_var("PATH", path);
-        },
-        None => unsafe {
-            std::env::remove_var("PATH");
-        },
-    }
 
     let value = result.unwrap();
     assert!(

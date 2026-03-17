@@ -173,8 +173,12 @@ impl Engine {
             None
         } else {
             let verification_obligations = request.verification_obligations.clone();
+            let search_path = self.host_search_path.clone();
             Some(thread::spawn(move || {
-                verify_host_obligations(&verification_obligations)
+                verify_host_obligations_with_search_path(
+                    &verification_obligations,
+                    search_path.as_deref(),
+                )
             }))
         };
 

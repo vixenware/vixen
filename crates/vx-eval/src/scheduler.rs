@@ -205,7 +205,7 @@ impl Scheduler {
                     vec![(node_id, result)]
                 } else {
                     let mut join_set = tokio::task::JoinSet::new();
-                    let node_ids: Vec<_> = batch.iter().copied().collect();
+                    let node_ids: Vec<_> = batch.to_vec();
                     for &node_id in &node_ids {
                         let chain = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
                         let engine = Arc::clone(&self.engine);

@@ -561,9 +561,9 @@ mod tests {
 
         let engine = shipped_function_engine(
             r#"fn observe(process: Process, tree: Tree) (
-                   Tree {
-                     @stdout.txt: process.stdout.collect().blob(),
-                     @output.txt: tree.file(@out/output.txt),
+                   Tree %{
+                     @stdout.txt => process.stdout.collect().blob(),
+                     @output.txt => tree.file(@out/output.txt),
                    }
                  )
 
@@ -573,7 +573,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -634,8 +640,8 @@ mod tests {
 
         let engine = shipped_function_engine(
             r#"fn observe(_process: Process, tree: Tree) (
-                   Tree {
-                     @lua: tree.file(@out/lua),
+                   Tree %{
+                     @lua => tree.file(@out/lua),
                    }
                  )
 
@@ -645,7 +651,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -699,7 +711,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -734,8 +752,10 @@ mod tests {
                     .ship_function(
                         engine
                             .call("make", vec![Value::Bool(true)])
+                            .await
                             .expect("make should evaluate"),
                     )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -794,7 +814,13 @@ mod tests {
             executor: ExecutorSelector::class("default"),
             module: engine.transport_module(),
             probe: engine
-                .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                .ship_function(
+                    engine
+                        .call("make", vec![])
+                        .await
+                        .expect("make should evaluate"),
+                )
+                .await
                 .expect("probe should ship"),
         };
 
@@ -820,7 +846,7 @@ mod tests {
         }
     }
 
-    fn shipped_function_engine(source: &str) -> Engine {
+    fn shipped_function_engine(source: &str) -> Arc<Engine> {
         let parse = vx_parser::parse(source);
         assert_eq!(parse.errors(), []);
         let root = SourceFile::cast_root(parse.syntax());
