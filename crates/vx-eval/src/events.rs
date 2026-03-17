@@ -55,13 +55,13 @@ pub struct RecordedEvent {
     pub name: &'static str,
     pub phase: EventPhase,
     pub timestamp_us: u64,
+    pub duration_us: Option<u64>,
     pub args: Option<EventArgs>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventPhase {
-    Begin,
-    End,
+    Complete,
     Instant,
     Flow { target: &'static str },
 }
@@ -77,13 +77,25 @@ impl RecorderInner {
         self.start.elapsed().as_micros() as u64
     }
 
-    fn push(&self, name: &'static str, phase: EventPhase, args: Option<EventArgs>) {
+    fn push(
+        &self,
+        name: &'static str,
+        phase: EventPhase,
+        timestamp_us: u64,
+        duration_us: Option<u64>,
+        args: Option<EventArgs>,
+    ) {
         self.events.lock().unwrap().push(RecordedEvent {
             name,
             phase,
-            timestamp_us: self.now_us(),
+            timestamp_us,
+            duration_us,
             args,
         });
+    }
+
+    fn push_now(&self, name: &'static str, phase: EventPhase, args: Option<EventArgs>) {
+        self.push(name, phase, self.now_us(), None, args);
     }
 }
 
@@ -115,7 +127,7 @@ impl EventRecorder {
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| e.name == name && e.phase == EventPhase::Begin)
+            .filter(|e| e.name == name && e.phase == EventPhase::Complete)
             .count()
     }
 
@@ -143,7 +155,8 @@ impl EventRecorder {
     /// The output can be loaded in `chrome://tracing` or Perfetto.
     pub fn write_chrome_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
-        let events = self.inner.events.lock().unwrap();
+        let mut events = self.inner.events.lock().unwrap().clone();
+        events.sort_by_key(|event| event.timestamp_us);
         let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
         write!(f, "{{\"displayTimeUnit\":\"ms\",\"traceEvents\":[")?;
         let mut first = true;
@@ -153,21 +166,15 @@ impl EventRecorder {
             }
             first = false;
             match event.phase {
-                EventPhase::Begin => {
+                EventPhase::Complete => {
+                    let duration_us = event.duration_us.unwrap_or_default();
                     write!(
                         f,
-                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1",
-                        event.name, event.timestamp_us
+                        "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":1",
+                        event.name, event.timestamp_us, duration_us
                     )?;
                     write_trace_args(&mut f, event.args.as_ref())?;
                     write!(f, "}}")?;
-                }
-                EventPhase::End => {
-                    write!(
-                        f,
-                        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1}}",
-                        event.name, event.timestamp_us
-                    )?;
                 }
                 EventPhase::Instant => {
                     write!(
@@ -196,11 +203,20 @@ impl EventRecorder {
 pub struct RecorderSpan {
     inner: Arc<RecorderInner>,
     name: &'static str,
+    started_us: u64,
+    args: Option<EventArgs>,
 }
 
 impl Drop for RecorderSpan {
     fn drop(&mut self) {
-        self.inner.push(self.name, EventPhase::End, None);
+        let ended_us = self.inner.now_us();
+        self.inner.push(
+            self.name,
+            EventPhase::Complete,
+            self.started_us,
+            Some(ended_us.saturating_sub(self.started_us)),
+            self.args.take(),
+        );
     }
 }
 
@@ -208,31 +224,34 @@ impl EventSink for EventRecorder {
     type Span = RecorderSpan;
 
     fn begin_span(&self, name: &'static str) -> RecorderSpan {
-        self.inner.push(name, EventPhase::Begin, None);
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
+            started_us: self.inner.now_us(),
+            args: None,
         }
     }
 
     fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> RecorderSpan {
-        self.inner.push(name, EventPhase::Begin, Some(args));
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
+            started_us: self.inner.now_us(),
+            args: Some(args),
         }
     }
 
     fn instant(&self, name: &'static str) {
-        self.inner.push(name, EventPhase::Instant, None);
+        self.inner.push_now(name, EventPhase::Instant, None);
     }
 
     fn instant_with_args(&self, name: &'static str, args: EventArgs) {
-        self.inner.push(name, EventPhase::Instant, Some(args));
+        self.inner.push_now(name, EventPhase::Instant, Some(args));
     }
 
     fn flow(&self, from: &'static str, to: &'static str) {
-        self.inner.push(from, EventPhase::Flow { target: to }, None);
+        self.inner
+            .push_now(from, EventPhase::Flow { target: to }, None);
     }
 }
 
@@ -326,10 +345,31 @@ mod tests {
             trace.contains("\"name\":\"node.execute\""),
             "trace: {trace}"
         );
+        assert!(trace.contains("\"ph\":\"X\""), "trace: {trace}");
         assert!(trace.contains("\"args\":{\"node_id\":7"), "trace: {trace}");
         assert!(
             trace.contains("\"description\":\"compile:cc\""),
             "trace: {trace}"
         );
+    }
+
+    #[test]
+    fn complete_events_do_not_emit_begin_end_pairs() {
+        let recorder = EventRecorder::new();
+        let outer = EventSink::begin_span(&recorder, "outer");
+        let inner = EventSink::begin_span(&recorder, "inner");
+        drop(outer);
+        drop(inner);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.json");
+        recorder
+            .write_chrome_trace(&path)
+            .expect("write chrome trace");
+
+        let trace = std::fs::read_to_string(path).expect("read trace");
+        assert!(trace.contains("\"ph\":\"X\""), "trace: {trace}");
+        assert!(!trace.contains("\"ph\":\"B\""), "trace: {trace}");
+        assert!(!trace.contains("\"ph\":\"E\""), "trace: {trace}");
     }
 }
