@@ -4,11 +4,30 @@
 //! In production, `()` is used — all methods are no-ops that optimize away.
 //! In tests, `EventRecorder` captures events for assertions.
 
+use std::cell::RefCell;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 pub type EventArgs = facet_value::Value;
+
+tokio::task_local! {
+    static TRACE_TRACK_STACK: RefCell<Vec<u64>>;
+}
+
+thread_local! {
+    static FALLBACK_TRACE_TRACK_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+static NEXT_TRACE_TRACK_ID: AtomicU64 = AtomicU64::new(1);
+
+pub async fn with_fresh_trace_context<T>(future: impl Future<Output = T>) -> T {
+    TRACE_TRACK_STACK
+        .scope(RefCell::new(Vec::new()), future)
+        .await
+}
 
 /// Trait for recording structured engine events.
 ///
@@ -63,14 +82,16 @@ impl EventSink for () {
 pub struct RecordedEvent {
     pub name: &'static str,
     pub phase: EventPhase,
+    pub track_id: u64,
     pub timestamp_us: u64,
-    pub duration_us: Option<u64>,
+    pub sequence: u64,
     pub args: Option<EventArgs>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventPhase {
-    Complete,
+    Begin,
+    End,
     Instant,
     Flow { target: &'static str },
 }
@@ -78,6 +99,7 @@ pub enum EventPhase {
 /// Shared state for the event recorder.
 struct RecorderInner {
     start: Instant,
+    next_sequence: AtomicU64,
     events: Mutex<Vec<RecordedEvent>>,
 }
 
@@ -90,21 +112,28 @@ impl RecorderInner {
         &self,
         name: &'static str,
         phase: EventPhase,
+        track_id: u64,
         timestamp_us: u64,
-        duration_us: Option<u64>,
         args: Option<EventArgs>,
     ) {
         self.events.lock().unwrap().push(RecordedEvent {
             name,
             phase,
+            track_id,
             timestamp_us,
-            duration_us,
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
             args,
         });
     }
 
-    fn push_now(&self, name: &'static str, phase: EventPhase, args: Option<EventArgs>) {
-        self.push(name, phase, self.now_us(), None, args);
+    fn push_now(
+        &self,
+        name: &'static str,
+        phase: EventPhase,
+        track_id: u64,
+        args: Option<EventArgs>,
+    ) {
+        self.push(name, phase, track_id, self.now_us(), args);
     }
 }
 
@@ -119,6 +148,7 @@ impl EventRecorder {
         Self {
             inner: Arc::new(RecorderInner {
                 start: Instant::now(),
+                next_sequence: AtomicU64::new(0),
                 events: Mutex::new(Vec::new()),
             }),
         }
@@ -136,7 +166,7 @@ impl EventRecorder {
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| e.name == name && e.phase == EventPhase::Complete)
+            .filter(|e| e.name == name && e.phase == EventPhase::Begin)
             .count()
     }
 
@@ -165,31 +195,53 @@ impl EventRecorder {
     pub fn write_chrome_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
         let mut events = self.inner.events.lock().unwrap().clone();
-        events.sort_by_key(|event| event.timestamp_us);
+        events.sort_by_key(|event| (event.timestamp_us, event.sequence));
         let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
         write!(f, "{{\"displayTimeUnit\":\"ms\",\"traceEvents\":[")?;
         let mut first = true;
+        for track_id in track_ids(&events) {
+            if !first {
+                write!(f, ",")?;
+            }
+            first = false;
+            let track_name = if track_id == 0 {
+                "global".to_string()
+            } else {
+                format!("lane {track_id}")
+            };
+            write!(
+                f,
+                "{{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":1,\"tid\":{},\"args\":{{\"name\":\"{}\"}}}}",
+                track_id, track_name
+            )?;
+        }
         for event in events.iter() {
             if !first {
                 write!(f, ",")?;
             }
             first = false;
             match event.phase {
-                EventPhase::Complete => {
-                    let duration_us = event.duration_us.unwrap_or_default();
+                EventPhase::Begin => {
                     write!(
                         f,
-                        "{{\"ph\":\"X\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"dur\":{},\"pid\":1,\"tid\":1",
-                        event.name, event.timestamp_us, duration_us
+                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":{}",
+                        event.name, event.timestamp_us, event.track_id
                     )?;
                     write_trace_args(&mut f, event.args.as_ref())?;
                     write!(f, "}}")?;
                 }
+                EventPhase::End => {
+                    write!(
+                        f,
+                        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":{}}}",
+                        event.name, event.timestamp_us, event.track_id
+                    )?;
+                }
                 EventPhase::Instant => {
                     write!(
                         f,
-                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1",
-                        event.name, event.timestamp_us
+                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":{}",
+                        event.name, event.timestamp_us, event.track_id
                     )?;
                     write_trace_args(&mut f, event.args.as_ref())?;
                     write!(f, "}}")?;
@@ -197,8 +249,8 @@ impl EventRecorder {
                 EventPhase::Flow { target } => {
                     write!(
                         f,
-                        "{{\"ph\":\"i\",\"name\":\"{}→{}\",\"cat\":\"flow\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1}}",
-                        event.name, target, event.timestamp_us
+                        "{{\"ph\":\"i\",\"name\":\"{}→{}\",\"cat\":\"flow\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":{}}}",
+                        event.name, target, event.timestamp_us, event.track_id
                     )?;
                 }
             }
@@ -212,20 +264,14 @@ impl EventRecorder {
 pub struct RecorderSpan {
     inner: Arc<RecorderInner>,
     name: &'static str,
-    started_us: u64,
-    args: Option<EventArgs>,
+    track_id: u64,
 }
 
 impl Drop for RecorderSpan {
     fn drop(&mut self) {
-        let ended_us = self.inner.now_us();
-        self.inner.push(
-            self.name,
-            EventPhase::Complete,
-            self.started_us,
-            Some(ended_us.saturating_sub(self.started_us)),
-            self.args.take(),
-        );
+        pop_track(self.track_id);
+        self.inner
+            .push_now(self.name, EventPhase::End, self.track_id, None);
     }
 }
 
@@ -233,34 +279,43 @@ impl EventSink for EventRecorder {
     type Span = RecorderSpan;
 
     fn begin_span(&self, name: &'static str) -> RecorderSpan {
+        let track_id = push_track();
+        self.inner.push_now(name, EventPhase::Begin, track_id, None);
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
-            started_us: self.inner.now_us(),
-            args: None,
+            track_id,
         }
     }
 
     fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> RecorderSpan {
+        let track_id = push_track();
+        self.inner
+            .push_now(name, EventPhase::Begin, track_id, Some(args));
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
-            started_us: self.inner.now_us(),
-            args: Some(args),
+            track_id,
         }
     }
 
     fn instant(&self, name: &'static str) {
-        self.inner.push_now(name, EventPhase::Instant, None);
+        self.inner
+            .push_now(name, EventPhase::Instant, current_track_id(), None);
     }
 
     fn instant_with_args(&self, name: &'static str, args: EventArgs) {
-        self.inner.push_now(name, EventPhase::Instant, Some(args));
+        self.inner
+            .push_now(name, EventPhase::Instant, current_track_id(), Some(args));
     }
 
     fn flow(&self, from: &'static str, to: &'static str) {
-        self.inner
-            .push_now(from, EventPhase::Flow { target: to }, None);
+        self.inner.push_now(
+            from,
+            EventPhase::Flow { target: to },
+            current_track_id(),
+            None,
+        );
     }
 }
 
@@ -329,6 +384,60 @@ fn write_trace_args(f: &mut impl std::io::Write, args: Option<&EventArgs>) -> st
     write!(f, ",\"args\":{json}")
 }
 
+fn next_track_id() -> u64 {
+    NEXT_TRACE_TRACK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn current_track_id() -> u64 {
+    TRACE_TRACK_STACK
+        .try_with(|stack| stack.borrow().last().copied().unwrap_or(0))
+        .unwrap_or_else(|_| {
+            FALLBACK_TRACE_TRACK_STACK.with(|stack| stack.borrow().last().copied().unwrap_or(0))
+        })
+}
+
+fn push_track() -> u64 {
+    TRACE_TRACK_STACK
+        .try_with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let track_id = stack.last().copied().unwrap_or_else(next_track_id);
+            stack.push(track_id);
+            track_id
+        })
+        .unwrap_or_else(|_| {
+            FALLBACK_TRACE_TRACK_STACK.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                let track_id = stack.last().copied().unwrap_or_else(next_track_id);
+                stack.push(track_id);
+                track_id
+            })
+        })
+}
+
+fn pop_track(expected_track_id: u64) {
+    TRACE_TRACK_STACK
+        .try_with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            debug_assert_eq!(popped, Some(expected_track_id));
+        })
+        .unwrap_or_else(|_| {
+            FALLBACK_TRACE_TRACK_STACK.with(|stack| {
+                let popped = stack.borrow_mut().pop();
+                debug_assert_eq!(popped, Some(expected_track_id));
+            });
+        });
+}
+
+fn track_ids(events: &[RecordedEvent]) -> Vec<u64> {
+    let mut track_ids = events
+        .iter()
+        .map(|event| event.track_id)
+        .collect::<Vec<_>>();
+    track_ids.sort_unstable();
+    track_ids.dedup();
+    track_ids
+}
+
 #[cfg(test)]
 mod tests {
     use facet_value::value;
@@ -359,7 +468,8 @@ mod tests {
             trace.contains("\"name\":\"node.execute\""),
             "trace: {trace}"
         );
-        assert!(trace.contains("\"ph\":\"X\""), "trace: {trace}");
+        assert!(trace.contains("\"ph\":\"B\""), "trace: {trace}");
+        assert!(trace.contains("\"ph\":\"E\""), "trace: {trace}");
         assert!(trace.contains("\"args\":{\"node_id\":7"), "trace: {trace}");
         assert!(
             trace.contains("\"description\":\"compile:cc\""),
@@ -368,12 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn complete_events_do_not_emit_begin_end_pairs() {
+    fn nested_spans_emit_begin_end_pairs() {
         let recorder = EventRecorder::new();
         let outer = EventSink::begin_span(&recorder, "outer");
         let inner = EventSink::begin_span(&recorder, "inner");
-        drop(outer);
         drop(inner);
+        drop(outer);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("trace.json");
@@ -382,8 +492,8 @@ mod tests {
             .expect("write chrome trace");
 
         let trace = std::fs::read_to_string(path).expect("read trace");
-        assert!(trace.contains("\"ph\":\"X\""), "trace: {trace}");
-        assert!(!trace.contains("\"ph\":\"B\""), "trace: {trace}");
-        assert!(!trace.contains("\"ph\":\"E\""), "trace: {trace}");
+        assert!(trace.contains("\"ph\":\"B\""), "trace: {trace}");
+        assert!(trace.contains("\"ph\":\"E\""), "trace: {trace}");
+        assert!(!trace.contains("\"ph\":\"X\""), "trace: {trace}");
     }
 }

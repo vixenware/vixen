@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::events::with_fresh_trace_context;
 use crate::exec::BoxFuture;
 use crate::node::NodeId;
 use crate::poison::PoisonError;
@@ -195,13 +196,15 @@ impl Scheduler {
                 let results = if batch.len() == 1 {
                     let node_id = batch[0];
                     let chain = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
-                    let result = DEMAND_STACK
-                        .scope(RefCell::new(Vec::new()), async {
+                    let result = with_fresh_trace_context(DEMAND_STACK.scope(
+                        RefCell::new(Vec::new()),
+                        async {
                             self.engine
                                 .execute_pending_node_with_chain(node_id, &chain)
                                 .await
-                        })
-                        .await;
+                        },
+                    ))
+                    .await;
                     vec![(node_id, result)]
                 } else {
                     let mut join_set = tokio::task::JoinSet::new();
@@ -210,13 +213,15 @@ impl Scheduler {
                         let chain = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
                         let engine = Arc::clone(&self.engine);
                         join_set.spawn(async move {
-                            let result = DEMAND_STACK
-                                .scope(RefCell::new(Vec::new()), async {
+                            let result = with_fresh_trace_context(DEMAND_STACK.scope(
+                                RefCell::new(Vec::new()),
+                                async {
                                     engine
                                         .execute_pending_node_with_chain(node_id, &chain)
                                         .await
-                                })
-                                .await;
+                                },
+                            ))
+                            .await;
                             (node_id, result)
                         });
                     }
