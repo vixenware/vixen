@@ -21,8 +21,6 @@ thread_local! {
     static FALLBACK_TRACE_TRACK_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
-static NEXT_TRACE_TRACK_ID: AtomicU64 = AtomicU64::new(1);
-
 pub async fn with_fresh_trace_context<T>(future: impl Future<Output = T>) -> T {
     TRACE_TRACK_STACK
         .scope(RefCell::new(Vec::new()), future)
@@ -99,7 +97,9 @@ pub enum EventPhase {
 /// Shared state for the event recorder.
 struct RecorderInner {
     start: Instant,
+    next_track_id: AtomicU64,
     next_sequence: AtomicU64,
+    free_track_ids: Mutex<Vec<u64>>,
     events: Mutex<Vec<RecordedEvent>>,
 }
 
@@ -135,6 +135,21 @@ impl RecorderInner {
     ) {
         self.push(name, phase, track_id, self.now_us(), args);
     }
+
+    fn acquire_track_id(&self) -> u64 {
+        self.free_track_ids
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| self.next_track_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn release_track_id(&self, track_id: u64) {
+        if track_id == 0 {
+            return;
+        }
+        self.free_track_ids.lock().unwrap().push(track_id);
+    }
 }
 
 /// Recording sink for tests and diagnostics.
@@ -148,7 +163,9 @@ impl EventRecorder {
         Self {
             inner: Arc::new(RecorderInner {
                 start: Instant::now(),
+                next_track_id: AtomicU64::new(1),
                 next_sequence: AtomicU64::new(0),
+                free_track_ids: Mutex::new(Vec::new()),
                 events: Mutex::new(Vec::new()),
             }),
         }
@@ -265,6 +282,7 @@ pub struct RecorderSpan {
     inner: Arc<RecorderInner>,
     name: &'static str,
     track_id: u64,
+    owns_track: bool,
 }
 
 impl Drop for RecorderSpan {
@@ -272,6 +290,9 @@ impl Drop for RecorderSpan {
         pop_track(self.track_id);
         self.inner
             .push_now(self.name, EventPhase::End, self.track_id, None);
+        if self.owns_track {
+            self.inner.release_track_id(self.track_id);
+        }
     }
 }
 
@@ -279,23 +300,25 @@ impl EventSink for EventRecorder {
     type Span = RecorderSpan;
 
     fn begin_span(&self, name: &'static str) -> RecorderSpan {
-        let track_id = push_track();
+        let (track_id, owns_track) = push_track(&self.inner);
         self.inner.push_now(name, EventPhase::Begin, track_id, None);
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
             track_id,
+            owns_track,
         }
     }
 
     fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> RecorderSpan {
-        let track_id = push_track();
+        let (track_id, owns_track) = push_track(&self.inner);
         self.inner
             .push_now(name, EventPhase::Begin, track_id, Some(args));
         RecorderSpan {
             inner: Arc::clone(&self.inner),
             name,
             track_id,
+            owns_track,
         }
     }
 
@@ -384,10 +407,6 @@ fn write_trace_args(f: &mut impl std::io::Write, args: Option<&EventArgs>) -> st
     write!(f, ",\"args\":{json}")
 }
 
-fn next_track_id() -> u64 {
-    NEXT_TRACE_TRACK_ID.fetch_add(1, Ordering::Relaxed)
-}
-
 fn current_track_id() -> u64 {
     TRACE_TRACK_STACK
         .try_with(|stack| stack.borrow().last().copied().unwrap_or(0))
@@ -396,20 +415,26 @@ fn current_track_id() -> u64 {
         })
 }
 
-fn push_track() -> u64 {
+fn push_track(inner: &RecorderInner) -> (u64, bool) {
     TRACE_TRACK_STACK
         .try_with(|stack| {
             let mut stack = stack.borrow_mut();
-            let track_id = stack.last().copied().unwrap_or_else(next_track_id);
+            let (track_id, owns_track) = match stack.last().copied() {
+                Some(track_id) => (track_id, false),
+                None => (inner.acquire_track_id(), true),
+            };
             stack.push(track_id);
-            track_id
+            (track_id, owns_track)
         })
         .unwrap_or_else(|_| {
             FALLBACK_TRACE_TRACK_STACK.with(|stack| {
                 let mut stack = stack.borrow_mut();
-                let track_id = stack.last().copied().unwrap_or_else(next_track_id);
+                let (track_id, owns_track) = match stack.last().copied() {
+                    Some(track_id) => (track_id, false),
+                    None => (inner.acquire_track_id(), true),
+                };
                 stack.push(track_id);
-                track_id
+                (track_id, owns_track)
             })
         })
 }
@@ -495,5 +520,24 @@ mod tests {
         assert!(trace.contains("\"ph\":\"B\""), "trace: {trace}");
         assert!(trace.contains("\"ph\":\"E\""), "trace: {trace}");
         assert!(!trace.contains("\"ph\":\"X\""), "trace: {trace}");
+    }
+
+    #[test]
+    fn sequential_top_level_spans_reuse_track_ids() {
+        let recorder = EventRecorder::new();
+
+        let first = EventSink::begin_span(&recorder, "first");
+        drop(first);
+        let second = EventSink::begin_span(&recorder, "second");
+        drop(second);
+
+        let begin_track_ids = recorder
+            .events()
+            .into_iter()
+            .filter(|event| event.phase == EventPhase::Begin)
+            .map(|event| event.track_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(begin_track_ids, vec![1, 1]);
     }
 }
