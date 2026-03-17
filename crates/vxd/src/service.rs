@@ -34,6 +34,19 @@ use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+fn executor_max_concurrency() -> usize {
+    if let Ok(val) = std::env::var("VX_MAX_CONCURRENCY") {
+        if let Ok(n) = val.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 2)
+        .unwrap_or(16)
+}
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
@@ -4812,9 +4825,7 @@ impl VxdService {
                 self.report_set_total(total_actions as u64).await;
 
                 // Execute action graph
-                let max_concurrency = std::thread::available_parallelism()
-                    .map(|n| n.get() * 2)
-                    .unwrap_or(16);
+                let max_concurrency = executor_max_concurrency();
 
                 let progress_listener = self.progress_listener.lock().clone();
                 let session_id = self.session_id().await;
@@ -5298,9 +5309,7 @@ impl VxdService {
         let total_actions = action_graph.node_count();
         self.report_set_total(total_actions as u64).await;
 
-        let max_concurrency = std::thread::available_parallelism()
-            .map(|n| n.get() * 2)
-            .unwrap_or(16);
+        let max_concurrency = executor_max_concurrency();
         tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
