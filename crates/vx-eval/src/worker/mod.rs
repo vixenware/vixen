@@ -1386,6 +1386,7 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
+                let _span = self.event_sink.begin_span("node.execute");
                 let result = self
                     .with_prefixed_demand_chain(chain, node_id, self.execute_node(&node))
                     .await;
@@ -1400,13 +1401,22 @@ impl Engine {
                     }
                 }
             }
-            Err(Some(Outcome::Value(value))) => Ok(value),
-            Err(Some(Outcome::Poison(error))) => Err(error),
-            Err(None) => match receiver.await {
-                Ok((_node_id, Outcome::Value(value))) => Ok(value),
-                Ok((_node_id, Outcome::Poison(error))) => Err(error),
-                Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
-            },
+            Err(Some(Outcome::Value(value))) => {
+                self.event_sink.instant("node.cache_hit");
+                Ok(value)
+            }
+            Err(Some(Outcome::Poison(error))) => {
+                self.event_sink.instant("node.cache_hit");
+                Err(error)
+            }
+            Err(None) => {
+                let _span = self.event_sink.begin_span("node.wait");
+                match receiver.await {
+                    Ok((_node_id, Outcome::Value(value))) => Ok(value),
+                    Ok((_node_id, Outcome::Poison(error))) => Err(error),
+                    Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
+                }
+            }
         }
     }
 

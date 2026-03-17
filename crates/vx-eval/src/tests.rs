@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt, trimmed_range};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
+use crate::events::EventRecorder;
 use crate::exec::{AcquireRequest, ExecArgValue, ImportRequest, RenderRequest, StabilizeRequest};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
@@ -41,6 +42,12 @@ fn engine_with_source_id(source: &str, source_id: &str) -> Arc<Engine> {
     let root = SourceFile::cast_root(parse.syntax());
     let module = lower_source_file_with_source_id(&root, source_id);
     Engine::from_module(&module)
+}
+
+fn engine_with_recorder(source: &str) -> (Arc<Engine>, EventRecorder) {
+    let recorder = EventRecorder::new();
+    let engine = engine(source).with_event_sink(Arc::new(recorder.clone()));
+    (engine, recorder)
 }
 
 const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree %{\n    @bin/lua => lua_exe.file(@bin/lua).executable(),\n    @lib/liblua.a => liblua.file(@liblua.a),\n  }\n";
@@ -6356,5 +6363,33 @@ async fn exec_infers_writable_roots_only_for_unmounted_paths() {
             ExecArgValue::Path(PathValue::new("out/lib.a")),
             ExecArgValue::Path(PathValue::new(".vx/implicit/0/obj/a.o")),
         ]
+    );
+}
+
+// --- Event recording tests ---
+
+#[tokio::test]
+async fn second_call_with_same_args_is_cached() {
+    let source = r#"
+fn add(a, b) { a + b }
+fn main() { [add(1, 2), add(1, 2)] }
+"#;
+    let (engine, recorder) = engine_with_recorder(source);
+
+    let result = engine.call("main", vec![]).await.unwrap();
+    let Value::Array(items) = result else {
+        panic!("expected array, got {result:?}");
+    };
+    assert_eq!(items[0], items[1]);
+    assert_eq!(items[0], Value::U64(3));
+
+    let executions = recorder.count_spans("node.execute");
+    let cache_hits = recorder.count_instants("node.cache_hit");
+
+    // add(1, 2) should be memoized — called twice, executed once, one cache hit.
+    assert!(
+        cache_hits >= 1,
+        "expected at least 1 cache hit from memoized add(1,2), got {cache_hits} \
+        (executions: {executions})"
     );
 }
