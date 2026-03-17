@@ -8,20 +8,32 @@ use std::sync::Arc;
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
     Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, ImportExpr, InterpolatedStringExpr,
-    InvokeExpr, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter,
-    PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile,
-    Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
+    InvokeExpr, LineIndex, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl,
+    Parameter, PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr,
+    SourceFile, Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
     StructLiteralField, SyntaxKind, TextRange, TupleExpr, WhereExpr, trimmed_range,
 };
 
 use crate::instr;
 
-#[derive(Default)]
 struct LowerCtx {
     next_closure_id: usize,
     next_temp_id: usize,
     namespace_methods: Vec<Arc<instr::FnDef>>,
     source_id: Arc<str>,
+    line_index: Arc<LineIndex>,
+}
+
+impl Default for LowerCtx {
+    fn default() -> Self {
+        Self {
+            next_closure_id: 0,
+            next_temp_id: 0,
+            namespace_methods: Vec::new(),
+            source_id: Arc::default(),
+            line_index: Arc::new(LineIndex::new("")),
+        }
+    }
 }
 
 impl LowerCtx {
@@ -40,7 +52,10 @@ impl LowerCtx {
     fn provenance(&self, node: &impl AstNode, label: impl Into<String>) -> instr::SourceProvenance {
         instr::SourceProvenance {
             source_id: Arc::clone(&self.source_id),
-            span: instr::SourceSpan::from_text_range(trimmed_range(node.syntax())),
+            span: instr::SourceSpan::from_text_range(
+                trimmed_range(node.syntax()),
+                &self.line_index,
+            ),
             label: label.into(),
         }
     }
@@ -56,8 +71,10 @@ pub fn lower_source_file_with_source_id(
     source: &SourceFile,
     source_id: impl Into<Arc<str>>,
 ) -> instr::Module {
+    let source_text = source.syntax().text().to_string();
     let mut ctx = LowerCtx {
         source_id: source_id.into(),
+        line_index: Arc::new(LineIndex::new(&source_text)),
         ..LowerCtx::default()
     };
     let mut functions = Vec::new();
@@ -137,7 +154,7 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
     let sig_range = TextRange::new(trimmed_start, sig_end);
     let provenance = Some(instr::SourceProvenance {
         source_id: Arc::clone(&ctx.source_id),
-        span: instr::SourceSpan::from_text_range(sig_range),
+        span: instr::SourceSpan::from_text_range(sig_range, &ctx.line_index),
         label: format!("fn {name}"),
     });
     Some(instr::FnDef {
@@ -187,6 +204,7 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
         AstStmt::FnDecl(f) => {
             let mut fn_ctx = LowerCtx {
                 source_id: Arc::clone(&ctx.source_id),
+                line_index: Arc::clone(&ctx.line_index),
                 ..LowerCtx::default()
             };
             let def = lower_fn_decl_with_ctx(f, &mut fn_ctx)?;

@@ -1444,11 +1444,15 @@ fn build() -> Tree (
         needle: &str,
         label: &str,
     ) -> SourceProvenance {
+        let line_index = vx_parser::LineIndex::new(source);
         let start = source.find(needle).expect("needle start") as u32;
         let end = start + u32::try_from(needle.len()).expect("needle length");
         SourceProvenance {
             source_id: Arc::from(source_path.as_str()),
-            span: SourceSpan { start, end },
+            span: SourceSpan::from_text_range(
+                rowan::TextRange::new(start.into(), end.into()),
+                &line_index,
+            ),
             label: label.to_string(),
         }
     }

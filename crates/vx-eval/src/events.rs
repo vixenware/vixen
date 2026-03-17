@@ -18,6 +18,11 @@ pub type EventArgs = facet_value::Value;
 pub trait EventSink: Send + Sync + 'static {
     type Span: Send;
 
+    /// Whether this sink wants structured span arguments computed.
+    fn supports_args(&self) -> bool {
+        true
+    }
+
     /// Start a duration span. The returned guard emits an end event on drop.
     fn begin_span(&self, name: &'static str) -> Self::Span;
 
@@ -41,6 +46,10 @@ pub trait EventSink: Send + Sync + 'static {
 /// No-op sink — zero cost. All methods inline to nothing.
 impl EventSink for () {
     type Span = ();
+    #[inline(always)]
+    fn supports_args(&self) -> bool {
+        false
+    }
     #[inline(always)]
     fn begin_span(&self, _name: &'static str) {}
     #[inline(always)]
@@ -261,6 +270,7 @@ impl EventSink for EventRecorder {
 /// Slightly more overhead than the generic version, but avoids
 /// making Engine generic.
 pub trait ErasedEventSink: Send + Sync + 'static {
+    fn supports_args(&self) -> bool;
     fn begin_span(&self, name: &'static str) -> ErasedSpan;
     fn begin_span_with_args(&self, name: &'static str, args: EventArgs) -> ErasedSpan;
     fn instant(&self, name: &'static str);
@@ -282,6 +292,10 @@ impl<S: EventSink> ErasedEventSink for S
 where
     S::Span: 'static,
 {
+    fn supports_args(&self) -> bool {
+        EventSink::supports_args(self)
+    }
+
     fn begin_span(&self, name: &'static str) -> ErasedSpan {
         ErasedSpan(Some(Box::new(EventSink::begin_span(self, name))))
     }

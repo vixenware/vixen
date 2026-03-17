@@ -55,6 +55,10 @@ pub struct TransportKeywordParam {
 pub struct TransportSourceSpan {
     pub start: u32,
     pub end: u32,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -431,6 +435,10 @@ impl From<&instr::SourceSpan> for TransportSourceSpan {
         Self {
             start: span.start,
             end: span.end,
+            start_line: span.start_line,
+            start_column: span.start_column,
+            end_line: span.end_line,
+            end_column: span.end_column,
         }
     }
 }
@@ -440,6 +448,10 @@ impl From<TransportSourceSpan> for instr::SourceSpan {
         Self {
             start: span.start,
             end: span.end,
+            start_line: span.start_line,
+            start_column: span.start_column,
+            end_line: span.end_line,
+            end_column: span.end_column,
         }
     }
 }

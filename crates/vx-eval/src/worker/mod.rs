@@ -1381,6 +1381,183 @@ impl Engine {
             .collect()
     }
 
+    fn builtin_namespace_name(namespace: &BuiltinNamespace) -> &'static str {
+        match namespace {
+            BuiltinNamespace::Blob => "Blob",
+            BuiltinNamespace::Bytes => "Bytes",
+            BuiltinNamespace::Tree => "Tree",
+        }
+    }
+
+    fn builtin_function_name(function: &BuiltinFunction) -> String {
+        match function {
+            BuiltinFunction::Acquire => "acquire".into(),
+            BuiltinFunction::Stabilize => "stabilize".into(),
+            BuiltinFunction::Render => "render".into(),
+            BuiltinFunction::Exec => "exec".into(),
+            BuiltinFunction::Discover => "discover".into(),
+            BuiltinFunction::ExecutorClass => "Executor.class".into(),
+            BuiltinFunction::StructConstructor { type_name, .. } => {
+                format!("{type_name}.new")
+            }
+        }
+    }
+
+    fn builtin_method_name(method: &BuiltinMethod) -> &'static str {
+        match method {
+            BuiltinMethod::StringStartsWith { .. } => "String.starts_with",
+            BuiltinMethod::StringContains { .. } => "String.contains",
+            BuiltinMethod::StringSplit { .. } => "String.split",
+            BuiltinMethod::StringLines { .. } => "String.lines",
+            BuiltinMethod::StringTrim { .. } => "String.trim",
+            BuiltinMethod::StringToLower { .. } => "String.to_lower",
+            BuiltinMethod::BlobFromString => "Blob.from_string",
+            BuiltinMethod::BytesFromString => "Bytes.from_string",
+            BuiltinMethod::TreeOf => "Tree.of",
+            BuiltinMethod::TreeEmpty => "Tree.empty",
+            BuiltinMethod::TreeFromPath => "Tree.from_path",
+            BuiltinMethod::ArrayMap { .. } => "Array.map",
+            BuiltinMethod::ArrayToMap { .. } => "Array.to_map",
+            BuiltinMethod::ArrayFlatten { .. } => "Array.flatten",
+            BuiltinMethod::ArrayMerge { .. } => "Array.merge",
+            BuiltinMethod::MapMapValues { .. } => "Map.map_values",
+            BuiltinMethod::MapHas { .. } => "Map.has",
+            BuiltinMethod::MapGet { .. } => "Map.get",
+            BuiltinMethod::BlobToString { .. } => "Blob.to_string",
+            BuiltinMethod::BlobExecutable { .. } => "Blob.executable",
+            BuiltinMethod::BlobUtf8 { .. } => "Blob.utf8",
+            BuiltinMethod::BlobUtf8Lossy { .. } => "Blob.utf8_lossy",
+            BuiltinMethod::BytesUtf8 { .. } => "Bytes.utf8",
+            BuiltinMethod::BytesUtf8Lossy { .. } => "Bytes.utf8_lossy",
+            BuiltinMethod::BytesBlob { .. } => "Bytes.blob",
+            BuiltinMethod::StreamCollect { .. } => "Stream.collect",
+            BuiltinMethod::TreeFile { .. } => "Tree.file",
+            BuiltinMethod::TreeMerge { .. } => "Tree.merge",
+            BuiltinMethod::TreeSubtree { .. } => "Tree.subtree",
+            BuiltinMethod::OptionUnwrapOr { .. } => "Option.unwrap_or",
+            BuiltinMethod::FallibleCall { .. } => "Fallible.call",
+            BuiltinMethod::HostOs { .. } => "Host.os",
+            BuiltinMethod::HostArch { .. } => "Host.arch",
+            BuiltinMethod::HostRead { .. } => "Host.read",
+            BuiltinMethod::HostHash { .. } => "Host.hash",
+            BuiltinMethod::HostWhich { .. } => "Host.which",
+        }
+    }
+
+    fn value_trace_target(value: &Value) -> (String, String) {
+        match value {
+            Value::Function(function) => ("function".into(), function.def.name.clone()),
+            Value::Builtin(BuiltinValue::Namespace(namespace)) => (
+                "builtin_namespace".into(),
+                Self::builtin_namespace_name(namespace).into(),
+            ),
+            Value::Builtin(BuiltinValue::Function(function)) => (
+                "builtin_function".into(),
+                Self::builtin_function_name(function),
+            ),
+            Value::Builtin(BuiltinValue::Method(method)) => (
+                "builtin_method".into(),
+                Self::builtin_method_name(method).into(),
+            ),
+            Value::Partial(partial) => {
+                let (_, target_name) = Self::value_trace_target(&partial.function);
+                ("partial".into(), target_name)
+            }
+            other => ("value".into(), other.type_name().into()),
+        }
+    }
+
+    fn source_trace_detail(provenance: Option<&instr::SourceProvenance>) -> facet_value::Value {
+        let Some(provenance) = provenance else {
+            return value!({});
+        };
+        value!({
+            "source_id": ((provenance.source_id.to_string())),
+            "label": ((provenance.label.clone())),
+            "line": ((provenance.span.start_line)),
+            "column": ((provenance.span.start_column)),
+            "end_line": ((provenance.span.end_line)),
+            "end_column": ((provenance.span.end_column))
+        })
+    }
+
+    fn job_trace_detail(node: &Node) -> facet_value::Value {
+        match &node.job {
+            NodeJob::Binary { op, .. } => value!({
+                "operation": ((format!("{op:?}"))),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Unary { op, .. } => value!({
+                "operation": ((format!("{op:?}"))),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Template { kind, parts } => value!({
+                "template_kind": ((match kind {
+                    TemplateKind::String => "string",
+                    TemplateKind::Path => "path",
+                })),
+                "part_count": ((parts.len() as u64)),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::If { .. } => value!({
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Fallible { value } => value!({
+                "value_kind": ((value.type_name())),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Demand { demands, .. } => value!({
+                "demand_count": ((demands.len() as u64)),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Call {
+                function,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => {
+                let (target_kind, target_name) = Self::value_trace_target(function);
+                value!({
+                    "target_kind": ((target_kind)),
+                    "target_name": ((target_name)),
+                    "target_source": ((match function {
+                        Value::Function(function) => Self::source_trace_detail(function.def.provenance.as_ref()),
+                        _ => value!({}),
+                    })),
+                    "arg_count": ((args.len() as u64)),
+                    "kwarg_count": ((kwargs.len() as u64)),
+                    "has_kwargs_expr": ((kwargs_expr.is_some())),
+                    "pending_dep_count": ((node.job.pending_deps().len() as u64))
+                })
+            }
+            NodeJob::Invoke { function, args } => value!({
+                "target_kind": "function",
+                "target_name": ((function.def.name.clone())),
+                "target_source": ((Self::source_trace_detail(function.def.provenance.as_ref()))),
+                "arg_count": ((args.len() as u64)),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Field {
+                field, receiver, ..
+            } => value!({
+                "field": ((field.to_string())),
+                "receiver_kind": ((receiver.type_name())),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            NodeJob::Fail { message } => value!({
+                "message_kind": ((message.type_name())),
+                "pending_dep_count": ((node.job.pending_deps().len() as u64))
+            }),
+            #[cfg(test)]
+            NodeJob::Sleep { millis, value } => value!({
+                "millis": ((*millis)),
+                "value_kind": ((value.type_name()))
+            }),
+            #[cfg(test)]
+            NodeJob::Poison(_) => value!({}),
+        }
+    }
+
     fn node_trace_args(node: &Node) -> facet_value::Value {
         let provenance_source = node
             .provenance
@@ -1391,6 +1568,18 @@ impl Engine {
             .provenance
             .as_ref()
             .map(|provenance| provenance.label.clone())
+            .unwrap_or_default();
+        let (source_line, source_column, source_end_line, source_end_column) = node
+            .provenance
+            .as_ref()
+            .map(|provenance| {
+                (
+                    provenance.span.start_line,
+                    provenance.span.start_column,
+                    provenance.span.end_line,
+                    provenance.span.end_column,
+                )
+            })
             .unwrap_or_default();
         let job_kind = match &node.job {
             NodeJob::Binary { .. } => "binary",
@@ -1408,13 +1597,19 @@ impl Engine {
             #[cfg(test)]
             NodeJob::Poison(_) => "poison",
         };
+        let detail = Self::job_trace_detail(node);
 
         value!({
             "node_id": ((node.id.0)),
             "description": ((node.description.clone())),
             "job_kind": ((job_kind)),
             "source_id": ((provenance_source)),
-            "source_label": ((provenance_label))
+            "source_label": ((provenance_label)),
+            "source_line": ((source_line)),
+            "source_column": ((source_column)),
+            "source_end_line": ((source_end_line)),
+            "source_end_column": ((source_end_column)),
+            "detail": ((detail))
         })
     }
 
@@ -1428,9 +1623,12 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let _span = self
-                    .event_sink
-                    .begin_span_with_args("node.execute", Self::node_trace_args(&node));
+                let _span = if self.event_sink.supports_args() {
+                    self.event_sink
+                        .begin_span_with_args("node.execute", Self::node_trace_args(&node))
+                } else {
+                    self.event_sink.begin_span("node.execute")
+                };
                 let result = self
                     .with_prefixed_demand_chain(chain, node_id, self.execute_node(&node))
                     .await;
@@ -1454,9 +1652,12 @@ impl Engine {
                 Err(error)
             }
             Err(None) => {
-                let _span = self
-                    .event_sink
-                    .begin_span_with_args("node.wait", Self::node_trace_args(&node));
+                let _span = if self.event_sink.supports_args() {
+                    self.event_sink
+                        .begin_span_with_args("node.wait", Self::node_trace_args(&node))
+                } else {
+                    self.event_sink.begin_span("node.wait")
+                };
                 match receiver.await {
                     Ok((_node_id, Outcome::Value(value))) => Ok(value),
                     Ok((_node_id, Outcome::Poison(error))) => Err(error),
