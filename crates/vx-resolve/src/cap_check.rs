@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{
     AstNode, CallExpr, ClosureExpr, Expr, FieldExpr, FnDecl, Item, NameRefExpr, SourceFile, Stmt,
-    SyntaxKind,
+    SyntaxKind, trimmed_range,
 };
 
 use vx_types::{Capability, FnSig};
@@ -515,7 +515,7 @@ impl<'a> CapChecker<'a> {
         let excess = inferred.satisfies(mask);
         if !excess.is_empty() {
             self.errors.push(CapError {
-                range: expr.syntax().text_range(),
+                range: trimmed_range(expr.syntax()),
                 kind: CapErrorKind::CapabilityViolation {
                     slot_name: slot_name.to_string(),
                     allowed: mask,
@@ -698,7 +698,7 @@ impl<'a> CapChecker<'a> {
                     && CapSet::from_name(name_tok.text()).is_none()
                 {
                     self.errors.push(CapError {
-                        range: tag.syntax().text_range(),
+                        range: trimmed_range(tag.syntax()),
                         kind: CapErrorKind::UnknownCapability {
                             name: name_tok.text().to_string(),
                         },

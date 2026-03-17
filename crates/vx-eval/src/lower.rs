@@ -11,7 +11,7 @@ use vx_parser::{
     InvokeExpr, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter,
     PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile,
     Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
-    StructLiteralField, SyntaxKind, TextRange, TupleExpr, WhereExpr,
+    StructLiteralField, SyntaxKind, TextRange, TupleExpr, WhereExpr, trimmed_range,
 };
 
 use crate::instr;
@@ -40,7 +40,7 @@ impl LowerCtx {
     fn provenance(&self, node: &impl AstNode, label: impl Into<String>) -> instr::SourceProvenance {
         instr::SourceProvenance {
             source_id: Arc::clone(&self.source_id),
-            span: instr::SourceSpan::from_text_range(node.syntax().text_range()),
+            span: instr::SourceSpan::from_text_range(trimmed_range(node.syntax())),
             label: label.into(),
         }
     }
@@ -126,6 +126,7 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
     // Narrow the provenance span to just the signature (fn name + params),
     // excluding the body — so diagnostics highlight `fn build(a, b, c)` not
     // the entire function.
+    let trimmed_start = trimmed_range(f.syntax()).start();
     let sig_end = f
         .syntax()
         .children()
@@ -133,7 +134,7 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
         .map(|clause| clause.text_range().end())
         .or_else(|| f.name().map(|tok| tok.text_range().end()))
         .unwrap_or_else(|| f.syntax().text_range().end());
-    let sig_range = TextRange::new(f.syntax().text_range().start(), sig_end);
+    let sig_range = TextRange::new(trimmed_start, sig_end);
     let provenance = Some(instr::SourceProvenance {
         source_id: Arc::clone(&ctx.source_id),
         span: instr::SourceSpan::from_text_range(sig_range),

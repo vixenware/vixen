@@ -11,7 +11,7 @@ use std::time::Instant;
 use blake3::hash as blake3_hash;
 use indoc::indoc;
 use tempfile::TempDir;
-use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
+use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt, trimmed_range};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::exec::{AcquireRequest, ExecArgValue, ImportRequest, RenderRequest, StabilizeRequest};
@@ -2582,7 +2582,7 @@ async fn lowering_keeps_call_provenance_with_source_spans() {
         Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
         other => panic!("expected parsed call, got {other:?}"),
     };
-    let expected_range = parsed_call.syntax().text_range();
+    let expected_range = trimmed_range(parsed_call.syntax());
     let module = lower_source_file_with_source_id(&file, "fixtures/build.vx");
     let body = &module.functions[0].body;
 
@@ -4451,7 +4451,7 @@ async fn missing_file_failures_keep_source_provenance_in_demand_chain() {
         Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
         other => panic!("expected parsed call, got {other:?}"),
     };
-    let outer_range = parsed_outer_call.syntax().text_range();
+    let outer_range = trimmed_range(parsed_outer_call.syntax());
     let engine = engine_with_source_id(source, "/workspace/build.vx");
     let tree = Value::Tree(TreeValue::Inline(Arc::from([])));
     let err = engine.call("main", vec![tree]).await.unwrap_err();
@@ -4490,7 +4490,7 @@ fn build(input: Blob) {
     };
     let outer_range = match function.body().expect("function body").statements().next() {
         Some(vx_parser::Stmt::Expr(vx_parser::Expr::Where(where_expr))) => {
-            where_expr.syntax().text_range()
+            trimmed_range(where_expr.syntax())
         }
         other => panic!("expected parsed where expr, got {other:?}"),
     };
@@ -4545,7 +4545,7 @@ fn probe() {
         Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
         other => panic!("expected parsed call, got {other:?}"),
     };
-    let outer_range = parsed_outer_call.syntax().text_range();
+    let outer_range = trimmed_range(parsed_outer_call.syntax());
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine_with_source_id(source, "/workspace/build.vx").with_discover_handler(
@@ -4595,7 +4595,7 @@ fn fetch() {
     };
     let outer_range = match function.body().expect("function body").statements().next() {
         Some(vx_parser::Stmt::Expr(vx_parser::Expr::Where(where_expr))) => {
-            where_expr.syntax().text_range()
+            trimmed_range(where_expr.syntax())
         }
         other => panic!("expected parsed where expr, got {other:?}"),
     };
@@ -4668,7 +4668,7 @@ fn render_header() {
     };
     let outer_range = match function.body().expect("function body").statements().next() {
         Some(vx_parser::Stmt::Return(stmt)) => match stmt.expr() {
-            Some(vx_parser::Expr::Where(where_expr)) => where_expr.syntax().text_range(),
+            Some(vx_parser::Expr::Where(where_expr)) => trimmed_range(where_expr.syntax()),
             other => panic!("expected return where expr, got {other:?}"),
         },
         other => panic!("expected parsed return where expr, got {other:?}"),
