@@ -941,8 +941,12 @@ impl Engine {
         };
 
         match self.call_memo.entry(key) {
-            Entry::Occupied(entry) => entry.get().id,
+            Entry::Occupied(entry) => {
+                self.event_sink.instant("memo.hit");
+                entry.get().id
+            }
             Entry::Vacant(entry) => {
+                self.event_sink.instant("memo.miss");
                 let node = Arc::new(Node::new(
                     NodeJob::Invoke {
                         function,

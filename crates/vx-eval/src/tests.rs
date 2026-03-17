@@ -6386,14 +6386,17 @@ fn main() { [add(1, 2), add(1, 2)] }
     let executions = recorder.count_spans("node.execute");
     let cache_hits = recorder.count_instants("node.cache_hit");
 
-    let waits = recorder.count_spans("node.wait");
+    let memo_hits = recorder.count_instants("memo.hit");
+    let memo_misses = recorder.count_instants("memo.miss");
 
-    // add(1, 2) should be memoized — called twice, executed once.
-    // The second demand should either be a cache hit or a wait (if concurrent).
-    assert!(
-        cache_hits + waits >= 1,
-        "expected at least 1 cache hit or wait from memoized add(1,2), \
-        got {cache_hits} cache hits, {waits} waits (executions: {executions})"
+    // add(1, 2) appears twice — the memo table should deduplicate them.
+    // memo_misses: main() + first add(1,2) = 2
+    // memo_hits: second add(1,2) = 1
+    // executions: main body + add(1,2) = 2 (the second add reuses the same node)
+    assert_eq!(
+        memo_hits, 1,
+        "expected 1 memo hit from deduplicated add(1,2), got {memo_hits} \
+        (memo_misses: {memo_misses}, executions: {executions})"
     );
 }
 
