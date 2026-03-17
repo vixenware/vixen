@@ -33,6 +33,7 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 
+use crate::events::ErasedEventSink;
 use crate::exec::{
     AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue,
     ExecMount, ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler,
@@ -129,6 +130,7 @@ pub struct Engine {
     self_ref: std::sync::OnceLock<std::sync::Weak<Engine>>,
     host_search_path: Option<Vec<std::path::PathBuf>>,
     exec_semaphore: Option<Arc<Semaphore>>,
+    event_sink: Arc<dyn ErasedEventSink>,
 }
 
 impl Engine {
@@ -175,12 +177,21 @@ impl Engine {
             self_ref: std::sync::OnceLock::new(),
             host_search_path: None,
             exec_semaphore,
+            event_sink: Arc::new(()),
         });
         engine
             .self_ref
             .set(Arc::downgrade(&engine))
             .expect("self_ref already set");
         engine
+    }
+
+    /// Set a custom event sink for recording engine events.
+    pub fn with_event_sink(self: Arc<Self>, sink: Arc<dyn ErasedEventSink>) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        this.event_sink = sink;
+        Self::rewrap(this)
     }
 
     fn rewrap(mut this: Self) -> Arc<Self> {

@@ -8,6 +8,9 @@
 mod capability;
 pub use capability::CapabilitySet;
 
+pub mod events;
+pub use events::{ErasedEventSink, ErasedSpan, EventRecorder, EventSink};
+
 mod exec;
 pub use exec::{
     AcquireHandler, AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverHandler,
