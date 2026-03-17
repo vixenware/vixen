@@ -11,7 +11,7 @@ use vx_parser::{
     InvokeExpr, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter,
     PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile,
     Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
-    StructLiteralField, SyntaxKind, TupleExpr, WhereExpr,
+    StructLiteralField, SyntaxKind, TextRange, TupleExpr, WhereExpr,
 };
 
 use crate::instr;
@@ -123,7 +123,22 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
         None => instr::Block { stmts: vec![] },
     };
 
-    let provenance = Some(ctx.provenance(f, format!("fn {name}")));
+    // Narrow the provenance span to just the signature (fn name + params),
+    // excluding the body — so diagnostics highlight `fn build(a, b, c)` not
+    // the entire function.
+    let sig_end = f
+        .syntax()
+        .children()
+        .find(|child| child.kind() == SyntaxKind::PARAMETER_CLAUSE)
+        .map(|clause| clause.text_range().end())
+        .or_else(|| f.name().map(|tok| tok.text_range().end()))
+        .unwrap_or_else(|| f.syntax().text_range().end());
+    let sig_range = TextRange::new(f.syntax().text_range().start(), sig_end);
+    let provenance = Some(instr::SourceProvenance {
+        source_id: Arc::clone(&ctx.source_id),
+        span: instr::SourceSpan::from_text_range(sig_range),
+        label: format!("fn {name}"),
+    });
     Some(instr::FnDef {
         name: name.to_string(),
         params,
