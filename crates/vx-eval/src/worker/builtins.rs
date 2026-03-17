@@ -306,6 +306,51 @@ impl Engine {
                 self.check_arity("map.map_values", args, 1)?;
                 self.map_map_values(receiver, args[0].clone()).await
             }
+            BuiltinValue::Method(BuiltinMethod::MapHas { receiver }) => {
+                self.require_no_kwargs("map.has", kwargs)?;
+                self.check_arity("map.has", args, 1)?;
+                let (receiver, _obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing map.has receiver",
+                    )
+                    .await?,
+                );
+                let Value::Map(map) = receiver else {
+                    return Err(self.type_error("map.has receiver must be Map"));
+                };
+                let key = self
+                    .materialize_value_shallow(args[0].clone(), "forcing map.has key")
+                    .await?;
+                let found = map.entries.iter().any(|(k, _)| *k == key);
+                Ok(Value::Bool(found))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapGet { receiver }) => {
+                self.require_no_kwargs("map.get", kwargs)?;
+                self.check_arity("map.get", args, 1)?;
+                let (receiver, obligations) = self.split_obligations(
+                    self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing map.get receiver",
+                    )
+                    .await?,
+                );
+                let Value::Map(map) = receiver else {
+                    return Err(self.type_error("map.get receiver must be Map"));
+                };
+                let key = self
+                    .materialize_value_shallow(args[0].clone(), "forcing map.get key")
+                    .await?;
+                match map.entries.iter().find(|(k, _)| *k == key) {
+                    Some((_, value)) => {
+                        Ok(self.attach_obligations(value.clone(), obligations.iter().cloned()))
+                    }
+                    None => {
+                        Err(self
+                            .type_error(&format!("map.get: key not found: {}", key.type_name())))
+                    }
+                }
+            }
             BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
                 self.require_no_kwargs("array.flatten", kwargs)?;
                 self.check_arity("array.flatten", args, 0)?;

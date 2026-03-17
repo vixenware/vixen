@@ -47,10 +47,26 @@ fn build_for(workspace: Path, class: ExecutorClass) {
   render_png(class, app)
 }
 
+fn build_platform(workspace: Path, name: String) {
+  if name == "local" (
+    build_for(workspace, executor_class("default"))
+  ) else if name == "orb" (
+    build_for(workspace, executor_class("ssh:orb"))
+  ) else if name == "toast" (
+    build_for(workspace, executor_class("ssh:toast"))
+  ) else (
+    fail `unknown platform: ${name}`
+  )
+}
+
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree %{
-    @local => build_for(workspace, executor_class("default")),
-    @orb => build_for(workspace, executor_class("ssh:orb")),
-    @toast => build_for(workspace, executor_class("ssh:toast")),
-  }
+  let selected =
+    if env.has("VX_PLATFORMS") (
+      env.get("VX_PLATFORMS").split(",")
+    ) else (
+      ["local", "orb", "toast"]
+    );
+  selected
+    .map((name) => Tree %{ @({name}) => build_platform(workspace, name) })
+    .merge()
 }

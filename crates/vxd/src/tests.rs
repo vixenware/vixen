@@ -2153,11 +2153,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should complete with a structured failure");
 
@@ -2220,11 +2216,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -2307,11 +2299,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -2376,11 +2364,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -2429,11 +2413,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should complete with a structured failure");
 
@@ -2480,11 +2460,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree
     fs::write(workspace.path().join("input.txt"), "world\n").expect("write input");
     fs::write(workspace.path().join("template.txt"), "hello {{VALUE}}").expect("write template");
 
-    let request = BuildRequest {
-        project_path: workspace_root.to_owned(),
-        build_file_path: None,
-        release: false,
-    };
+    let request = BuildRequest::new(workspace_root.to_owned());
 
     let first = env
         .service

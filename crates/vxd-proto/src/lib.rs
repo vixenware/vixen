@@ -16,7 +16,7 @@ use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 5;
+pub const VXD_PROTOCOL_VERSION: u32 = 6;
 
 /// Request to build a project
 #[derive(Debug, Clone, Facet)]
@@ -27,6 +27,42 @@ pub struct BuildRequest {
     pub build_file_path: Option<Utf8PathBuf>,
     /// Build in release mode
     pub release: bool,
+    /// Extra arguments passed to the build entry function
+    pub args: Vec<String>,
+    /// Explicit environment variables passed to the build entry function
+    pub env: Vec<(String, String)>,
+}
+
+impl BuildRequest {
+    pub fn new(project_path: impl Into<Utf8PathBuf>) -> Self {
+        Self {
+            project_path: project_path.into(),
+            build_file_path: None,
+            release: false,
+            args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    pub fn build_file_path(mut self, path: impl Into<Utf8PathBuf>) -> Self {
+        self.build_file_path = Some(path.into());
+        self
+    }
+
+    pub fn release(mut self, release: bool) -> Self {
+        self.release = release;
+        self
+    }
+
+    pub fn args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    pub fn env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
 }
 
 /// Result of a build
@@ -422,11 +458,11 @@ mod tests {
 
     #[test]
     fn test_build_request_roundtrip() {
-        let request = BuildRequest {
-            project_path: Utf8PathBuf::from("/home/user/project"),
-            build_file_path: Some(Utf8PathBuf::from("/home/user/project/lua.vx")),
-            release: true,
-        };
+        let request = BuildRequest::new("/home/user/project")
+            .build_file_path("/home/user/project/lua.vx")
+            .release(true)
+            .args(vec!["--verbose".to_string()])
+            .env(vec![("VX_PLATFORMS".to_string(), "local".to_string())]);
 
         let bytes = to_vec(&request).expect("serialize");
         println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
@@ -435,6 +471,8 @@ mod tests {
         assert_eq!(decoded.project_path, request.project_path);
         assert_eq!(decoded.build_file_path, request.build_file_path);
         assert_eq!(decoded.release, request.release);
+        assert_eq!(decoded.args, request.args);
+        assert_eq!(decoded.env, request.env);
     }
 
     #[test]

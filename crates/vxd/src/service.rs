@@ -4348,8 +4348,8 @@ impl VxdService {
                     .call_entry(
                         "build",
                         request.project_path.as_str(),
-                        Vec::new(),
-                        Default::default(),
+                        request.args.clone(),
+                        request.env.iter().cloned().collect(),
                     )
                     .await
                     .map_err(|error| {

@@ -423,11 +423,23 @@ impl CliContext {
                 .map_err(|e| eyre!("set_session RPC failed: {e:?}"))?;
         }
 
-        let request = BuildRequest {
-            project_path: cwd.clone(),
-            build_file_path,
-            release: args.release,
-        };
+        let mut build_env = Vec::new();
+        for entry in &args.env {
+            if let Some((key, value)) = entry.split_once('=') {
+                build_env.push((key.to_string(), value.to_string()));
+            } else {
+                let value = std::env::var(entry)
+                    .map_err(|_| eyre!("--env {entry}: not set in environment"))?;
+                build_env.push((entry.clone(), value));
+            }
+        }
+
+        let mut request = BuildRequest::new(cwd.clone())
+            .release(args.release)
+            .env(build_env);
+        if let Some(path) = build_file_path {
+            request = request.build_file_path(path);
+        }
 
         // Race the build against Ctrl-C. When the user hits Ctrl-C, we shut down
         // the TUI cleanly and exit. The daemon detects the dropped connection and

@@ -1357,6 +1357,8 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { .. })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { .. })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { .. })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { .. })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { .. })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. })
             | BuiltinValue::Method(BuiltinMethod::HostOs { .. })
             | BuiltinValue::Method(BuiltinMethod::HostArch { .. })

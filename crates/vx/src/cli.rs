@@ -63,6 +63,10 @@ pub(crate) struct BuildArgs {
     /// Build in release mode
     #[facet(args::named, args::short = 'r')]
     pub(crate) release: bool,
+
+    /// Pass an environment variable to the build (KEY=VALUE)
+    #[facet(args::named, args::short = 'e')]
+    pub(crate) env: Vec<String>,
 }
 
 /// Start daemons

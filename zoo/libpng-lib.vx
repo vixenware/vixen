@@ -93,6 +93,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         "-o",
         @(out/{shared_binary_name}),
         "-Wl,-install_name,@rpath/libpng16.dylib",
+        "-Wl,-rpath,@loader_path",
         ..shared_objects,
         ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
@@ -106,6 +107,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
         "-o",
         @(out/{shared_binary_name}),
         "-Wl,-soname,libpng16.so",
+        "-Wl,-rpath,$ORIGIN",
         ..shared_objects,
         ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
       ] where {
@@ -131,10 +133,13 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
   let shared_variant =
     if tc.os == "windows" (
       rules.CLibraryVariant {
-        link_tree: Tree %{
-          @({shared_link_name}) => shared_build.file(shared_link_name),
-        },
-        link_inputs: [shared_link_name],
+        link_tree: [
+          Tree %{
+            @({shared_link_name}) => shared_build.file(shared_link_name),
+          },
+          zlib.shared.link_tree,
+        ].merge(),
+        link_inputs: [shared_link_name, ..zlib.shared.link_inputs],
         runtime_tree: [
           Tree %{
             @({shared_binary_name}) => shared_build.file(shared_binary_name),
@@ -145,10 +150,13 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
       }
     ) else (
       rules.CLibraryVariant {
-        link_tree: Tree %{
-          @({shared_link_name}) => shared_build.file(shared_binary_name),
-        },
-        link_inputs: [shared_link_name],
+        link_tree: [
+          Tree %{
+            @({shared_link_name}) => shared_build.file(shared_binary_name),
+          },
+          zlib.shared.link_tree,
+        ].merge(),
+        link_inputs: [shared_link_name, ..zlib.shared.link_inputs],
         runtime_tree: [
           Tree %{
             @({shared_binary_name}) => shared_build.file(shared_binary_name),

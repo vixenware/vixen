@@ -761,6 +761,8 @@ impl Engine {
                 | BuiltinMethod::ArrayFlatten { receiver }
                 | BuiltinMethod::ArrayMerge { receiver }
                 | BuiltinMethod::MapMapValues { receiver }
+                | BuiltinMethod::MapHas { receiver }
+                | BuiltinMethod::MapGet { receiver }
                 | BuiltinMethod::BlobToString { receiver }
                 | BuiltinMethod::BlobExecutable { receiver }
                 | BuiltinMethod::BlobUtf8 { receiver }

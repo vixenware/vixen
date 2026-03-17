@@ -225,6 +225,8 @@ pub enum BuiltinMethod {
     ArrayFlatten { receiver: Box<Value> },
     ArrayMerge { receiver: Box<Value> },
     MapMapValues { receiver: Box<Value> },
+    MapHas { receiver: Box<Value> },
+    MapGet { receiver: Box<Value> },
     BlobToString { receiver: Box<Value> },
     BlobExecutable { receiver: Box<Value> },
     BlobUtf8 { receiver: Box<Value> },
@@ -644,6 +646,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
@@ -693,6 +697,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
@@ -781,6 +787,12 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
                 Some(format!("builtin:map.map_values({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapHas { receiver }) => {
+                Some(format!("builtin:map.has({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapGet { receiver }) => {
+                Some(format!("builtin:map.get({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
@@ -1125,6 +1137,14 @@ impl PartialEq for BuiltinMethod {
                 BuiltinMethod::MapMapValues { receiver: right },
             )
             | (
+                BuiltinMethod::MapHas { receiver: left },
+                BuiltinMethod::MapHas { receiver: right },
+            )
+            | (
+                BuiltinMethod::MapGet { receiver: left },
+                BuiltinMethod::MapGet { receiver: right },
+            )
+            | (
                 BuiltinMethod::BlobToString { receiver: left },
                 BuiltinMethod::BlobToString { receiver: right },
             )
@@ -1311,6 +1331,12 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { .. }) => {
                 write!(f, "<bound map.map_values>")
+            }
+            BuiltinValue::Method(BuiltinMethod::MapHas { .. }) => {
+                write!(f, "<bound map.has>")
+            }
+            BuiltinValue::Method(BuiltinMethod::MapGet { .. }) => {
+                write!(f, "<bound map.get>")
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")

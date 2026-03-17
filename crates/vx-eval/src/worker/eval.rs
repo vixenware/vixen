@@ -593,6 +593,26 @@ impl Engine {
                         errors,
                     ))
                 }
+                BuiltinMethod::MapHas { receiver } => {
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::MapHas {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::MapGet { receiver } => {
+                    let (value, pending, errors) = inspect_receiver!(receiver, visiting);
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::MapGet {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
                 BuiltinMethod::BlobToString { receiver } => {
                     let (value, pending, errors) = inspect_receiver!(receiver, visiting);
                     Ok((
@@ -2424,6 +2444,18 @@ impl Engine {
                 if field == "map_values" {
                     Ok(Value::Builtin(BuiltinValue::Method(
                         BuiltinMethod::MapMapValues {
+                            receiver: Box::new(receiver.clone()),
+                        },
+                    )))
+                } else if field == "has" {
+                    Ok(Value::Builtin(BuiltinValue::Method(
+                        BuiltinMethod::MapHas {
+                            receiver: Box::new(receiver.clone()),
+                        },
+                    )))
+                } else if field == "get" {
+                    Ok(Value::Builtin(BuiltinValue::Method(
+                        BuiltinMethod::MapGet {
                             receiver: Box::new(receiver.clone()),
                         },
                     )))
