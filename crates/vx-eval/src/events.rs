@@ -123,6 +123,57 @@ impl Default for EventRecorder {
     }
 }
 
+impl EventRecorder {
+    /// Write all recorded events as a Chrome Trace JSON file.
+    ///
+    /// The output can be loaded in `chrome://tracing` or Perfetto.
+    pub fn write_chrome_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let events = self.inner.events.lock().unwrap();
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+        write!(f, "{{\"displayTimeUnit\":\"ms\",\"traceEvents\":[")?;
+        let mut first = true;
+        for event in events.iter() {
+            if !first {
+                write!(f, ",")?;
+            }
+            first = false;
+            match event.phase {
+                EventPhase::Begin => {
+                    write!(
+                        f,
+                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        event.name, event.timestamp_us
+                    )?;
+                }
+                EventPhase::End => {
+                    write!(
+                        f,
+                        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        event.name, event.timestamp_us
+                    )?;
+                }
+                EventPhase::Instant => {
+                    write!(
+                        f,
+                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        event.name, event.timestamp_us
+                    )?;
+                }
+                EventPhase::Flow { target } => {
+                    write!(
+                        f,
+                        "{{\"ph\":\"i\",\"name\":\"{}→{}\",\"cat\":\"flow\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":1}}",
+                        event.name, target, event.timestamp_us
+                    )?;
+                }
+            }
+        }
+        write!(f, "]}}")?;
+        f.flush()
+    }
+}
+
 /// Guard that records an end event on drop.
 pub struct RecorderSpan {
     inner: Arc<RecorderInner>,

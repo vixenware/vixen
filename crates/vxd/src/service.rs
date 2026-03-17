@@ -3197,6 +3197,7 @@ struct BuildVxRuntime {
     exec_fs_tree_snapshot_cache: Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
     module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
+    event_recorder: Option<vx_eval::EventRecorder>,
 }
 
 async fn emit_build_vx_boundary_log(listener: &Option<Arc<ProgressListenerClient>>, message: &str) {
@@ -3306,7 +3307,12 @@ async fn load_stabilized_value_from_manifest(
 
 impl BuildVxRuntime {
     fn build_engine(&self, module: &EvalModule) -> Arc<Engine> {
-        Engine::from_module(module).with_runtime(Arc::new(self.clone()))
+        let engine = Engine::from_module(module).with_runtime(Arc::new(self.clone()));
+        if let Some(recorder) = &self.event_recorder {
+            engine.with_event_sink(Arc::new(recorder.clone()))
+        } else {
+            engine
+        }
     }
 
     async fn emit_boundary_log(&self, message: &str) {
@@ -4332,6 +4338,9 @@ impl VxdService {
                     let root = SourceFile::cast_root(parse.syntax());
                     lower_source_file_with_source_id(&root, build_vx_path.to_string())
                 };
+                let event_recorder = std::env::var("VX_TRACE")
+                    .ok()
+                    .map(|_| vx_eval::EventRecorder::new());
                 let build_runtime = BuildVxRuntime {
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
@@ -4345,6 +4354,7 @@ impl VxdService {
                     )),
                     module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
                     module_stack: Arc::new(SyncMutex::new("build_vx_module_stack", HashSet::new())),
+                    event_recorder: event_recorder.clone(),
                 };
                 let engine = build_runtime.build_engine(&module);
                 let output = engine
@@ -4361,6 +4371,15 @@ impl VxdService {
                             1,
                         )
                     });
+
+                if let Some(recorder) = &event_recorder {
+                    let trace_path = request.project_path.join(".vx/trace.json");
+                    if let Err(error) = recorder.write_chrome_trace(trace_path.as_std_path()) {
+                        tracing::warn!(%error, path = %trace_path, "failed to write chrome trace");
+                    } else {
+                        tracing::info!(path = %trace_path, "wrote chrome trace");
+                    }
+                }
 
                 let output = match output {
                     Ok(output) => output,
