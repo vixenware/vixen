@@ -2143,8 +2143,8 @@ async fn build_vx_reports_unknown_executor_selectors() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => Blob("present")),
   }
 }
 "#,
@@ -2210,8 +2210,8 @@ async fn build_vx_routes_configured_daemon_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => host.read("/tmp/tool")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => host.read("/tmp/tool")),
   }
 }
 "#,
@@ -2297,8 +2297,8 @@ async fn build_vx_routes_implicit_ssh_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("ssh:toast"), (host) => host.read("C:/Windows/win.ini")),
+  Tree %{
+    @tool.txt => discover(executor_class("ssh:toast"), (host) => host.read("C:/Windows/win.ini")),
   }
 }
 "#,
@@ -2366,8 +2366,8 @@ async fn build_vx_accepts_discovered_top_level_trees() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  discover(executor_class("linux"), (host) => Tree {
-    @tool.txt: host.read("/tmp/tool"),
+  discover(executor_class("linux"), (host) => Tree %{
+    @tool.txt => host.read("/tmp/tool"),
   })
 }
 "#,
@@ -2419,8 +2419,8 @@ async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => Blob("present")),
   }
 }
 "#,
@@ -2463,12 +2463,12 @@ async fn stabilize_reuses_resolve_output_until_witness_changes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree (
-  Tree({
-    @out.txt: stabilize(
+  Tree(%{
+    @out.txt => stabilize(
       () => Tree.from_path(workspace).file(@input.txt).utf8(),
       (value) => render(@template.txt) where {
-        bindings: {
-          VALUE: value,
+        bindings: %{
+          "VALUE" => value,
         },
       },
     ),
