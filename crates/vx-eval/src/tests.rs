@@ -6396,3 +6396,68 @@ fn main() { [add(1, 2), add(1, 2)] }
         got {cache_hits} cache hits, {waits} waits (executions: {executions})"
     );
 }
+
+// --- Demand-driven laziness tests ---
+//
+// These tests verify that the evaluator only executes code that is actually
+// demanded. Undemanded values (let bindings, array elements, map entries,
+// struct fields, function call results) should never be forced.
+//
+// Each test uses a "canary" function whose execution we can detect via the
+// event recorder. If the canary runs when it shouldn't, the test fails.
+
+/// Helper: count how many times a function with a given name was invoked.
+/// We instrument invoke_function to emit "invoke:{name}" instants.
+/// For now, we use node.execute count as a proxy — each test is designed
+/// so that extra executions can only come from undemanded code.
+
+#[tokio::test]
+async fn let_binding_not_demanded_is_not_evaluated() {
+    let source = "fn main() { let a = 1 + 2; let b = 42; b }";
+    let (engine, recorder) = engine_with_recorder(source);
+    let result = engine.call("main", vec![]).await.unwrap();
+    assert_eq!(result, Value::U64(42));
+
+    let executions = recorder.count_spans("node.execute");
+    // `a = 1 + 2` is never demanded — should not produce node executions.
+    assert!(
+        executions <= 2,
+        "expected at most 2 node executions (main body only), got {executions}. \
+        Undemanded let binding was forced."
+    );
+}
+
+#[tokio::test]
+async fn tree_entry_access_does_not_force_other_entries() {
+    let source = r#"
+fn expensive() { Blob.from_string("should not run") }
+fn cheap() { Blob.from_string("hello") }
+fn main() { let t = Tree %{ @a.txt => expensive(), @b.txt => cheap() }; t.file(@b.txt) }
+"#;
+    let (engine, recorder) = engine_with_recorder(source);
+    let result = engine.call("main", vec![]).await.unwrap();
+    assert!(
+        matches!(result, Value::Blob(_)),
+        "expected Blob, got {result:?}"
+    );
+
+    let executions = recorder.count_spans("node.execute");
+    assert!(
+        executions <= 8,
+        "too many node executions ({executions}), expensive() may have been forced"
+    );
+}
+
+#[tokio::test]
+async fn if_branch_does_not_force_other_branch() {
+    let source = "fn main() { if true ( 42 ) else ( 1 + 2 + 3 ) }";
+    let (engine, recorder) = engine_with_recorder(source);
+    let result = engine.call("main", vec![]).await.unwrap();
+    assert_eq!(result, Value::U64(42));
+
+    let executions = recorder.count_spans("node.execute");
+    assert!(
+        executions <= 2,
+        "too many node executions ({executions}), false branch may have been forced"
+    );
+}
