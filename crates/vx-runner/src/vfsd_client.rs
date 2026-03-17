@@ -96,10 +96,7 @@ impl VfsdClient {
             let dir_node = CasNode::Directory(DirectoryNode {
                 entries: vec![DirEntry {
                     name: dir_name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: current_hash,
-                        total_size: current_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: current_hash },
                 }],
                 total_size: current_size,
             });

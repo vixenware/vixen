@@ -506,7 +506,16 @@ async fn build_merkle_tree(
             match &entry.kind {
                 DirEntryKind::SmallFile { size, .. } => total_size += size,
                 DirEntryKind::LargeFile { size, .. } => total_size += size,
-                DirEntryKind::Dir { total_size: ts, .. } => total_size += ts,
+                DirEntryKind::Dir { .. } => {
+                    let child_path = if dir_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{dir_path}/{}", entry.name)
+                    };
+                    if let Some(&(_, child_total)) = dir_hashes.get(&child_path) {
+                        total_size += child_total;
+                    }
+                }
                 DirEntryKind::Symlink { .. } => {}
             }
         }
@@ -533,10 +542,7 @@ async fn build_merkle_tree(
                 .or_default()
                 .push(DirEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: node_hash,
-                        total_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: node_hash },
                 });
         }
     }

@@ -272,7 +272,7 @@ fn commit_fs_tree<'a>(
             })?;
             let (kind, size) = if metadata.is_dir() {
                 let (hash, total_size) = commit_fs_tree(cas, child).await?;
-                (DirEntryKind::Dir { hash, total_size }, total_size)
+                (DirEntryKind::Dir { hash }, total_size)
             } else {
                 let bytes = fs::read(child.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", child.as_str()))
@@ -320,7 +320,7 @@ fn commit_tree_entry<'a>(
             }
             Value::Tree(tree) => {
                 let (hash, total_size) = commit_tree(cas, tree).await?;
-                Ok((DirEntryKind::Dir { hash, total_size }, total_size))
+                Ok((DirEntryKind::Dir { hash }, total_size))
             }
             other => Err(boundary_user_poison(format!(
                 "tree entries must be Blob or Tree, got {}",

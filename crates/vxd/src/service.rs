@@ -1685,13 +1685,7 @@ fn snapshot_exec_fs_tree_uncached<'a>(
                 let directory = load_store_directory(store, hash)
                     .await
                     .map_err(|error| error.to_string())?;
-                (
-                    DirEntryKind::Dir {
-                        hash,
-                        total_size: directory.total_size,
-                    },
-                    directory.total_size,
-                )
+                (DirEntryKind::Dir { hash }, directory.total_size)
             } else {
                 let (blob_ref, executable) = store_exec_blob_ref(
                     store,
@@ -1729,7 +1723,7 @@ fn snapshot_exec_tree_entry<'a>(
             }
             Value::Tree(tree) => {
                 let (hash, total_size) = snapshot_exec_tree(store, cache, &tree).await?;
-                Ok((DirEntryKind::Dir { hash, total_size }, total_size))
+                Ok((DirEntryKind::Dir { hash }, total_size))
             }
             other => Err(format!(
                 "tree entries must be Blob or Tree, got {}",
@@ -2459,7 +2453,14 @@ async fn store_acquired_tree_manifest(
                 DirEntryKind::SmallFile { size, .. } | DirEntryKind::LargeFile { size, .. } => {
                     *size
                 }
-                DirEntryKind::Dir { total_size, .. } => *total_size,
+                DirEntryKind::Dir { .. } => {
+                    let child_path = if dir_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{dir_path}/{}", entry.name)
+                    };
+                    dir_hashes.get(&child_path).map(|&(_, s)| s).unwrap_or(0)
+                }
                 DirEntryKind::Symlink { .. } => 0,
             }
         });
@@ -2485,10 +2486,7 @@ async fn store_acquired_tree_manifest(
                 .or_default()
                 .push(DirEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: node_hash,
-                        total_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: node_hash },
                 });
         }
     }

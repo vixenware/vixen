@@ -1478,7 +1478,6 @@ impl RunnerService {
                 name: "obj".to_string(),
                 kind: DirEntryKind::Dir {
                     hash: obj_node_hash,
-                    total_size: dir_total_size,
                 },
             }],
             total_size: dir_total_size,

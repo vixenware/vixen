@@ -406,7 +406,7 @@ pub enum DirEntryKind {
         executable: bool,
     },
     /// Subdirectory. hash points to a child DirectoryNode in nodes/.
-    Dir { hash: NodeHash, total_size: u64 },
+    Dir { hash: NodeHash },
     /// Symbolic link. Target must be valid UTF-8 (same restriction as name).
     Symlink { target: String },
 }
@@ -1445,7 +1445,6 @@ mod tests {
                     name: "subdir".to_string(),
                     kind: DirEntryKind::Dir {
                         hash: NodeHash(Blake3Hash([30u8; 32])),
-                        total_size: 50_000,
                     },
                 },
             ],
@@ -1484,10 +1483,7 @@ mod tests {
         let parent = CasNode::Directory(DirectoryNode {
             entries: vec![DirEntry {
                 name: "src".to_string(),
-                kind: DirEntryKind::Dir {
-                    hash: child_hash,
-                    total_size: 123,
-                },
+                kind: DirEntryKind::Dir { hash: child_hash },
             }],
             total_size: 123,
         });
@@ -1497,12 +1493,11 @@ mod tests {
         let CasNode::Directory(dir) = decoded else {
             panic!("expected Directory node");
         };
-        let DirEntryKind::Dir { hash, total_size } = &dir.entries[0].kind else {
+        let DirEntryKind::Dir { hash } = &dir.entries[0].kind else {
             panic!("expected child directory entry");
         };
 
         assert_eq!(*hash, child_hash);
-        assert_eq!(*total_size, 123);
     }
 
     #[test]

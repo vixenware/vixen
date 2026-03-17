@@ -367,10 +367,7 @@ impl VfsdService {
 
                     entries.push(CasDirEntry {
                         name: child_name.to_string(),
-                        kind: DirEntryKind::Dir {
-                            hash: child_hash,
-                            total_size: child_total,
-                        },
+                        kind: DirEntryKind::Dir { hash: child_hash },
                     });
                 }
                 ItemType::Symlink => {
@@ -609,7 +606,6 @@ mod tests {
                     name: component.to_string(),
                     kind: DirEntryKind::Dir {
                         hash: vx_store_proto::NodeHash(current_hash),
-                        total_size: data.len() as u64,
                     },
                 }],
                 data.len() as u64,
