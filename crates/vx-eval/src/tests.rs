@@ -6415,6 +6415,41 @@ fn main() { [add(1, 2), add(1, 2)] }
 /// so that extra executions can only come from undemanded code.
 
 #[tokio::test]
+async fn nested_call_with_pending_args_is_memoized() {
+    // compute(1) has literal args → memoized at build time.
+    // use_it(compute(1)) has a pending arg (the result of compute(1)).
+    // Both use_it calls receive the same pending node, so the memo key
+    // should match and use_it should only execute once.
+    let source = r#"
+fn compute(x) { x + 1 }
+fn use_it(y) { y * 10 }
+fn main() { [use_it(compute(1)), use_it(compute(1))] }
+"#;
+    let (engine, recorder) = engine_with_recorder(source);
+
+    let result = engine.call("main", vec![]).await.unwrap();
+    let Value::Array(items) = result else {
+        panic!("expected array, got {result:?}");
+    };
+    assert_eq!(items[0], items[1]);
+    assert_eq!(items[0], Value::U64(20));
+
+    let memo_hits = recorder.count_instants("memo.hit");
+    let memo_misses = recorder.count_instants("memo.miss");
+
+    // Expected if memoization works with pending args:
+    //   memo_misses: main() + compute(1) + first use_it(compute(1)) = 3
+    //   memo_hits: second compute(1) + second use_it(compute(1)) = 2
+    // The key point: use_it should be memoized because both calls receive
+    // the same pending NodeId as their argument.
+    assert!(
+        memo_hits >= 2,
+        "expected at least 2 memo hits (compute + use_it deduplicated), \
+        got {memo_hits} (memo_misses: {memo_misses})"
+    );
+}
+
+#[tokio::test]
 async fn let_binding_not_demanded_is_not_evaluated() {
     let source = "fn main() { let a = 1 + 2; let b = 42; b }";
     let (engine, recorder) = engine_with_recorder(source);
