@@ -2173,11 +2173,10 @@ async fn store_exec_mounts_deduped(
         .await
         .clone();
 
-    let mut flights = inflight.lock();
-    if let Some(existing) = flights.get(&key)
-        && Arc::ptr_eq(existing, &cell)
-    {
-        flights.remove(&key);
+    // Keep the completed cell in the map so subsequent execs with the same
+    // mount key reuse the cached result. Only evict on error to allow retry.
+    if result.is_err() {
+        inflight.lock().remove(&key);
     }
 
     result
