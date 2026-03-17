@@ -431,6 +431,29 @@ pub enum BlobRef {
     },
 }
 
+impl BlobRef {
+    /// Convert to the corresponding `DirEntryKind` for embedding in a directory node.
+    pub fn to_dir_entry_kind(&self, executable: bool) -> DirEntryKind {
+        match self {
+            BlobRef::Small { chunk, size } => DirEntryKind::SmallFile {
+                content_hash: ContentHash(chunk.0),
+                size: *size,
+                executable,
+            },
+            BlobRef::Large {
+                blob_node,
+                content_hash,
+                size,
+            } => DirEntryKind::LargeFile {
+                blob_node: *blob_node,
+                content_hash: *content_hash,
+                size: *size,
+                executable,
+            },
+        }
+    }
+}
+
 // =============================================================================
 // FlatTreeEntry (tarball extraction output)
 // =============================================================================

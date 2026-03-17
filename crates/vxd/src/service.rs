@@ -948,6 +948,12 @@ fn exec_mount_blob_singleflight_key(blob: &BlobValue) -> Option<String> {
 }
 
 fn exec_mount_tree_singleflight_key(tree: &TreeValue) -> Option<String> {
+    // Fast path: if the tree's merkle root is known (or computable from
+    // children's hashes), use it directly. This avoids the expensive
+    // recursive string-formatting walk for inline trees.
+    if let Some(hash) = tree.node_hash() {
+        return Some(format!("tree:{hash}"));
+    }
     match tree {
         TreeValue::Inline { entries, .. } => {
             let mut parts = Vec::with_capacity(entries.len());

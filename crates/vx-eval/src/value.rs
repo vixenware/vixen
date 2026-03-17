@@ -8,7 +8,7 @@ use std::fs;
 use std::sync::{Arc, OnceLock};
 
 use facet::Facet;
-use vx_store_proto::{BlobRef, NodeHash};
+use vx_store_proto::{BlobRef, CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash};
 
 use crate::instr::FnDef;
 use crate::node::NodeId;
@@ -574,6 +574,29 @@ impl TreeValue {
         match self {
             TreeValue::Inline { entries, .. } => Some(entries),
             _ => None,
+        }
+    }
+
+    /// Returns the NodeHash if known. For `Store` trees this is immediate.
+    /// For inline trees, attempts to compute the merkle root from children's
+    /// hashes — returns `None` if any child's hash is unknown (Pending,
+    /// FsDir, FsFile, inline blobs, etc.).
+    pub fn node_hash(&self) -> Option<NodeHash> {
+        match self {
+            TreeValue::Store(hash) => Some(*hash),
+            TreeValue::FsDir(_) => None,
+            TreeValue::Inline {
+                entries,
+                cached_hash,
+            } => {
+                if let Some(hash) = cached_hash.get() {
+                    return Some(*hash);
+                }
+                let hash = compute_inline_tree_hash(entries)?;
+                // Race is fine — all threads compute the same hash.
+                let _ = cached_hash.set(hash);
+                Some(hash)
+            }
         }
     }
 
@@ -1510,6 +1533,46 @@ fn blob_ref_key(blob_ref: &BlobRef) -> String {
             content_hash,
             size,
         } => format!("blob:store:large:{blob_node}:{content_hash}:{size}"),
+    }
+}
+
+/// Try to compute the merkle root of an inline tree from its children's
+/// already-known hashes. Returns `None` if any child's hash is unknown.
+fn compute_inline_tree_hash(entries: &[(Arc<str>, Value)]) -> Option<NodeHash> {
+    let mut dir_entries = Vec::with_capacity(entries.len());
+    let mut sorted: Vec<_> = entries.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+
+    for (name, value) in sorted {
+        let kind = value_to_dir_entry_kind(value)?;
+        dir_entries.push(DirEntry {
+            name: name.to_string(),
+            kind,
+        });
+    }
+
+    let directory = CasNode::Directory(DirectoryNode {
+        entries: dir_entries,
+        total_size: 0,
+    });
+    let (_, hash) = directory.to_bytes_and_hash();
+    Some(hash)
+}
+
+/// Try to convert a Value into a DirEntryKind for merkle hashing.
+/// Returns `None` for values whose hash isn't known yet.
+fn value_to_dir_entry_kind(value: &Value) -> Option<DirEntryKind> {
+    match value {
+        Value::Tree(tree) => {
+            let hash = tree.node_hash()?;
+            Some(DirEntryKind::Dir { hash })
+        }
+        Value::Blob(BlobValue::Store {
+            blob_ref,
+            executable,
+        }) => Some(blob_ref.to_dir_entry_kind(*executable)),
+        // Inline blobs, FsFile, Pending, etc. — hash not cheaply available
+        _ => None,
     }
 }
 
