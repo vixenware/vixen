@@ -8,7 +8,9 @@ use std::fs;
 use std::sync::{Arc, OnceLock};
 
 use facet::Facet;
-use vx_store_proto::{BlobRef, CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash};
+use vx_store_proto::{
+    BlobRef, CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, chunking::prepare_blob,
+};
 
 use crate::instr::FnDef;
 use crate::node::NodeId;
@@ -1571,7 +1573,11 @@ fn value_to_dir_entry_kind(value: &Value) -> Option<DirEntryKind> {
             blob_ref,
             executable,
         }) => Some(blob_ref.to_dir_entry_kind(*executable)),
-        // Inline blobs, FsFile, Pending, etc. — hash not cheaply available
+        Value::Blob(BlobValue::Inline { bytes, executable }) => {
+            let prepared = prepare_blob(bytes);
+            Some(prepared.to_blob_ref().to_dir_entry_kind(*executable))
+        }
+        // FsFile, Pending, etc. — hash not cheaply available
         _ => None,
     }
 }

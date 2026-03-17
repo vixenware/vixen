@@ -899,76 +899,118 @@ pub(crate) struct VxdServiceDeps {
 }
 
 pub(crate) fn exec_mounts_singleflight_key(mounts: &[ExecMount]) -> Option<String> {
-    let mut parts = Vec::with_capacity(mounts.len());
-    for mount in mounts {
-        parts.push(format!(
-            "{}={}",
-            mount.path.as_str(),
-            exec_mount_value_singleflight_key(&mount.value)?
-        ));
+    let mut hasher = blake3::Hasher::new();
+    // Sort mounts by path for deterministic key.
+    let mut sorted: Vec<_> = mounts.iter().collect();
+    sorted.sort_by(|a, b| a.path.as_str().as_bytes().cmp(b.path.as_str().as_bytes()));
+    for mount in sorted {
+        hasher.update(mount.path.as_str().as_bytes());
+        hasher.update(b"\x00");
+        hash_mount_value(&mut hasher, &mount.value)?;
     }
-    parts.sort();
-    Some(parts.join("\n"))
+    Some(hasher.finalize().to_hex().to_string())
 }
 
-fn exec_mount_value_singleflight_key(value: &Value) -> Option<String> {
+fn hash_mount_value(hasher: &mut blake3::Hasher, value: &Value) -> Option<()> {
     match value {
-        Value::Discovered(discovered) => {
-            exec_mount_value_singleflight_key(discovered.value.as_ref())
+        Value::Discovered(discovered) => hash_mount_value(hasher, discovered.value.as_ref()),
+        Value::ExecPath(path) => hash_exec_path_value(hasher, path),
+        Value::Blob(blob) => hash_blob_value(hasher, blob),
+        Value::Tree(tree) => hash_tree_value(hasher, tree),
+        other => {
+            hasher.update(b"v:");
+            hasher.update(other.key()?.as_bytes());
+            Some(())
         }
-        Value::ExecPath(path) => exec_mount_exec_path_singleflight_key(path),
-        Value::Blob(blob) => exec_mount_blob_singleflight_key(blob),
-        Value::Tree(tree) => exec_mount_tree_singleflight_key(tree),
-        other => other.key(),
     }
 }
 
-fn exec_mount_exec_path_singleflight_key(path: &ExecPathValue) -> Option<String> {
+fn hash_exec_path_value(hasher: &mut blake3::Hasher, path: &ExecPathValue) -> Option<()> {
     match path {
-        ExecPathValue::InTree { tree, suffix } => Some(format!(
-            "execpath:tree:{}:{}",
-            exec_mount_tree_singleflight_key(tree)?,
-            suffix.as_str()
-        )),
-        ExecPathValue::InBlob { blob, leaf } => Some(format!(
-            "execpath:blob:{}:{}",
-            exec_mount_blob_singleflight_key(blob)?,
-            leaf.as_str()
-        )),
-    }
-}
-
-fn exec_mount_blob_singleflight_key(blob: &BlobValue) -> Option<String> {
-    match blob {
-        BlobValue::Inline { .. } | BlobValue::Store { .. } => blob.key(),
-        BlobValue::FsFile { path, executable } => {
-            Some(format!("blob:fs:{executable}:{}", path.as_str()))
+        ExecPathValue::InTree { tree, suffix } => {
+            hasher.update(b"execpath:tree:");
+            hash_tree_value(hasher, tree)?;
+            hasher.update(suffix.as_str().as_bytes());
+            Some(())
+        }
+        ExecPathValue::InBlob { blob, leaf } => {
+            hasher.update(b"execpath:blob:");
+            hash_blob_value(hasher, blob)?;
+            hasher.update(leaf.as_str().as_bytes());
+            Some(())
         }
     }
 }
 
-fn exec_mount_tree_singleflight_key(tree: &TreeValue) -> Option<String> {
-    // Fast path: if the tree's merkle root is known (or computable from
-    // children's hashes), use it directly. This avoids the expensive
-    // recursive string-formatting walk for inline trees.
+fn hash_blob_value(hasher: &mut blake3::Hasher, blob: &BlobValue) -> Option<()> {
+    match blob {
+        BlobValue::Inline { bytes, executable } => {
+            hasher.update(b"blob:inline:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            hasher.update(blake3::hash(bytes).as_bytes());
+            Some(())
+        }
+        BlobValue::Store {
+            blob_ref,
+            executable,
+        } => {
+            hasher.update(b"blob:store:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            match blob_ref {
+                BlobRef::Small { chunk, size } => {
+                    hasher.update(&chunk.0.0);
+                    hasher.update(&size.to_le_bytes());
+                }
+                BlobRef::Large {
+                    blob_node,
+                    content_hash,
+                    size,
+                } => {
+                    hasher.update(&blob_node.0.0);
+                    hasher.update(&content_hash.0.0);
+                    hasher.update(&size.to_le_bytes());
+                }
+            }
+            Some(())
+        }
+        BlobValue::FsFile { path, executable } => {
+            hasher.update(b"blob:fs:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            hasher.update(path.as_str().as_bytes());
+            Some(())
+        }
+    }
+}
+
+fn hash_tree_value(hasher: &mut blake3::Hasher, tree: &TreeValue) -> Option<()> {
+    // Fast path: if the merkle root is known, just feed it into the hasher.
     if let Some(hash) = tree.node_hash() {
-        return Some(format!("tree:{hash}"));
+        hasher.update(b"tree:");
+        hasher.update(&hash.0.0);
+        return Some(());
     }
     match tree {
         TreeValue::Inline { entries, .. } => {
-            let mut parts = Vec::with_capacity(entries.len());
-            for (name, value) in entries.iter() {
-                parts.push(format!(
-                    "{}:{}",
-                    name.as_ref(),
-                    exec_mount_value_singleflight_key(value)?
-                ));
+            hasher.update(b"tree:inline:");
+            let mut sorted: Vec<_> = entries.iter().collect();
+            sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            for (name, value) in sorted {
+                hasher.update(name.as_bytes());
+                hasher.update(b"\x00");
+                hash_mount_value(hasher, value)?;
             }
-            parts.sort();
-            Some(format!("tree:inline:{{{}}}", parts.join(",")))
+            Some(())
         }
-        TreeValue::FsDir(path) => Some(format!("tree:fsdir:{}", path.as_str())),
-        TreeValue::Store(root) => Some(format!("tree:store:{root}")),
+        TreeValue::FsDir(path) => {
+            hasher.update(b"tree:fsdir:");
+            hasher.update(path.as_str().as_bytes());
+            Some(())
+        }
+        TreeValue::Store(root) => {
+            hasher.update(b"tree:store:");
+            hasher.update(&root.0.0);
+            Some(())
+        }
     }
 }
 

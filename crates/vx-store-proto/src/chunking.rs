@@ -32,6 +32,24 @@ pub struct PreparedBlob {
     pub blob_node: Option<SerializedBlobNode>,
 }
 
+impl PreparedBlob {
+    /// Convert to a `BlobRef` (without storing anything).
+    pub fn to_blob_ref(&self) -> BlobRef {
+        if let Some(blob_node) = &self.blob_node {
+            BlobRef::Large {
+                blob_node: blob_node.node_hash,
+                content_hash: self.content_hash,
+                size: self.chunks.iter().map(|c| c.size as u64).sum(),
+            }
+        } else {
+            BlobRef::Small {
+                chunk: self.chunks[0].hash,
+                size: self.chunks[0].size as u64,
+            }
+        }
+    }
+}
+
 /// A serialized BlobNode ready for storage.
 #[derive(Debug)]
 pub struct SerializedBlobNode {
