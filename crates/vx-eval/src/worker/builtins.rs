@@ -1268,14 +1268,14 @@ impl Engine {
         left: Value,
         right: Value,
     ) -> Result<Value, PoisonError> {
+        let spreads = self
+            .demand_many_shallow(vec![left, right], "forcing keyword record spreads")
+            .await?;
+        let [left, right]: [Value; 2] = spreads
+            .try_into()
+            .expect("keyword record spreads should match input arity");
         let mut entries = Vec::new();
-        let left = self
-            .materialize_value_shallow(left, "forcing keyword record spread")
-            .await?;
         self.extend_record_with_spread(&mut entries, left).await?;
-        let right = self
-            .materialize_value_shallow(right, "forcing keyword record spread")
-            .await?;
         self.extend_record_with_spread(&mut entries, right).await?;
         Ok(Value::Map(MapValue {
             entries: Arc::from(entries),

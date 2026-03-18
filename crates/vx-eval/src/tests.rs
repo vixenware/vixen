@@ -5026,6 +5026,133 @@ async fn array_flatten_schedules_item_containers_concurrently() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn array_spread_forces_spreads_concurrently() {
+    let engine = engine("fn main(a: Array, b: Array) { [..a, ..b] }");
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, Value::Array(Arc::from([Value::U64(1)]))),
+                engine.sleep_value(200, Value::Array(Arc::from([Value::U64(2)]))),
+            ],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn record_spread_forces_spreads_concurrently() {
+    let engine = engine("fn main(a: Map, b: Map) { { ..a, ..b } }");
+    let left = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("a")), Value::U64(1))]),
+    });
+    let right = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("b")), Value::U64(2))]),
+    });
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, left),
+                engine.sleep_value(200, right),
+            ],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Map(MapValue {
+            entries: Arc::from([
+                (Value::String(Arc::from("a")), Value::U64(1)),
+                (Value::String(Arc::from("b")), Value::U64(2)),
+            ]),
+        })
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn map_spread_forces_spreads_concurrently() {
+    let engine = engine("fn main(a: Map, b: Map) { %{ ..a, ..b } }");
+    let left = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("a")), Value::U64(1))]),
+    });
+    let right = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("b")), Value::U64(2))]),
+    });
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, left),
+                engine.sleep_value(200, right),
+            ],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Map(MapValue {
+            entries: Arc::from([
+                (Value::String(Arc::from("a")), Value::U64(1)),
+                (Value::String(Arc::from("b")), Value::U64(2)),
+            ]),
+        })
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keyword_record_spreads_are_merged_concurrently() {
+    let engine = engine(
+        r#"fn f() where { a: U64 = 0, b: U64 = 0 } { [a, b] }
+           fn main(left: Map, right: Map) { f() where { ..left, ..right } }"#,
+    );
+    let left = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("a")), Value::U64(1))]),
+    });
+    let right = Value::Map(MapValue {
+        entries: Arc::from([(Value::String(Arc::from("b")), Value::U64(2))]),
+    });
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, left),
+                engine.sleep_value(200, right),
+            ],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn exec_schedules_argument_resolution_concurrently() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) { process.exit_code }

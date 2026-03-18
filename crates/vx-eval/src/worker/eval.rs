@@ -177,6 +177,61 @@ impl Engine {
         }
     }
 
+    pub(super) async fn demand_many_shallow(
+        &self,
+        values: Vec<Value>,
+        context: &str,
+    ) -> Result<Vec<Value>, PoisonError> {
+        use tokio::task::JoinSet;
+
+        let mut join_set = JoinSet::new();
+        let engine = self.arc_self();
+        let demand_stack = self.current_demand_stack_ids();
+
+        for (idx, value) in values.into_iter().enumerate() {
+            let engine = Arc::clone(&engine);
+            let stack = demand_stack.clone();
+            join_set.spawn(async move {
+                let result = DEMAND_STACK
+                    .scope(RefCell::new(stack), async {
+                        engine.demand_value_shallow(value).await
+                    })
+                    .await;
+                (idx, result)
+            });
+        }
+
+        let mut results: Vec<Option<Result<Value, PoisonError>>> =
+            (0..join_set.len()).map(|_| None).collect();
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, result)) => {
+                    results[idx] = Some(result);
+                }
+                Err(join_error) => {
+                    if join_error.is_panic() {
+                        std::panic::resume_unwind(join_error.into_panic());
+                    }
+                    return Err(self.internal_error("demand_many_shallow: task was cancelled"));
+                }
+            }
+        }
+
+        let mut forced = Vec::with_capacity(results.len());
+        let mut errors = Vec::new();
+        for result in results {
+            match result.expect("all tasks should complete") {
+                Ok(value) => forced.push(value),
+                Err(error) => errors.push(error),
+            }
+        }
+        if errors.is_empty() {
+            Ok(forced)
+        } else {
+            Err(self.aggregate_poison_errors(context, errors))
+        }
+    }
+
     pub(crate) async fn inspect_value(&self, value: Value) -> Result<InspectedValue, PoisonError> {
         self.inspect_value_inner(value, &mut Vec::new()).await
     }
@@ -1897,7 +1952,13 @@ impl Engine {
                     }))
                 }
                 instr::Expr::Record(items) => {
-                    let mut entries = Vec::new();
+                    enum EvaluatedRecordItem {
+                        Field(Arc<str>, Value),
+                        Spread,
+                    }
+
+                    let mut evaluated_items = Vec::with_capacity(items.len());
+                    let mut spread_values = Vec::new();
                     for item in items {
                         match item {
                             instr::RecordItem::Field { name, value } => {
@@ -1913,7 +1974,10 @@ impl Engine {
                                     BuildResult::Value(value) => value,
                                     other => return other,
                                 };
-                                entries.push((Value::String(Arc::from(name.as_str())), value));
+                                evaluated_items.push(EvaluatedRecordItem::Field(
+                                    Arc::from(name.as_str()),
+                                    value,
+                                ));
                             }
                             instr::RecordItem::Spread(spread_expr) => {
                                 let spread_value = match self
@@ -1928,11 +1992,28 @@ impl Engine {
                                     BuildResult::Value(value) => value,
                                     other => return other,
                                 };
+                                spread_values.push(spread_value.clone());
+                                evaluated_items.push(EvaluatedRecordItem::Spread);
+                            }
+                        }
+                    }
+                    let spread_values = match self
+                        .demand_many_shallow(spread_values, "forcing record spreads")
+                        .await
+                    {
+                        Ok(values) => values,
+                        Err(error) => return BuildResult::Poisoned(error),
+                    };
+                    let mut spread_iter = spread_values.into_iter();
+                    let mut entries = Vec::new();
+                    for item in evaluated_items {
+                        match item {
+                            EvaluatedRecordItem::Field(name, value) => {
+                                entries.push((Value::String(name), value));
+                            }
+                            EvaluatedRecordItem::Spread => {
                                 let spread_value =
-                                    match self.demand_value_shallow(spread_value).await {
-                                        Ok(value) => value,
-                                        Err(error) => return BuildResult::Poisoned(error),
-                                    };
+                                    spread_iter.next().expect("spread values should align");
                                 match self
                                     .extend_record_with_spread(&mut entries, spread_value)
                                     .await
@@ -1948,7 +2029,13 @@ impl Engine {
                     }))
                 }
                 instr::Expr::Array(items) => {
-                    let mut values = Vec::with_capacity(items.len());
+                    enum EvaluatedArrayItem {
+                        Expr(Value),
+                        Spread,
+                    }
+
+                    let mut evaluated_items = Vec::with_capacity(items.len());
+                    let mut spread_values = Vec::new();
                     for item in items {
                         match item {
                             instr::ArrayItem::Expr(item_expr) => {
@@ -1961,7 +2048,9 @@ impl Engine {
                                     )
                                     .await
                                 {
-                                    BuildResult::Value(value) => values.push(value),
+                                    BuildResult::Value(value) => {
+                                        evaluated_items.push(EvaluatedArrayItem::Expr(value))
+                                    }
                                     other => return other,
                                 }
                             }
@@ -1978,11 +2067,26 @@ impl Engine {
                                     BuildResult::Value(value) => value,
                                     other => return other,
                                 };
+                                spread_values.push(spread_value.clone());
+                                evaluated_items.push(EvaluatedArrayItem::Spread);
+                            }
+                        }
+                    }
+                    let spread_values = match self
+                        .demand_many_shallow(spread_values, "forcing array spreads")
+                        .await
+                    {
+                        Ok(values) => values,
+                        Err(error) => return BuildResult::Poisoned(error),
+                    };
+                    let mut spread_iter = spread_values.into_iter();
+                    let mut values = Vec::with_capacity(items.len());
+                    for item in evaluated_items {
+                        match item {
+                            EvaluatedArrayItem::Expr(value) => values.push(value),
+                            EvaluatedArrayItem::Spread => {
                                 let spread_value =
-                                    match self.demand_value_shallow(spread_value).await {
-                                        Ok(value) => value,
-                                        Err(error) => return BuildResult::Poisoned(error),
-                                    };
+                                    spread_iter.next().expect("spread values should align");
                                 match self
                                     .extend_array_with_spread(&mut values, spread_value)
                                     .await
@@ -1996,7 +2100,13 @@ impl Engine {
                     BuildResult::Value(Value::Array(Arc::from(values)))
                 }
                 instr::Expr::Map(entries) => {
-                    let mut values = Vec::with_capacity(entries.len());
+                    enum EvaluatedMapItem {
+                        Entry(Value, Value),
+                        Spread,
+                    }
+
+                    let mut evaluated_entries = Vec::with_capacity(entries.len());
+                    let mut spread_values = Vec::new();
                     for entry in entries {
                         match entry {
                             instr::MapItem::Entry { key, value } => {
@@ -2024,7 +2134,7 @@ impl Engine {
                                     BuildResult::Value(value) => value,
                                     other => return other,
                                 };
-                                values.push((key, value));
+                                evaluated_entries.push(EvaluatedMapItem::Entry(key, value));
                             }
                             instr::MapItem::Spread(spread_expr) => {
                                 let spread_value = match self
@@ -2039,11 +2149,26 @@ impl Engine {
                                     BuildResult::Value(value) => value,
                                     other => return other,
                                 };
+                                spread_values.push(spread_value.clone());
+                                evaluated_entries.push(EvaluatedMapItem::Spread);
+                            }
+                        }
+                    }
+                    let spread_values = match self
+                        .demand_many_shallow(spread_values, "forcing map spreads")
+                        .await
+                    {
+                        Ok(values) => values,
+                        Err(error) => return BuildResult::Poisoned(error),
+                    };
+                    let mut spread_iter = spread_values.into_iter();
+                    let mut values = Vec::with_capacity(entries.len());
+                    for entry in evaluated_entries {
+                        match entry {
+                            EvaluatedMapItem::Entry(key, value) => values.push((key, value)),
+                            EvaluatedMapItem::Spread => {
                                 let spread_value =
-                                    match self.demand_value_shallow(spread_value).await {
-                                        Ok(value) => value,
-                                        Err(error) => return BuildResult::Poisoned(error),
-                                    };
+                                    spread_iter.next().expect("spread values should align");
                                 match self.extend_map_with_spread(&mut values, spread_value).await {
                                     Ok(()) => {}
                                     Err(error) => return BuildResult::Poisoned(error),
