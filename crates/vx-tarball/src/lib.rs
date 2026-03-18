@@ -11,8 +11,10 @@
 //! - Efficient partial materialization
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use vx_store_proto::{Blake3Hash, TreeManifest};
+use std::future::Future;
+use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncWriteExt};
+use vx_store_proto::{Blake3Hash, BlobRef, ContentHash, TreeManifest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TarballError {
@@ -55,6 +57,18 @@ pub enum TarballError {
     #[error("failed to read entry data: {0}")]
     ReadEntry(String),
 }
+
+/// Result returned by streamed regular-file extraction callbacks.
+#[derive(Debug, Clone)]
+pub struct ExtractedFile {
+    pub content_hash: ContentHash,
+    pub blob_ref: BlobRef,
+    pub size: u64,
+}
+
+pub type OwnedFileReader = Box<dyn AsyncRead + Unpin + Send>;
+pub type FileStreamCallbackFuture =
+    Pin<Box<dyn Future<Output = Result<ExtractedFile, String>> + Send>>;
 
 /// Compression format for tarballs
 #[derive(Debug, Clone, Copy)]
@@ -199,30 +213,32 @@ async fn extract_tar<R: AsyncRead + Unpin>(
 // Tree Extraction (CAS Deduplication)
 // =============================================================================
 
-/// Extract a tarball to a TreeManifest, storing each file via a callback.
+/// Extract a tarball to a TreeManifest, storing each regular file via a streaming callback.
 ///
-/// Instead of writing files to disk, this function:
-/// 1. Reads each file from the tarball
-/// 2. Calls `store_blob` to store the file contents (e.g., in CAS)
-/// 3. Records the path → blob mapping in a TreeManifest
-///
-/// The callback receives the file contents and should return the Blake3Hash
-/// of the stored blob.
+/// Instead of buffering each file entry in memory, this function:
+/// 1. Streams each regular file body directly from the tar entry
+/// 2. Calls `store_blob` while the entry is still being read
+/// 3. Records the path → content-hash mapping in a TreeManifest
+/// 4. Returns both the TreeManifest and the per-file streamed blob results
 ///
 /// # Arguments
 /// * `reader` - Any async reader (HTTP response, CAS stream, file, etc.)
 /// * `compression` - Compression format (Xz or Gzip)
 /// * `strip_components` - Number of leading path components to strip
-/// * `store_blob` - Async callback to store blob contents, returns Blake3Hash
+/// * `store_blob` - Async callback that consumes a streamed tar entry body
 ///
 /// # Returns
-/// A TreeManifest containing all extracted entries
-pub async fn extract_to_tree(
-    reader: impl AsyncRead + Unpin,
+/// A TreeManifest plus the per-file streamed blob results in path order
+pub async fn extract_to_tree<R, F>(
+    reader: R,
     compression: Compression,
     strip_components: u32,
-    store_blob: impl AsyncFn(Vec<u8>) -> Result<Blake3Hash, String>,
-) -> Result<TreeManifest, TarballError> {
+    store_blob: F,
+) -> Result<(TreeManifest, Vec<(String, ExtractedFile, bool)>), TarballError>
+where
+    R: AsyncRead + Unpin + Send,
+    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+{
     match compression {
         Compression::Xz => {
             let decoder = async_compression::tokio::bufread::XzDecoder::new(
@@ -239,12 +255,18 @@ pub async fn extract_to_tree(
     }
 }
 
-async fn extract_tar_to_tree(
-    reader: impl AsyncRead + Unpin,
+async fn extract_tar_to_tree<R, F>(
+    reader: R,
     strip_components: u32,
-    store_blob: impl AsyncFn(Vec<u8>) -> Result<Blake3Hash, String>,
-) -> Result<TreeManifest, TarballError> {
+    store_blob: F,
+) -> Result<(TreeManifest, Vec<(String, ExtractedFile, bool)>), TarballError>
+where
+    R: AsyncRead + Unpin + Send,
+    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+{
     let mut manifest = TreeManifest::new();
+    let mut extracted_files = Vec::new();
+    let mut pending_files = Vec::new();
     let mut archive = tokio_tar::Archive::new(reader);
     let mut entries = archive
         .entries()
@@ -315,37 +337,49 @@ async fn extract_tar_to_tree(
         }
 
         if entry_type.is_file() || entry_type.is_hard_link() {
-            // Read file contents
-            let size = entry.header().size().unwrap_or(0);
-            let mut contents = Vec::with_capacity(size as usize);
-            entry
-                .read_to_end(&mut contents)
-                .await
-                .map_err(|e| TarballError::ReadEntry(e.to_string()))?;
-
-            let actual_size = contents.len() as u64;
-
-            // Check if executable
             let executable = entry
                 .header()
                 .mode()
                 .map(|m| m & 0o111 != 0)
                 .unwrap_or(false);
+            let (mut writer, reader) = tokio::io::duplex(256 * 1024);
+            let path_for_task = path_str.clone();
+            let callback = store_blob(Box::new(reader), executable);
 
-            // Store the blob via callback
-            let blob_hash = store_blob(contents)
+            pending_files.push(tokio::spawn(async move {
+                let extracted = callback.await.map_err(TarballError::BlobStore)?;
+                Ok::<_, TarballError>((path_for_task, extracted, executable))
+            }));
+
+            tokio::io::copy(&mut entry, &mut writer)
                 .await
-                .map_err(TarballError::BlobStore)?;
-
-            manifest.add_file(path_str, blob_hash, actual_size, executable);
+                .map_err(|error| TarballError::ReadEntry(error.to_string()))?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|error| TarballError::ReadEntry(error.to_string()))?;
         }
         // Skip other entry types (devices, fifos, etc.)
     }
 
+    for pending in pending_files {
+        let (path_str, extracted, executable) = pending
+            .await
+            .map_err(|error| TarballError::ReadEntry(error.to_string()))??;
+        manifest.add_file(
+            path_str.clone(),
+            extracted.content_hash.0,
+            extracted.size,
+            executable,
+        );
+        extracted_files.push((path_str, extracted, executable));
+    }
+
     // Finalize: sort entries and compute stats
     manifest.finalize();
+    extracted_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(manifest)
+    Ok((manifest, extracted_files))
 }
 
 // =============================================================================
@@ -485,3 +519,6 @@ pub async fn materialize_tree(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

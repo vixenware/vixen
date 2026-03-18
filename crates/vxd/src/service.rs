@@ -18,9 +18,11 @@ use facet_postcard::{from_slice, to_vec};
 use facet_value::value;
 use futures_util::stream;
 use futures_util::{StreamExt, TryStreamExt};
+use http_body_util::BodyExt;
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
+use pin_project_lite::pin_project;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -30,7 +32,9 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +60,9 @@ use vx_runner_proto::{
     DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
     RunRequest, RunTreeMount, RunnerClient,
 };
-use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
+use vx_store_proto::chunking::{
+    prepare_blob, put_node_if_missing, store_blob_stream, store_prepared_blob,
+};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind, DirectoryNode,
     EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RemoteTracePhase,
@@ -70,6 +76,93 @@ use vxd_proto::{
 
 mod build_vx_render;
 pub(crate) use build_vx_render::run_build_vx_render_via_store;
+
+pin_project! {
+    struct AcquireDigestVerifyingReader<R> {
+        #[pin]
+        inner: R,
+        digest: AcquireDigest,
+        sha256: Sha256,
+        blake3: blake3::Hasher,
+        verified: bool,
+    }
+}
+
+impl<R: AsyncRead> AcquireDigestVerifyingReader<R> {
+    fn new(inner: R, digest: AcquireDigest) -> Self {
+        Self {
+            inner,
+            digest,
+            sha256: Sha256::new(),
+            blake3: blake3::Hasher::new(),
+            verified: false,
+        }
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for AcquireDigestVerifyingReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.project();
+        let before = buf.filled().len();
+
+        match this.inner.poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let after = buf.filled().len();
+                let new_data = &buf.filled()[before..after];
+                this.sha256.update(new_data);
+                this.blake3.update(new_data);
+
+                if new_data.is_empty() && !*this.verified {
+                    let verified = match this.digest {
+                        AcquireDigest::Sha256(expected) => {
+                            let actual = this.sha256.finalize_reset();
+                            if actual.as_slice() == expected.as_slice() {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!(
+                                        "acquire digest mismatch: expected sha256:{}, got sha256:{}",
+                                        hex::encode(expected),
+                                        hex::encode(actual),
+                                    ),
+                                ))
+                            }
+                        }
+                        AcquireDigest::Blake3(expected) => {
+                            let actual = *this.blake3.finalize().as_bytes();
+                            if actual == *expected {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!(
+                                        "acquire digest mismatch: expected blake3:{}, got blake3:{}",
+                                        hex::encode(expected),
+                                        hex::encode(actual),
+                                    ),
+                                ))
+                            }
+                        }
+                    };
+
+                    if let Err(error) = verified {
+                        return Poll::Ready(Err(error));
+                    }
+                    *this.verified = true;
+                }
+
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// Toolchain information (manifest-only, no materialization)
 pub struct ToolchainInfo {
@@ -2206,35 +2299,15 @@ impl AcquireDigest {
             Self::Blake3(bytes) => format!("blake3:{}", hex::encode(bytes)),
         }
     }
+}
 
-    fn verify(self, bytes: &[u8]) -> std::result::Result<(), String> {
-        match self {
-            Self::Sha256(expected) => {
-                let actual = Sha256::digest(bytes);
-                if actual.as_slice() == expected.as_slice() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "acquire digest mismatch: expected sha256:{}, got sha256:{}",
-                        hex::encode(expected),
-                        hex::encode(actual)
-                    ))
-                }
-            }
-            Self::Blake3(expected) => {
-                let actual = *blake3::hash(bytes).as_bytes();
-                if actual == expected {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "acquire digest mismatch: expected blake3:{}, got blake3:{}",
-                        hex::encode(expected),
-                        hex::encode(actual)
-                    ))
-                }
-            }
-        }
-    }
+fn acquire_trace_args(request: &EvalAcquireRequest, display_name: &str) -> facet_value::Value {
+    value!({
+        "display_name": ((display_name.to_string())),
+        "url": ((request.url.clone())),
+        "digest": ((request.digest.clone())),
+        "extract": ((request.extract.clone().unwrap_or_default()))
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -2584,12 +2657,6 @@ pub(crate) async fn run_build_vx_acquire_via_store(
     event_recorder: Option<&vx_eval::EventRecorder>,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
-    let trace_args = value!({
-        "display_name": ("acquire(..)"),
-        "url": ((request.url.clone())),
-        "digest": ((request.digest.clone())),
-        "extract": ((request.extract.clone().unwrap_or_default())),
-    });
     let digest = AcquireDigest::parse(&request.digest)
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let extract_format = request
@@ -2610,11 +2677,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
             EventSink::begin_span_with_args(
                 recorder,
                 "acquire.lookup",
-                value!({
-                    "display_name": ("acquire lookup"),
-                    "cache_key": ((cache_key.to_hex().to_string())),
-                    ..trace_args.clone(),
-                }),
+                acquire_trace_args(&request, "acquire lookup"),
             )
         });
         store.lookup(cache_key).await.map_err(|error| {
@@ -2627,11 +2690,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
             EventSink::begin_span_with_args(
                 recorder,
                 "acquire.load_cached",
-                value!({
-                    "display_name": ("load cached acquire"),
-                    "manifest_hash": ((cached.to_string())),
-                    ..trace_args.clone(),
-                }),
+                acquire_trace_args(&request, "load cached acquire"),
             )
         });
         match extract_format {
@@ -2643,18 +2702,15 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 })?,
         }
     } else {
-        let bytes = {
+        let response = {
             let _download_span = event_recorder.map(|recorder| {
                 EventSink::begin_span_with_args(
                     recorder,
                     "acquire.download",
-                    value!({
-                        "display_name": ("download acquire payload"),
-                        ..trace_args.clone(),
-                    }),
+                    acquire_trace_args(&request, "download acquire payload"),
                 )
             });
-            vx_http::get_bytes(&request.url).await.map_err(|error| {
+            vx_http::get(&request.url).await.map_err(|error| {
                 exec_bridge_poison(
                     PoisonKind::UserFail,
                     format!("failed to acquire {}: {error}", request.url),
@@ -2662,52 +2718,50 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 )
             })?
         };
-        {
-            let _verify_span = event_recorder.map(|recorder| {
-                EventSink::begin_span_with_args(
-                    recorder,
-                    "acquire.verify",
-                    value!({
-                        "display_name": ("verify acquire digest"),
-                        "bytes": ((bytes.len() as u64)),
-                        ..trace_args.clone(),
-                    }),
-                )
-            });
-            digest.verify(&bytes).map_err(|message| {
-                exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
-            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(exec_bridge_poison(
+                PoisonKind::UserFail,
+                format!("failed to acquire {}: HTTP {status}", request.url),
+                &demand_chain,
+            ));
         }
+
+        let body_reader = tokio_util::io::StreamReader::new(
+            response
+                .into_body()
+                .into_data_stream()
+                .map(|result| result.map_err(std::io::Error::other)),
+        );
+        let mut reader = Box::pin(AcquireDigestVerifyingReader::new(body_reader, digest));
 
         match extract_format {
             Some(format) => {
-                let files = Arc::new(SyncMutex::new("vxd/acquire_file_info", HashMap::new()));
-                let files_for_extract = Arc::clone(&files);
                 let store_for_extract = Arc::clone(store);
-                let tree = {
+                let (tree, extracted_files) = {
                     let _extract_span = event_recorder.map(|recorder| {
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.extract",
-                            value!({
-                                "display_name": ("extract acquire archive"),
-                                "compression": ((format.compression().as_str().to_string())),
-                                "bytes": ((bytes.len() as u64)),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "extract acquire archive"),
                         )
                     });
                     vx_tarball::extract_to_tree(
-                        std::io::Cursor::new(bytes),
+                        &mut reader,
                         format.compression(),
                         0,
-                        async move |data: Vec<u8>| {
-                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = prepare_blob(&data);
-                            let blob_ref =
-                                store_prepared_blob(&store_for_extract, &prepared, &data).await?;
-                            files_for_extract.lock().insert(content_hash.0, blob_ref);
-                            Ok(content_hash.0)
+                        move |mut entry_reader, _executable: bool| {
+                            let store_for_extract = Arc::clone(&store_for_extract);
+                            Box::pin(async move {
+                                let streamed =
+                                    store_blob_stream(&store_for_extract, entry_reader.as_mut())
+                                        .await?;
+                                Ok(vx_tarball::ExtractedFile {
+                                    content_hash: streamed.content_hash,
+                                    blob_ref: streamed.blob_ref,
+                                    size: streamed.size,
+                                })
+                            })
                         },
                     )
                     .await
@@ -2719,17 +2773,25 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         )
                     })?
                 };
-                let files = files.lock().clone();
+                tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                    .await
+                    .map_err(|error| {
+                        exec_bridge_poison(
+                            PoisonKind::UserFail,
+                            format!("failed to verify {}: {error}", request.url),
+                            &demand_chain,
+                        )
+                    })?;
+                let files = extracted_files
+                    .into_iter()
+                    .map(|(_, extracted, _)| (extracted.content_hash.0, extracted.blob_ref))
+                    .collect::<HashMap<_, _>>();
                 let (root, _) = {
                     let _manifest_span = event_recorder.map(|recorder| {
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.store_tree",
-                            value!({
-                                "display_name": ("store acquire tree"),
-                                "files": ((files.len() as u64)),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "store acquire tree"),
                         )
                     });
                     store_acquired_tree_manifest(store, &tree, &files)
@@ -2743,11 +2805,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.publish_cache",
-                            value!({
-                                "display_name": ("publish acquire cache"),
-                                "root": ((root.to_string())),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "publish acquire cache"),
                         )
                     });
                     publish_acquire_cache_entry(store, cache_key, root)
@@ -2759,21 +2817,17 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 Value::Tree(TreeValue::Store(root))
             }
             None => {
-                let prepared = prepare_blob(&bytes);
                 let blob_ref = {
                     let _store_blob_span = event_recorder.map(|recorder| {
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.store_blob",
-                            value!({
-                                "display_name": ("store acquire blob"),
-                                "bytes": ((bytes.len() as u64)),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "store acquire blob"),
                         )
                     });
-                    store_prepared_blob(store, &prepared, &bytes)
+                    store_blob_stream(store, &mut reader)
                         .await
+                        .map(|streamed| streamed.blob_ref)
                         .map_err(|message| {
                             exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
                         })?
@@ -2796,11 +2850,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.store_manifest",
-                            value!({
-                                "display_name": ("store acquire manifest"),
-                                "manifest_hash": ((manifest_hash.to_string())),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "store acquire manifest"),
                         )
                     });
                     store
@@ -2819,11 +2869,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         EventSink::begin_span_with_args(
                             recorder,
                             "acquire.publish_cache",
-                            value!({
-                                "display_name": ("publish acquire cache"),
-                                "manifest_hash": ((manifest_hash.to_string())),
-                                ..trace_args.clone(),
-                            }),
+                            acquire_trace_args(&request, "publish acquire cache"),
                         )
                     });
                     publish_acquire_cache_entry(store, cache_key, manifest_hash)
@@ -2844,10 +2890,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         EventSink::begin_span_with_args(
             recorder,
             "acquire.hydrate",
-            value!({
-                "display_name": ("hydrate acquire result"),
-                ..trace_args.clone(),
-            }),
+            acquire_trace_args(&request, "hydrate acquire result"),
         )
     });
     hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
@@ -3899,7 +3942,7 @@ impl BuildRuntime for BuildVxRuntime {
         Box::pin(async move {
             let summary = summarize_build_vx_acquire_request(&request);
             self.emit_boundary_log(&summary).await;
-            run_build_vx_acquire_via_store(&self.store, request)
+            run_build_vx_acquire_via_store(&self.store, request, self.event_recorder.as_ref())
                 .await
                 .map_err(|error| error.with_context(summary))
         })

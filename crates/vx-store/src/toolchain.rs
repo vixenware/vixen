@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use vx_store_proto::chunking::prepare_blob;
+use tokio::io::AsyncRead;
+use vx_store_proto::chunking::{PreparedBlob, StreamingBlobBuilder, prepare_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind,
     DirectoryNode, EnsureRustToolchainComponentResult, EnsureStatus,
@@ -13,7 +14,7 @@ use vx_store_proto::{
     RustComponent, RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
     ToolchainComponentTree, ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
-use vx_tarball::Compression;
+use vx_tarball::{Compression, FileStreamCallbackFuture, OwnedFileReader};
 
 use crate::types::StoreService;
 
@@ -138,15 +139,18 @@ async fn download_component(
 /// The store_blob callback now chunks data and stores chunks/BlobNodes.
 /// It returns a Blake3Hash (content hash) for the TreeManifest, but also
 /// records per-file info via the side channel.
-async fn download_and_extract_component(
+async fn download_and_extract_component<F>(
     url: &str,
     expected_hash: &str,
     component_name: &str,
     compression: Compression,
     strip_components: u32,
     progress: &roam::Tx<StoreProgress>,
-    store_blob: impl AsyncFn(Vec<u8>) -> Result<Blake3Hash, String>,
-) -> Result<vx_store_proto::TreeManifest, vx_toolchain::ToolchainError> {
+    store_blob: F,
+) -> Result<vx_store_proto::TreeManifest, vx_toolchain::ToolchainError>
+where
+    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+{
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -255,6 +259,8 @@ async fn download_and_extract_component(
     )
     .await;
 
+    let (tree, _extracted_files) = tree;
+
     tracing::debug!(
         url = %url,
         bytes = counter.load(std::sync::atomic::Ordering::Relaxed),
@@ -360,7 +366,14 @@ impl ToolchainManager {
 /// Store blob data as chunks, return a BlobRef.
 async fn store_blob_chunked(service: &StoreService, data: &[u8]) -> Result<BlobRef, String> {
     let prepared = prepare_blob(data);
+    store_prepared_blob_via_service(service, &prepared, data).await
+}
 
+async fn store_prepared_blob_via_service(
+    service: &StoreService,
+    prepared: &PreparedBlob,
+    data: &[u8],
+) -> Result<BlobRef, String> {
     // Store all chunks
     for chunk_info in &prepared.chunks {
         let chunk_data = &data[chunk_info.offset..chunk_info.offset + chunk_info.size as usize];
@@ -390,6 +403,52 @@ async fn store_blob_chunked(service: &StoreService, data: &[u8]) -> Result<BlobR
             size: data.len() as u64,
         })
     }
+}
+
+async fn store_blob_stream_via_service<R: AsyncRead + Unpin + ?Sized>(
+    service: &StoreService,
+    reader: &mut R,
+) -> Result<(ContentHash, BlobRef, u64), String> {
+    let mut builder = StreamingBlobBuilder::new();
+    let mut buf = vec![0u8; 256 * 1024];
+
+    loop {
+        let read = tokio::io::AsyncReadExt::read(reader, &mut buf)
+            .await
+            .map_err(|e| format!("failed to read streamed blob: {e}"))?;
+        if read == 0 {
+            break;
+        }
+
+        for chunk in builder.push_bytes(&buf[..read]) {
+            service
+                .storage
+                .put_chunk(&chunk.hash, &chunk.data)
+                .await
+                .map_err(|e| format!("failed to store chunk: {e}"))?;
+        }
+    }
+
+    let finished = builder.finish();
+    service
+        .storage
+        .put_chunk(&finished.final_chunk.hash, &finished.final_chunk.data)
+        .await
+        .map_err(|e| format!("failed to store final chunk: {e}"))?;
+
+    if let Some(blob_node) = &finished.streamed.blob_node {
+        service
+            .storage
+            .put_node(&blob_node.node_hash, &blob_node.serialized_bytes)
+            .await
+            .map_err(|e| format!("failed to store BlobNode: {e}"))?;
+    }
+
+    Ok((
+        finished.streamed.content_hash,
+        finished.streamed.blob_ref,
+        finished.streamed.size,
+    ))
 }
 
 /// Build a DirectoryNode Merkle tree from a flat list of (path, info) pairs.
@@ -870,40 +929,31 @@ impl StoreService {
                         Compression::Xz,
                         2,
                         progress,
-                        async move |data: Vec<u8>| {
-                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = prepare_blob(&data);
-                            // Store chunks
-                            for ci in &prepared.chunks {
-                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                                this1
-                                    .storage
-                                    .put_chunk(&ci.hash, chunk_data)
-                                    .await
-                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
-                            }
-                            // Store blob node if multi-chunk
-                            let blob_node = if let Some(bn) = &prepared.blob_node {
-                                this1
-                                    .storage
-                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                    .await
-                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                                Some(bn.node_hash)
-                            } else {
-                                None
-                            };
-                            // Track info
-                            rustc_info.lock().insert(
-                                content_hash.0,
-                                ExtractedFileInfo {
+                        move |mut reader: OwnedFileReader, _executable: bool| {
+                            let rustc_info = rustc_info.clone();
+                            let this1 = this1.clone();
+                            Box::pin(async move {
+                                let (content_hash, blob_ref, size) =
+                                    store_blob_stream_via_service(&this1, reader.as_mut()).await?;
+                                let blob_node = match &blob_ref {
+                                    BlobRef::Large { blob_node, .. } => Some(*blob_node),
+                                    BlobRef::Small { .. } => None,
+                                };
+                                rustc_info.lock().insert(
+                                    content_hash.0,
+                                    ExtractedFileInfo {
+                                        content_hash,
+                                        blob_node,
+                                        size,
+                                        executable: false, // will be set from tree manifest
+                                    },
+                                );
+                                Ok(vx_tarball::ExtractedFile {
                                     content_hash,
-                                    blob_node,
-                                    size: data.len() as u64,
-                                    executable: false, // will be set from tree manifest
-                                },
-                            );
-                            Ok(content_hash.0)
+                                    blob_ref,
+                                    size,
+                                })
+                            })
                         },
                     )
                     .await
@@ -924,37 +974,31 @@ impl StoreService {
                         Compression::Xz,
                         2,
                         progress,
-                        async move |data: Vec<u8>| {
-                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = prepare_blob(&data);
-                            for ci in &prepared.chunks {
-                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                                this2
-                                    .storage
-                                    .put_chunk(&ci.hash, chunk_data)
-                                    .await
-                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
-                            }
-                            let blob_node = if let Some(bn) = &prepared.blob_node {
-                                this2
-                                    .storage
-                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                    .await
-                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                                Some(bn.node_hash)
-                            } else {
-                                None
-                            };
-                            std_info.lock().insert(
-                                content_hash.0,
-                                ExtractedFileInfo {
+                        move |mut reader: OwnedFileReader, _executable: bool| {
+                            let std_info = std_info.clone();
+                            let this2 = this2.clone();
+                            Box::pin(async move {
+                                let (content_hash, blob_ref, size) =
+                                    store_blob_stream_via_service(&this2, reader.as_mut()).await?;
+                                let blob_node = match &blob_ref {
+                                    BlobRef::Large { blob_node, .. } => Some(*blob_node),
+                                    BlobRef::Small { .. } => None,
+                                };
+                                std_info.lock().insert(
+                                    content_hash.0,
+                                    ExtractedFileInfo {
+                                        content_hash,
+                                        blob_node,
+                                        size,
+                                        executable: false,
+                                    },
+                                );
+                                Ok(vx_tarball::ExtractedFile {
                                     content_hash,
-                                    blob_node,
-                                    size: data.len() as u64,
-                                    executable: false,
-                                },
-                            );
-                            Ok(content_hash.0)
+                                    blob_ref,
+                                    size,
+                                })
+                            })
                         },
                     )
                     .await
@@ -1534,44 +1578,40 @@ impl StoreService {
         let file_info_clone = file_info.clone();
         let this = self.clone();
 
-        let tree = match vx_tarball::extract_to_tree(
+        let (tree, _extracted_files) = match vx_tarball::extract_to_tree(
             std::io::Cursor::new(tarball),
             Compression::Xz,
             strip_components,
-            async move |data: Vec<u8>| {
-                let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                let prepared = prepare_blob(&data);
-                for ci in &prepared.chunks {
-                    let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                    this.storage
-                        .put_chunk(&ci.hash, chunk_data)
-                        .await
-                        .map_err(|e| format!("failed to write chunk: {e}"))?;
-                }
-                let blob_node = if let Some(bn) = &prepared.blob_node {
-                    this.storage
-                        .put_node(&bn.node_hash, &bn.serialized_bytes)
-                        .await
-                        .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                    Some(bn.node_hash)
-                } else {
-                    None
-                };
-                file_info_clone.lock().insert(
-                    content_hash.0,
-                    ExtractedFileInfo {
+            move |mut reader: OwnedFileReader, _executable: bool| {
+                let file_info_clone = file_info_clone.clone();
+                let this = this.clone();
+                Box::pin(async move {
+                    let (content_hash, blob_ref, size) =
+                        store_blob_stream_via_service(&this, reader.as_mut()).await?;
+                    let blob_node = match &blob_ref {
+                        BlobRef::Large { blob_node, .. } => Some(*blob_node),
+                        BlobRef::Small { .. } => None,
+                    };
+                    file_info_clone.lock().insert(
+                        content_hash.0,
+                        ExtractedFileInfo {
+                            content_hash,
+                            blob_node,
+                            size,
+                            executable: false,
+                        },
+                    );
+                    Ok(vx_tarball::ExtractedFile {
                         content_hash,
-                        blob_node,
-                        size: data.len() as u64,
-                        executable: false,
-                    },
-                );
-                Ok(content_hash.0)
+                        blob_ref,
+                        size,
+                    })
+                })
             },
         )
         .await
         {
-            Ok(tree) => tree,
+            Ok(result) => result,
             Err(e) => {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),

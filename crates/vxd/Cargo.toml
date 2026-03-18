@@ -30,6 +30,7 @@ tracing = { workspace = true }
 libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
+pin-project-lite = { workspace = true }
 hex = { workspace = true }
 ignore = "0.4"
 base64 = "0.22"
@@ -37,6 +38,7 @@ flate2 = "1"
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
+http-body-util = "0.1"
 
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }

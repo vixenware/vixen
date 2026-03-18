@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use tokio::io::{AsyncRead, AsyncReadExt};
+
 use crate::{
     Blake3Hash, BlobNode, BlobRef, CDC_AVG_CHUNK, CDC_MAX_CHUNK, CDC_MIN_CHUNK, CDC_PARAMS_ID,
     CasNode, ChunkEntry, ChunkHash, ContentHash, MAX_MISSING_CHUNKS_BATCH, MAX_MISSING_NODES_BATCH,
@@ -54,12 +56,193 @@ impl PreparedBlob {
 }
 
 /// A serialized BlobNode ready for storage.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SerializedBlobNode {
     /// Hash of serialized_bytes (blake3), used as the node address.
     pub node_hash: NodeHash,
     /// The raw bytes to pass to `put_node`.
     pub serialized_bytes: Vec<u8>,
+}
+
+/// Bytes for a chunk that is ready to store.
+#[derive(Debug, Clone)]
+pub struct ReadyChunk {
+    /// Hash of the chunk bytes (used to address in chunks/).
+    pub hash: ChunkHash,
+    /// Raw chunk bytes.
+    pub data: Vec<u8>,
+    /// Byte offset of this chunk within the original data.
+    pub offset: usize,
+}
+
+/// Final result of streaming blob ingestion.
+#[derive(Debug)]
+pub struct StreamedBlob {
+    /// Blake3 of full file content (for integrity verification).
+    pub content_hash: ContentHash,
+    /// Final blob reference shape.
+    pub blob_ref: BlobRef,
+    /// Total input size in bytes.
+    pub size: u64,
+    /// Chunk metadata in file order.
+    pub chunks: Vec<ChunkInfo>,
+    /// Serialized BlobNode for multi-chunk blobs.
+    pub blob_node: Option<SerializedBlobNode>,
+}
+
+impl StreamedBlob {
+    /// Convert the streamed result into a PreparedBlob-compatible shape.
+    pub fn to_prepared_blob(&self) -> PreparedBlob {
+        PreparedBlob {
+            content_hash: self.content_hash,
+            chunks: self.chunks.clone(),
+            blob_node: self.blob_node.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FinishedStreamingBlob {
+    pub streamed: StreamedBlob,
+    pub final_chunk: ReadyChunk,
+}
+
+/// Incremental blob builder that preserves the exact `prepare_blob` semantics:
+/// - one chunk for total size <= CDC_MAX_CHUNK
+/// - FastCDC only once total size exceeds CDC_MAX_CHUNK
+#[derive(Debug)]
+pub struct StreamingBlobBuilder {
+    pending: Vec<u8>,
+    offset: usize,
+    chunks: Vec<ChunkInfo>,
+    content_hasher: blake3::Hasher,
+    total_size: u64,
+}
+
+impl StreamingBlobBuilder {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            offset: 0,
+            chunks: Vec::new(),
+            content_hasher: blake3::Hasher::new(),
+            total_size: 0,
+        }
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<ReadyChunk> {
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+
+        self.content_hasher.update(bytes);
+        self.total_size += bytes.len() as u64;
+        self.pending.extend_from_slice(bytes);
+
+        let mut ready = Vec::new();
+        while self.pending.len() > CDC_MAX_CHUNK as usize {
+            let mut chunks = fastcdc::v2020::FastCDC::new(
+                &self.pending,
+                CDC_MIN_CHUNK,
+                CDC_AVG_CHUNK,
+                CDC_MAX_CHUNK,
+            );
+            let Some(chunk) = chunks.next() else {
+                break;
+            };
+
+            let chunk_len = chunk.length;
+            let chunk_data = self.pending.drain(..chunk_len).collect::<Vec<_>>();
+            let hash = ChunkHash(Blake3Hash(*blake3::hash(&chunk_data).as_bytes()));
+            let offset = self.offset;
+            self.offset += chunk_len;
+
+            self.chunks.push(ChunkInfo {
+                hash,
+                offset,
+                size: chunk_len as u32,
+            });
+            ready.push(ReadyChunk {
+                hash,
+                data: chunk_data,
+                offset,
+            });
+        }
+
+        ready
+    }
+
+    pub fn finish(mut self) -> FinishedStreamingBlob {
+        let final_chunk = ReadyChunk {
+            hash: ChunkHash(Blake3Hash(*blake3::hash(&self.pending).as_bytes())),
+            data: self.pending,
+            offset: self.offset,
+        };
+
+        self.chunks.push(ChunkInfo {
+            hash: final_chunk.hash,
+            offset: final_chunk.offset,
+            size: final_chunk.data.len() as u32,
+        });
+
+        let content_hash = ContentHash(Blake3Hash(*self.content_hasher.finalize().as_bytes()));
+
+        let blob_node = if self.chunks.len() >= 2 {
+            let blob = BlobNode {
+                chunks: self
+                    .chunks
+                    .iter()
+                    .map(|chunk| ChunkEntry {
+                        hash: chunk.hash,
+                        size: chunk.size,
+                    })
+                    .collect(),
+                total_size: self.total_size,
+                content_hash,
+                cdc_params_id: CDC_PARAMS_ID,
+            };
+
+            let node = CasNode::Blob(blob);
+            let (serialized_bytes, node_hash) = node.to_bytes_and_hash();
+
+            Some(SerializedBlobNode {
+                node_hash,
+                serialized_bytes,
+            })
+        } else {
+            None
+        };
+
+        let blob_ref = if let Some(blob_node) = &blob_node {
+            BlobRef::Large {
+                blob_node: blob_node.node_hash,
+                content_hash,
+                size: self.total_size,
+            }
+        } else {
+            BlobRef::Small {
+                chunk: self.chunks[0].hash,
+                size: self.total_size,
+            }
+        };
+
+        FinishedStreamingBlob {
+            streamed: StreamedBlob {
+                content_hash,
+                blob_ref,
+                size: self.total_size,
+                chunks: self.chunks,
+                blob_node,
+            },
+            final_chunk,
+        }
+    }
+}
+
+impl Default for StreamingBlobBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Chunk data using FastCDC with the canonical CDC parameters.
@@ -100,39 +283,9 @@ pub fn chunk_data(data: &[u8]) -> Vec<ChunkInfo> {
 
 /// Chunk data and compute the content hash + BlobNode if needed.
 pub fn prepare_blob(data: &[u8]) -> PreparedBlob {
-    let content_hash = ContentHash(Blake3Hash(*blake3::hash(data).as_bytes()));
-    let chunks = chunk_data(data);
-
-    let blob_node = if chunks.len() >= 2 {
-        let blob = BlobNode {
-            chunks: chunks
-                .iter()
-                .map(|chunk| ChunkEntry {
-                    hash: chunk.hash,
-                    size: chunk.size,
-                })
-                .collect(),
-            total_size: data.len() as u64,
-            content_hash,
-            cdc_params_id: CDC_PARAMS_ID,
-        };
-
-        let node = CasNode::Blob(blob);
-        let (serialized_bytes, node_hash) = node.to_bytes_and_hash();
-
-        Some(SerializedBlobNode {
-            node_hash,
-            serialized_bytes,
-        })
-    } else {
-        None
-    };
-
-    PreparedBlob {
-        content_hash,
-        chunks,
-        blob_node,
-    }
+    let mut builder = StreamingBlobBuilder::new();
+    let _ = builder.push_bytes(data);
+    builder.finish().streamed.to_prepared_blob()
 }
 
 /// Store a prepared blob (chunks plus optional BlobNode) into the store.
@@ -184,6 +337,60 @@ pub async fn store_prepared_blob(
             size: data.len() as u64,
         })
     }
+}
+
+/// Store a blob from an AsyncRead source using the shared streaming CDC pipeline.
+///
+/// This preserves the exact same chunking semantics as `prepare_blob()`:
+/// a single chunk for total size <= CDC_MAX_CHUNK, otherwise canonical FastCDC.
+pub async fn store_blob_stream<R: AsyncRead + Unpin + ?Sized>(
+    store: &StoreClient,
+    reader: &mut R,
+) -> Result<StreamedBlob, String> {
+    let mut builder = StreamingBlobBuilder::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut uploaded_hashes = HashSet::new();
+
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .await
+            .map_err(|error| format!("{error}"))?;
+        if read == 0 {
+            break;
+        }
+
+        for chunk in builder.push_bytes(&buf[..read]) {
+            if uploaded_hashes.insert(chunk.hash) {
+                store
+                    .put_chunk(chunk.hash, chunk.data)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+        }
+    }
+
+    let finished = builder.finish();
+    let streamed = finished.streamed;
+    let final_chunk = finished.final_chunk;
+
+    if uploaded_hashes.insert(final_chunk.hash) {
+        store
+            .put_chunk(final_chunk.hash, final_chunk.data)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+    }
+
+    if let Some(blob_node) = &streamed.blob_node {
+        put_node_if_missing(
+            store,
+            blob_node.node_hash,
+            blob_node.serialized_bytes.clone(),
+        )
+        .await?;
+    }
+
+    Ok(streamed)
 }
 
 pub async fn list_missing_chunks(
@@ -350,5 +557,55 @@ mod tests {
             prepared.content_hash,
             ContentHash(Blake3Hash(*blake3::hash(&data).as_bytes()))
         );
+    }
+
+    #[test]
+    fn streaming_builder_matches_prepare_blob_for_small_inputs() {
+        let data = b"hello streamed world";
+        let prepared = prepare_blob(data);
+
+        let mut builder = StreamingBlobBuilder::new();
+        let ready = builder.push_bytes(&data[..5]);
+        assert!(ready.is_empty());
+        let ready = builder.push_bytes(&data[5..]);
+        assert!(ready.is_empty());
+
+        let finished = builder.finish();
+        let streamed = finished.streamed;
+        assert_eq!(streamed.content_hash, prepared.content_hash);
+        assert_eq!(streamed.chunks.len(), prepared.chunks.len());
+        assert_eq!(streamed.blob_node.is_none(), prepared.blob_node.is_none());
+        for (left, right) in streamed.chunks.iter().zip(prepared.chunks.iter()) {
+            assert_eq!(left.hash, right.hash);
+            assert_eq!(left.offset, right.offset);
+            assert_eq!(left.size, right.size);
+        }
+    }
+
+    #[test]
+    fn streaming_builder_matches_prepare_blob_for_large_inputs() {
+        let data = vec![0xCD; (CDC_MAX_CHUNK as usize) + (CDC_MIN_CHUNK as usize) + 12345];
+        let prepared = prepare_blob(&data);
+
+        let mut builder = StreamingBlobBuilder::new();
+        for chunk in data.chunks(97 * 1024) {
+            let _ = builder.push_bytes(chunk);
+        }
+
+        let finished = builder.finish();
+        let streamed = finished.streamed;
+        assert_eq!(streamed.content_hash, prepared.content_hash);
+        assert_eq!(streamed.chunks.len(), prepared.chunks.len());
+        assert_eq!(streamed.blob_node.is_some(), prepared.blob_node.is_some());
+        for (left, right) in streamed.chunks.iter().zip(prepared.chunks.iter()) {
+            assert_eq!(left.hash, right.hash);
+            assert_eq!(left.offset, right.offset);
+            assert_eq!(left.size, right.size);
+        }
+
+        let left_blob = streamed.blob_node.expect("streamed blob node");
+        let right_blob = prepared.blob_node.expect("prepared blob node");
+        assert_eq!(left_blob.node_hash, right_blob.node_hash);
+        assert_eq!(left_blob.serialized_bytes, right_blob.serialized_bytes);
     }
 }

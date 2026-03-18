@@ -4059,6 +4059,7 @@ dependencies = [
  "fastcdc",
  "hex",
  "roam",
+ "tokio",
 ]
 
 [[package]]
@@ -4067,8 +4068,10 @@ version = "0.1.0"
 dependencies = [
  "async-compression",
  "camino",
+ "flate2",
  "futures-util",
  "moire",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tar",
@@ -4226,11 +4229,13 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "http-body-util",
  "ignore",
  "libc",
  "moire",
  "petgraph 0.8.3",
  "picante",
+ "pin-project-lite",
  "roam",
  "roam-core",
  "roam-stream",

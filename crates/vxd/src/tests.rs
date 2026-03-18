@@ -2005,10 +2005,10 @@ async fn acquire_blob_reuses_the_persistent_store_cache() {
         demand_chain: DemandChain::new(),
     };
 
-    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone())
+    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone(), None)
         .await
         .expect("first acquire should succeed");
-    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request)
+    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request, None)
         .await
         .expect("second acquire should succeed");
 
@@ -2039,10 +2039,10 @@ async fn acquire_extract_reuses_the_persistent_store_cache() {
         demand_chain: DemandChain::new(),
     };
 
-    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone())
+    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone(), None)
         .await
         .expect("first extract acquire should succeed");
-    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request)
+    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request, None)
         .await
         .expect("second extract acquire should succeed");
 
