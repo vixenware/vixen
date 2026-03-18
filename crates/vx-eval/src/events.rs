@@ -161,6 +161,10 @@ impl RecorderInner {
             .unwrap_or_else(|| self.next_track_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    fn acquire_persistent_track_id(&self) -> u64 {
+        self.next_track_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn release_track_id(&self, track_id: u64) {
         if track_id == 0 {
             return;
@@ -291,7 +295,7 @@ impl EventRecorder {
         sort_index: i64,
         parent_track_id: Option<u64>,
     ) -> DetachedTrack {
-        let track_id = self.inner.acquire_track_id();
+        let track_id = self.inner.acquire_persistent_track_id();
         self.inner.set_track_metadata(
             track_id,
             Some(name.into()),
@@ -500,11 +504,6 @@ fn trace_display_name<'a>(fallback: &'a str, args: Option<&'a EventArgs>) -> Cow
 
 fn process_descriptor_packet() -> TracePacket {
     TracePacket {
-        sequence_flags: Some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as u32),
-        first_packet_on_sequence: Some(true),
-        optional_trusted_packet_sequence_id: Some(
-            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
-        ),
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(process_uuid()),
             process: Some(ProcessDescriptor {
@@ -522,6 +521,7 @@ fn process_descriptor_packet() -> TracePacket {
 }
 
 fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacket {
+    let parent_track_id = metadata.parent_track_id;
     let track_name = metadata.name.unwrap_or_else(|| {
         if track_id == 0 {
             "global".to_string()
@@ -530,18 +530,17 @@ fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacke
         }
     });
     TracePacket {
+        sequence_flags: Some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as u32),
+        first_packet_on_sequence: Some(true),
         optional_trusted_packet_sequence_id: Some(
-            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                track_sequence_id(track_id),
+            ),
         ),
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(track_uuid(track_id)),
-            parent_uuid: Some(
-                metadata
-                    .parent_track_id
-                    .map(track_uuid)
-                    .unwrap_or_else(process_uuid),
-            ),
-            thread: Some(ThreadDescriptor {
+            parent_uuid: Some(parent_track_id.map(track_uuid).unwrap_or_else(process_uuid)),
+            thread: parent_track_id.is_none().then(|| ThreadDescriptor {
                 pid: Some(1),
                 tid: Some(track_tid(track_id)),
                 thread_name: Some(track_name.clone()),
@@ -561,18 +560,18 @@ fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacke
 fn event_packet(event: &RecordedEvent) -> TracePacket {
     let (name, phase, args) = match event.phase {
         EventPhase::Begin => (
-            trace_display_name(event.name, event.args.as_ref()).into_owned(),
+            Some(trace_display_name(event.name, event.args.as_ref()).into_owned()),
             track_event::Type::SliceBegin,
             event.args.as_ref(),
         ),
-        EventPhase::End => (event.name.to_string(), track_event::Type::SliceEnd, None),
+        EventPhase::End => (None, track_event::Type::SliceEnd, None),
         EventPhase::Instant => (
-            trace_display_name(event.name, event.args.as_ref()).into_owned(),
+            Some(trace_display_name(event.name, event.args.as_ref()).into_owned()),
             track_event::Type::Instant,
             event.args.as_ref(),
         ),
         EventPhase::Flow { target } => (
-            format!("{}→{}", event.name, target),
+            Some(format!("{}→{}", event.name, target)),
             track_event::Type::Instant,
             None,
         ),
@@ -580,12 +579,14 @@ fn event_packet(event: &RecordedEvent) -> TracePacket {
     TracePacket {
         timestamp: Some(us_to_ns(event.timestamp_us)),
         optional_trusted_packet_sequence_id: Some(
-            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                track_sequence_id(event.track_id),
+            ),
         ),
         data: Some(trace_packet::Data::TrackEvent(TrackEvent {
             r#type: Some(phase as i32),
             track_uuid: Some(track_uuid(event.track_id)),
-            name_field: Some(track_event::NameField::Name(name)),
+            name_field: name.map(track_event::NameField::Name),
             debug_annotations: args.map(debug_annotations_from_args).unwrap_or_default(),
             ..TrackEvent::default()
         })),
@@ -661,6 +662,10 @@ fn process_uuid() -> u64 {
 
 fn track_uuid(track_id: u64) -> u64 {
     1_000 + track_id
+}
+
+fn track_sequence_id(track_id: u64) -> u32 {
+    u32::try_from(track_id.saturating_add(2)).unwrap_or(u32::MAX)
 }
 
 fn track_tid(track_id: u64) -> i32 {
@@ -937,6 +942,7 @@ mod tests {
             .find(|descriptor| descriptor.uuid == Some(child_track_uuid))
             .expect("child descriptor");
         assert_eq!(child_descriptor.parent_uuid, Some(parent_track_uuid));
+        assert!(child_descriptor.thread.is_none());
         assert_eq!(
             child_descriptor.static_or_dynamic_name,
             Some(track_descriptor::StaticOrDynamicName::Name(
