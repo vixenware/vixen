@@ -2970,14 +2970,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         }
     };
 
-    let _hydrate_span = event_recorder.map(|recorder| {
-        EventSink::begin_span_with_args(
-            recorder,
-            "acquire.hydrate",
-            acquire_trace_args(&request, "hydrate acquire result"),
-        )
-    });
-    hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
+    Ok(acquired)
 }
 
 fn remote_trace_span_name(span: RemoteTraceSpan) -> &'static str {
