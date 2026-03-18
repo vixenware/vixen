@@ -3612,11 +3612,22 @@ async fn run_build_vx_discover_via_runner(
     executors: &BuildVxExecutors,
     activity_registry: &ActivityRegistry,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    event_recorder: Option<vx_eval::EventRecorder>,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let discover_started = Instant::now();
     let executor_summary = describe_executor_selector(&request.executor);
+    let _discover_span = event_recorder.as_ref().map(|recorder| {
+        EventSink::begin_span_with_args(
+            recorder,
+            "discover.runtime",
+            value!({
+                "display_name": "discover(..)",
+                "executor": ((executor_summary.clone()))
+            }),
+        )
+    });
     let activity = start_build_vx_activity(
         activity_registry,
         "discover",
@@ -3629,18 +3640,30 @@ async fn run_build_vx_discover_via_runner(
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
-    let exec = executors
-        .runner_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    let exec_store = executors
-        .store_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    let store_supports_readthrough = executors
-        .store_supports_readthrough(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let (exec, exec_store, store_supports_readthrough) = {
+        let _resolve_executor_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "discover.resolve_executor",
+                value!({
+                    "executor": ((executor_summary.clone()))
+                }),
+            )
+        });
+        let exec = executors
+            .runner_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let exec_store = executors
+            .store_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let store_supports_readthrough = executors
+            .store_supports_readthrough(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        (exec, exec_store, store_supports_readthrough)
+    };
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -3655,8 +3678,20 @@ async fn run_build_vx_discover_via_runner(
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
-    let result = exec
-        .discover(RunnerDiscoverRequest {
+    let result = {
+        let _runner_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "discover.runner.call",
+                value!({
+                    "display_name": "runner.discover(..)",
+                    "executor": ((executor_summary.clone())),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store))),
+                    "store_supports_readthrough": ((store_supports_readthrough))
+                }),
+            )
+        });
+        exec.discover(RunnerDiscoverRequest {
             executor: request.executor,
             module: request.module,
             probe,
@@ -3664,7 +3699,8 @@ async fn run_build_vx_discover_via_runner(
         .await
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
-        })?;
+        })?
+    };
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -3680,28 +3716,40 @@ async fn run_build_vx_discover_via_runner(
         return Err(PoisonError::from(poison));
     }
 
-    let value = if std::ptr::eq(target_store, &**store) {
-        result.value.ok_or_else(|| {
-            exec_bridge_poison(
-                PoisonKind::UserFail,
-                "runner did not return a discovery value",
-                &demand_chain,
+    let value = {
+        let _bridge_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "discover.result.bridge",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store)))
+                }),
             )
-        })?
-    } else {
-        mirror_transport_value_store_refs(
-            target_store,
-            store,
+        });
+        if std::ptr::eq(target_store, &**store) {
             result.value.ok_or_else(|| {
                 exec_bridge_poison(
                     PoisonKind::UserFail,
                     "runner did not return a discovery value",
                     &demand_chain,
                 )
-            })?,
-        )
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+            })?
+        } else {
+            mirror_transport_value_store_refs(
+                target_store,
+                store,
+                result.value.ok_or_else(|| {
+                    exec_bridge_poison(
+                        PoisonKind::UserFail,
+                        "runner did not return a discovery value",
+                        &demand_chain,
+                    )
+                })?,
+            )
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+        }
     };
     let value = Value::try_from(value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
@@ -3716,8 +3764,18 @@ async fn run_build_vx_discover_via_runner(
         ),
     )
     .await;
-    let value =
-        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?;
+    let value = {
+        let _hydrate_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "discover.result.hydrate",
+                value!({
+                    "executor": ((executor_summary.clone()))
+                }),
+            )
+        });
+        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?
+    };
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -4262,6 +4320,7 @@ impl BuildRuntime for BuildVxRuntime {
                 &self.executors,
                 &self.activity_registry,
                 self.progress_listener.clone(),
+                self.event_recorder.clone(),
                 request,
             )
             .await
