@@ -19,6 +19,7 @@ vx-parser = { path = "../vx-parser" }
 vx-store-proto = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
+prost = "0.13"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 

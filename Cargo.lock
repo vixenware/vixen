@@ -3794,6 +3794,7 @@ dependencies = [
  "facet-value",
  "indoc",
  "parking_lot",
+ "prost",
  "tempfile",
  "tokio",
  "vx-parser",

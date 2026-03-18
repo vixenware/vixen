@@ -4,12 +4,21 @@
 //! In production, `()` is used — all methods are no-ops that optimize away.
 //! In tests, `EventRecorder` captures events for assertions.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+use prost::Message;
+
+use crate::perfetto_proto_generated::{
+    BuiltinClock, DebugAnnotation, ProcessDescriptor, ThreadDescriptor, Trace, TracePacket,
+    TrackDescriptor, TrackEvent, debug_annotation, trace_packet, track_descriptor, track_event,
+};
 
 pub type EventArgs = facet_value::Value;
 
@@ -100,7 +109,15 @@ struct RecorderInner {
     next_track_id: AtomicU64,
     next_sequence: AtomicU64,
     free_track_ids: Mutex<Vec<u64>>,
+    track_metadata: Mutex<HashMap<u64, TrackMetadata>>,
     events: Mutex<Vec<RecordedEvent>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrackMetadata {
+    name: Option<String>,
+    sort_index: Option<i64>,
+    parent_track_id: Option<u64>,
 }
 
 impl RecorderInner {
@@ -149,6 +166,33 @@ impl RecorderInner {
             return;
         }
         self.free_track_ids.lock().unwrap().push(track_id);
+        self.track_metadata.lock().unwrap().remove(&track_id);
+    }
+
+    fn set_track_metadata(
+        &self,
+        track_id: u64,
+        name: Option<String>,
+        sort_index: Option<i64>,
+        parent_track_id: Option<u64>,
+    ) {
+        self.track_metadata.lock().unwrap().insert(
+            track_id,
+            TrackMetadata {
+                name,
+                sort_index,
+                parent_track_id,
+            },
+        );
+    }
+
+    fn track_metadata(&self, track_id: u64) -> TrackMetadata {
+        self.track_metadata
+            .lock()
+            .unwrap()
+            .get(&track_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -166,6 +210,7 @@ impl EventRecorder {
                 next_track_id: AtomicU64::new(1),
                 next_sequence: AtomicU64::new(0),
                 free_track_ids: Mutex::new(Vec::new()),
+                track_metadata: Mutex::new(HashMap::new()),
                 events: Mutex::new(Vec::new()),
             }),
         }
@@ -231,6 +276,34 @@ impl EventRecorder {
         self.inner
             .push_now(name, EventPhase::Instant, track_id, Some(args));
     }
+
+    pub fn acquire_detached_track(&self) -> DetachedTrack {
+        DetachedTrack {
+            inner: Arc::clone(&self.inner),
+            track_id: self.inner.acquire_track_id(),
+            release_on_drop: true,
+        }
+    }
+
+    pub fn acquire_detached_track_with_metadata(
+        &self,
+        name: impl Into<String>,
+        sort_index: i64,
+        parent_track_id: Option<u64>,
+    ) -> DetachedTrack {
+        let track_id = self.inner.acquire_track_id();
+        self.inner.set_track_metadata(
+            track_id,
+            Some(name.into()),
+            Some(sort_index),
+            parent_track_id,
+        );
+        DetachedTrack {
+            inner: Arc::clone(&self.inner),
+            track_id,
+            release_on_drop: false,
+        }
+    }
 }
 
 impl Default for EventRecorder {
@@ -240,74 +313,25 @@ impl Default for EventRecorder {
 }
 
 impl EventRecorder {
-    /// Write all recorded events as a Chrome Trace JSON file.
-    ///
-    /// The output can be loaded in `chrome://tracing` or Perfetto.
-    pub fn write_chrome_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
+    /// Write all recorded events as a native Perfetto protobuf trace file.
+    pub fn write_perfetto_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
         let mut events = self.inner.events.lock().unwrap().clone();
         events.sort_by_key(|event| (event.timestamp_us, event.sequence));
-        let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-        write!(f, "{{\"displayTimeUnit\":\"ms\",\"traceEvents\":[")?;
-        let mut first = true;
+        let mut packets = Vec::new();
+        packets.push(process_descriptor_packet());
         for track_id in track_ids(&events) {
-            if !first {
-                write!(f, ",")?;
-            }
-            first = false;
-            let track_name = if track_id == 0 {
-                "global".to_string()
-            } else {
-                format!("lane {track_id}")
-            };
-            write!(
-                f,
-                "{{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":1,\"tid\":{},\"args\":{{\"name\":\"{}\"}}}}",
-                track_id, track_name
-            )?;
+            packets.push(track_descriptor_packet(
+                track_id,
+                self.inner.track_metadata(track_id),
+            ));
         }
-        for event in events.iter() {
-            if !first {
-                write!(f, ",")?;
-            }
-            first = false;
-            match event.phase {
-                EventPhase::Begin => {
-                    write!(
-                        f,
-                        "{{\"ph\":\"B\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":{}",
-                        event.name, event.timestamp_us, event.track_id
-                    )?;
-                    write_trace_args(&mut f, event.args.as_ref())?;
-                    write!(f, "}}")?;
-                }
-                EventPhase::End => {
-                    write!(
-                        f,
-                        "{{\"ph\":\"E\",\"name\":\"{}\",\"cat\":\"eval\",\"ts\":{},\"pid\":1,\"tid\":{}}}",
-                        event.name, event.timestamp_us, event.track_id
-                    )?;
-                }
-                EventPhase::Instant => {
-                    write!(
-                        f,
-                        "{{\"ph\":\"i\",\"name\":\"{}\",\"cat\":\"eval\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":{}",
-                        event.name, event.timestamp_us, event.track_id
-                    )?;
-                    write_trace_args(&mut f, event.args.as_ref())?;
-                    write!(f, "}}")?;
-                }
-                EventPhase::Flow { target } => {
-                    write!(
-                        f,
-                        "{{\"ph\":\"i\",\"name\":\"{}→{}\",\"cat\":\"flow\",\"s\":\"t\",\"ts\":{},\"pid\":1,\"tid\":{}}}",
-                        event.name, target, event.timestamp_us, event.track_id
-                    )?;
-                }
-            }
+        for event in &events {
+            packets.push(event_packet(event));
         }
-        write!(f, "]}}")?;
-        f.flush()
+
+        let trace = Trace { packet: packets };
+        let encoded = trace.encode_to_vec();
+        std::fs::write(path, encoded)
     }
 }
 
@@ -340,6 +364,26 @@ impl Drop for DetachedRecorderSpan {
     fn drop(&mut self) {
         self.inner
             .push_now(self.name, EventPhase::End, self.track_id, None);
+    }
+}
+
+pub struct DetachedTrack {
+    inner: Arc<RecorderInner>,
+    track_id: u64,
+    release_on_drop: bool,
+}
+
+impl DetachedTrack {
+    pub fn id(&self) -> u64 {
+        self.track_id
+    }
+}
+
+impl Drop for DetachedTrack {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.inner.release_track_id(self.track_id);
+        }
     }
 }
 
@@ -444,14 +488,181 @@ where
     }
 }
 
-fn write_trace_args(f: &mut impl std::io::Write, args: Option<&EventArgs>) -> std::io::Result<()> {
-    let Some(args) = args else {
-        return Ok(());
+fn trace_display_name<'a>(fallback: &'a str, args: Option<&'a EventArgs>) -> Cow<'a, str> {
+    args.and_then(|args| {
+        args.as_object()
+            .and_then(|object| object.get("display_name"))
+            .and_then(|value| value.as_string())
+            .map(|value| Cow::Borrowed(value.as_str()))
+    })
+    .unwrap_or_else(|| Cow::Borrowed(fallback))
+}
+
+fn process_descriptor_packet() -> TracePacket {
+    TracePacket {
+        data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
+            uuid: Some(process_uuid()),
+            process: Some(ProcessDescriptor {
+                pid: Some(1),
+                process_name: Some("vixen".to_string()),
+                ..ProcessDescriptor::default()
+            }),
+            static_or_dynamic_name: Some(track_descriptor::StaticOrDynamicName::Name(
+                "vixen".to_string(),
+            )),
+            ..TrackDescriptor::default()
+        })),
+        ..TracePacket::default()
+    }
+}
+
+fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacket {
+    let track_name = metadata.name.unwrap_or_else(|| {
+        if track_id == 0 {
+            "global".to_string()
+        } else {
+            format!("lane {track_id}")
+        }
+    });
+    TracePacket {
+        data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
+            uuid: Some(track_uuid(track_id)),
+            parent_uuid: Some(
+                metadata
+                    .parent_track_id
+                    .map(track_uuid)
+                    .unwrap_or_else(process_uuid),
+            ),
+            thread: Some(ThreadDescriptor {
+                pid: Some(1),
+                tid: Some(track_tid(track_id)),
+                thread_name: Some(track_name.clone()),
+                legacy_sort_index: Some(
+                    metadata.sort_index.unwrap_or((track_id as i64) * 10) as i32
+                ),
+                ..ThreadDescriptor::default()
+            }),
+            static_or_dynamic_name: Some(track_descriptor::StaticOrDynamicName::Name(track_name)),
+            disallow_merging_with_system_tracks: Some(true),
+            ..TrackDescriptor::default()
+        })),
+        ..TracePacket::default()
+    }
+}
+
+fn event_packet(event: &RecordedEvent) -> TracePacket {
+    let (name, phase, args) = match event.phase {
+        EventPhase::Begin => (
+            trace_display_name(event.name, event.args.as_ref()).into_owned(),
+            track_event::Type::SliceBegin,
+            event.args.as_ref(),
+        ),
+        EventPhase::End => (event.name.to_string(), track_event::Type::SliceEnd, None),
+        EventPhase::Instant => (
+            trace_display_name(event.name, event.args.as_ref()).into_owned(),
+            track_event::Type::Instant,
+            event.args.as_ref(),
+        ),
+        EventPhase::Flow { target } => (
+            format!("{}→{}", event.name, target),
+            track_event::Type::Instant,
+            None,
+        ),
     };
-    let json = facet_json::to_string(args).map_err(|error| {
-        std::io::Error::other(format!("failed to serialize trace args: {error}"))
-    })?;
-    write!(f, ",\"args\":{json}")
+    TracePacket {
+        timestamp: Some(us_to_ns(event.timestamp_us)),
+        timestamp_clock_id: Some(BuiltinClock::Monotonic as u32),
+        data: Some(trace_packet::Data::TrackEvent(TrackEvent {
+            r#type: Some(phase as i32),
+            track_uuid: Some(track_uuid(event.track_id)),
+            name_field: Some(track_event::NameField::Name(name)),
+            debug_annotations: args.map(debug_annotations_from_args).unwrap_or_default(),
+            ..TrackEvent::default()
+        })),
+        ..TracePacket::default()
+    }
+}
+
+fn debug_annotations_from_args(args: &EventArgs) -> Vec<DebugAnnotation> {
+    let Some(object) = args.as_object() else {
+        return vec![debug_annotation_for_value(None, args)];
+    };
+    object
+        .iter()
+        .map(|(key, value)| debug_annotation_for_value(Some(key.as_str()), value))
+        .collect()
+}
+
+fn debug_annotation_for_value(name: Option<&str>, value: &EventArgs) -> DebugAnnotation {
+    let mut annotation = DebugAnnotation::default();
+    if let Some(name) = name {
+        annotation.name_field = Some(debug_annotation::NameField::Name(name.to_string()));
+    }
+    if value.is_null() {
+        annotation.value = Some(debug_annotation::Value::LegacyJsonValue("null".to_string()));
+        return annotation;
+    }
+    if let Some(boolean) = value.as_bool() {
+        annotation.value = Some(debug_annotation::Value::BoolValue(boolean));
+        return annotation;
+    }
+    if let Some(number) = value.as_number() {
+        if let Some(integer) = number.to_i64() {
+            annotation.value = Some(debug_annotation::Value::IntValue(integer));
+            return annotation;
+        }
+        if let Some(unsigned) = number.to_u64() {
+            annotation.value = Some(debug_annotation::Value::UintValue(unsigned));
+            return annotation;
+        }
+        annotation.value = Some(debug_annotation::Value::DoubleValue(number.to_f64_lossy()));
+        return annotation;
+    }
+    if let Some(string) = value.as_string() {
+        annotation.value = Some(debug_annotation::Value::StringValue(
+            string.as_str().to_string(),
+        ));
+        return annotation;
+    }
+    if let Some(array) = value.as_array() {
+        annotation.array_values = array
+            .as_slice()
+            .iter()
+            .map(|item| debug_annotation_for_value(None, item))
+            .collect();
+        return annotation;
+    }
+    if let Some(object) = value.as_object() {
+        annotation.dict_entries = object
+            .iter()
+            .map(|(key, item)| debug_annotation_for_value(Some(key.as_str()), item))
+            .collect();
+        return annotation;
+    }
+    annotation.value = Some(debug_annotation::Value::LegacyJsonValue(
+        facet_json::to_string(value).unwrap_or_else(|_| format!("\"{:?}\"", value.value_type())),
+    ));
+    annotation
+}
+
+fn process_uuid() -> u64 {
+    1
+}
+
+fn track_uuid(track_id: u64) -> u64 {
+    1_000 + track_id
+}
+
+fn track_tid(track_id: u64) -> i32 {
+    if track_id == 0 {
+        0
+    } else {
+        i32::try_from(track_id).unwrap_or(i32::MAX)
+    }
+}
+
+fn us_to_ns(timestamp_us: u64) -> u64 {
+    timestamp_us.saturating_mul(1_000)
 }
 
 pub fn current_trace_track_id() -> u64 {
@@ -517,11 +728,17 @@ fn track_ids(events: &[RecordedEvent]) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use facet_value::value;
+    use prost::Message;
 
     use super::*;
+    use crate::perfetto_proto_generated::{Trace, trace_packet, track_descriptor, track_event};
+
+    fn decode_trace(path: &std::path::Path) -> Trace {
+        Trace::decode(std::fs::read(path).expect("read trace").as_slice()).expect("decode trace")
+    }
 
     #[test]
-    fn chrome_trace_includes_span_args() {
+    fn perfetto_trace_includes_span_args() {
         let recorder = EventRecorder::new();
         let span = EventSink::begin_span_with_args(
             &recorder,
@@ -534,27 +751,82 @@ mod tests {
         drop(span);
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("trace.json");
+        let path = dir.path().join("trace.pftrace");
         recorder
-            .write_chrome_trace(&path)
-            .expect("write chrome trace");
+            .write_perfetto_trace(&path)
+            .expect("write perfetto trace");
 
-        let trace = std::fs::read_to_string(path).expect("read trace");
-        assert!(
-            trace.contains("\"name\":\"node.execute\""),
-            "trace: {trace}"
+        let trace = decode_trace(&path);
+        let begin = trace
+            .packet
+            .iter()
+            .find_map(|packet| match packet.data.as_ref() {
+                Some(trace_packet::Data::TrackEvent(event))
+                    if event.r#type == Some(track_event::Type::SliceBegin as i32) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .expect("slice begin");
+        assert_eq!(
+            begin.name_field,
+            Some(track_event::NameField::Name("node.execute".to_string()))
         );
-        assert!(trace.contains("\"ph\":\"B\""), "trace: {trace}");
-        assert!(trace.contains("\"ph\":\"E\""), "trace: {trace}");
-        assert!(trace.contains("\"args\":{\"node_id\":7"), "trace: {trace}");
-        assert!(
-            trace.contains("\"description\":\"compile:cc\""),
-            "trace: {trace}"
+        assert!(begin.debug_annotations.iter().any(|annotation| {
+            annotation.name_field
+                == Some(
+                    crate::perfetto_proto_generated::debug_annotation::NameField::Name(
+                        "node_id".to_string(),
+                    ),
+                )
+                && annotation.value
+                    == Some(crate::perfetto_proto_generated::debug_annotation::Value::IntValue(7))
+        }));
+    }
+
+    #[test]
+    fn perfetto_trace_uses_display_name_when_present() {
+        let recorder = EventRecorder::new();
+        let span = EventSink::begin_span_with_args(
+            &recorder,
+            "node.execute",
+            value!({
+                "display_name": "compile(src/lua.c)",
+                "node_id": 7
+            }),
+        );
+        drop(span);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.pftrace");
+        recorder
+            .write_perfetto_trace(&path)
+            .expect("write perfetto trace");
+
+        let trace = decode_trace(&path);
+        let begin = trace
+            .packet
+            .iter()
+            .find_map(|packet| match packet.data.as_ref() {
+                Some(trace_packet::Data::TrackEvent(event))
+                    if event.r#type == Some(track_event::Type::SliceBegin as i32) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .expect("slice begin");
+        assert_eq!(
+            begin.name_field,
+            Some(track_event::NameField::Name(
+                "compile(src/lua.c)".to_string()
+            ))
         );
     }
 
     #[test]
-    fn nested_spans_emit_begin_end_pairs() {
+    fn perfetto_trace_emits_slice_begin_end_pairs() {
         let recorder = EventRecorder::new();
         let outer = EventSink::begin_span(&recorder, "outer");
         let inner = EventSink::begin_span(&recorder, "inner");
@@ -562,15 +834,22 @@ mod tests {
         drop(outer);
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("trace.json");
+        let path = dir.path().join("trace.pftrace");
         recorder
-            .write_chrome_trace(&path)
-            .expect("write chrome trace");
+            .write_perfetto_trace(&path)
+            .expect("write perfetto trace");
 
-        let trace = std::fs::read_to_string(path).expect("read trace");
-        assert!(trace.contains("\"ph\":\"B\""), "trace: {trace}");
-        assert!(trace.contains("\"ph\":\"E\""), "trace: {trace}");
-        assert!(!trace.contains("\"ph\":\"X\""), "trace: {trace}");
+        let trace = decode_trace(&path);
+        let types = trace
+            .packet
+            .iter()
+            .filter_map(|packet| match packet.data.as_ref() {
+                Some(trace_packet::Data::TrackEvent(event)) => event.r#type,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(types.contains(&(track_event::Type::SliceBegin as i32)));
+        assert!(types.contains(&(track_event::Type::SliceEnd as i32)));
     }
 
     #[test]
@@ -610,5 +889,49 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(begin_track_ids, vec![1, 1]);
+    }
+
+    #[test]
+    fn perfetto_trace_preserves_parent_track_relationships() {
+        let recorder = EventRecorder::new();
+        let outer = EventSink::begin_span(&recorder, "outer");
+        let parent_track_id = current_trace_track_id();
+        let child_track = recorder.acquire_detached_track_with_metadata(
+            "child".to_string(),
+            42,
+            Some(parent_track_id),
+        );
+        let child = recorder.begin_detached_span(child_track.id(), "child_span");
+        drop(child);
+        drop(outer);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.pftrace");
+        recorder
+            .write_perfetto_trace(&path)
+            .expect("write perfetto trace");
+
+        let trace = decode_trace(&path);
+        let descriptors = trace
+            .packet
+            .iter()
+            .filter_map(|packet| match packet.data.as_ref() {
+                Some(trace_packet::Data::TrackDescriptor(descriptor)) => Some(descriptor),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let child_track_uuid = track_uuid(child_track.id());
+        let parent_track_uuid = track_uuid(parent_track_id);
+        let child_descriptor = descriptors
+            .into_iter()
+            .find(|descriptor| descriptor.uuid == Some(child_track_uuid))
+            .expect("child descriptor");
+        assert_eq!(child_descriptor.parent_uuid, Some(parent_track_uuid));
+        assert_eq!(
+            child_descriptor.static_or_dynamic_name,
+            Some(track_descriptor::StaticOrDynamicName::Name(
+                "child".to_string()
+            ))
+        );
     }
 }

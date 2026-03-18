@@ -11,6 +11,9 @@ pub use capability::CapabilitySet;
 pub mod events;
 pub use events::{ErasedEventSink, ErasedSpan, EventRecorder, EventSink, current_trace_track_id};
 
+#[allow(dead_code)]
+mod perfetto_proto_generated;
+
 mod exec;
 pub use exec::{
     AcquireHandler, AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverHandler,

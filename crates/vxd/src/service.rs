@@ -16,6 +16,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
 use facet_postcard::{from_slice, to_vec};
 use facet_value::value;
+use futures_util::stream;
+use futures_util::{StreamExt, TryStreamExt};
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
@@ -89,7 +91,7 @@ struct PreparedExecMounts {
 
 type ExecMountPrepResult = std::result::Result<PreparedExecMounts, String>;
 type ExecMountPrepFuture = Arc<moire::sync::OnceCell<ExecMountPrepResult>>;
-type BuildVxFsTreeSnapshotResult = std::result::Result<NodeHash, String>;
+type BuildVxFsTreeSnapshotResult = std::result::Result<(NodeHash, u64), String>;
 type BuildVxFsTreeSnapshotFuture = Arc<moire::sync::OnceCell<BuildVxFsTreeSnapshotResult>>;
 type SnapshotTreeFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(NodeHash, u64), String>> + Send + 'a>>;
@@ -1523,6 +1525,14 @@ fn validate_tree_entry_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn mount_prep_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(8)
+        .saturating_mul(2)
+        .clamp(4, 64)
+}
+
 async fn store_directory_node(
     store: &StoreClient,
     entries: Vec<DirEntry>,
@@ -1621,24 +1631,32 @@ fn snapshot_exec_inline_tree<'a>(
     entries: &'a Arc<[(Arc<str>, Value)]>,
 ) -> SnapshotTreeFuture<'a> {
     Box::pin(async move {
-        let mut names = HashSet::new();
         let mut sorted = entries.iter().cloned().collect::<Vec<_>>();
         sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
-
-        let mut dir_entries = Vec::with_capacity(sorted.len());
-        let mut total_size = 0u64;
-        for (name, value) in sorted {
+        let mut seen_names = HashSet::with_capacity(sorted.len());
+        for (name, _) in &sorted {
             validate_tree_entry_name(name.as_ref())?;
-            if !names.insert(name.to_string()) {
+            if !seen_names.insert(name.to_string()) {
                 return Err(format!("duplicate tree entry '{name}'"));
             }
-            let (kind, size) = snapshot_exec_tree_entry(store, cache, value).await?;
-            total_size += size;
-            dir_entries.push(DirEntry {
-                name: name.to_string(),
-                kind,
-            });
         }
+        let parallelism = mount_prep_parallelism();
+        let mut prepared_entries: Vec<(String, DirEntryKind, u64)> = stream::iter(sorted)
+            .map(|(name, value)| async move {
+                let (kind, size) = snapshot_exec_tree_entry(store, cache, value).await?;
+                Ok::<_, String>((name.to_string(), kind, size))
+            })
+            .buffer_unordered(parallelism)
+            .try_collect()
+            .await?;
+        prepared_entries
+            .sort_by(|(left, _, _), (right, _, _)| left.as_bytes().cmp(right.as_bytes()));
+
+        let total_size = prepared_entries.iter().map(|(_, _, size)| *size).sum();
+        let dir_entries = prepared_entries
+            .into_iter()
+            .map(|(name, kind, _)| DirEntry { name, kind })
+            .collect();
         store_directory_node(store, dir_entries, total_size).await
     })
 }
@@ -1646,7 +1664,7 @@ fn snapshot_exec_inline_tree<'a>(
 fn snapshot_exec_fs_tree_uncached<'a>(
     store: &'a StoreClient,
     root: PathValue,
-) -> Pin<Box<dyn Future<Output = std::result::Result<NodeHash, String>> + Send + 'a>> {
+) -> SnapshotTreeFuture<'a> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(root.as_str())
             .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?;
@@ -1659,37 +1677,47 @@ fn snapshot_exec_fs_tree_uncached<'a>(
             names.push(entry.file_name().to_string_lossy().to_string());
         }
         names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let parallelism = mount_prep_parallelism();
+        let mut prepared_entries: Vec<(String, DirEntryKind, u64)> = stream::iter(names)
+            .map(|name| {
+                let root = root.clone();
+                async move {
+                    validate_tree_entry_name(&name)?;
+                    let child = root.join(&name);
+                    let metadata = fs::metadata(child.as_str())
+                        .map_err(|error| format!("failed to stat {}: {error}", child.as_str()))?;
+                    let (kind, size) = if metadata.is_dir() {
+                        let (hash, total_size) =
+                            snapshot_exec_fs_tree_uncached(store, child).await?;
+                        (DirEntryKind::Dir { hash }, total_size)
+                    } else {
+                        let executable = host_path_is_executable(&child)?;
+                        let (blob_ref, executable) = store_exec_blob_ref(
+                            store,
+                            &BlobValue::FsFile {
+                                path: child,
+                                executable,
+                            },
+                        )
+                        .await?;
+                        let size = blob_ref_size(&blob_ref);
+                        (exec_blob_kind_from_blob_ref(&blob_ref, executable), size)
+                    };
+                    Ok::<_, String>((name, kind, size))
+                }
+            })
+            .buffer_unordered(parallelism)
+            .try_collect()
+            .await?;
+        prepared_entries
+            .sort_by(|(left, _, _), (right, _, _)| left.as_bytes().cmp(right.as_bytes()));
 
-        let mut dir_entries = Vec::with_capacity(names.len());
-        let mut total_size = 0u64;
-        for name in names {
-            validate_tree_entry_name(&name)?;
-            let child = root.join(&name);
-            let metadata = fs::metadata(child.as_str())
-                .map_err(|error| format!("failed to stat {}: {error}", child.as_str()))?;
-            let (kind, size) = if metadata.is_dir() {
-                let hash = snapshot_exec_fs_tree_uncached(store, child).await?;
-                let directory = load_store_directory(store, hash)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                (DirEntryKind::Dir { hash }, directory.total_size)
-            } else {
-                let (blob_ref, executable) = store_exec_blob_ref(
-                    store,
-                    &BlobValue::FsFile {
-                        path: child,
-                        executable: host_path_is_executable(&root.join(&name))?,
-                    },
-                )
-                .await?;
-                let size = blob_ref_size(&blob_ref);
-                (exec_blob_kind_from_blob_ref(&blob_ref, executable), size)
-            };
-            total_size += size;
-            dir_entries.push(DirEntry { name, kind });
-        }
-        let (hash, _) = store_directory_node(store, dir_entries, total_size).await?;
-        Ok(hash)
+        let total_size = prepared_entries.iter().map(|(_, _, size)| *size).sum();
+        let dir_entries = prepared_entries
+            .into_iter()
+            .map(|(name, kind, _)| DirEntry { name, kind })
+            .collect();
+        store_directory_node(store, dir_entries, total_size).await
     })
 }
 
@@ -1727,13 +1755,7 @@ async fn snapshot_exec_tree(
 ) -> std::result::Result<(NodeHash, u64), String> {
     match tree {
         TreeValue::Inline { entries, .. } => snapshot_exec_inline_tree(store, cache, entries).await,
-        TreeValue::FsDir(path) => {
-            let hash = snapshot_exec_fs_tree_cached(store, cache, path).await?;
-            let directory = load_store_directory(store, hash)
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok((hash, directory.total_size))
-        }
+        TreeValue::FsDir(path) => snapshot_exec_fs_tree_cached(store, cache, path).await,
         TreeValue::Store(root) => {
             let directory = load_store_directory(store, *root)
                 .await
@@ -1783,8 +1805,6 @@ async fn prepare_exec_mounts_with_progress(
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
 ) -> ExecMountPrepResult {
-    let mut prepared = PreparedExecMounts::default();
-
     if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
         emit_build_vx_progress_activity(
             progress_listener,
@@ -1798,30 +1818,50 @@ async fn prepare_exec_mounts_with_progress(
         .await;
     }
 
-    for mount in mounts {
-        let value = match &mount.value {
-            Value::Discovered(discovered) => discovered.value.as_ref(),
-            other => other,
-        };
-        match value {
-            Value::Tree(tree) => {
-                let (root, _) = snapshot_exec_tree(store, fs_tree_snapshot_cache, tree).await?;
-                prepared.tree_mounts.push(RunTreeMount {
-                    mount: mount.path.as_str().to_string(),
-                    manifest: root.0,
-                });
-            }
-            Value::Blob(blob) => {
-                prepared
-                    .file_mounts
-                    .push(snapshot_exec_blob_mount(store, mount.path.as_str(), blob).await?);
-            }
-            other => {
-                return Err(format!(
-                    "exec mount values must be Blob or Tree, got {}",
-                    other.type_name()
-                ));
-            }
+    enum PreparedMount {
+        Tree(RunTreeMount),
+        File(RunFileMount),
+    }
+
+    let parallelism = mount_prep_parallelism();
+    let mount_inputs: Vec<_> = mounts.iter().cloned().enumerate().collect();
+    let prepared_mounts: Vec<(usize, PreparedMount)> = stream::iter(mount_inputs)
+        .map(|(index, mount)| async move {
+            let value = match &mount.value {
+                Value::Discovered(discovered) => discovered.value.as_ref(),
+                other => other,
+            };
+            let prepared = match value {
+                Value::Tree(tree) => {
+                    let (root, _) = snapshot_exec_tree(store, fs_tree_snapshot_cache, tree).await?;
+                    PreparedMount::Tree(RunTreeMount {
+                        mount: mount.path.as_str().to_string(),
+                        manifest: root.0,
+                    })
+                }
+                Value::Blob(blob) => PreparedMount::File(
+                    snapshot_exec_blob_mount(store, mount.path.as_str(), blob).await?,
+                ),
+                other => {
+                    return Err(format!(
+                        "exec mount values must be Blob or Tree, got {}",
+                        other.type_name()
+                    ));
+                }
+            };
+            Ok::<_, String>((index, prepared))
+        })
+        .buffer_unordered(parallelism)
+        .try_collect()
+        .await?;
+
+    let mut prepared = PreparedExecMounts::default();
+    let mut prepared_mounts = prepared_mounts;
+    prepared_mounts.sort_by_key(|(index, _)| *index);
+    for (_, mount) in prepared_mounts {
+        match mount {
+            PreparedMount::Tree(tree_mount) => prepared.tree_mounts.push(tree_mount),
+            PreparedMount::File(file_mount) => prepared.file_mounts.push(file_mount),
         }
     }
 
@@ -2710,6 +2750,7 @@ async fn run_build_vx_exec_via_runner(
             recorder,
             "exec.runtime",
             value!({
+                "display_name": ((format!("exec {command_preview}"))),
                 "executor": ((executor_summary.clone())),
                 "command": ((command.clone())),
                 "command_preview": ((command_preview.clone())),
@@ -2900,6 +2941,7 @@ async fn run_build_vx_exec_via_runner(
                 recorder,
                 "exec.runner.run",
                 value!({
+                    "display_name": ((format!("run {command_preview}"))),
                     "executor": ((executor_summary.clone())),
                     "command": ((command.clone())),
                     "command_preview": ((command_preview.clone())),
@@ -2914,18 +2956,49 @@ async fn run_build_vx_exec_via_runner(
         let event_recorder_for_progress = event_recorder.clone();
         let progress_handle = moire::task::spawn(
             async move {
+                let store_blob_track = event_recorder_for_progress.as_ref().map(|recorder| {
+                    recorder.acquire_detached_track_with_metadata(
+                        "exec.runner.observer.store_blob".to_string(),
+                        (runner_track_id as i64) * 10 + 1,
+                        Some(runner_track_id),
+                    )
+                });
+                let store_node_track = event_recorder_for_progress.as_ref().map(|recorder| {
+                    recorder.acquire_detached_track_with_metadata(
+                        "exec.runner.observer.store_node".to_string(),
+                        (runner_track_id as i64) * 10 + 2,
+                        Some(runner_track_id),
+                    )
+                });
                 let mut remote_trace_spans =
                     HashMap::<RemoteTraceSpan, vx_eval::events::DetachedRecorderSpan>::new();
                 while let Ok(Some(update)) = progress_rx.recv().await {
                     if let Some(trace_event) = update.trace_event.as_ref()
                         && let Some(recorder) = event_recorder_for_progress.as_ref()
                     {
+                        let trace_track_id = match trace_event.span {
+                            RemoteTraceSpan::RunnerObserverCommitStoreBlob => store_blob_track
+                                .as_ref()
+                                .map_or(runner_track_id, |track| track.id()),
+                            RemoteTraceSpan::RunnerObserverCommitStoreNode => store_node_track
+                                .as_ref()
+                                .map_or(runner_track_id, |track| track.id()),
+                            _ => runner_track_id,
+                        };
                         match trace_event.phase {
                             RemoteTracePhase::Begin => {
-                                let span = recorder.begin_detached_span(
-                                    runner_track_id,
-                                    remote_trace_span_name(trace_event.span),
-                                );
+                                let span_name = remote_trace_span_name(trace_event.span);
+                                let span = if trace_event.label.is_empty() {
+                                    recorder.begin_detached_span(trace_track_id, span_name)
+                                } else {
+                                    recorder.begin_detached_span_with_args(
+                                        trace_track_id,
+                                        span_name,
+                                        value!({
+                                            "display_name": ((trace_event.label.clone()))
+                                        }),
+                                    )
+                                };
                                 remote_trace_spans.insert(trace_event.span, span);
                             }
                             RemoteTracePhase::End => {
@@ -2933,7 +3006,7 @@ async fn run_build_vx_exec_via_runner(
                             }
                             RemoteTracePhase::Instant => {
                                 recorder.instant_on_track(
-                                    runner_track_id,
+                                    trace_track_id,
                                     remote_trace_span_name(trace_event.span),
                                 );
                             }
@@ -2953,6 +3026,8 @@ async fn run_build_vx_exec_via_runner(
                         .await;
                     }
                 }
+                drop(store_blob_track);
+                drop(store_node_track);
                 drop(remote_trace_spans);
             }
             .named("build_vx_exec_progress_fwd"),
@@ -3089,37 +3164,6 @@ async fn run_build_vx_exec_via_runner(
     let value = Value::try_from(observer_value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
-    let hydration_started = Instant::now();
-    emit_build_vx_progress_activity(
-        &progress_listener,
-        &activity,
-        format!("build.vx executor {}: hydrating result", executor_summary),
-    )
-    .await;
-    let value = {
-        let _hydrate_span = event_recorder.as_ref().map(|recorder| {
-            EventSink::begin_span_with_args(
-                recorder,
-                "exec.result.hydrate",
-                value!({
-                    "executor": ((executor_summary.clone()))
-                }),
-            )
-        });
-        tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
-        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?
-    };
-    tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
-    emit_build_vx_progress_activity(
-        &progress_listener,
-        &activity,
-        format!(
-            "build.vx executor {}: hydration finished ({})",
-            executor_summary,
-            format_progress_elapsed(hydration_started.elapsed())
-        ),
-    )
-    .await;
     Ok(value)
 }
 
@@ -4326,11 +4370,11 @@ impl VxdService {
                     });
 
                 if let Some(recorder) = &event_recorder {
-                    let trace_path = request.project_path.join(".vx/trace.json");
-                    if let Err(error) = recorder.write_chrome_trace(trace_path.as_std_path()) {
-                        tracing::warn!(%error, path = %trace_path, "failed to write chrome trace");
+                    let trace_path = request.project_path.join(".vx/trace.pftrace");
+                    if let Err(error) = recorder.write_perfetto_trace(trace_path.as_std_path()) {
+                        tracing::warn!(%error, path = %trace_path, "failed to write perfetto trace");
                     } else {
-                        tracing::info!(path = %trace_path, "wrote chrome trace");
+                        tracing::info!(path = %trace_path, "wrote perfetto trace");
                     }
                 }
 
