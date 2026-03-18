@@ -2957,21 +2957,33 @@ async fn run_build_vx_exec_via_runner(
         let progress_handle = moire::task::spawn(
             async move {
                 let store_blob_track = event_recorder_for_progress.as_ref().map(|recorder| {
-                    recorder.acquire_detached_track_with_metadata(
+                    recorder.acquire_detached_track_with_descriptor(
                         "exec.runner.observer.store_blob".to_string(),
                         (runner_track_id as i64) * 10 + 1,
                         Some(runner_track_id),
+                        None,
+                        Some(1),
+                        Some(
+                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                                as i32,
+                        ),
                     )
                 });
                 let store_node_track = event_recorder_for_progress.as_ref().map(|recorder| {
-                    recorder.acquire_detached_track_with_metadata(
+                    recorder.acquire_detached_track_with_descriptor(
                         "exec.runner.observer.store_node".to_string(),
                         (runner_track_id as i64) * 10 + 2,
                         Some(runner_track_id),
+                        None,
+                        Some(2),
+                        Some(
+                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                                as i32,
+                        ),
                     )
                 });
                 let mut remote_trace_spans =
-                    HashMap::<RemoteTraceSpan, vx_eval::events::DetachedRecorderSpan>::new();
+                    HashMap::<(RemoteTraceSpan, u64), vx_eval::events::DetachedRecorderSpan>::new();
                 while let Ok(Some(update)) = progress_rx.recv().await {
                     if let Some(trace_event) = update.trace_event.as_ref()
                         && let Some(recorder) = event_recorder_for_progress.as_ref()
@@ -2999,10 +3011,12 @@ async fn run_build_vx_exec_via_runner(
                                         }),
                                     )
                                 };
-                                remote_trace_spans.insert(trace_event.span, span);
+                                remote_trace_spans
+                                    .insert((trace_event.span, trace_event.instance_id), span);
                             }
                             RemoteTracePhase::End => {
-                                remote_trace_spans.remove(&trace_event.span);
+                                remote_trace_spans
+                                    .remove(&(trace_event.span, trace_event.instance_id));
                             }
                             RemoteTracePhase::Instant => {
                                 recorder.instant_on_track(

@@ -113,6 +113,7 @@ pub mod gpu_counter_descriptor {
         /// Includes counters relating to caching and bandwidth.
         Memory = 5,
         Compute = 6,
+        RayTracing = 7,
     }
     impl GpuCounterGroup {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -128,6 +129,7 @@ pub mod gpu_counter_descriptor {
                 Self::Primitives => "PRIMITIVES",
                 Self::Memory => "MEMORY",
                 Self::Compute => "COMPUTE",
+                Self::RayTracing => "RAY_TRACING",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -140,6 +142,7 @@ pub mod gpu_counter_descriptor {
                 "PRIMITIVES" => Some(Self::Primitives),
                 "MEMORY" => Some(Self::Memory),
                 "COMPUTE" => Some(Self::Compute),
+                "RAY_TRACING" => Some(Self::RayTracing),
                 _ => None,
             }
         }
@@ -304,6 +307,158 @@ pub struct TrackEventDescriptor {
     #[prost(message, repeated, tag = "1")]
     pub available_categories: ::prost::alloc::vec::Vec<TrackEventCategory>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VmProgram {
+    #[prost(uint32, optional, tag = "1")]
+    pub version: ::core::option::Option<u32>,
+    #[prost(message, repeated, tag = "2")]
+    pub instructions: ::prost::alloc::vec::Vec<VmInstruction>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VmInstruction {
+    #[prost(enumeration = "vm_instruction::AbortLevel", optional, tag = "6")]
+    pub abort_level: ::core::option::Option<i32>,
+    /// Sub-instructions executed if the current instruction succeeds
+    #[prost(message, repeated, tag = "7")]
+    pub nested_instructions: ::prost::alloc::vec::Vec<VmInstruction>,
+    #[prost(oneof = "vm_instruction::Operation", tags = "1, 2, 3, 4, 5")]
+    pub operation: ::core::option::Option<vm_instruction::Operation>,
+}
+/// Nested message and enum types in `VmInstruction`.
+pub mod vm_instruction {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum AbortLevel {
+        /// Skip current instruction but execute following ones
+        SkipCurrentInstruction = 1,
+        /// Skip current instruction as well as following ones (default)
+        SkipCurrentInstructionAndBreakOuter = 2,
+        /// Abort whole program
+        Abort = 3,
+    }
+    impl AbortLevel {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::SkipCurrentInstruction => "SKIP_CURRENT_INSTRUCTION",
+                Self::SkipCurrentInstructionAndBreakOuter => {
+                    "SKIP_CURRENT_INSTRUCTION_AND_BREAK_OUTER"
+                }
+                Self::Abort => "ABORT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "SKIP_CURRENT_INSTRUCTION" => Some(Self::SkipCurrentInstruction),
+                "SKIP_CURRENT_INSTRUCTION_AND_BREAK_OUTER" => {
+                    Some(Self::SkipCurrentInstructionAndBreakOuter)
+                }
+                "ABORT" => Some(Self::Abort),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Operation {
+        #[prost(message, tag = "1")]
+        Select(super::VmOpSelect),
+        #[prost(message, tag = "2")]
+        RegLoad(super::VmOpRegLoad),
+        #[prost(message, tag = "3")]
+        Merge(super::VmOpMerge),
+        #[prost(message, tag = "4")]
+        Set(super::VmOpSet),
+        #[prost(message, tag = "5")]
+        Del(super::VmOpDel),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VmOpSelect {
+    /// Enum SRC|DST|BOTH. Default=SRC.
+    #[prost(enumeration = "VmCursorEnum", optional, tag = "1")]
+    pub cursor: ::core::option::Option<i32>,
+    #[prost(message, repeated, tag = "2")]
+    pub relative_path: ::prost::alloc::vec::Vec<vm_op_select::PathComponent>,
+    /// Creates the submessage if doesn't exist in the DST cursor
+    /// (think of mkdir -p). Only valid when cursor=DST|BOTH.
+    #[prost(bool, optional, tag = "3")]
+    pub create_if_not_exist: ::core::option::Option<bool>,
+}
+/// Nested message and enum types in `VmOpSelect`.
+pub mod vm_op_select {
+    /// A path component is either: (1) a field id to descend into (common case);
+    /// (2) an array index (for repeated fields); (3) a map lookup operation (for
+    /// repeated fields, where we snoop a sub-field as a map key)
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct PathComponent {
+        /// Only valid when using field_id. This makes select have foreach
+        /// semantics. This means that the body of nested_instructions is
+        /// executed several times, once per each repeated submessage.
+        #[prost(bool, optional, tag = "5")]
+        pub is_repeated: ::core::option::Option<bool>,
+        /// Only valid when using map_key_field_id. This defines which
+        /// register (R1..R32) should be used to match the key of the dict
+        /// in a map lookup operation.
+        /// In other words:
+        /// foreach msg in repeated message {
+        ///    if msg\[map_key_field_id\] == R\[register_to_match\] {
+        ///       break;  // Lookup succeeded, PathComponent resolves here.
+        ///    }
+        /// }
+        #[prost(uint32, optional, tag = "6")]
+        pub register_to_match: ::core::option::Option<u32>,
+        /// Only valid when using field_id and is_repeated=true. When iterating
+        /// over repeated fields, stores the current iteration index into the
+        /// the register R1..R32 defined below. This can be used to do complex
+        /// operations like "find the entry in the array that has width==100,
+        /// remember its offset in the SRC array and overwrite the matching
+        /// i-th element in the DST array. We will probably never implement
+        /// this but it's here for completeness.
+        #[prost(uint32, optional, tag = "7")]
+        pub store_foreach_index_into_register: ::core::option::Option<u32>,
+        #[prost(oneof = "path_component::Field", tags = "1, 2, 3")]
+        pub field: ::core::option::Option<path_component::Field>,
+    }
+    /// Nested message and enum types in `PathComponent`.
+    pub mod path_component {
+        #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+        pub enum Field {
+            #[prost(uint32, tag = "1")]
+            FieldId(u32),
+            #[prost(uint32, tag = "2")]
+            ArrayIndex(u32),
+            /// The ID of the field in the repeated submessage that we
+            /// use as a key (e.g. LayerState.layer_id). When setting this
+            /// register_to_match must also be set, to tell what's the
+            /// expected value of the key we are looking up.
+            #[prost(uint32, tag = "3")]
+            MapKeyFieldId(u32),
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct VmOpRegLoad {
+    /// SRC(default) | DST.
+    #[prost(enumeration = "VmCursorEnum", optional, tag = "1")]
+    pub cursor: ::core::option::Option<i32>,
+    /// 1=R1, 2=R2... 32=R32
+    #[prost(uint32, optional, tag = "2")]
+    pub dst_register: ::core::option::Option<u32>,
+}
+/// Merges SRC into DST. Both need to point to a message (not a field).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct VmOpMerge {}
+/// Copies SRC into DST. If a message, replaces the DST node, discarding any
+/// pre-existing field.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct VmOpSet {}
+/// Delete the field or message pointed by DST.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct VmOpDel {}
 /// This message is sent from Producer(s) to the tracing Service when registering
 /// to advertise their capabilities. It describes the structure of tracing
 /// protos that will be produced by the data source and the supported filters.
@@ -343,6 +498,13 @@ pub struct DataSourceDescriptor {
     /// Introduced in v39 / Android V.
     #[prost(bool, optional, tag = "9")]
     pub no_flush: ::core::option::Option<bool>,
+    /// If present, the tracing service executes this program within a ProtoVM to
+    /// process overwritten packets (patches). The service computes a hash of the
+    /// program to detect and disambiguate between different versions; if multiple
+    /// versions (from different producers) are specified for the same data source,
+    /// the service instantiates a dedicated ProtoVM for each.
+    #[prost(message, optional, tag = "10")]
+    pub protovm_program: ::core::option::Option<VmProgram>,
     /// Optional specification about available GPU counters.
     #[prost(message, optional, tag = "5")]
     pub gpu_counter_descriptor: ::core::option::Option<GpuCounterDescriptor>,
@@ -410,6 +572,10 @@ pub mod tracing_service_state {
         /// This is intended for human debugging only.
         #[prost(string, optional, tag = "4")]
         pub sdk_version: ::core::option::Option<::prost::alloc::string::String>,
+        /// Returns true if the process appears to be frozen (Android only).
+        /// Introduced in Perfetto V49 / Android 24Q4.
+        #[prost(bool, optional, tag = "6")]
+        pub frozen: ::core::option::Option<bool>,
     }
     /// Describes a data source registered by a producer. Data sources are listed
     /// regardless of the fact that they are being used or not.
@@ -649,6 +815,13 @@ pub struct AndroidLogConfig {
     /// specified values.
     #[prost(string, repeated, tag = "4")]
     pub filter_tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// If true, includes the contents of the logcat buffers that were already
+    /// present before the data source started. By default (false), only new
+    /// log entries produced after the data source starts are recorded.
+    /// Can be useful for boot traces or situations where logs from before
+    /// traced started are important.
+    #[prost(bool, optional, tag = "5")]
+    pub preserve_log_buffer: ::core::option::Option<bool>,
 }
 /// Data source that polls for display state. This should only be used for
 /// backward-compatibility; AndroidSystemPropertyConfig should be preferred.
@@ -695,7 +868,7 @@ pub struct AndroidSdkSyspropGuardConfig {
     ///    - debug.tracing.ctl.renderengine.skia_use_perfetto_track_events
     ///
     /// Does not affect actual track_event data *collection*, which must be
-    /// configured seperately.
+    /// configured separately.
     #[prost(bool, optional, tag = "1")]
     pub surfaceflinger_skia_track_events: ::core::option::Option<bool>,
     /// If true, configures HWUI apps to initialize Skia's Perfetto integration
@@ -716,7 +889,7 @@ pub struct AndroidSdkSyspropGuardConfig {
     ///    - debug.tracing.ctl.hwui.skia_use_perfetto_track_events.<package.name>
     ///
     /// Does not affect actual track_event data *collection*, which must be
-    /// configured seperately.
+    /// configured separately.
     #[prost(bool, optional, tag = "2")]
     pub hwui_skia_track_events: ::core::option::Option<bool>,
     /// If non-empty, hwui_skia_track_events applies to only the packages listed.
@@ -735,6 +908,54 @@ pub struct AndroidSystemPropertyConfig {
     /// Properties to poll. All property names must start with "debug.tracing.".
     #[prost(string, repeated, tag = "2")]
     pub property_name: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Configuration for the android.app_wakelocks data source.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct AppWakelocksConfig {
+    /// Specifies the delay (in milliseconds) after which the data source will
+    /// attempt to write events. Writing less frequently reduces the trace size by
+    /// making better use of the packed arrays and reducing the total number of
+    /// TracePackets needed (which each have dozens of bytes of overhead). The
+    /// suggested delay is 5000ms.
+    #[prost(int32, optional, tag = "1")]
+    pub write_delay_ms: ::core::option::Option<i32>,
+    /// When set, wakelocks held for less than this amount of time are filtered
+    /// from the resulting trace. Note: duration is computed by matching wakelocks
+    /// with identical attributes, not by tracking the underlying objects. The
+    /// threshold should be < the trace's flush_period_ms.
+    #[prost(int32, optional, tag = "2")]
+    pub filter_duration_below_ms: ::core::option::Option<i32>,
+    /// When true, the owner_pid is dropped from the resulting output, reducing the
+    /// size of the interning tables.
+    #[prost(bool, optional, tag = "3")]
+    pub drop_owner_pid: ::core::option::Option<bool>,
+}
+/// Data source that records CPU per UID data.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CpuPerUidConfig {
+    /// Record at this frequency.
+    #[prost(uint32, optional, tag = "1")]
+    pub poll_ms: ::core::option::Option<u32>,
+}
+/// Custom configuration for the "android.inputmethod" data source.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct InputMethodConfig {
+    /// If true, enables tracing in the clients.
+    #[prost(bool, optional, tag = "1")]
+    pub client: ::core::option::Option<bool>,
+    /// If true, enables tracing in InputMethodService.
+    #[prost(bool, optional, tag = "2")]
+    pub service: ::core::option::Option<bool>,
+    /// If true, enables tracing in InputMethodManagerService.
+    #[prost(bool, optional, tag = "3")]
+    pub manager_service: ::core::option::Option<bool>,
+}
+/// Data source that records kernel (and native) wakelock data.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KernelWakelocksConfig {
+    /// Record at this frequency.
+    #[prost(uint32, optional, tag = "1")]
+    pub poll_ms: ::core::option::Option<u32>,
 }
 /// Network tracing data source that records details on all packets sent or
 /// received by the network.
@@ -782,6 +1003,12 @@ pub struct PackagesListConfig {
     /// (exact match, no regex). Otherwise, emit info about all packages.
     #[prost(string, repeated, tag = "1")]
     pub package_name_filter: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// If present and non-zero, the data source will periodically poll for CPU
+    /// use by packages and only emit results for those that it sees. If absent,
+    /// the data source will emit results for all packages at startup. The package
+    /// name filter applies either way.
+    #[prost(uint32, optional, tag = "2")]
+    pub only_write_on_cpu_use_every_ms: ::core::option::Option<u32>,
 }
 /// Data source that records events from the modem.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -928,8 +1155,8 @@ pub mod surface_flinger_layers_config {
         /// Trace a single layers snapshot.
         Dump = 3,
         /// Default mode (applied by SurfaceFlinger if no mode is specified).
-        /// Same as MODE_GENERATED, but triggers the layers snapshots generation only when a bugreport
-        /// is taken.
+        /// Same as MODE_GENERATED, but triggers the layers snapshots generation only
+        /// when a bugreport is taken.
         GeneratedBugreportOnly = 4,
     }
     impl Mode {
@@ -1053,6 +1280,41 @@ pub mod surface_flinger_transactions_config {
         }
     }
 }
+/// Data source that lists details (such as version code) about users on an
+/// Android device.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AndroidUserListConfig {
+    /// An allowlist of user type strings, used to control the granularity of
+    /// user type information emitted in the trace. Exact, case-sensitive string
+    /// matching is used.
+    ///
+    /// Any user type read from the device that is NOT present in the
+    /// effective allowlist will have its type reported as
+    /// "android.os.usertype.FILTERED".
+    ///
+    /// The effective allowlist is determined as follows:
+    ///
+    /// 1. If this 'user_type_filter' field is provided and non-empty:
+    ///     This list itself is the effective allowlist.
+    ///     Example TraceConfig:
+    ///     --------------------
+    ///     data_sources {
+    ///         config {
+    ///             name: "android.user_list"
+    ///             target_buffer: 0
+    ///             user_list_config {
+    ///               # Only report these specific types, others become FILTERED.
+    ///               user_type_filter: "android.os.usertype.full.SYSTEM"
+    ///               user_type_filter: "android.os.usertype.system.HEADLESS"
+    ///             }
+    ///         }
+    ///     }
+    ///
+    ///
+    /// Note: This field does not support regular expressions.
+    #[prost(string, repeated, tag = "1")]
+    pub user_type_filter: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// Custom configuration for the "android.windowmanager" data source.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct WindowManagerConfig {
@@ -1160,6 +1422,9 @@ pub struct ChromeConfig {
     /// the specified tracing agent label (e.g. "traceEvents") will be returned.
     #[prost(string, optional, tag = "5")]
     pub json_agent_label_filter: ::core::option::Option<::prost::alloc::string::String>,
+    ///   When enabled, event names should not contain package names.
+    #[prost(bool, optional, tag = "6")]
+    pub event_package_name_filter_enabled: ::core::option::Option<bool>,
 }
 /// Nested message and enum types in `ChromeConfig`.
 pub mod chrome_config {
@@ -1196,6 +1461,37 @@ pub mod chrome_config {
         }
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChromiumHistogramSamplesConfig {
+    /// List of histograms to record. If no histogram is specified, all histograms
+    /// are recorded.
+    #[prost(message, repeated, tag = "1")]
+    pub histograms: ::prost::alloc::vec::Vec<chromium_histogram_samples_config::HistogramSample>,
+    /// Default: false (i.e. histogram names are NOT filtered out by default)
+    /// When true, histogram_name will be filtered out.
+    #[prost(bool, optional, tag = "2")]
+    pub filter_histogram_names: ::core::option::Option<bool>,
+}
+/// Nested message and enum types in `ChromiumHistogramSamplesConfig`.
+pub mod chromium_histogram_samples_config {
+    /// Records when a value within the specified bounds \[min_value, max_value\] is
+    /// emitted into a Chrome histogram.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct HistogramSample {
+        #[prost(string, optional, tag = "1")]
+        pub histogram_name: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(int64, optional, tag = "2")]
+        pub min_value: ::core::option::Option<i64>,
+        #[prost(int64, optional, tag = "3")]
+        pub max_value: ::core::option::Option<i64>,
+    }
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ChromiumSystemMetricsConfig {
+    /// Samples counters every X ms.
+    #[prost(uint32, optional, tag = "1")]
+    pub sampling_interval_ms: ::core::option::Option<u32>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct V8Config {
     /// Whether to log the actual content of scripts (e.g. content of the JS file
@@ -1226,6 +1522,15 @@ pub struct EtwConfig {
         tag = "1"
     )]
     pub kernel_flags: ::prost::alloc::vec::Vec<i32>,
+    /// Provides events relating to the scheduler.
+    #[prost(string, repeated, tag = "2")]
+    pub scheduler_provider_events: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Provides events relating to the memory manager.
+    #[prost(string, repeated, tag = "3")]
+    pub memory_provider_events: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Provides events relating to file I/O.
+    #[prost(string, repeated, tag = "4")]
+    pub file_provider_events: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Nested message and enum types in `EtwConfig`.
 pub mod etw_config {
@@ -1258,7 +1563,13 @@ pub mod etw_config {
         }
     }
 }
-/// Next id: 30
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FrozenFtraceConfig {
+    /// The instance name which stores the previous boot ftrace data. Required.
+    #[prost(string, optional, tag = "1")]
+    pub instance_name: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Next id: 38
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FtraceConfig {
     /// Ftrace events to record, example: "sched/sched_switch".
@@ -1274,11 +1585,35 @@ pub struct FtraceConfig {
     /// preferred, if possible, for this config.
     #[prost(string, repeated, tag = "28")]
     pub atrace_categories_prefer_sdk: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// If true, do *not* add in extra ftrace events when |atrace_categories| are
+    /// set. This skips the legacy "atrace" behaviour of adding hardcoded ftrace
+    /// events for convenience (and the vendor-specific events on top).
+    /// Introduced in: perfetto v52.
+    #[prost(bool, optional, tag = "34")]
+    pub atrace_userspace_only: ::core::option::Option<bool>,
     /// Size of each per-cpu kernel ftrace ring buffer.
     /// Not guaranteed if there are multiple concurrent tracing sessions, as the
     /// buffers cannot be resized without pausing recording in the kernel.
     #[prost(uint32, optional, tag = "10")]
     pub buffer_size_kb: ::core::option::Option<u32>,
+    /// If true, |buffer_size_kb| is interpreted as a lower bound, allowing the
+    /// implementation to choose a bigger buffer size.
+    ///
+    /// Most configs for perfetto v43+ should simply leave both fields unset.
+    ///
+    /// If you need a config compatible with a range of perfetto builds and you
+    /// used to set a non-default buffer_size_kb, consider setting both fields.
+    /// Example:
+    ///    buffer_size_kb: 4096
+    ///    buffer_size_lower_bound: true
+    /// On older builds, the per-cpu buffers will be exactly 4 MB.
+    /// On v43+, buffers will be at least 4 MB.
+    /// In both cases, neither is guaranteed if there are other concurrent
+    /// perfetto ftrace sessions, as the buffers cannot be resized without pausing
+    /// the recording in the kernel.
+    /// Introduced in: perfetto v43.
+    #[prost(bool, optional, tag = "27")]
+    pub buffer_size_lower_bound: ::core::option::Option<bool>,
     /// If set, specifies how often the tracing daemon reads from the kernel ring
     /// buffer. Not guaranteed if there are multiple concurrent tracing sessions.
     /// Leave unset unless you're fine-tuning a local config.
@@ -1305,16 +1640,6 @@ pub struct FtraceConfig {
     pub symbolize_ksyms: ::core::option::Option<bool>,
     #[prost(enumeration = "ftrace_config::KsymsMemPolicy", optional, tag = "17")]
     pub ksyms_mem_policy: ::core::option::Option<i32>,
-    /// By default the kernel symbolizer is lazily initialized on a deferred task
-    /// to reduce ftrace's time-to-start-recording. Unfortunately that makes
-    /// ksyms integration tests hard. This flag forces the kernel symbolizer to be
-    /// initialized synchronously on the data source start and hence avoiding
-    /// timing races in tests.
-    /// DEPRECATED in v28 / Android U. This is now the default behavior, setting it
-    /// to true is a no-op.
-    #[deprecated]
-    #[prost(bool, optional, tag = "14")]
-    pub initialize_ksyms_synchronously_for_testing: ::core::option::Option<bool>,
     /// When this boolean is true AND the ftrace_events contains "kmem/rss_stat",
     /// this option causes traced_probes to enable the "kmem/rss_stat_throttled"
     /// event instead if present, and fall back to "kmem/rss_stat" if not present.
@@ -1329,6 +1654,17 @@ pub struct FtraceConfig {
     /// For more context: go/rss-stat-throttled.
     #[prost(bool, optional, tag = "15")]
     pub throttle_rss_stat: ::core::option::Option<bool>,
+    /// If true, use self-describing proto messages when writing events not known
+    /// at compile time (aka generic events). Each event bundle will have a set of
+    /// serialised proto descriptors for events within that bundle.
+    ///
+    /// Default if unset:
+    /// * v53+: true
+    /// * before v53: false
+    ///
+    /// Added in: perfetto v50.
+    #[prost(bool, optional, tag = "32")]
+    pub denser_generic_event_encoding: ::core::option::Option<bool>,
     /// If true, avoid enabling events that aren't statically known by
     /// traced_probes. Otherwise, the default is to emit such events as
     /// GenericFtraceEvent protos.
@@ -1385,11 +1721,28 @@ pub struct FtraceConfig {
     /// * Introduced in: Android U.
     #[prost(string, repeated, tag = "21")]
     pub function_graph_roots: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// If true, does not clear ftrace buffers before the start of the program.
+    /// If |enable_function_graph| is true, only trace the specified
+    /// number of calls down the stack. Sets the max_graph_depth value
+    /// in sys/kernel/tracing/
+    ///
+    /// Only respected for the first tracing session that enables
+    /// function_graph tracing.
+    ///
+    /// Introduced in: perfetto v51.
+    /// Supported on: Android 25Q3+.
+    #[prost(uint32, optional, tag = "33")]
+    pub function_graph_max_depth: ::core::option::Option<u32>,
+    /// Ftrace events to record, specific for kprobes and kretprobes
+    #[prost(message, repeated, tag = "30")]
+    pub kprobe_events: ::prost::alloc::vec::Vec<ftrace_config::KprobeEvent>,
+    /// If true, does not clear kernel ftrace buffers when starting the trace.
     /// This makes sense only if this is the first ftrace data source instance
     /// created after the daemon has been started. Can be useful for gathering boot
     /// traces, if ftrace has been separately configured (e.g. via kernel
     /// commandline).
+    /// NB: when configuring the pre-perfetto ftrace, prefer to set
+    /// "/sys/kernel/tracing/trace_clock" to "boot" if your trace will contain
+    /// anything besides ftrace. Otherwise timestamps might be skewed.
     #[prost(bool, optional, tag = "23")]
     pub preserve_ftrace_buffer: ::core::option::Option<bool>,
     /// If true, overrides the default timestamp clock and uses a raw hardware
@@ -1401,7 +1754,7 @@ pub struct FtraceConfig {
     /// for event recording. Normally, this means
     /// `/sys/kernel/tracing/instances/$instance_name`.
     ///
-    /// The name "hyp" is reserved.
+    /// Names "hyp" and "hypervisor" are reserved.
     ///
     /// The instance must already exist, the tracing daemon *will not* create it
     /// for you as it typically doesn't have such permissions.
@@ -1411,24 +1764,50 @@ pub struct FtraceConfig {
     ///   * buffer_size_kb
     #[prost(string, optional, tag = "25")]
     pub instance_name: ::core::option::Option<::prost::alloc::string::String>,
-    /// If true, |buffer_size_kb| is interpreted as a lower bound, allowing the
-    /// implementation to choose a bigger buffer size.
+    /// For perfetto developer use. If true and on a debuggable android build,
+    /// serialise raw tracing pages that the implementation cannot parse.
+    #[prost(bool, optional, tag = "31")]
+    pub debug_ftrace_abi: ::core::option::Option<bool>,
+    /// Filter ftrace events by Thread ID (TID).
+    /// This writes the TIDs to `/sys/kernel/tracing/set_event_pid`.
     ///
-    /// Most configs for perfetto v43+ should simply leave both fields unset.
+    /// Note: this is an exclusive feature, see:
+    /// <https://perfetto.dev/docs/learning-more/android#exclusive-tracing-sessions.>
     ///
-    /// If you need a config compatible with a range of perfetto builds and you
-    /// used to set a non-default buffer_size_kb, consider setting both fields.
-    /// Example:
-    ///    buffer_size_kb: 4096
-    ///    buffer_size_lower_bound: true
-    /// On older builds, the per-cpu buffers will be exactly 4 MB.
-    /// On v43+, buffers will be at least 4 MB.
-    /// In both cases, neither is guaranteed if there are other concurrent
-    /// perfetto ftrace sessions, as the buffers cannot be resized without pausing
-    /// the recording in the kernel.
-    /// Introduced in: perfetto v43.
-    #[prost(bool, optional, tag = "27")]
-    pub buffer_size_lower_bound: ::core::option::Option<bool>,
+    /// Introduced in: perfetto v52.
+    /// Supported on: Android 25Q3+.
+    #[prost(uint32, repeated, packed = "false", tag = "35")]
+    pub tids_to_trace: ::prost::alloc::vec::Vec<u32>,
+    #[prost(message, repeated, tag = "36")]
+    pub tracefs_options: ::prost::alloc::vec::Vec<ftrace_config::TracefsOption>,
+    /// This mask restricts tracing to a specific set of CPUs using a
+    /// comma-separated hex mask. Each hex number (up to 8 digits) represents a
+    /// 32-bit chunk of the CPU mask.
+    ///
+    /// The chunks are ordered from high CPUs to low CPUs (left to right):
+    ///    - Rightmost chunk: CPUs 0-31
+    ///    - 2nd chunk from right: CPUs 32-63
+    ///    - ...and so on.
+    ///
+    /// Example (assuming NR_CPUS=128, requiring 4 chunks):
+    /// The full mask would be in the format: "chunk3,chunk2,chunk1,chunk0"
+    /// where chunk3 maps to CPUs 96-127, chunk2 to 64-95, chunk1 to 32-63, and
+    /// chunk0 to 0-31.
+    ///    - "ffffffff,0,0,0": Enables CPUs 96-127 only.
+    ///    - "f,ff": Enables CPUs 0-7 (from "ff") and CPUs 32-35 (from "f").
+    ///
+    /// Note: This is an exclusive feature, see:
+    /// <https://perfetto.dev/docs/learning-more/android#exclusive-tracing-sessions.>
+    ///
+    /// Introduced in: perfetto v52.
+    /// Supported on: Android 25Q3+.
+    #[prost(string, optional, tag = "37")]
+    pub tracing_cpumask: ::core::option::Option<::prost::alloc::string::String>,
+    /// No-op in perfetto v28+. Name preserved because of existing references in
+    /// textproto configs.
+    #[deprecated]
+    #[prost(bool, optional, tag = "14")]
+    pub initialize_ksyms_synchronously_for_testing: ::core::option::Option<bool>,
 }
 /// Nested message and enum types in `FtraceConfig`.
 pub mod ftrace_config {
@@ -1492,6 +1871,110 @@ pub mod ftrace_config {
             }
         }
     }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct KprobeEvent {
+        /// Kernel function name to attach to, for example "fuse_file_write_iter"
+        #[prost(string, optional, tag = "1")]
+        pub probe: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(enumeration = "kprobe_event::KprobeType", optional, tag = "2")]
+        pub r#type: ::core::option::Option<i32>,
+    }
+    /// Nested message and enum types in `KprobeEvent`.
+    pub mod kprobe_event {
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum KprobeType {
+            Unknown = 0,
+            Kprobe = 1,
+            Kretprobe = 2,
+            Both = 3,
+        }
+        impl KprobeType {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::Unknown => "KPROBE_TYPE_UNKNOWN",
+                    Self::Kprobe => "KPROBE_TYPE_KPROBE",
+                    Self::Kretprobe => "KPROBE_TYPE_KRETPROBE",
+                    Self::Both => "KPROBE_TYPE_BOTH",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "KPROBE_TYPE_UNKNOWN" => Some(Self::Unknown),
+                    "KPROBE_TYPE_KPROBE" => Some(Self::Kprobe),
+                    "KPROBE_TYPE_KRETPROBE" => Some(Self::Kretprobe),
+                    "KPROBE_TYPE_BOTH" => Some(Self::Both),
+                    _ => None,
+                }
+            }
+        }
+    }
+    /// Tracefs options to set directly in the tracefs instance. This is a very
+    /// niche feature since almost all of the options deal with formatting textual
+    /// output (the /trace file), which perfetto doesn't use.
+    ///
+    /// The options with a known use-case:
+    /// * event-fork: when using `tids_to_trace` above, the kernel will
+    ///    automatically add newly spawned descendant threads to the set of TIDs.
+    ///
+    /// Full list of options is available at
+    /// <https://docs.kernel.org/trace/ftrace.html#trace-options.>
+    ///
+    /// Note: this is an exclusive feature, see:
+    /// <https://perfetto.dev/docs/learning-more/android#exclusive-tracing-sessions.>
+    ///
+    /// Introduced in: perfetto v52.
+    /// Supported on: Android 25Q3+.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct TracefsOption {
+        /// The name of the tracefs option as found in tracefs/trace_options (without
+        /// the "no" prefix).
+        #[prost(string, optional, tag = "1")]
+        pub name: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(enumeration = "tracefs_option::State", optional, tag = "2")]
+        pub state: ::core::option::Option<i32>,
+    }
+    /// Nested message and enum types in `TracefsOption`.
+    pub mod tracefs_option {
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum State {
+            Unknown = 0,
+            Enabled = 1,
+            Disabled = 2,
+        }
+        impl State {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::Unknown => "STATE_UNKNOWN",
+                    Self::Enabled => "STATE_ENABLED",
+                    Self::Disabled => "STATE_DISABLED",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "STATE_UNKNOWN" => Some(Self::Unknown),
+                    "STATE_ENABLED" => Some(Self::Enabled),
+                    "STATE_DISABLED" => Some(Self::Disabled),
+                    _ => None,
+                }
+            }
+        }
+    }
     /// When symbolize_ksyms=true, determines whether the traced_probes daemon
     /// should keep the symbol map in memory (and reuse it for future tracing
     /// sessions) or clear it (saving memory) and re-create it on each tracing
@@ -1546,6 +2029,23 @@ pub struct GpuCounterConfig {
     #[prost(bool, optional, tag = "4")]
     pub fix_gpu_clock: ::core::option::Option<bool>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GpuRenderStagesConfig {
+    /// Enable to separate the color and depth/stencil load and store stages
+    /// into a separate stages. If disabled, the depth/stencil load and store
+    /// stages will be combined.  Disabled by default. This option has no effect if
+    /// Low Overhead mode is enabled.
+    #[prost(bool, optional, tag = "1")]
+    pub full_loadstore: ::core::option::Option<bool>,
+    /// Use the low overhead mode for traces. In this mode render stages are
+    /// combined into a single workload stage. This provides less granular data but
+    /// induces minimal GPU overhead. Disabled by default.
+    #[prost(bool, optional, tag = "2")]
+    pub low_overhead: ::core::option::Option<bool>,
+    /// Trace metrics to capture for each render stage
+    #[prost(string, repeated, tag = "3")]
+    pub trace_metrics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct VulkanMemoryConfig {
     /// Tracking driver memory usage events
@@ -1555,6 +2055,8 @@ pub struct VulkanMemoryConfig {
     #[prost(bool, optional, tag = "2")]
     pub track_device_memory_usage: ::core::option::Option<bool>,
 }
+/// WARNING: unmaintained and deprecated. Likely won't work at all on modern
+/// systems.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InodeFileConfig {
     /// How long to pause between batches.
@@ -1707,6 +2209,63 @@ pub mod android_power_config {
         }
     }
 }
+/// Configuration that allows to boost the priority of the 'traced' or
+/// 'traced_probs' processes, by changing the scheduler configuration.
+/// Only supported on Linux and Android the boosted process must have
+/// 'CAP_SYS_NICE' capability.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct PriorityBoostConfig {
+    #[prost(
+        enumeration = "priority_boost_config::BoostPolicy",
+        optional,
+        tag = "1"
+    )]
+    pub policy: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub priority: ::core::option::Option<u32>,
+}
+/// Nested message and enum types in `PriorityBoostConfig`.
+pub mod priority_boost_config {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum BoostPolicy {
+        PolicyUnspecified = 0,
+        /// The default policy (e.g., CFS on Linux). Priority range: \[0; 20\]
+        /// priority is interpreted as -(nice), i.e., 1 is slightly higher prio
+        /// than default 0, 20 is the highest priority.
+        /// Note: this is the opposite semantic of the cmdline nice, and is done for
+        /// consistency with POLICY_SCHED_FIFO, so higher number == higher prio.
+        PolicySchedOther = 1,
+        /// The Real-time policy, Priority range: \[1; 99\]
+        PolicySchedFifo = 2,
+    }
+    impl BoostPolicy {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::PolicyUnspecified => "POLICY_UNSPECIFIED",
+                Self::PolicySchedOther => "POLICY_SCHED_OTHER",
+                Self::PolicySchedFifo => "POLICY_SCHED_FIFO",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "POLICY_UNSPECIFIED" => Some(Self::PolicyUnspecified),
+                "POLICY_SCHED_OTHER" => Some(Self::PolicySchedOther),
+                "POLICY_SCHED_FIFO" => Some(Self::PolicySchedFifo),
+                _ => None,
+            }
+        }
+    }
+}
+/// Config for polling process-related information from /proc/pid/status and
+/// related files on Linux.
+///
+/// Data source name: "linux.process_stats".
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProcessStatsConfig {
     #[prost(
@@ -1725,24 +2284,23 @@ pub struct ProcessStatsConfig {
     pub record_thread_names: ::core::option::Option<bool>,
     /// If > 0 samples counters (see process_stats.proto) from
     /// /proc/pid/status and oom_score_adj every X ms.
-    /// It will also sample /proc/pid/smaps_rollup if scan_smaps_rollup = true.
     /// This is required to be > 100ms to avoid excessive CPU usage.
     #[prost(uint32, optional, tag = "4")]
     pub proc_stats_poll_ms: ::core::option::Option<u32>,
-    /// This is required to be either = 0 or a multiple of |proc_stats_poll_ms|
-    /// (default: |proc_stats_poll_ms|). If = 0, will be set to
-    /// |proc_stats_poll_ms|. Non-multiples will be rounded down to the nearest
-    /// multiple.
+    /// Explicit caching period during which the polling won't re-emit identical
+    /// counter values. This is required to be either = 0 or a multiple of
+    /// |proc_stats_poll_ms| (default: |proc_stats_poll_ms|). Non-multiples will be
+    /// rounded down to the nearest multiple.
     #[prost(uint32, optional, tag = "6")]
     pub proc_stats_cache_ttl_ms: ::core::option::Option<u32>,
-    /// Niche feature: If true this will resolve file descriptors for each process
-    /// so these can be mapped to their actual device or file.
-    /// Requires raw_syscalls/sys_{enter,exit} ftrace events to be enabled or
-    /// new fds opened after initially scanning a process will not be
-    /// recognized.
-    #[prost(bool, optional, tag = "9")]
-    pub resolve_process_fds: ::core::option::Option<bool>,
-    /// If true, output will include memory stats from /proc/pid/smaps_rollup.
+    /// If true and |proc_stats_poll_ms| is set, sample memory stats from
+    /// /proc/pid/smaps_rollup.
+    ///
+    /// Android: does NOT work with the system daemons by default, as it requires
+    /// running the recording process (traced_probes or tracebox) as root. It is
+    /// possible to avoid the root requirement, but the exact steps depend on the
+    /// Linux distibution. The proc file requires passing a PTRACE_MODE_READ
+    /// check, and might be further covered by the procfs "hidepid" mount option.
     #[prost(bool, optional, tag = "10")]
     pub scan_smaps_rollup: ::core::option::Option<bool>,
     /// If true: process descriptions will include process age (starttime in
@@ -1750,11 +2308,24 @@ pub struct ProcessStatsConfig {
     /// Introduced in: perfetto v44.
     #[prost(bool, optional, tag = "11")]
     pub record_process_age: ::core::option::Option<bool>,
-    /// If true and |proc_stats_poll_ms| is true, process stats will include time
+    /// If true and |proc_stats_poll_ms| is set, process stats will include time
     /// spent running in user/kernel mode (utime/stime in /proc/pid/stat).
     /// Introduced in: perfetto v44.
     #[prost(bool, optional, tag = "12")]
     pub record_process_runtime: ::core::option::Option<bool>,
+    /// If true obtain per-process dmabuf resident set size from
+    /// /proc/pid/dmabuf_rss.
+    /// This feature is not in upstream linux, and is available only on some
+    /// Android kernels.
+    #[prost(bool, optional, tag = "13")]
+    pub record_process_dmabuf_rss: ::core::option::Option<bool>,
+    /// WARNING: unmaintained and deprecated. If true this will resolve file
+    /// descriptors for each process so these can be mapped to their actual device
+    /// or file. Requires raw_syscalls/sys_{enter,exit} ftrace events to be enabled
+    /// or new fds opened after initially scanning a process will not be
+    /// recognized.
+    #[prost(bool, optional, tag = "9")]
+    pub resolve_process_fds: ::core::option::Option<bool>,
 }
 /// Nested message and enum types in `ProcessStatsConfig`.
 pub mod process_stats_config {
@@ -1766,6 +2337,9 @@ pub mod process_stats_config {
         /// startup is now disabled by default and can be re-enabled using the
         /// |scan_all_processes_on_start| arg.
         DisableInitialDump = 1,
+        /// If set, disables the special interaction with "linux.ftrace" data source,
+        /// where the process stats rescrapes any thread id seen in the ftrace
+        /// stream.
         DisableOnDemand = 2,
     }
     impl Quirks {
@@ -2054,15 +2628,22 @@ pub mod java_hprof_config {
         pub scan_pids_only_on_start: ::core::option::Option<bool>,
     }
 }
-/// Next id: 12
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct PerfEvents {}
 /// Nested message and enum types in `PerfEvents`.
 pub mod perf_events {
-    /// What event to sample on, and how often. Commented from the perspective of
-    /// its use in |PerfEventConfig|.
+    /// The primary event to count. If recording multiple events, this
+    /// counter is the "group leader".
+    /// Commented from the perspective of its use in |PerfEventConfig|.
+    /// Next id: 13
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Timebase {
+        /// Optional modifiers for the event. Modelled after the perftool's
+        /// <https://man7.org/linux/man-pages/man1/perf-list.1.html#EVENT_MODIFIERS>
+        /// Currently supported: count scoping such as :u, :k, :uk, ...
+        /// Modifiers can differ between the timebase and followers.
+        #[prost(enumeration = "EventModifier", repeated, packed = "false", tag = "12")]
+        pub modifiers: ::prost::alloc::vec::Vec<i32>,
         /// If set, samples will be timestamped with the given clock.
         /// If unset, the clock is chosen by the implementation.
         /// For software events, prefer PERF_CLOCK_BOOTTIME. However it cannot be
@@ -2075,23 +2656,40 @@ pub mod perf_events {
         /// parser will choose a suitable name.
         #[prost(string, optional, tag = "10")]
         pub name: ::core::option::Option<::prost::alloc::string::String>,
-        /// How often the per-cpu sampling will occur. Not guaranteed to be honored
-        /// as the kernel can throttle the sampling rate if it's too high.
-        /// If unset, an implementation-defined default is used.
-        #[prost(oneof = "timebase::Interval", tags = "2, 1")]
+        /// How often to snapshot the counter, along with any follower events and
+        /// any additional sampled data such as callstacks.
+        ///
+        /// This choice also controls how the readings are taken:
+        /// * With |frequency| or |period|, samples are taken by the kernel
+        ///    into a ring buffer. Analogous to `perf record`.
+        /// * With |poll_period_ms|, the userspace periodically snapshots
+        ///    the counters using the read syscall. Analogous to `perf stat -I`.
+        /// Prefer the sampling options unless you're recording PMUs whose
+        /// perf drivers only support the reading mode.
+        ///
+        /// If unset, an implementation-defined sampling default is used.
+        #[prost(oneof = "timebase::Interval", tags = "2, 1, 6")]
         pub interval: ::core::option::Option<timebase::Interval>,
-        /// Counting event to use as a timebase for the sampling.
+        /// Counting event to use as the timebase.
         /// If unset, implies the CPU timer (SW_CPU_CLOCK) as the event,
         /// which is what you usually want.
-        /// See common/perf_events.proto for the definitions.
         #[prost(oneof = "timebase::Event", tags = "4, 3, 5")]
         pub event: ::core::option::Option<timebase::Event>,
     }
     /// Nested message and enum types in `Timebase`.
     pub mod timebase {
-        /// How often the per-cpu sampling will occur. Not guaranteed to be honored
-        /// as the kernel can throttle the sampling rate if it's too high.
-        /// If unset, an implementation-defined default is used.
+        /// How often to snapshot the counter, along with any follower events and
+        /// any additional sampled data such as callstacks.
+        ///
+        /// This choice also controls how the readings are taken:
+        /// * With |frequency| or |period|, samples are taken by the kernel
+        ///    into a ring buffer. Analogous to `perf record`.
+        /// * With |poll_period_ms|, the userspace periodically snapshots
+        ///    the counters using the read syscall. Analogous to `perf stat -I`.
+        /// Prefer the sampling options unless you're recording PMUs whose
+        /// perf drivers only support the reading mode.
+        ///
+        /// If unset, an implementation-defined sampling default is used.
         #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
         pub enum Interval {
             /// Per-cpu sampling frequency in Hz, as requested from the kernel. Not the
@@ -2100,18 +2698,28 @@ pub mod perf_events {
             /// kernel will dynamically adjust it based on the observed event rate, to
             /// approximate this frequency. Works best with steady-rate events like
             /// timers.
+            /// Not guaranteed to be honored as the kernel can throttle the sampling
+            /// rate if it's too high.
             #[prost(uint64, tag = "2")]
             Frequency(u64),
             /// Per-cpu sampling will occur every |period| counts of |event|.
             /// Prefer |frequency| by default, as it's easier to oversample with a
             /// fixed period.
+            /// Not guaranteed to be honored as the kernel can throttle the sampling
+            /// rate if it's too high.
             #[prost(uint64, tag = "1")]
             Period(u64),
+            /// Per-cpu values are read by the userspace every interval. If using this
+            /// mode, only follower events are supported. Options such as
+            /// |PerfEventConfig.CallstackSampling| are incompatible.
+            /// The period can't be guaranteed to be exact since the readings are taken
+            /// by userspace.
+            #[prost(uint32, tag = "6")]
+            PollPeriodMs(u32),
         }
-        /// Counting event to use as a timebase for the sampling.
+        /// Counting event to use as the timebase.
         /// If unset, implies the CPU timer (SW_CPU_CLOCK) as the event,
         /// which is what you usually want.
-        /// See common/perf_events.proto for the definitions.
         #[derive(Clone, PartialEq, ::prost::Oneof)]
         pub enum Event {
             #[prost(enumeration = "super::Counter", tag = "4")]
@@ -2298,13 +2906,57 @@ pub mod perf_events {
             }
         }
     }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum EventModifier {
+        UnknownEventModifier = 0,
+        /// count only while in userspace
+        CountUserspace = 1,
+        /// count only while in kernel
+        CountKernel = 2,
+        /// count only while in hypervisor
+        CountHypervisor = 3,
+    }
+    impl EventModifier {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::UnknownEventModifier => "UNKNOWN_EVENT_MODIFIER",
+                Self::CountUserspace => "EVENT_MODIFIER_COUNT_USERSPACE",
+                Self::CountKernel => "EVENT_MODIFIER_COUNT_KERNEL",
+                Self::CountHypervisor => "EVENT_MODIFIER_COUNT_HYPERVISOR",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN_EVENT_MODIFIER" => Some(Self::UnknownEventModifier),
+                "EVENT_MODIFIER_COUNT_USERSPACE" => Some(Self::CountUserspace),
+                "EVENT_MODIFIER_COUNT_KERNEL" => Some(Self::CountKernel),
+                "EVENT_MODIFIER_COUNT_HYPERVISOR" => Some(Self::CountHypervisor),
+                _ => None,
+            }
+        }
+    }
 }
 /// Additional events associated with a leader.
-/// Configuration is similar to Timebase event. Because data acquisition is
-/// driven by the leader there is no option to configure the clock or the
-/// frequency.
+/// See <https://man7.org/linux/man-pages/man1/perf-list.1.html#LEADER_SAMPLING>
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FollowerEvent {
+    /// Modifiers can differ between the timebase and followers.
+    #[prost(
+        enumeration = "perf_events::EventModifier",
+        repeated,
+        packed = "false",
+        tag = "5"
+    )]
+    pub modifiers: ::prost::alloc::vec::Vec<i32>,
+    /// Optional arbitrary name for the event, to identify it in the parsed
+    /// trace. Does *not* affect the profiling itself. If unset, the trace
+    /// parser will choose a suitable name.
     #[prost(string, optional, tag = "4")]
     pub name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(oneof = "follower_event::Event", tags = "1, 2, 3")]
@@ -2338,7 +2990,7 @@ pub mod follower_event {
 ///      }
 ///    }
 ///
-/// Next id: 20
+/// Next id: 21
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PerfEventConfig {
     /// What event to sample on, and how often.
@@ -2353,6 +3005,15 @@ pub struct PerfEventConfig {
     /// If unset, the profiler will record only the event counts.
     #[prost(message, optional, tag = "16")]
     pub callstack_sampling: ::core::option::Option<perf_event_config::CallstackSampling>,
+    /// List of cpu indices for counting. If empty, the default is all cpus.
+    ///
+    /// Note: this is not inside |callstack_sampling.scope| as it also applies to
+    /// counter-only traces. A future change will likely reorganise the options,
+    /// but this field will continue to be supported.
+    ///
+    /// Available since: perfetto v50.
+    #[prost(uint32, repeated, packed = "false", tag = "20")]
+    pub target_cpu: ::prost::alloc::vec::Vec<u32>,
     /// How often the per-cpu ring buffers are read by the producer.
     /// If unset, an implementation-defined default is used.
     #[prost(uint32, optional, tag = "8")]
@@ -2382,10 +3043,17 @@ pub struct PerfEventConfig {
     /// If unset, an implementation-defined default is used.
     #[prost(uint32, optional, tag = "9")]
     pub remote_descriptor_timeout_ms: ::core::option::Option<u32>,
-    /// Optional period for clearing state cached by the unwinder. This is a heavy
-    /// operation that is only necessary for traces that target a wide set of
-    /// processes, and require the memory footprint to be reset periodically.
-    /// If unset, the cached state will not be cleared.
+    /// Optional period for clearing state cached by the userspace unwinder. This
+    /// is a heavy operation that is only necessary for traces that target a wide
+    /// set of processes, and require the memory footprint to be reset
+    /// periodically. To effectively disable the cache clearing, set to a value
+    /// greater than your trace duration.
+    ///
+    /// Relevant only if |callstack_sampling.user_frames| is set to UNWIND_DWARF.
+    ///
+    /// If zero or unset:
+    /// * before perfetto v52: no cache clearing.
+    /// * perfetto v52+: implementation chooses an infrequent default.
     #[prost(uint32, optional, tag = "10")]
     pub unwind_state_clear_period_ms: ::core::option::Option<u32>,
     /// If set, only profile target if it was installed by a package with one of
@@ -2508,6 +3176,8 @@ pub mod perf_event_config {
         UnwindSkip = 1,
         /// Use libunwindstack (default):
         UnwindDwarf = 2,
+        /// Use userspace frame pointer unwinder:
+        UnwindFramePointer = 3,
     }
     impl UnwindMode {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -2519,6 +3189,7 @@ pub mod perf_event_config {
                 Self::UnwindUnknown => "UNWIND_UNKNOWN",
                 Self::UnwindSkip => "UNWIND_SKIP",
                 Self::UnwindDwarf => "UNWIND_DWARF",
+                Self::UnwindFramePointer => "UNWIND_FRAME_POINTER",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2527,10 +3198,47 @@ pub mod perf_event_config {
                 "UNWIND_UNKNOWN" => Some(Self::UnwindUnknown),
                 "UNWIND_SKIP" => Some(Self::UnwindSkip),
                 "UNWIND_DWARF" => Some(Self::UnwindDwarf),
+                "UNWIND_FRAME_POINTER" => Some(Self::UnwindFramePointer),
                 _ => None,
             }
         }
     }
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ProtoVmConfig {
+    #[prost(uint32, optional, tag = "1")]
+    pub memory_limit_kb: ::core::option::Option<u32>,
+}
+/// QnxConfig is used with trace_qnx_probes build from
+/// <https://github.com/qnx-ports/perfetto>
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct QnxConfig {
+    /// The number of buffers that tracelog will init for the QNX trace.
+    #[prost(uint32, optional, tag = "1")]
+    pub qnx_kernel_buffers: ::core::option::Option<u32>,
+    /// The number of kernel buffers that tracelog will init for the QNX trace.
+    #[prost(uint32, optional, tag = "2")]
+    pub qnx_kernel_kbuffers: ::core::option::Option<u32>,
+    /// Flag indicating whether the QNX kernel tracing should produce wide
+    /// events which contain additional data or fast events which are most
+    /// concise. In fast mode we lose the priority information
+    #[prost(bool, optional, tag = "3")]
+    pub qnx_kernel_wide_events: ::core::option::Option<bool>,
+    /// The number of pages initialized by default the parser's page cache.
+    #[prost(uint32, optional, tag = "4")]
+    pub qnx_cache_pages: ::core::option::Option<u32>,
+    /// The max pages the page cache should allocate (must be at least as big)
+    /// as the qnx_cache_pages value. Using -1 will allow the cache to grow
+    /// unbounded. The cache will prefer to re-use existing pages so growth will
+    /// only happen when needed (when parser is not keeping up).
+    #[prost(int32, optional, tag = "5")]
+    pub qnx_cache_max_pages: ::core::option::Option<i32>,
+    /// The initial size of the the buffer used to hold the trace header values
+    /// this dynamic buffer will grow as needed but reallocs can be avoided by
+    /// selecting an initial size large enough to hold all the initial header
+    /// data.
+    #[prost(uint32, optional, tag = "6")]
+    pub qnx_trace_buffer_init_bytes: ::core::option::Option<u32>,
 }
 /// This file is named 'statsd_tracing_config.proto' rather than
 /// 'statsd_config.proto' (which would be more consistent with the other
@@ -2809,16 +3517,21 @@ pub struct TrackEventConfig {
     /// still be emitted even if set to true.
     #[prost(bool, optional, tag = "7")]
     pub filter_debug_annotations: ::core::option::Option<bool>,
-    /// Default : false (i.e. disabled)
+    /// Default: false (i.e. disabled)
     /// When true, the SDK samples and emits the current thread time counter value
     /// for each event on the current thread's track. This value represents the
-    /// total CPU time consumed by that thread since its creation. Note that if a
-    /// thread is not scheduled by OS for some duration, that time won't be
-    /// included in thread_time.
-    /// Learn more : "CLOCK_THREAD_CPUTIME_ID" flag at
-    /// <https://linux.die.net/man/3/clock_gettime>
+    /// total CPU time consumed by that thread since its creation.
+    /// Learn more: "CLOCK_THREAD_CPUTIME_ID" flag at
+    /// <https://man7.org/linux/man-pages/man3/clock_gettime.3.html>
     #[prost(bool, optional, tag = "8")]
     pub enable_thread_time_sampling: ::core::option::Option<bool>,
+    /// When enable_thread_time_sampling is true, and this is specified, thread
+    /// time is sampled only if the elapsed wall time >
+    /// `thread_time_subsampling_ns`. Otherwise, thread time is considered nil.
+    /// Effectively, this means thread time will have a leeway of
+    /// `thread_time_subsampling_ns` and won't be emitted for shorter events.
+    #[prost(uint64, optional, tag = "10")]
+    pub thread_time_subsampling_ns: ::core::option::Option<u64>,
     /// Default: false (i.e. dynamic event names are NOT filtered out by default)
     /// When true, event_names wrapped in perfetto::DynamicString will be filtered
     /// out.
@@ -2826,7 +3539,7 @@ pub struct TrackEventConfig {
     pub filter_dynamic_event_names: ::core::option::Option<bool>,
 }
 /// The configuration that is passed to each data source when starting tracing.
-/// Next id: 131
+/// Next id: 140
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DataSourceConfig {
     /// Data source unique name, e.g., "linux.ftrace". This must match
@@ -2835,13 +3548,31 @@ pub struct DataSourceConfig {
     #[prost(string, optional, tag = "1")]
     pub name: ::core::option::Option<::prost::alloc::string::String>,
     /// The index of the logging buffer where TracePacket(s) will be stored.
-    /// This field doesn't make a major difference for the Producer(s). The final
-    /// logging buffers, in fact, are completely owned by the Service. We just ask
-    /// the Producer to copy this number into the chunk headers it emits, so that
-    /// the Service can quickly identify the buffer where to move the chunks into
-    /// without expensive lookups on its fastpath.
+    /// This field is quite subtle as it has a double semantic:
+    /// 1) When the config is passed, this field is a 0-based index relative to the
+    ///     buffer array in the TraceConfig and defines the mapping between data
+    ///     sources and config. From v54 this is optional because the user can
+    ///     instead use target_buffer_name.
+    /// 2) When the TracingService issues a SetupDataSource/StartDataSource to the
+    ///     producer, it overwrites this field with the global buffer index (which
+    ///     depends on other tracing sessions active). This tells the producer which
+    ///     buffer id should be passed to CreateTraceWriter. In this case, the trace
+    ///     service always sets the resolved global id, even when using
+    ///     `target_buffer_name`.
+    /// In hindsight we should have used two different fields given even in v0 they
+    /// had a different semantic. But now it's too late as this would be a major
+    /// protocol breaking change.
     #[prost(uint32, optional, tag = "2")]
     pub target_buffer: ::core::option::Option<u32>,
+    /// Alternative to |target_buffer|. References a buffer by name (as specified
+    /// in TraceConfig.BufferConfig.name) rather than by index. This is more
+    /// readable and less error-prone than using buffer indices.
+    /// If both |target_buffer| and |target_buffer_name| are specified, they must
+    /// refer to the same buffer, otherwise the service will reject the config.
+    /// Using both fields allows configs to work with both old and new versions
+    /// of the tracing service. Introduced in v54.
+    #[prost(string, optional, tag = "11")]
+    pub target_buffer_name: ::core::option::Option<::prost::alloc::string::String>,
     /// Set by the service to indicate the duration of the trace.
     /// DO NOT SET in consumer as this will be overridden by the service.
     #[prost(uint32, optional, tag = "3")]
@@ -2875,6 +3606,26 @@ pub struct DataSourceConfig {
     /// DO NOT SET in consumer as this will be overridden by the service.
     #[prost(uint64, optional, tag = "4")]
     pub tracing_session_id: ::core::option::Option<u64>,
+    /// How to behave when the producer runs out of space in the shared memory
+    /// buffer. This is only honored by some data sources (in the SDK, the data
+    /// sources registered with a configurable buffer exhausted policy).
+    #[prost(
+        enumeration = "data_source_config::BufferExhaustedPolicy",
+        optional,
+        tag = "9"
+    )]
+    pub buffer_exhausted_policy: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "10")]
+    pub priority_boost: ::core::option::Option<PriorityBoostConfig>,
+    /// TODO(primiano): today when we enable a protovm_config, we actually accept
+    /// that if N producers advertise M different versions of the same program we
+    /// will create M instances of that program.
+    /// To overcome this, we could move the program to the TraceConfig. But doing
+    /// so would bloat the trace config size too big and create problems to statsd.
+    /// Once the config store (b/482305876) exists we should move protovm programs
+    /// onto that.
+    #[prost(message, optional, tag = "12")]
+    pub protovm_config: ::core::option::Option<ProtoVmConfig>,
     /// Data source name: linux.ftrace
     #[prost(message, optional, tag = "100")]
     pub ftrace_config: ::core::option::Option<FtraceConfig>,
@@ -2901,7 +3652,7 @@ pub struct DataSourceConfig {
     /// Data source name: android.log
     #[prost(message, optional, tag = "107")]
     pub android_log_config: ::core::option::Option<AndroidLogConfig>,
-    /// TODO(fmayer): Add data source name for this.
+    /// Data source name: gpu.counters
     #[prost(message, optional, tag = "108")]
     pub gpu_counter_config: ::core::option::Option<GpuCounterConfig>,
     /// Data source name: android.game_interventions
@@ -2932,6 +3683,9 @@ pub struct DataSourceConfig {
     /// Data source name: linux.system_info
     #[prost(message, optional, tag = "119")]
     pub system_info_config: ::core::option::Option<SystemInfoConfig>,
+    /// Data source name: linux.frozen_ftrace
+    #[prost(message, optional, tag = "136")]
+    pub frozen_ftrace_config: ::core::option::Option<FrozenFtraceConfig>,
     /// Chrome is special as it doesn't use the perfetto IPC layer. We want to
     /// avoid proto serialization and de-serialization there because that would
     /// just add extra hops on top of the Mojo ser/des. Instead we auto-generate a
@@ -2981,6 +3735,33 @@ pub struct DataSourceConfig {
     /// Data source name: android.windowmanager
     #[prost(message, optional, tag = "130")]
     pub windowmanager_config: ::core::option::Option<WindowManagerConfig>,
+    /// Data source name: org.chromium.system_metrics
+    #[prost(message, optional, tag = "131")]
+    pub chromium_system_metrics: ::core::option::Option<ChromiumSystemMetricsConfig>,
+    /// Data source name: android.kernel_wakelocks
+    #[prost(message, optional, tag = "132")]
+    pub kernel_wakelocks_config: ::core::option::Option<KernelWakelocksConfig>,
+    /// Data source name: gpu.renderstages
+    #[prost(message, optional, tag = "133")]
+    pub gpu_renderstages_config: ::core::option::Option<GpuRenderStagesConfig>,
+    /// Data source name: org.chromium.histogram_samples
+    #[prost(message, optional, tag = "134")]
+    pub chromium_histogram_samples: ::core::option::Option<ChromiumHistogramSamplesConfig>,
+    /// Data source name: android.app_wakelocks
+    #[prost(message, optional, tag = "135")]
+    pub app_wakelocks_config: ::core::option::Option<AppWakelocksConfig>,
+    /// Data source name: android.cpu_per_uid
+    #[prost(message, optional, tag = "137")]
+    pub cpu_per_uid_config: ::core::option::Option<CpuPerUidConfig>,
+    /// Data source name: android.user_list
+    #[prost(message, optional, tag = "138")]
+    pub user_list_config: ::core::option::Option<AndroidUserListConfig>,
+    /// Data source name: android.inputmethod
+    #[prost(message, optional, tag = "139")]
+    pub inputmethod_config: ::core::option::Option<InputMethodConfig>,
+    /// Data source name: qnx.kernel
+    #[prost(message, optional, tag = "150")]
+    pub qnx_config: ::core::option::Option<QnxConfig>,
     /// This is a fallback mechanism to send a free-form text config to the
     /// producer. In theory this should never be needed. All the code that
     /// is part of the platform (i.e. traced service) is supposed to *not* truncate
@@ -3026,13 +3807,55 @@ pub mod data_source_config {
             }
         }
     }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum BufferExhaustedPolicy {
+        /// The data source will use its default buffer exhausted policy, specified
+        /// by the code when the data source is registered.
+        BufferExhaustedUnspecified = 0,
+        /// The data source will drop packets when there's no space in the shared
+        /// memory buffer.
+        BufferExhaustedDrop = 1,
+        /// The data source will wait when there's no space in the shared memory
+        /// buffer. If there's still not space, after a few seconds, the whole
+        /// producer process will be aborted.
+        BufferExhaustedStallThenAbort = 2,
+        /// The data source will wait when there's no space in the shared memory
+        /// buffer.  If there's still not space, after a few seconds, the data source
+        /// will drop packets.
+        BufferExhaustedStallThenDrop = 3,
+    }
+    impl BufferExhaustedPolicy {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::BufferExhaustedUnspecified => "BUFFER_EXHAUSTED_UNSPECIFIED",
+                Self::BufferExhaustedDrop => "BUFFER_EXHAUSTED_DROP",
+                Self::BufferExhaustedStallThenAbort => "BUFFER_EXHAUSTED_STALL_THEN_ABORT",
+                Self::BufferExhaustedStallThenDrop => "BUFFER_EXHAUSTED_STALL_THEN_DROP",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "BUFFER_EXHAUSTED_UNSPECIFIED" => Some(Self::BufferExhaustedUnspecified),
+                "BUFFER_EXHAUSTED_DROP" => Some(Self::BufferExhaustedDrop),
+                "BUFFER_EXHAUSTED_STALL_THEN_ABORT" => Some(Self::BufferExhaustedStallThenAbort),
+                "BUFFER_EXHAUSTED_STALL_THEN_DROP" => Some(Self::BufferExhaustedStallThenDrop),
+                _ => None,
+            }
+        }
+    }
 }
 /// The overall config that is used when starting a new tracing session through
 /// ProducerPort::StartTracing().
 /// It contains the general config for the logging buffer(s) and the configs for
 /// all the data source being enabled.
 ///
-/// Next id: 40.
+/// Next id: 47.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TraceConfig {
     #[prost(message, repeated, tag = "1")]
@@ -3114,6 +3937,10 @@ pub struct TraceConfig {
     /// to commit their data into the tracing service. This can be used for
     /// quasi-real-time streaming mode and to guarantee some partial ordering of
     /// events in the trace in windows of X ms.
+    ///
+    /// Warning: Perfetto automatically handles periodic flushing so in most
+    /// scenarios setting this field is not needed. High frequency flushing can
+    /// significantly impact performance.
     #[prost(uint32, optional, tag = "13")]
     pub flush_period_ms: ::core::option::Option<u32>,
     /// Wait for this long for producers to acknowledge flush requests.
@@ -3159,10 +3986,8 @@ pub struct TraceConfig {
     pub activate_triggers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "21")]
     pub incremental_state_config: ::core::option::Option<trace_config::IncrementalStateConfig>,
-    /// Additional guardrail used by the Perfetto command line client.
-    /// On user builds when --dropbox is set perfetto will refuse to trace unless
-    /// this is also set.
-    /// Added in Q.
+    /// No longer needed as we unconditionally allow tracing on user builds.
+    #[deprecated]
     #[prost(bool, optional, tag = "19")]
     pub allow_user_build_tracing: ::core::option::Option<bool>,
     /// If set the tracing service will ensure there is at most one tracing session
@@ -3198,10 +4023,65 @@ pub struct TraceConfig {
     pub cmd_trace_start_delay: ::core::option::Option<trace_config::CmdTraceStartDelay>,
     #[prost(message, repeated, tag = "39")]
     pub session_semaphores: ::prost::alloc::vec::Vec<trace_config::SessionSemaphore>,
+    /// Priority boost to be applied to the traced process, when the session is
+    /// running.
+    #[prost(message, optional, tag = "40")]
+    pub priority_boost: ::core::option::Option<PriorityBoostConfig>,
+    /// When set to a value > 0, this tracing session will be started in
+    /// "exclusive mode". This has the following semantics:
+    /// - It can only be set by shell or root users.
+    /// - A new exclusive session will only be started if its priority is strictly
+    ///    higher than any other active tracing session.
+    /// - If a new exclusive session is started, all other existing tracing
+    ///    sessions (exclusive or not) are aborted.
+    /// - While an exclusive session is active, any new non-exclusive session (or
+    ///    any exclusive session with a lower or equal priority) will be rejected.
+    ///
+    /// Introduced in: perfetto v52.
+    /// Supported on: Android 25Q3+.
+    #[prost(uint32, optional, tag = "41")]
+    pub exclusive_prio: ::core::option::Option<u32>,
+    /// Configures how the service should handle flushing data from producers
+    /// before periodically writing the trace into the output file.
+    /// Only applicable when |write_into_file| is true.
+    ///
+    /// By default, if |write_into_file| is set, the service periodically issues
+    /// a Flush() to all data sources before writing buffers into the file.
+    /// This ensures the file always contains the latest available data.
+    ///
+    /// Introduced in: perfetto v54.
+    /// Supported on: Android 26Q1+.
+    #[prost(enumeration = "trace_config::WriteFlushMode", optional, tag = "44")]
+    pub write_flush_mode: ::core::option::Option<i32>,
+    /// Whether to sync the output file to storage after each periodic write pass.
+    /// Only applicable when |write_into_file| is true.
+    ///
+    /// By default, no fflush is invoked. FFLUSH_ENABLED must be set to explicitly
+    /// sync to storage on every write.
+    ///
+    /// Introduced in: perfetto v54.
+    /// Supported on: Android 26Q1+.
+    #[prost(enumeration = "trace_config::FFlushMode", optional, tag = "45")]
+    pub fflush_post_write: ::core::option::Option<i32>,
+    /// When true, data sources in remote producers (machines connected via
+    /// traced_relay) will be matched by default. When false (the default), data
+    /// sources only match the host machine. In either case, an explicit
+    /// |DataSource.machine_name_filter| takes priority.
+    ///
+    /// NB: perfetto versions before v54 do not have this option and match across
+    /// machines by default. To be compatible across this version boundary, either
+    /// set this field to true, or set an explicit machine_name_filter on all data
+    /// sources.
+    ///
+    /// Introduced in: perfetto v54.
+    #[prost(bool, optional, tag = "43")]
+    pub trace_all_machines: ::core::option::Option<bool>,
+    #[prost(message, repeated, tag = "46")]
+    pub notes: ::prost::alloc::vec::Vec<trace_config::Note>,
 }
 /// Nested message and enum types in `TraceConfig`.
 pub mod trace_config {
-    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct BufferConfig {
         #[prost(uint32, optional, tag = "1")]
         pub size_kb: ::core::option::Option<u32>,
@@ -3215,13 +4095,22 @@ pub mod trace_config {
         /// that case we don't want to retain another in-memory copy of the buffer.
         #[prost(bool, optional, tag = "5")]
         pub transfer_on_clone: ::core::option::Option<bool>,
-        /// Used in conjuction with transfer_on_clone. When true the buffer is
+        /// Used in conjunction with transfer_on_clone. When true the buffer is
         /// cleared before issuing the Flush(reason=kTraceClone). This is to ensure
         /// that if the data source took too long to write the data in a previous
         /// clone-related flush, we don't end up with a mixture of leftovers from
         /// the previous write and new data.
         #[prost(bool, optional, tag = "6")]
         pub clear_before_clone: ::core::option::Option<bool>,
+        /// Optional name for this buffer. If set, data sources can reference this
+        /// buffer by name using |target_buffer_name| in DataSourceConfig instead of
+        /// using the buffer index. Buffer names must be unique within a tracing
+        /// session. This provides a more human-readable and less error-prone way to
+        /// configure which buffer a data source writes to.
+        #[prost(string, optional, tag = "7")]
+        pub name: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(enumeration = "buffer_config::ExperimentalMode", optional, tag = "8")]
+        pub experimental_mode: ::core::option::Option<i32>,
     }
     /// Nested message and enum types in `BufferConfig`.
     pub mod buffer_config {
@@ -3263,6 +4152,45 @@ pub mod trace_config {
                 }
             }
         }
+        /// When true, uses the experimental TraceBufferV2 implementation for this
+        /// buffer. This is for testing purposes only and may be removed in future
+        /// versions.
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ExperimentalMode {
+            /// Use the default V1 implementation.
+            ModeUnspecified = 0,
+            /// Use TraceBufferV2.
+            TraceBufferV2 = 1,
+            /// Use both V1 and V2 in shadow mode. Data is written to both buffers,
+            /// but only V1 data is returned. Comparison stats are reported to
+            /// validate V2 returns equivalent data.
+            TraceBufferV2ShadowMode = 2,
+        }
+        impl ExperimentalMode {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::ModeUnspecified => "MODE_UNSPECIFIED",
+                    Self::TraceBufferV2 => "TRACE_BUFFER_V2",
+                    Self::TraceBufferV2ShadowMode => "TRACE_BUFFER_V2_SHADOW_MODE",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "MODE_UNSPECIFIED" => Some(Self::ModeUnspecified),
+                    "TRACE_BUFFER_V2" => Some(Self::TraceBufferV2),
+                    "TRACE_BUFFER_V2_SHADOW_MODE" => Some(Self::TraceBufferV2ShadowMode),
+                    _ => None,
+                }
+            }
+        }
     }
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct DataSource {
@@ -3284,6 +4212,16 @@ pub mod trace_config {
         pub producer_name_filter: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         #[prost(string, repeated, tag = "3")]
         pub producer_name_regex_filter: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        /// Filter by machine names. The name of a machine is determined by the
+        /// PERFETTO_MACHINE_NAME env variable. In Android systems, if the env
+        /// variable is not set then the
+        /// persist.traced_relay.machine_name system property is used. If the
+        /// sysprop isn't set or not in an Android system, then the machine name by
+        /// default is set to the utsname sysname (e.g. Linux), which can be obtained
+        /// via the 'uname -s' command. As a convenience, one can use "host" to refer
+        /// to the host machine, which is the machine running traced.
+        #[prost(string, repeated, tag = "4")]
+        pub machine_name_filter: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     }
     /// Config for disabling builtin data sources in the tracing service.
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -3601,6 +4539,43 @@ pub mod trace_config {
         pub bytecode_v2: ::core::option::Option<::prost::bytes::Bytes>,
         #[prost(message, optional, tag = "3")]
         pub string_filter_chain: ::core::option::Option<trace_filter::StringFilterChain>,
+        /// Bytecode overlay for Perfetto v54+. This overlay is applied on top of
+        /// bytecode_v2 to upgrade specific simple fields to new values. Old Perfetto
+        /// versions ignore this field; new versions apply it.
+        ///
+        /// The motivation for this is that adding new opcodes in a backwards
+        /// compatible way while also minimizing config size is hard. Instead, the
+        /// overlay mechanism allows us to "patch" specific fields in the original
+        /// bytecode_v2 with new semantics.
+        ///
+        /// See RFC 0011-subset-string-filter-rules.md for more info.
+        ///
+        /// Note:
+        /// Unlike bytecode_v2 (which uses implicit message indices via EndOfMessage
+        /// markers), this overlay uses a triplet format with explicit indices:
+        ///    \[msg_index, field_id << 3 | opcode, argument\] ... \[checksum\]
+        /// Each entry is exactly 3 varints. The argument is 0 when not needed.
+        /// Entries must be sorted by (msg_index, field_id).
+        ///
+        /// The parser processes bytecode_v2 and this overlay simultaneously:
+        ///   - any field not mentioned in the overlay is parsed as usual
+        ///   - any field in the overlay but *not* in the bytecode_v2 is added
+        ///     with its overlay value
+        ///   - any field in both the overlay and bytecode_v2 takes the value in the
+        ///     overlay, the bytecode_v2 value is ignored.
+        ///
+        /// Introduced in: Perfetto v54.
+        #[prost(bytes = "bytes", optional, tag = "4")]
+        pub bytecode_overlay_v54: ::core::option::Option<::prost::bytes::Bytes>,
+        /// String filter chain for Perfetto v54+. Rules in this chain either
+        /// overwrite rules in string_filter_chain (if the name matches) or are
+        /// appended (if the name doesn't match). This allows modifying existing
+        /// rules (e.g., changing policy) without duplicating the entire chain.
+        /// Rules without a name are always appended.
+        /// See /rfcs/0011-subset-string-filter-rules.md for design details.
+        /// Introduced in: Perfetto v54.
+        #[prost(message, optional, tag = "5")]
+        pub string_filter_chain_v54: ::core::option::Option<trace_filter::StringFilterChain>,
     }
     /// Nested message and enum types in `TraceFilter`.
     pub mod trace_filter {
@@ -3618,6 +4593,36 @@ pub mod trace_config {
             /// strings.
             #[prost(string, optional, tag = "3")]
             pub atrace_payload_starts_with: ::core::option::Option<::prost::alloc::string::String>,
+            /// Optional name for the rule. When merging chains (e.g. via
+            /// string_filter_chain_v54), rules with matching names in the newer chain
+            /// will overwrite rules in the base chain. Rules without a name (empty or
+            /// unset) are always treated as distinct and will be appended.
+            /// See /rfcs/0011-subset-string-filter-rules.md for design details.
+            /// Introduced in: Perfetto v54.
+            #[prost(string, optional, tag = "4")]
+            pub name: ::core::option::Option<::prost::alloc::string::String>,
+            /// The semantic types this rule applies to.
+            ///
+            /// SEMANTIC_TYPE_UNSPECIFIED (0) is treated as its own distinct category:
+            /// - If empty, the rule applies only to fields with UNSPECIFIED type.
+            /// - If non-empty, the rule applies only to fields whose semantic type
+            ///    is explicitly listed. To match UNSPECIFIED fields, you must include
+            ///    SEMANTIC_TYPE_UNSPECIFIED in the list.
+            ///
+            /// Examples:
+            ///    semantic_type: \[\]           -> matches only UNSPECIFIED fields
+            ///    semantic_type: \[ATRACE\]     -> matches only ATRACE fields
+            ///    semantic_type: \[UNSPECIFIED, ATRACE\] -> matches both
+            ///
+            /// See /rfcs/0011-subset-string-filter-rules.md for design details.
+            /// Introduced in: Perfetto v54.
+            #[prost(
+                enumeration = "super::super::SemanticType",
+                repeated,
+                packed = "false",
+                tag = "5"
+            )]
+            pub semantic_type: ::prost::alloc::vec::Vec<i32>,
         }
         /// A chain is a list of rules which string will be sequentially checked
         /// against.
@@ -3821,6 +4826,16 @@ pub mod trace_config {
         #[prost(uint64, optional, tag = "2")]
         pub max_other_session_count: ::core::option::Option<u64>,
     }
+    /// Allow key, value pairs to save arbitrary data about trace.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Note {
+        /// Required.
+        #[prost(string, optional, tag = "1")]
+        pub key: ::core::option::Option<::prost::alloc::string::String>,
+        /// Required.
+        #[prost(string, optional, tag = "2")]
+        pub value: ::core::option::Option<::prost::alloc::string::String>,
+    }
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum LockdownModeOperation {
@@ -3906,6 +4921,196 @@ pub mod trace_config {
             }
         }
     }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum WriteFlushMode {
+        /// Same as WRITE_FLUSH_AUTO.
+        WriteFlushUnspecified = 0,
+        /// Default mode. The service automatically determines the flush frequency
+        /// to balance performance and data freshness:
+        /// 1) If file_write_period_ms <= 5s (kDefaultWriteIntoFilePeriodMs):
+        ///     Flushes are NOT issued on every write. Instead, a periodic flush is
+        ///     issued every 5s.
+        /// 2) If file_write_period_ms > 5s:
+        ///     A flush is issued before every periodic write into the file.
+        WriteFlushAuto = 1,
+        /// Do not flush buffers before periodic writes into the file.
+        /// Use this mode if you want to minimize the performance impact of flushes
+        /// and can tolerate potentially missing the most recent data in the trace
+        /// file until the end of the session or an explicit flush.
+        /// When this mode is selected, |flush_period_ms| is respected.
+        WriteFlushDisabled = 2,
+        /// Issue a flush before every periodic write into the file.
+        /// This ensures that each write into the file contains the most up-to-date
+        /// data from all data sources, but may have a higher performance overhead.
+        WriteFlushEnabled = 3,
+    }
+    impl WriteFlushMode {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::WriteFlushUnspecified => "WRITE_FLUSH_UNSPECIFIED",
+                Self::WriteFlushAuto => "WRITE_FLUSH_AUTO",
+                Self::WriteFlushDisabled => "WRITE_FLUSH_DISABLED",
+                Self::WriteFlushEnabled => "WRITE_FLUSH_ENABLED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "WRITE_FLUSH_UNSPECIFIED" => Some(Self::WriteFlushUnspecified),
+                "WRITE_FLUSH_AUTO" => Some(Self::WriteFlushAuto),
+                "WRITE_FLUSH_DISABLED" => Some(Self::WriteFlushDisabled),
+                "WRITE_FLUSH_ENABLED" => Some(Self::WriteFlushEnabled),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum FFlushMode {
+        /// Default: same as FFLUSH_DISABLED.
+        FflushUnspecified = 0,
+        /// Do not explicitly sync the file to storage after each write pass.
+        FflushDisabled = 1,
+        /// Explicitly sync the file to storage (via fdatasync) after each periodic
+        /// write pass. Increases data durability at the cost of higher disk I/O
+        /// overhead.
+        FflushEnabled = 2,
+    }
+    impl FFlushMode {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::FflushUnspecified => "FFLUSH_UNSPECIFIED",
+                Self::FflushDisabled => "FFLUSH_DISABLED",
+                Self::FflushEnabled => "FFLUSH_ENABLED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "FFLUSH_UNSPECIFIED" => Some(Self::FflushUnspecified),
+                "FFLUSH_DISABLED" => Some(Self::FflushDisabled),
+                "FFLUSH_ENABLED" => Some(Self::FflushEnabled),
+                _ => None,
+            }
+        }
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Utsname {
+    #[prost(string, optional, tag = "1")]
+    pub sysname: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub version: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub release: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub machine: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Next id: 17
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SystemInfo {
+    #[prost(message, optional, tag = "1")]
+    pub utsname: ::core::option::Option<Utsname>,
+    #[prost(string, optional, tag = "2")]
+    pub android_build_fingerprint: ::core::option::Option<::prost::alloc::string::String>,
+    /// The manufacturer of the product/hardware.
+    /// Source : "ro.product.manufacturer"
+    /// Introduced after Android W in Nov 2024 and is not supported on older
+    /// versions.
+    #[prost(string, optional, tag = "14")]
+    pub android_device_manufacturer: ::core::option::Option<::prost::alloc::string::String>,
+    /// The SoC model from which trace is collected
+    #[prost(string, optional, tag = "9")]
+    pub android_soc_model: ::core::option::Option<::prost::alloc::string::String>,
+    /// The guest SoC model from which trace is collected in case of VMs
+    #[prost(string, optional, tag = "13")]
+    pub android_guest_soc_model: ::core::option::Option<::prost::alloc::string::String>,
+    /// The hardware reversion from android device
+    #[prost(string, optional, tag = "10")]
+    pub android_hardware_revision: ::core::option::Option<::prost::alloc::string::String>,
+    /// The storage component from android_device. This field has been introduced
+    /// after Android W in Aug 2024 and is not supported on older versions.
+    #[prost(string, optional, tag = "11")]
+    pub android_storage_model: ::core::option::Option<::prost::alloc::string::String>,
+    /// The RAM component information from android device. This field has been
+    /// introduced after Android W in Aug 2024 and is not supported on older
+    /// versions.
+    #[prost(string, optional, tag = "12")]
+    pub android_ram_model: ::core::option::Option<::prost::alloc::string::String>,
+    /// The serial console information from android device.
+    #[prost(string, optional, tag = "15")]
+    pub android_serial_console: ::core::option::Option<::prost::alloc::string::String>,
+    /// The version of traced (the same returned by `traced --version`).
+    /// This is a human readable string with and its format varies depending on
+    /// the build system and the repo (standalone vs AOSP).
+    /// This is intended for human debugging only.
+    #[prost(string, optional, tag = "4")]
+    pub tracing_service_version: ::core::option::Option<::prost::alloc::string::String>,
+    /// The Android SDK vesion (e.g. 21 for L, 31 for S etc).
+    /// Introduced in Android T.
+    #[prost(uint64, optional, tag = "5")]
+    pub android_sdk_version: ::core::option::Option<u64>,
+    /// Kernel page size - sysconf(_SC_PAGESIZE).
+    #[prost(uint32, optional, tag = "6")]
+    pub page_size: ::core::option::Option<u32>,
+    /// Number of cpus - sysconf(_SC_NPROCESSORS_CONF).
+    /// Might be different to the number of online cpus.
+    /// Introduced in perfetto v44.
+    #[prost(uint32, optional, tag = "8")]
+    pub num_cpus: ::core::option::Option<u32>,
+    /// The timezone offset from UTC, as per strftime("%z"), in minutes.
+    /// Introduced in v38 / Android V.
+    #[prost(int32, optional, tag = "7")]
+    pub timezone_off_mins: ::core::option::Option<i32>,
+    /// Ticks per second - sysconf(_SC_CLK_TCK).
+    /// Not serialised as of perfetto v44.
+    #[prost(int64, optional, tag = "3")]
+    pub hz: ::core::option::Option<i64>,
+    /// The size of the system RAM in bytes.
+    ///
+    /// On Linux/Android: sysinfo.totalram * sysinfo.mem_unit.
+    /// Other POSIX (e.g. Mac): sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE).
+    ///
+    /// Introduced in perfetto v54 / Android 26Q1+.
+    #[prost(uint64, optional, tag = "16")]
+    pub system_ram_bytes: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TraceAttributes {
+    #[prost(message, repeated, tag = "1")]
+    pub attribute: ::prost::alloc::vec::Vec<trace_attributes::Attribute>,
+}
+/// Nested message and enum types in `TraceAttributes`.
+pub mod trace_attributes {
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Attribute {
+        /// The key
+        #[prost(string, optional, tag = "1")]
+        pub key: ::core::option::Option<::prost::alloc::string::String>,
+        /// The value
+        #[prost(oneof = "attribute::Value", tags = "2, 3")]
+        pub value: ::core::option::Option<attribute::Value>,
+    }
+    /// Nested message and enum types in `Attribute`.
+    pub mod attribute {
+        /// The value
+        #[derive(Clone, PartialEq, ::prost::Oneof)]
+        pub enum Value {
+            #[prost(int64, tag = "2")]
+            LongValue(i64),
+            #[prost(string, tag = "3")]
+            StringValue(::prost::alloc::string::String),
+        }
+    }
 }
 /// Statistics for the internals of the tracing service.
 ///
@@ -3982,7 +5187,7 @@ pub struct TraceStats {
 pub mod trace_stats {
     /// From TraceBuffer::Stats.
     ///
-    /// Next id: 21.
+    /// Next id: 22.
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
     pub struct BufferStats {
         /// Size of the circular buffer in bytes.
@@ -4076,6 +5281,42 @@ pub mod trace_stats {
         /// not reflected in this stat.
         #[prost(uint64, optional, tag = "19")]
         pub trace_writer_packet_loss: ::core::option::Option<u64>,
+        #[prost(message, optional, tag = "21")]
+        pub shadow_buffer_stats: ::core::option::Option<buffer_stats::ShadowBufferStats>,
+    }
+    /// Nested message and enum types in `BufferStats`.
+    pub mod buffer_stats {
+        /// Statistics for TRACE_BUFFER_V2_SHADOW_MODE comparison.
+        /// Only populated when the buffer is configured with shadow mode.
+        #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+        pub struct ShadowBufferStats {
+            /// Total num. packets read. This is not affected by capping of the hasher
+            /// to 32K elements.
+            #[prost(uint64, optional, tag = "1")]
+            pub packets_seen: ::core::option::Option<u64>,
+            /// Num. packets found in both V1 and V2 buffers (matched by content hash).
+            #[prost(uint64, optional, tag = "2")]
+            pub packets_in_both: ::core::option::Option<u64>,
+            /// Num. packets found only in V1 buffer but not in V2.
+            #[prost(uint64, optional, tag = "3")]
+            pub packets_only_v1: ::core::option::Option<u64>,
+            /// Num. packets found only in V2 buffer but not in V1.
+            #[prost(uint64, optional, tag = "4")]
+            pub packets_only_v2: ::core::option::Option<u64>,
+            /// Num. patch operations attempted.
+            #[prost(uint64, optional, tag = "5")]
+            pub patches_attempted: ::core::option::Option<u64>,
+            /// Num. patches that succeeded on V1 buffer.
+            #[prost(uint64, optional, tag = "6")]
+            pub v1_patches_succeeded: ::core::option::Option<u64>,
+            /// Num. patches that succeeded on V2 buffer.
+            #[prost(uint64, optional, tag = "7")]
+            pub v2_patches_succeeded: ::core::option::Option<u64>,
+            /// This is to distinguish the updated calculations after fixing the
+            /// hashes. This field is either empty or "2"
+            #[prost(uint32, optional, tag = "8")]
+            pub stats_version: ::core::option::Option<u32>,
+        }
     }
     /// Per TraceWriter stat. Each {producer, trace writer} tuple is publicly
     /// visible as a unique sequence ID in the trace.
@@ -4281,6 +5522,79 @@ pub mod android_system_property {
         pub value: ::core::option::Option<::prost::alloc::string::String>,
     }
 }
+/// AppWakelockInfo describes the time-independent properties of a wakelock, such
+/// as the owning package or wakelock tag. This is interned to reduce trace size.
+/// Event bundles refer to interned wakelock info by the iid.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AppWakelockInfo {
+    /// The interned id of this wakelock.
+    #[prost(int32, optional, tag = "1")]
+    pub iid: ::core::option::Option<i32>,
+    /// The app-provided tag of the wakelock.
+    #[prost(string, optional, tag = "2")]
+    pub tag: ::core::option::Option<::prost::alloc::string::String>,
+    /// The wakelock flags (such as partial vs full).
+    #[prost(int32, optional, tag = "3")]
+    pub flags: ::core::option::Option<i32>,
+    /// The pid that created the wakelock.
+    #[prost(int32, optional, tag = "4")]
+    pub owner_pid: ::core::option::Option<i32>,
+    /// The uid that created the wakelock.
+    #[prost(int32, optional, tag = "5")]
+    pub owner_uid: ::core::option::Option<i32>,
+    /// The uid of the work source root (if present).
+    #[prost(int32, optional, tag = "6")]
+    pub work_uid: ::core::option::Option<i32>,
+}
+/// AppWakelockBundle describes one or more wakelock events. Events are written
+/// in two paired array, such that the details for event i are in intern_id\[i\]
+/// and encoded_ts\[i\].
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AppWakelockBundle {
+    /// The interned id for the WakelockInfo of the event.
+    #[prost(uint32, repeated, tag = "1")]
+    pub intern_id: ::prost::alloc::vec::Vec<u32>,
+    /// The timestamp and event type, encoded as:
+    ///    (event_time - packet_time) << 1 | (acquired ? 1 : 0)
+    #[prost(uint64, repeated, tag = "2")]
+    pub encoded_ts: ::prost::alloc::vec::Vec<u64>,
+    /// For writing single packets (mainly by tokenization).
+    #[prost(message, optional, tag = "3")]
+    pub info: ::core::option::Option<AppWakelockInfo>,
+    #[prost(bool, optional, tag = "4")]
+    pub acquired: ::core::option::Option<bool>,
+}
+/// Trace event for bluetooth
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BluetoothTraceEvent {
+    /// Packet type and direction
+    #[prost(enumeration = "BluetoothTracePacketType", optional, tag = "1")]
+    pub packet_type: ::core::option::Option<i32>,
+    /// Total count of the packets collected during the collection interval
+    #[prost(uint32, optional, tag = "2")]
+    pub count: ::core::option::Option<u32>,
+    /// Total cumulative length of the packets collected during the collection
+    /// interval
+    #[prost(uint32, optional, tag = "3")]
+    pub length: ::core::option::Option<u32>,
+    /// The collection interval in nanoseconds. This is the duration between the
+    /// first and last packets collected.
+    #[prost(uint32, optional, tag = "4")]
+    pub duration: ::core::option::Option<u32>,
+    /// In case of CMD type, further breakdown of the type of command
+    #[prost(uint32, optional, tag = "5")]
+    pub op_code: ::core::option::Option<u32>,
+    /// In the case of EVT type, further breakdown of the type of event
+    #[prost(uint32, optional, tag = "6")]
+    pub event_code: ::core::option::Option<u32>,
+    /// When applicable for EVT type, further breakdown of event type into specific
+    /// subevent
+    #[prost(uint32, optional, tag = "7")]
+    pub subevent_code: ::core::option::Option<u32>,
+    /// Associated handle for the bluetooth packet
+    #[prost(uint32, optional, tag = "8")]
+    pub connection_handle: ::core::option::Option<u32>,
+}
 /// A profiling event corresponding to a single camera frame. This message
 /// collects important details and timestamps involved in producing a single
 /// camera frame.
@@ -4359,10 +5673,9 @@ pub struct AndroidCameraFrameEvent {
 }
 /// Nested message and enum types in `AndroidCameraFrameEvent`.
 pub mod android_camera_frame_event {
-    /// A profiling event corresponding to a single node processing within the camera
-    /// pipeline. Intuitively this corresponds to a single stage of processing to
-    /// produce a camera frame.
-    /// Next ID: 6
+    /// A profiling event corresponding to a single node processing within the
+    /// camera pipeline. Intuitively this corresponds to a single stage of
+    /// processing to produce a camera frame. Next ID: 6
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
     pub struct CameraNodeProcessingDetails {
         #[prost(int64, optional, tag = "1")]
@@ -4373,8 +5686,8 @@ pub mod android_camera_frame_event {
         /// The timestamp at which node processing finishes running.
         #[prost(int64, optional, tag = "3")]
         pub end_processing_ns: ::core::option::Option<i64>,
-        /// The delay between inputs becoming ready and the node actually beginning to
-        /// run.
+        /// The delay between inputs becoming ready and the node actually beginning
+        /// to run.
         #[prost(int64, optional, tag = "4")]
         pub scheduling_latency_ns: ::core::option::Option<i64>,
     }
@@ -4460,10 +5773,10 @@ pub mod android_camera_session_stats {
             /// A list of outputs produced by this node.
             #[prost(int64, repeated, packed = "false", tag = "3")]
             pub output_ids: ::prost::alloc::vec::Vec<i64>,
-            /// These fields capture vendor-specific additions to this proto message. In
-            /// practice `vendor_data` typically contains a serialized message of the
-            /// vendor's design, and `vendor_data_version` is incremented each time there
-            /// is a backwards incompatible change made to the message.
+            /// These fields capture vendor-specific additions to this proto message.
+            /// In practice `vendor_data` typically contains a serialized message of
+            /// the vendor's design, and `vendor_data_version` is incremented each time
+            /// there is a backwards incompatible change made to the message.
             #[prost(int32, optional, tag = "4")]
             pub vendor_data_version: ::core::option::Option<i32>,
             #[prost(bytes = "bytes", optional, tag = "5")]
@@ -4483,16 +5796,39 @@ pub mod android_camera_session_stats {
             pub input_node_id: ::core::option::Option<i64>,
             #[prost(int64, optional, tag = "4")]
             pub input_id: ::core::option::Option<i64>,
-            /// These fields capture vendor-specific additions to this proto message. In
-            /// practice `vendor_data` typically contains a serialized message of the
-            /// vendor's design, and `vendor_data_version` is incremented each time there
-            /// is a backwards incompatible change made to the message.
+            /// These fields capture vendor-specific additions to this proto message.
+            /// In practice `vendor_data` typically contains a serialized message of
+            /// the vendor's design, and `vendor_data_version` is incremented each time
+            /// there is a backwards incompatible change made to the message.
             #[prost(int32, optional, tag = "5")]
             pub vendor_data_version: ::core::option::Option<i32>,
             #[prost(bytes = "bytes", optional, tag = "6")]
             pub vendor_data: ::core::option::Option<::prost::bytes::Bytes>,
         }
     }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CpuPerUidData {
+    /// Number of clusters in the device. This will only be filled in the first
+    /// packet in a sequence.
+    #[prost(uint32, optional, tag = "1")]
+    pub cluster_count: ::core::option::Option<u32>,
+    /// The UIDs for which we have data in this packet.
+    #[prost(uint32, repeated, tag = "2")]
+    pub uid: ::prost::alloc::vec::Vec<u32>,
+    /// List of times for {UID, cluster} tuples. This will be cluster_count
+    /// times as long as the UID list.
+    ///
+    /// Ordered like:
+    /// [{UID 0, cluster 0}, {UID 0, cluster 1}, {UID 0, cluster 2},
+    ///   {UID 1, cluster 0}, {UID 1, cluster 1}, {UID 1, cluster 2}, ...]
+    ///
+    /// Each value is an absolute count for the first packet in a sequence, and a
+    /// delta thereafter. UIDs for which all clusters have a zero delta are
+    /// omitted; a single non-zero value for any cluster for a UID will cause
+    /// values for all clusters to be recorded.
+    #[prost(uint64, repeated, tag = "3")]
+    pub total_time_ms: ::prost::alloc::vec::Vec<u64>,
 }
 /// Generated by SurfaceFlinger's FrameTimeline (go/adaptive-scheduling-fr).
 /// Used in comparing the expected timeline of a frame to the actual timeline.
@@ -4581,6 +5917,21 @@ pub mod frame_timeline_event {
         pub is_buffer: ::core::option::Option<bool>,
         #[prost(enumeration = "JankSeverityType", optional, tag = "12")]
         pub jank_severity_type: ::core::option::Option<i32>,
+        #[prost(float, optional, tag = "13")]
+        pub present_delay_millis: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "14")]
+        pub vsync_resynced_jitter_millis: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "15")]
+        pub jank_severity_score: ::core::option::Option<f32>,
+        /// experimental value for jank_type. Do not consider in jank analysis.
+        #[prost(int32, optional, tag = "16")]
+        pub jank_type_experimental: ::core::option::Option<i32>,
+        /// experimental value for present_type. Do not consider in jank analysis.
+        #[prost(enumeration = "PresentType", optional, tag = "17")]
+        pub present_type_experimental: ::core::option::Option<i32>,
+        /// jank metadata information (for debug).
+        #[prost(float, optional, tag = "18")]
+        pub jank_debug_metadata: ::core::option::Option<f32>,
     }
     /// Indicates the start of expected timeline slice for DisplayFrames.
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -4634,6 +5985,19 @@ pub mod frame_timeline_event {
         pub prediction_type: ::core::option::Option<i32>,
         #[prost(enumeration = "JankSeverityType", optional, tag = "9")]
         pub jank_severity_type: ::core::option::Option<i32>,
+        #[prost(float, optional, tag = "10")]
+        pub present_delay_millis: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "11")]
+        pub jank_severity_score: ::core::option::Option<f32>,
+        /// experimental value for jank_type. Do not consider in jank analysis.
+        #[prost(int32, optional, tag = "12")]
+        pub jank_type_experimental: ::core::option::Option<i32>,
+        /// experimental value for present_type. Do not consider in jank analysis.
+        #[prost(enumeration = "PresentType", optional, tag = "13")]
+        pub present_type_experimental: ::core::option::Option<i32>,
+        /// jank metadata information (for debug).
+        #[prost(float, optional, tag = "14")]
+        pub jank_debug_metadata: ::core::option::Option<f32>,
     }
     /// FrameEnd just sends the cookie to indicate that the corresponding
     /// <display/surface>frame slice's end.
@@ -4659,6 +6023,11 @@ pub mod frame_timeline_event {
         JankUnknown = 256,
         JankSfStuffing = 512,
         JankDropped = 1024,
+        JankNonAnimating = 2048,
+        JankAppResyncedJitter = 4096,
+        JankDisplayNotOn = 8192,
+        JankDisplayModeChangeInProgress = 16384,
+        JankDisplayPowerModeChangeInProgress = 32768,
     }
     impl JankType {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -4679,6 +6048,13 @@ pub mod frame_timeline_event {
                 Self::JankUnknown => "JANK_UNKNOWN",
                 Self::JankSfStuffing => "JANK_SF_STUFFING",
                 Self::JankDropped => "JANK_DROPPED",
+                Self::JankNonAnimating => "JANK_NON_ANIMATING",
+                Self::JankAppResyncedJitter => "JANK_APP_RESYNCED_JITTER",
+                Self::JankDisplayNotOn => "JANK_DISPLAY_NOT_ON",
+                Self::JankDisplayModeChangeInProgress => "JANK_DISPLAY_MODE_CHANGE_IN_PROGRESS",
+                Self::JankDisplayPowerModeChangeInProgress => {
+                    "JANK_DISPLAY_POWER_MODE_CHANGE_IN_PROGRESS"
+                }
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4696,6 +6072,15 @@ pub mod frame_timeline_event {
                 "JANK_UNKNOWN" => Some(Self::JankUnknown),
                 "JANK_SF_STUFFING" => Some(Self::JankSfStuffing),
                 "JANK_DROPPED" => Some(Self::JankDropped),
+                "JANK_NON_ANIMATING" => Some(Self::JankNonAnimating),
+                "JANK_APP_RESYNCED_JITTER" => Some(Self::JankAppResyncedJitter),
+                "JANK_DISPLAY_NOT_ON" => Some(Self::JankDisplayNotOn),
+                "JANK_DISPLAY_MODE_CHANGE_IN_PROGRESS" => {
+                    Some(Self::JankDisplayModeChangeInProgress)
+                }
+                "JANK_DISPLAY_POWER_MODE_CHANGE_IN_PROGRESS" => {
+                    Some(Self::JankDisplayPowerModeChangeInProgress)
+                }
                 _ => None,
             }
         }
@@ -4927,6 +6312,73 @@ pub struct InitialDisplayState {
     #[prost(double, optional, tag = "2")]
     pub brightness: ::core::option::Option<f64>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KernelWakelockData {
+    /// This is only emitted when we encounter new wakelocks.
+    #[prost(message, repeated, tag = "1")]
+    pub wakelock: ::prost::alloc::vec::Vec<kernel_wakelock_data::Wakelock>,
+    /// Interning id.
+    #[prost(uint32, repeated, tag = "2")]
+    pub wakelock_id: ::prost::alloc::vec::Vec<u32>,
+    /// If we interned the wakelock name in this packet, this is the total time
+    /// the wakelock has been held.
+    /// If not, it's a delta from the last time we saw it.
+    #[prost(uint64, repeated, tag = "3")]
+    pub time_held_millis: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub error_flags: ::core::option::Option<u64>,
+}
+/// Nested message and enum types in `KernelWakelockData`.
+pub mod kernel_wakelock_data {
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Wakelock {
+        /// Interning id.
+        #[prost(uint32, optional, tag = "1")]
+        pub wakelock_id: ::core::option::Option<u32>,
+        /// Name of the wakelock.
+        #[prost(string, optional, tag = "2")]
+        pub wakelock_name: ::core::option::Option<::prost::alloc::string::String>,
+        /// Type of the wakelock. We record data about both true kernel wakelocks
+        /// and "native" wakelocks which are taken in userspace but are more
+        /// conceptually similar to kernel wakelocks than normal userspace ones.
+        #[prost(enumeration = "wakelock::Type", optional, tag = "3")]
+        pub wakelock_type: ::core::option::Option<i32>,
+    }
+    /// Nested message and enum types in `Wakelock`.
+    pub mod wakelock {
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum Type {
+            WakelockTypeUnknown = 0,
+            WakelockTypeKernel = 1,
+            WakelockTypeNative = 2,
+        }
+        impl Type {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::WakelockTypeUnknown => "WAKELOCK_TYPE_UNKNOWN",
+                    Self::WakelockTypeKernel => "WAKELOCK_TYPE_KERNEL",
+                    Self::WakelockTypeNative => "WAKELOCK_TYPE_NATIVE",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "WAKELOCK_TYPE_UNKNOWN" => Some(Self::WakelockTypeUnknown),
+                    "WAKELOCK_TYPE_KERNEL" => Some(Self::WakelockTypeKernel),
+                    "WAKELOCK_TYPE_NATIVE" => Some(Self::WakelockTypeNative),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
 /// NetworkPacketEvent records the details of a single packet sent or received
 /// on the network (in Linux kernel terminology, one sk_buff struct).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4934,9 +6386,9 @@ pub struct NetworkPacketEvent {
     /// The direction traffic is flowing for this event.
     #[prost(enumeration = "TrafficDirection", optional, tag = "1")]
     pub direction: ::core::option::Option<i32>,
-    /// The name of the interface if available (e.g. 'rmnet0').
+    /// The name of the network interface if available (e.g. 'rmnet0').
     #[prost(string, optional, tag = "2")]
-    pub interface: ::core::option::Option<::prost::alloc::string::String>,
+    pub network_interface: ::core::option::Option<::prost::alloc::string::String>,
     /// The length of the packet in bytes (wire_size - L2_header_size). Ignored
     /// when using NetworkPacketEvent as the ctx in either NetworkPacketBundle or
     /// NetworkPacketContext.
@@ -5117,6 +6569,17 @@ pub mod proto_log_viewer_config {
         pub tag: ::core::option::Option<::prost::alloc::string::String>,
     }
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RectProto {
+    #[prost(int32, optional, tag = "1")]
+    pub left: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "2")]
+    pub top: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    pub right: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "4")]
+    pub bottom: ::core::option::Option<i32>,
+}
 /// ShellTransition messages record information about the shell transitions in
 /// the system. This is used to track the animations that are created and execute
 /// through the shell transition system.
@@ -5181,9 +6644,9 @@ pub struct ShellTransition {
     /// The transition type of this transition (e.g. TO_FRONT, OPEN, CLOSE).
     #[prost(int32, optional, tag = "13")]
     pub r#type: ::core::option::Option<i32>,
-    /// The list of targets that are part of this transition.
+    /// The list of changes that are part of this transition.
     #[prost(message, repeated, tag = "14")]
-    pub targets: ::prost::alloc::vec::Vec<shell_transition::Target>,
+    pub changes: ::prost::alloc::vec::Vec<shell_transition::Change>,
     /// The id of the transition we have requested to merge or have merged this
     /// transition into.
     #[prost(int32, optional, tag = "15")]
@@ -5201,21 +6664,39 @@ pub struct ShellTransition {
 }
 /// Nested message and enum types in `ShellTransition`.
 pub mod shell_transition {
-    /// Contains the information about the windows targeted in a transition.
+    /// Contains the information about the windows changed in a transition.
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
-    pub struct Target {
-        /// The transition mode of this target (e.g. TO_FRONT, CLOSE...)
+    pub struct Change {
+        /// The transition mode of this change (e.g. TO_FRONT, CLOSE...)
         #[prost(int32, optional, tag = "1")]
         pub mode: ::core::option::Option<i32>,
-        /// The layer id of this target.
+        /// The layer id of this change.
         #[prost(int32, optional, tag = "2")]
         pub layer_id: ::core::option::Option<i32>,
-        /// The window id of this target.
+        /// The window id of this change.
         #[prost(int32, optional, tag = "3")]
         pub window_id: ::core::option::Option<i32>,
-        /// The flags set on this target.
+        /// The flags set on this change.
         #[prost(int32, optional, tag = "4")]
         pub flags: ::core::option::Option<i32>,
+        /// The display id the change is transitioning on before the transition.
+        #[prost(int32, optional, tag = "5")]
+        pub start_display_id: ::core::option::Option<i32>,
+        /// The display id the change is transitioning on after the transition.
+        #[prost(int32, optional, tag = "6")]
+        pub end_display_id: ::core::option::Option<i32>,
+        /// The rotation of the change before the transition.
+        #[prost(int32, optional, tag = "7")]
+        pub start_rotation: ::core::option::Option<i32>,
+        /// The rotation of the change after the transition.
+        #[prost(int32, optional, tag = "8")]
+        pub end_rotation: ::core::option::Option<i32>,
+        /// The absolute screen bounds of the change before the transition.
+        #[prost(message, optional, tag = "9")]
+        pub start_absolute_bounds: ::core::option::Option<super::RectProto>,
+        /// The absolute screen bounds of the change after the transition.
+        #[prost(message, optional, tag = "10")]
+        pub end_absolute_bounds: ::core::option::Option<super::RectProto>,
     }
 }
 /// Contains mappings from handler ids to string representation of the handlers.
@@ -5232,17 +6713,6 @@ pub struct ShellHandlerMapping {
     /// A human readable and meaningful string representation of the handler.
     #[prost(string, optional, tag = "2")]
     pub name: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct RectProto {
-    #[prost(int32, optional, tag = "1")]
-    pub left: ::core::option::Option<i32>,
-    #[prost(int32, optional, tag = "2")]
-    pub top: ::core::option::Option<i32>,
-    #[prost(int32, optional, tag = "3")]
-    pub right: ::core::option::Option<i32>,
-    #[prost(int32, optional, tag = "4")]
-    pub bottom: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RegionProto {
@@ -5324,14 +6794,34 @@ pub struct InputWindowInfoProto {
 pub struct BlurRegion {
     #[prost(uint32, optional, tag = "1")]
     pub blur_radius: ::core::option::Option<u32>,
+    #[deprecated]
     #[prost(uint32, optional, tag = "2")]
     pub corner_radius_tl: ::core::option::Option<u32>,
+    #[deprecated]
     #[prost(uint32, optional, tag = "3")]
     pub corner_radius_tr: ::core::option::Option<u32>,
+    #[deprecated]
     #[prost(uint32, optional, tag = "4")]
     pub corner_radius_bl: ::core::option::Option<u32>,
+    #[deprecated]
     #[prost(float, optional, tag = "5")]
     pub corner_radius_br: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "11")]
+    pub corner_radius_tlx: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "12")]
+    pub corner_radius_tly: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "13")]
+    pub corner_radius_trx: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "14")]
+    pub corner_radius_try: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "15")]
+    pub corner_radius_blx: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "16")]
+    pub corner_radius_bly: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "17")]
+    pub corner_radius_brx: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "18")]
+    pub corner_radius_bry: ::core::option::Option<f32>,
     #[prost(float, optional, tag = "6")]
     pub alpha: ::core::option::Option<f32>,
     #[prost(int32, optional, tag = "7")]
@@ -5348,6 +6838,34 @@ pub struct ColorTransformProto {
     /// This will be a 4x4 matrix of float values
     #[prost(float, repeated, tag = "1")]
     pub val: ::prost::alloc::vec::Vec<f32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BoxShadowSettings {
+    #[prost(message, repeated, tag = "1")]
+    pub box_shadows: ::prost::alloc::vec::Vec<box_shadow_settings::BoxShadowParams>,
+}
+/// Nested message and enum types in `BoxShadowSettings`.
+pub mod box_shadow_settings {
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct BoxShadowParams {
+        #[prost(float, optional, tag = "1")]
+        pub blur_radius: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "2")]
+        pub spread_radius: ::core::option::Option<f32>,
+        #[prost(int32, optional, tag = "3")]
+        pub color: ::core::option::Option<i32>,
+        #[prost(float, optional, tag = "4")]
+        pub offset_x: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "5")]
+        pub offset_y: ::core::option::Option<f32>,
+    }
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct BorderSettings {
+    #[prost(float, optional, tag = "1")]
+    pub stroke_width: ::core::option::Option<f32>,
+    #[prost(int32, optional, tag = "2")]
+    pub color: ::core::option::Option<i32>,
 }
 /// Message used by Winscope to process legacy trace files.
 /// Represents a file full of surface flinger trace entries.
@@ -5587,12 +7105,13 @@ pub struct LayerProto {
     pub buffer_transform: ::core::option::Option<TransformProto>,
     #[prost(int32, optional, tag = "40")]
     pub effective_scaling_mode: ::core::option::Option<i32>,
-    /// Layer's corner radius.
+    /// Layer's corner radius
+    #[deprecated]
     #[prost(float, optional, tag = "41")]
     pub corner_radius: ::core::option::Option<f32>,
     /// Metadata map. May be empty.
-    #[prost(map = "int32, string", tag = "42")]
-    pub metadata: ::std::collections::HashMap<i32, ::prost::alloc::string::String>,
+    #[prost(map = "int32, bytes", tag = "42")]
+    pub metadata: ::std::collections::HashMap<i32, ::prost::bytes::Bytes>,
     #[prost(message, optional, tag = "43")]
     pub effective_transform: ::core::option::Option<TransformProto>,
     #[prost(message, optional, tag = "44")]
@@ -5625,6 +7144,7 @@ pub struct LayerProto {
     #[prost(bool, optional, tag = "55")]
     pub is_trusted_overlay: ::core::option::Option<bool>,
     /// Corner radius explicitly set on layer rather than inherited
+    #[deprecated]
     #[prost(float, optional, tag = "56")]
     pub requested_corner_radius: ::core::option::Option<f32>,
     #[prost(message, optional, tag = "57")]
@@ -5633,6 +7153,30 @@ pub struct LayerProto {
     pub original_id: ::core::option::Option<u32>,
     #[prost(enumeration = "TrustedOverlay", optional, tag = "59")]
     pub trusted_overlay: ::core::option::Option<i32>,
+    /// Layer's scale during background blur, relative to 1.0f=100%
+    #[prost(float, optional, tag = "60")]
+    pub background_blur_scale: ::core::option::Option<f32>,
+    /// Layer's corner radius.
+    #[prost(message, optional, tag = "61")]
+    pub corner_radii: ::core::option::Option<CornerRadiiProto>,
+    /// Corner radius explicitly set on layer rather than inherited
+    #[prost(message, optional, tag = "62")]
+    pub requested_corner_radii: ::core::option::Option<CornerRadiiProto>,
+    /// Corner radius explicity set as drawn by client
+    #[prost(message, optional, tag = "63")]
+    pub client_drawn_corner_radii: ::core::option::Option<CornerRadiiProto>,
+    /// Priority value of the layer set by the system.
+    #[prost(int32, optional, tag = "64")]
+    pub system_content_priority: ::core::option::Option<i32>,
+    /// Settings which specify how shadows should be drawn for a layer.
+    #[prost(message, optional, tag = "65")]
+    pub box_shadow_settings: ::core::option::Option<BoxShadowSettings>,
+    /// Settings which specify how an outline should be drawn for a layer.
+    #[prost(message, optional, tag = "66")]
+    pub border_settings: ::core::option::Option<BorderSettings>,
+    /// "True" corner radii of the layer computed by SurfaceFlinger.
+    #[prost(message, optional, tag = "67")]
+    pub effective_radii: ::core::option::Option<CornerRadiiProto>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct PositionProto {
@@ -5651,6 +7195,17 @@ pub struct FloatRectProto {
     pub right: ::core::option::Option<f32>,
     #[prost(float, optional, tag = "4")]
     pub bottom: ::core::option::Option<f32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CornerRadiiProto {
+    #[prost(float, optional, tag = "1")]
+    pub tl: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "2")]
+    pub tr: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "3")]
+    pub bl: ::core::option::Option<f32>,
+    #[prost(float, optional, tag = "4")]
+    pub br: ::core::option::Option<f32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ActiveBufferProto {
@@ -5813,6 +7368,13 @@ pub struct Transform {
     pub ty: ::core::option::Option<f32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransactionBarrier {
+    #[prost(string, optional, tag = "1")]
+    pub barrier_token: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub kind: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TransactionState {
     #[prost(int32, optional, tag = "1")]
     pub pid: ::core::option::Option<i32>,
@@ -5832,6 +7394,10 @@ pub struct TransactionState {
     pub display_changes: ::prost::alloc::vec::Vec<DisplayState>,
     #[prost(uint64, repeated, packed = "false", tag = "9")]
     pub merged_transaction_ids: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, optional, tag = "10")]
+    pub apply_token: ::core::option::Option<u64>,
+    #[prost(message, repeated, tag = "11")]
+    pub transaction_barriers: ::prost::alloc::vec::Vec<TransactionBarrier>,
 }
 /// Keep insync with layer_state_t
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5858,6 +7424,7 @@ pub struct LayerState {
     pub mask: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "11")]
     pub matrix: ::core::option::Option<layer_state::Matrix22>,
+    #[deprecated]
     #[prost(float, optional, tag = "12")]
     pub corner_radius: ::core::option::Option<f32>,
     #[prost(uint32, optional, tag = "13")]
@@ -5923,6 +7490,18 @@ pub struct LayerState {
     pub drop_input_mode: ::core::option::Option<i32>,
     #[prost(enumeration = "TrustedOverlay", optional, tag = "43")]
     pub trusted_overlay: ::core::option::Option<i32>,
+    #[prost(float, optional, tag = "44")]
+    pub background_blur_scale: ::core::option::Option<f32>,
+    #[prost(message, optional, tag = "45")]
+    pub corner_radii: ::core::option::Option<layer_state::CornerRadii>,
+    #[prost(message, optional, tag = "46")]
+    pub client_drawn_corner_radii: ::core::option::Option<layer_state::CornerRadii>,
+    #[prost(int32, optional, tag = "47")]
+    pub system_content_priority: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "48")]
+    pub box_shadow_settings: ::core::option::Option<BoxShadowSettings>,
+    #[prost(message, optional, tag = "49")]
+    pub border_settings: ::core::option::Option<BorderSettings>,
 }
 /// Nested message and enum types in `LayerState`.
 pub mod layer_state {
@@ -5936,6 +7515,17 @@ pub mod layer_state {
         pub dtdy: ::core::option::Option<f32>,
         #[prost(float, optional, tag = "4")]
         pub dsdy: ::core::option::Option<f32>,
+    }
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct CornerRadii {
+        #[prost(float, optional, tag = "1")]
+        pub tl: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "2")]
+        pub tr: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "3")]
+        pub bl: ::core::option::Option<f32>,
+        #[prost(float, optional, tag = "4")]
+        pub br: ::core::option::Option<f32>,
     }
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
     pub struct Color3 {
@@ -6230,6 +7820,10 @@ pub mod layer_state {
         EStretchChanged = 8192,
         ETrustedOverlayChanged = 16384,
         EDropInputModeChanged = 32768,
+        EClientDrawnCornerRadiusChanged = 65536,
+        ESystemContentPriorityChanged = 131072,
+        EBoxShadowSettingsChanged = 262144,
+        EBorderSettingsChanged = 524288,
     }
     impl ChangesMsb {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -6255,6 +7849,10 @@ pub mod layer_state {
                 Self::EStretchChanged => "eStretchChanged",
                 Self::ETrustedOverlayChanged => "eTrustedOverlayChanged",
                 Self::EDropInputModeChanged => "eDropInputModeChanged",
+                Self::EClientDrawnCornerRadiusChanged => "eClientDrawnCornerRadiusChanged",
+                Self::ESystemContentPriorityChanged => "eSystemContentPriorityChanged",
+                Self::EBoxShadowSettingsChanged => "eBoxShadowSettingsChanged",
+                Self::EBorderSettingsChanged => "eBorderSettingsChanged",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -6277,6 +7875,10 @@ pub mod layer_state {
                 "eStretchChanged" => Some(Self::EStretchChanged),
                 "eTrustedOverlayChanged" => Some(Self::ETrustedOverlayChanged),
                 "eDropInputModeChanged" => Some(Self::EDropInputModeChanged),
+                "eClientDrawnCornerRadiusChanged" => Some(Self::EClientDrawnCornerRadiusChanged),
+                "eSystemContentPriorityChanged" => Some(Self::ESystemContentPriorityChanged),
+                "eBoxShadowSettingsChanged" => Some(Self::EBoxShadowSettingsChanged),
+                "eBorderSettingsChanged" => Some(Self::EBorderSettingsChanged),
                 _ => None,
             }
         }
@@ -6414,6 +8016,25 @@ pub mod display_state {
         }
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AndroidUserList {
+    #[prost(message, repeated, tag = "1")]
+    pub users: ::prost::alloc::vec::Vec<android_user_list::UserInfo>,
+    /// Error number
+    #[prost(int32, optional, tag = "2")]
+    pub error: ::core::option::Option<i32>,
+}
+/// Nested message and enum types in `AndroidUserList`.
+pub mod android_user_list {
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct UserInfo {
+        /// eg. android.os.usertype.full.SYSTEM, android.os.usertype.full.SECONDARY
+        #[prost(string, optional, tag = "1")]
+        pub r#type: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(int32, optional, tag = "2")]
+        pub uid: ::core::option::Option<i32>,
+    }
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct WinscopeExtensions {}
 /// This message is not intended to be written by the chrome on the device.
@@ -6466,6 +8087,10 @@ pub struct ChromeMetadataPacket {
     /// List of Finch study/groups that apply to this trace.
     #[prost(message, repeated, tag = "4")]
     pub field_trial_hashes: ::prost::alloc::vec::Vec<chrome_metadata_packet::FinchHash>,
+    /// The package name of the app which is being traced. This field is only set
+    /// on Android.
+    #[prost(string, optional, tag = "5")]
+    pub app_package_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Nested message and enum types in `ChromeMetadataPacket`.
 pub mod chrome_metadata_packet {
@@ -6848,6 +8473,9 @@ pub struct ChromeTrigger {
     /// SHA1 hash of the trigger name.
     #[prost(fixed32, optional, tag = "2")]
     pub trigger_name_hash: ::core::option::Option<u32>,
+    /// Flow id which should terminate on this trigger.
+    #[prost(fixed64, optional, tag = "3")]
+    pub flow_id: ::core::option::Option<u64>,
 }
 /// Strings used by V8 can have different encodings, instead of coverting to a
 /// common encoding (e.g. UTF-8) on device is expensive. Instead we send the
@@ -6977,6 +8605,9 @@ pub struct InternedV8WasmScript {
     pub script_id: ::core::option::Option<i32>,
     #[prost(string, optional, tag = "3")]
     pub url: ::core::option::Option<::prost::alloc::string::String>,
+    /// Raw transferred wasm native module wire bytes.
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub wire_bytes: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct InternedV8JsFunction {
@@ -6994,6 +8625,10 @@ pub struct InternedV8JsFunction {
     /// bytes not characters.
     #[prost(uint32, optional, tag = "6")]
     pub byte_offset: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub line: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub column: ::core::option::Option<u32>,
 }
 /// Nested message and enum types in `InternedV8JsFunction`.
 pub mod interned_v8_js_function {
@@ -7168,6 +8803,8 @@ pub struct V8JsCode {
     pub instruction_size_bytes: ::core::option::Option<u64>,
     #[prost(oneof = "v8_js_code::Instructions", tags = "7, 8")]
     pub instructions: ::core::option::Option<v8_js_code::Instructions>,
+    #[prost(oneof = "v8_js_code::SourceMap", tags = "9, 10, 11")]
+    pub source_map: ::core::option::Option<v8_js_code::SourceMap>,
 }
 /// Nested message and enum types in `V8JsCode`.
 pub mod v8_js_code {
@@ -7215,6 +8852,24 @@ pub mod v8_js_code {
         MachineCode(::prost::bytes::Bytes),
         #[prost(bytes, tag = "8")]
         Bytecode(::prost::bytes::Bytes),
+    }
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum SourceMap {
+        /// For Ignition / bytecode:
+        ///   - Maps bytecode-ranges to byte offsets (for the same script as the
+        ///     related js function)
+        #[prost(bytes, tag = "9")]
+        SourcePositions(::prost::bytes::Bytes),
+        /// For Sparkplug code:
+        ///   - Maps machine-code ranges to bytecode ranges in the corresponding
+        ///     ignition code object for the same js-function.
+        #[prost(bytes, tag = "10")]
+        BytecodePositions(::prost::bytes::Bytes),
+        /// For optimized code:
+        /// - Maps machine-code-ranges to bytecode ranges in various
+        ///    ignition code objects (inlining might happen from multiple functions)
+        #[prost(bytes, tag = "11")]
+        InlinedBytecodePositions(::prost::bytes::Bytes),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -7394,10 +9049,13 @@ pub struct V8CodeDefaults {
 pub struct ClockSnapshot {
     #[prost(message, repeated, tag = "1")]
     pub clocks: ::prost::alloc::vec::Vec<clock_snapshot::Clock>,
-    /// The authoritative clock domain for the trace. Defaults to BOOTTIME, but can
-    /// be overridden in TraceConfig's builtin_data_sources. Trace processor will
-    /// attempt to translate packet/event timestamps from various data sources (and
-    /// their chosen clock domains) to this domain during import.
+    /// The authoritative clock domain for the trace. When set, this definitively
+    /// overrides the trace time clock. If not set, the trace time clock remains
+    /// at its default (BUILTIN_CLOCK_TRACE_FILE), unless a format-specific
+    /// fallback applies (e.g. BOOTTIME for legacy proto traces without clock
+    /// snapshots). Trace processor will attempt to translate packet/event
+    /// timestamps from various data sources (and their chosen clock domains) to
+    /// this domain during import.
     #[prost(enumeration = "BuiltinClock", optional, tag = "2")]
     pub primary_trace_clock: ::core::option::Option<i32>,
 }
@@ -7429,9 +9087,13 @@ pub mod clock_snapshot {
         #[prost(bool, optional, tag = "3")]
         pub is_incremental: ::core::option::Option<bool>,
         /// Allows to specify a custom unit different than the default (ns) for this
-        /// clock domain. A multiplier of 1000 means that a timestamp = 3 should be
-        /// interpreted as 3000 ns = 3 us. All snapshots for the same clock within a
-        /// trace need to use the same unit.
+        /// clock domain.
+        ///
+        /// * A multiplier of 1000 means that a timestamp = 3 should be interpreted
+        ///    as 3000 ns = 3 us.
+        /// * All snapshots for the same clock within a trace need to use the same
+        ///    unit.
+        /// * `unit_multiplier_ns` is *not* supported for the `primary_trace_clock`.
         #[prost(uint64, optional, tag = "4")]
         pub unit_multiplier_ns: ::core::option::Option<u64>,
     }
@@ -7507,30 +9169,27 @@ pub struct CSwitchEtwEvent {
     /// C-states.
     #[prost(uint32, optional, tag = "5")]
     pub previous_c_state: ::core::option::Option<u32>,
-    #[prost(
-        enumeration = "c_switch_etw_event::OldThreadWaitReason",
-        optional,
-        tag = "6"
-    )]
-    pub old_thread_wait_reason: ::core::option::Option<i32>,
-    #[prost(
-        enumeration = "c_switch_etw_event::OldThreadWaitMode",
-        optional,
-        tag = "7"
-    )]
-    pub old_thread_wait_mode: ::core::option::Option<i32>,
-    #[prost(
-        enumeration = "c_switch_etw_event::OldThreadState",
-        optional,
-        tag = "8"
-    )]
-    pub old_thread_state: ::core::option::Option<i32>,
     /// Ideal wait time of the previous thread.
     #[prost(sint32, optional, tag = "9")]
     pub old_thread_wait_ideal_processor: ::core::option::Option<i32>,
     /// Wait time for the new thread.
     #[prost(uint32, optional, tag = "10")]
     pub new_thread_wait_time: ::core::option::Option<u32>,
+    #[prost(
+        oneof = "c_switch_etw_event::OldThreadWaitReasonEnumOrInt",
+        tags = "6, 11"
+    )]
+    pub old_thread_wait_reason_enum_or_int:
+        ::core::option::Option<c_switch_etw_event::OldThreadWaitReasonEnumOrInt>,
+    #[prost(
+        oneof = "c_switch_etw_event::OldThreadWaitModeEnumOrInt",
+        tags = "7, 12"
+    )]
+    pub old_thread_wait_mode_enum_or_int:
+        ::core::option::Option<c_switch_etw_event::OldThreadWaitModeEnumOrInt>,
+    #[prost(oneof = "c_switch_etw_event::OldThreadStateEnumOrInt", tags = "8, 13")]
+    pub old_thread_state_enum_or_int:
+        ::core::option::Option<c_switch_etw_event::OldThreadStateEnumOrInt>,
 }
 /// Nested message and enum types in `CSwitchEtwEvent`.
 pub mod c_switch_etw_event {
@@ -7747,6 +9406,27 @@ pub mod c_switch_etw_event {
             }
         }
     }
+    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    pub enum OldThreadWaitReasonEnumOrInt {
+        #[prost(enumeration = "OldThreadWaitReason", tag = "6")]
+        OldThreadWaitReason(i32),
+        #[prost(int32, tag = "11")]
+        OldThreadWaitReasonInt(i32),
+    }
+    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    pub enum OldThreadWaitModeEnumOrInt {
+        #[prost(enumeration = "OldThreadWaitMode", tag = "7")]
+        OldThreadWaitMode(i32),
+        #[prost(int32, tag = "12")]
+        OldThreadWaitModeInt(i32),
+    }
+    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    pub enum OldThreadStateEnumOrInt {
+        #[prost(enumeration = "OldThreadState", tag = "8")]
+        OldThreadState(i32),
+        #[prost(sint32, tag = "13")]
+        OldThreadStateInt(i32),
+    }
 }
 /// Proto definition based on the Thread_v2 CSwitch class definition
 /// See: <https://learn.microsoft.com/en-us/windows/win32/etw/readythread>
@@ -7755,17 +9435,14 @@ pub struct ReadyThreadEtwEvent {
     /// The thread identifier of the thread being readied for execution.
     #[prost(uint32, optional, tag = "1")]
     pub t_thread_id: ::core::option::Option<u32>,
-    #[prost(
-        enumeration = "ready_thread_etw_event::AdjustReason",
-        optional,
-        tag = "2"
-    )]
-    pub adjust_reason: ::core::option::Option<i32>,
     ///   The value by which the priority is being adjusted.
     #[prost(sint32, optional, tag = "3")]
     pub adjust_increment: ::core::option::Option<i32>,
-    #[prost(enumeration = "ready_thread_etw_event::TraceFlag", optional, tag = "4")]
-    pub flag: ::core::option::Option<i32>,
+    #[prost(oneof = "ready_thread_etw_event::AdjustReasonEnumOrInt", tags = "2, 5")]
+    pub adjust_reason_enum_or_int:
+        ::core::option::Option<ready_thread_etw_event::AdjustReasonEnumOrInt>,
+    #[prost(oneof = "ready_thread_etw_event::FlagEnumOrInt", tags = "4, 6")]
+    pub flag_enum_or_int: ::core::option::Option<ready_thread_etw_event::FlagEnumOrInt>,
 }
 /// Nested message and enum types in `ReadyThreadEtwEvent`.
 pub mod ready_thread_etw_event {
@@ -7839,24 +9516,203 @@ pub mod ready_thread_etw_event {
             }
         }
     }
+    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    pub enum AdjustReasonEnumOrInt {
+        #[prost(enumeration = "AdjustReason", tag = "2")]
+        AdjustReason(i32),
+        #[prost(int32, tag = "5")]
+        AdjustReasonInt(i32),
+    }
+    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    pub enum FlagEnumOrInt {
+        #[prost(enumeration = "TraceFlag", tag = "4")]
+        Flag(i32),
+        #[prost(int32, tag = "6")]
+        FlagInt(i32),
+    }
 }
+/// Proto definition based on the type of MemInfoArgs_V1, found here and observed
+/// on local traces using tracerpt:
+/// <https://github.com/repnz/etw-providers-docs/blob/master/Manifests-Win10-17134/Microsoft-Windows-Kernel-Memory.xml>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MemInfoEtwEvent {
+    /// Number of memory priorities on the system.
+    #[prost(uint32, optional, tag = "1")]
+    pub priority_levels: ::core::option::Option<u32>,
+    /// Number of pages in the zero list.
+    #[prost(uint64, optional, tag = "2")]
+    pub zero_page_count: ::core::option::Option<u64>,
+    /// Number of pages in the free list.
+    #[prost(uint64, optional, tag = "3")]
+    pub free_page_count: ::core::option::Option<u64>,
+    /// Number of pages in the modified list.
+    #[prost(uint64, optional, tag = "4")]
+    pub modified_page_count: ::core::option::Option<u64>,
+    /// Number of modified non-paged pool pages.
+    #[prost(uint64, optional, tag = "5")]
+    pub modified_no_write_page_count: ::core::option::Option<u64>,
+    /// Number of bad pages.
+    #[prost(uint64, optional, tag = "6")]
+    pub bad_page_count: ::core::option::Option<u64>,
+    /// Number of standby pages by memory priority.
+    #[prost(uint64, repeated, packed = "false", tag = "7")]
+    pub standby_page_counts: ::prost::alloc::vec::Vec<u64>,
+    /// Number of repurposed pages by memory priority.
+    #[prost(uint64, repeated, packed = "false", tag = "8")]
+    pub repurposed_page_counts: ::prost::alloc::vec::Vec<u64>,
+    /// Modified paged pages.
+    #[prost(uint64, optional, tag = "9")]
+    pub modified_page_count_page_file: ::core::option::Option<u64>,
+    /// Pool page counts.
+    #[prost(uint64, optional, tag = "10")]
+    pub paged_pool_page_count: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "11")]
+    pub non_paged_pool_page_count: ::core::option::Option<u64>,
+    /// Memory Descriptor List page count.
+    #[prost(uint64, optional, tag = "12")]
+    pub mdl_page_count: ::core::option::Option<u64>,
+    /// Commit weight.
+    #[prost(uint64, optional, tag = "13")]
+    pub commit_page_count: ::core::option::Option<u64>,
+}
+/// Proto definition based on the `FileIo_Create` class definition.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FileIoCreateEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub file_object: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub ttid: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub create_options: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub file_attributes: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub share_access: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "7")]
+    pub open_path: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Proto definition based on the `FileIo_DirEnum` class definition.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FileIoDirEnumEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub file_object: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub file_key: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "4")]
+    pub ttid: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub info_class: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub file_index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "8")]
+    pub file_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "9")]
+    pub opcode: ::core::option::Option<u32>,
+}
+/// Proto definition based on the `FileIo_Info` class definition.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FileIoInfoEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub file_object: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub file_key: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub extra_info: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub ttid: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub info_class: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub opcode: ::core::option::Option<u32>,
+}
+/// Proto definition based on the `FileIo_ReadWrite` class definition.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FileIoReadWriteEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub offset: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub file_object: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub file_key: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub ttid: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub io_size: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub io_flags: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub opcode: ::core::option::Option<u32>,
+}
+/// Proto definition based on the `FileIo_SimpleOp` class definition.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FileIoSimpleOpEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub file_object: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub file_key: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "4")]
+    pub ttid: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub opcode: ::core::option::Option<u32>,
+}
+/// Proto definition based on the `FileIo_OpEnd` class definition.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FileIoOpEndEtwEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub irp_ptr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub extra_info: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub nt_status: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EtwTraceEvent {
     #[prost(uint64, optional, tag = "1")]
     pub timestamp: ::core::option::Option<u64>,
     #[prost(uint32, optional, tag = "4")]
     pub cpu: ::core::option::Option<u32>,
-    #[prost(oneof = "etw_trace_event::Event", tags = "2, 3")]
+    #[prost(uint32, optional, tag = "5")]
+    pub thread_id: ::core::option::Option<u32>,
+    #[prost(
+        oneof = "etw_trace_event::Event",
+        tags = "2, 3, 6, 7, 8, 9, 10, 11, 12"
+    )]
     pub event: ::core::option::Option<etw_trace_event::Event>,
 }
 /// Nested message and enum types in `EtwTraceEvent`.
 pub mod etw_trace_event {
-    #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Event {
         #[prost(message, tag = "2")]
         CSwitch(super::CSwitchEtwEvent),
         #[prost(message, tag = "3")]
         ReadyThread(super::ReadyThreadEtwEvent),
+        #[prost(message, tag = "6")]
+        MemInfo(super::MemInfoEtwEvent),
+        #[prost(message, tag = "7")]
+        FileIoCreate(super::FileIoCreateEtwEvent),
+        #[prost(message, tag = "8")]
+        FileIoDirEnum(super::FileIoDirEnumEtwEvent),
+        #[prost(message, tag = "9")]
+        FileIoInfo(super::FileIoInfoEtwEvent),
+        #[prost(message, tag = "10")]
+        FileIoReadWrite(super::FileIoReadWriteEtwEvent),
+        #[prost(message, tag = "11")]
+        FileIoSimpleOp(super::FileIoSimpleOpEtwEvent),
+        #[prost(message, tag = "12")]
+        FileIoOpEnd(super::FileIoOpEndEtwEvent),
     }
 }
 /// The result of tracing one or more etw event uses per-processor buffers where
@@ -7868,6 +9724,189 @@ pub struct EtwTraceEventBundle {
     pub cpu: ::core::option::Option<u32>,
     #[prost(message, repeated, tag = "2")]
     pub event: ::prost::alloc::vec::Vec<EtwTraceEvent>,
+}
+/// Records an event in the evdev protocol, as used by Linux and some other *nix
+/// kernels to report events from human interface devices.
+///
+/// Next ID: 5
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EvdevEvent {
+    /// The device's unique ID number. This need not be the number of its
+    /// /dev/input/event node.
+    #[prost(uint32, optional, tag = "1")]
+    pub device_id: ::core::option::Option<u32>,
+    #[prost(oneof = "evdev_event::Event", tags = "2, 3, 4")]
+    pub event: ::core::option::Option<evdev_event::Event>,
+}
+/// Nested message and enum types in `EvdevEvent`.
+pub mod evdev_event {
+    /// Proto version of Linux's struct input_event. The meaning of types and codes
+    /// are described in the Linux kernel documentation at
+    /// <https://www.kernel.org/doc/html/latest/input/event-codes.html.>
+    ///
+    /// Next ID: 5
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct InputEvent {
+        /// The monotonic timestamp at which the event occurred, as reported by the
+        /// kernel, in integer nanoseconds. If omitted, assume that it hasn't changed
+        /// since the previous event.
+        #[prost(uint64, optional, tag = "1")]
+        pub kernel_timestamp: ::core::option::Option<u64>,
+        /// The code grouping for this event, used to distinguish signals, absolute
+        /// and relative axis changes, and other types of event.
+        #[prost(uint32, optional, tag = "2")]
+        pub r#type: ::core::option::Option<u32>,
+        /// The precise type of the event, such as the axis code for absolute and
+        /// relative events.
+        #[prost(uint32, optional, tag = "3")]
+        pub code: ::core::option::Option<u32>,
+        /// The new value of the axis described by type and code.
+        #[prost(sint32, optional, tag = "4")]
+        pub value: ::core::option::Option<i32>,
+    }
+    /// Describes an evdev device being added to the system.
+    ///
+    /// Next ID: 2
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct DeviceAddition {
+        #[prost(message, optional, tag = "1")]
+        pub device: ::core::option::Option<super::EvdevDevice>,
+    }
+    /// Describes an evdev device being removed from the system.
+    ///
+    /// Next ID: 1
+    ///
+    /// Empty — we don't need to record any data other than the device ID for
+    /// this event type.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct DeviceRemoval {}
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Event {
+        #[prost(message, tag = "2")]
+        InputEvent(InputEvent),
+        #[prost(message, tag = "3")]
+        AddEvent(DeviceAddition),
+        #[prost(message, tag = "4")]
+        RemoveEvent(DeviceRemoval),
+    }
+}
+/// The properties of an input device that don't change during the time that it's
+/// connected, as well as the current values for all of its axes.
+///
+/// Next ID: 13
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EvdevDevice {
+    /// The device's unique ID number. This need not be the number of its
+    /// /dev/input/event node.
+    #[prost(uint32, optional, tag = "1")]
+    pub device_id: ::core::option::Option<u32>,
+    /// The number of the evdev device (i.e. from its /dev/input/eventX node path).
+    #[prost(uint32, optional, tag = "2")]
+    pub device_num: ::core::option::Option<u32>,
+    /// The device's name.
+    #[prost(string, optional, tag = "3")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    /// The physical path to the device in the system hierarchy.
+    #[prost(string, optional, tag = "4")]
+    pub phys: ::core::option::Option<::prost::alloc::string::String>,
+    /// The unique identification code for the device (if it has one).
+    #[prost(string, optional, tag = "5")]
+    pub uniq: ::core::option::Option<::prost::alloc::string::String>,
+    /// The device's ID numbers.
+    #[prost(message, optional, tag = "6")]
+    pub id: ::core::option::Option<evdev_device::Identifier>,
+    /// A map of information for each of the device's absolute axes. Keys are the
+    /// Linux ABS_* constants.
+    #[prost(map = "uint32, message", tag = "7")]
+    pub absolute_axis_infos: ::std::collections::HashMap<u32, evdev_device::AbsInfo>,
+    /// Bitmask specifying which types of events the device declares.
+    #[prost(bytes = "bytes", optional, tag = "8")]
+    pub ev_bitmask: ::core::option::Option<::prost::bytes::Bytes>,
+    /// A map of bitmasks specifying which axes of each type the device declares.
+    /// Keys are the Linux EV_* constants.
+    #[prost(map = "uint32, bytes", tag = "9")]
+    pub event_type_bitmasks: ::std::collections::HashMap<u32, ::prost::bytes::Bytes>,
+    /// Bitmask of properties declared by the device.
+    #[prost(bytes = "bytes", optional, tag = "10")]
+    pub prop_bitmask: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Current states of device axes.
+    ///
+    /// The keys are the Linux event type constants (e.g. EV_KEY, EV_ABS, etc.). We
+    /// don't need to keep track of states for all axis types, only KEY, SW, LED,
+    /// and ABS, so only those will have entries in this map. States for ABS_MT_*
+    /// axes (which have multiple slots) will be kept in abs_mt_states instead.
+    #[prost(map = "uint32, message", tag = "11")]
+    pub axis_states: ::std::collections::HashMap<u32, evdev_device::AxisMap>,
+    /// Current states of ABS_MT_* axes other than ABS_MT_SLOT. The keys are the
+    /// ABS axis codes.
+    #[prost(map = "uint32, message", tag = "12")]
+    pub abs_mt_states: ::std::collections::HashMap<u32, evdev_device::SlotValuesMap>,
+}
+/// Nested message and enum types in `EvdevDevice`.
+pub mod evdev_device {
+    /// Proto version of Linux's struct input_id. Although uint32s are used for the
+    /// fields, the kernel uses 16-bit ints so values will be less than 2^16.
+    ///
+    /// Next ID: 5
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Identifier {
+        /// The bus that the device is connected to. Values will be one of Linux's
+        /// BUS_* constants.
+        #[prost(uint32, optional, tag = "1")]
+        pub bustype: ::core::option::Option<u32>,
+        /// A number identifying the vendor of the device. Often a USB or Bluetooth
+        /// vendor ID, but not always.
+        #[prost(uint32, optional, tag = "2")]
+        pub vendor: ::core::option::Option<u32>,
+        #[prost(uint32, optional, tag = "3")]
+        pub product: ::core::option::Option<u32>,
+        #[prost(uint32, optional, tag = "4")]
+        pub version: ::core::option::Option<u32>,
+    }
+    /// Proto version of Linux's struct input_absinfo, excluding the value field
+    /// (which is tracked elsewhere).
+    ///
+    /// Next ID: 6
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct AbsInfo {
+        #[prost(sint32, optional, tag = "1")]
+        pub minimum: ::core::option::Option<i32>,
+        #[prost(sint32, optional, tag = "2")]
+        pub maximum: ::core::option::Option<i32>,
+        #[prost(int32, optional, tag = "3")]
+        pub fuzz: ::core::option::Option<i32>,
+        #[prost(int32, optional, tag = "4")]
+        pub flat: ::core::option::Option<i32>,
+        #[prost(int32, optional, tag = "5")]
+        pub resolution: ::core::option::Option<i32>,
+    }
+    /// Contains the current values of all axes of a particular type (e.g. EV_ABS,
+    /// EV_KEY, etc.).
+    ///
+    /// Next ID: 2
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct AxisMap {
+        /// Current values of all axes, other than ABS_MT_* axes (which have multiple
+        /// slots), which are kept in abs_mt_states instead.
+        ///
+        /// The keys are the Linux axis codes, e.g. ABS_* for absolute axes. If there
+        /// is no entry for a particular axis, assume that its value is 0.
+        #[prost(map = "uint32, sint32", tag = "1")]
+        pub axis_states: ::std::collections::HashMap<u32, i32>,
+    }
+    /// Contains the current values of a single ABS_MT_* axis across all of its
+    /// slots.
+    ///
+    /// Next ID: 2
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct SlotValuesMap {
+        /// Current values for all slots.
+        ///
+        /// The keys are the slot numbers. If there is no entry for a particular
+        /// slot, assume that its value is 0.
+        #[prost(map = "uint32, sint32", tag = "1")]
+        pub slot_values: ::std::collections::HashMap<u32, i32>,
+    }
 }
 /// The protocol compiler can output a FileDescriptorSet containing the .proto
 /// files it parses.
@@ -8188,8 +10227,25 @@ pub struct OneofOptions {}
 /// See docs/design-docs/extensions.md for more details.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExtensionDescriptor {
-    #[prost(message, optional, tag = "1")]
-    pub extension_set: ::core::option::Option<FileDescriptorSet>,
+    /// Optional, for debugging only. The file name or path of the descriptor
+    /// source. Can be omitted without affecting functionality.
+    #[prost(string, optional, tag = "3")]
+    pub file_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(oneof = "extension_descriptor::Descriptor", tags = "1, 2")]
+    pub descriptor: ::core::option::Option<extension_descriptor::Descriptor>,
+}
+/// Nested message and enum types in `ExtensionDescriptor`.
+pub mod extension_descriptor {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Descriptor {
+        #[prost(message, tag = "1")]
+        ExtensionSet(super::FileDescriptorSet),
+        /// Same as extension_set, but gzip-compressed. This is used by the tracing
+        /// service on Android to emit pre-compressed descriptor files from
+        /// /etc/tracing_descriptors.gz without decompressing them first.
+        #[prost(bytes, tag = "2")]
+        ExtensionSetGzip(::prost::bytes::Bytes),
+    }
 }
 /// Represents the mapping between inode numbers in a block device and their path
 /// on the filesystem
@@ -8668,6 +10724,44 @@ pub struct BlockUnplugFtraceEvent {
     pub comm: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockIoStartFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub dev: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub sector: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub nr_sector: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub bytes: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub ioprio: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub rwbs: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "7")]
+    pub comm: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "8")]
+    pub cmd: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BlockIoDoneFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub dev: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub sector: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub nr_sector: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub bytes: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub ioprio: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub rwbs: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "7")]
+    pub comm: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "8")]
+    pub cmd: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CgroupAttachTaskFtraceEvent {
     #[prost(int32, optional, tag = "1")]
     pub dst_root: ::core::option::Option<i32>,
@@ -8828,6 +10922,21 @@ pub struct CmaAllocInfoFtraceEvent {
     pub nr_reclaimed: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "10")]
     pub pfn: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CmaAllocFinishFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub pfn: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub page: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub count: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub align: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "6")]
+    pub errorno: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct MmCompactionBeginFtraceEvent {
@@ -8990,6 +11099,15 @@ pub struct MmCompactionWakeupKcompactdFtraceEvent {
     pub classzone_idx: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "4")]
     pub highest_zoneidx: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ParamSetValueCpmFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub body: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub value: ::core::option::Option<u32>,
+    #[prost(int64, optional, tag = "3")]
+    pub timestamp: ::core::option::Option<i64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct CpuhpExitFtraceEvent {
@@ -9167,23 +11285,41 @@ pub struct DpuDsiCmdFifoStatusFtraceEvent {
     #[prost(uint32, optional, tag = "2")]
     pub payload: ::core::option::Option<u32>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DpuDsiRxFtraceEvent {
     #[prost(uint32, optional, tag = "1")]
     pub cmd: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "2")]
-    pub rx_buf: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub rx_buf: ::core::option::Option<::prost::bytes::Bytes>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DpuDsiTxFtraceEvent {
     #[prost(uint32, optional, tag = "1")]
     pub r#type: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "2")]
-    pub tx_buf: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "3")]
     pub last: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "4")]
     pub delay_ms: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub tx_buf: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DpuDispDpuUnderrunFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub id: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "2")]
+    pub frames_pending: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    pub vsync_count: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DpuDispVblankIrqEnableFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub id: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "2")]
+    pub output_id: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    pub enable: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct DrmVblankEventFtraceEvent {
@@ -9204,6 +11340,263 @@ pub struct DrmVblankEventDeliveredFtraceEvent {
     pub file: ::core::option::Option<u64>,
     #[prost(uint32, optional, tag = "3")]
     pub seq: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3AllocRequestFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub req: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub actual: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub zero: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub short_not_ok: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "8")]
+    pub no_interrupt: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3CompleteTrbFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub trb: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub allocated: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub queued: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub bpl: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub bph: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub size: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub ctrl: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub r#type: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub enqueue: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "11")]
+    pub dequeue: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3CtrlReqFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub b_request_type: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub b_request: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub w_value: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub w_index: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub w_length: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "6")]
+    pub str: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3EpDequeueFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub req: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub actual: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub zero: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub short_not_ok: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "8")]
+    pub no_interrupt: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3EpQueueFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub req: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub actual: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub zero: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub short_not_ok: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "8")]
+    pub no_interrupt: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3EventFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub event: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub ep0state: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "3")]
+    pub str: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3FreeRequestFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub req: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub actual: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub zero: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub short_not_ok: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "8")]
+    pub no_interrupt: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3GadgetEpCmdFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub cmd: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub param0: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub param1: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub param2: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "6")]
+    pub cmd_status: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3GadgetEpDisableFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub maxpacket: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub maxpacket_limit: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub max_streams: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub maxburst: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub flags: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub direction: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub trb_enqueue: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub trb_dequeue: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3GadgetEpEnableFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub maxpacket: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub maxpacket_limit: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub max_streams: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub maxburst: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub flags: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub direction: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub trb_enqueue: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub trb_dequeue: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Dwc3GadgetGenericCmdFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub cmd: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub param: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "3")]
+    pub status: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3GadgetGivebackFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub req: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub actual: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub length: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub status: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub zero: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub short_not_ok: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "8")]
+    pub no_interrupt: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3PrepareTrbFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "2")]
+    pub trb: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    pub allocated: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub queued: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub bpl: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub bph: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub size: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub ctrl: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub r#type: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub enqueue: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "11")]
+    pub dequeue: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3ReadlFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub base: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "2")]
+    pub offset: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub value: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "4")]
+    pub msg: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Dwc3WritelFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub base: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "2")]
+    pub offset: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub value: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "4")]
+    pub msg: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct Ext4DaWriteBeginFtraceEvent {
@@ -10899,6 +13292,8 @@ pub struct F2fsWriteCheckpointFtraceEvent {
     pub msg: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "4")]
     pub reason: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub phase: ::core::option::Option<u32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct F2fsWriteEndFtraceEvent {
@@ -11086,6 +13481,35 @@ pub struct F2fsGcEndFtraceEvent {
     #[prost(uint32, optional, tag = "11")]
     pub prefree_seg: ::core::option::Option<u32>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct F2fsLockElapsedTimeFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub dev: ::core::option::Option<u64>,
+    #[prost(string, optional, tag = "2")]
+    pub comm: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int32, optional, tag = "3")]
+    pub pid: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "4")]
+    pub prio: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "5")]
+    pub ioprio_class: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "6")]
+    pub ioprio_data: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub lock_name: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub is_write: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "9")]
+    pub total_time: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "10")]
+    pub running_time: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "11")]
+    pub runnable_time: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "12")]
+    pub io_sleep_time: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "13")]
+    pub other_time: ::core::option::Option<u64>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct FastrpcDmaStatFtraceEvent {
     #[prost(int32, optional, tag = "1")]
@@ -11214,6 +13638,20 @@ pub struct MmFilemapDeleteFromPageCacheFtraceEvent {
     pub page: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DoSysOpenFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub filename: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int32, optional, tag = "2")]
+    pub flags: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    pub mode: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenExecFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub filename: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PrintFtraceEvent {
     #[prost(uint64, optional, tag = "1")]
     pub ip: ::core::option::Option<u64>,
@@ -11239,6 +13677,32 @@ pub struct FuncgraphExitFtraceEvent {
     pub overrun: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "5")]
     pub rettime: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FwtpPerfettoCounterFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timestamp: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "2")]
+    pub track_id: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "3")]
+    pub category: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "5")]
+    pub value: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FwtpPerfettoSliceFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timestamp: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "2")]
+    pub track_id: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "3")]
+    pub category: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "5")]
+    pub begin: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct G2dTracingMarkWriteFtraceEvent {
@@ -11279,6 +13743,48 @@ pub mod generic_ftrace_event {
             IntValue(i64),
             #[prost(uint64, tag = "5")]
             UintValue(u64),
+        }
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KprobeEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(enumeration = "kprobe_event::KprobeType", optional, tag = "2")]
+    pub r#type: ::core::option::Option<i32>,
+}
+/// Nested message and enum types in `KprobeEvent`.
+pub mod kprobe_event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum KprobeType {
+        Unknown = 0,
+        Begin = 1,
+        End = 2,
+        Instant = 3,
+    }
+    impl KprobeType {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "KPROBE_TYPE_UNKNOWN",
+                Self::Begin => "KPROBE_TYPE_BEGIN",
+                Self::End => "KPROBE_TYPE_END",
+                Self::Instant => "KPROBE_TYPE_INSTANT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "KPROBE_TYPE_UNKNOWN" => Some(Self::Unknown),
+                "KPROBE_TYPE_BEGIN" => Some(Self::Begin),
+                "KPROBE_TYPE_END" => Some(Self::End),
+                "KPROBE_TYPE_INSTANT" => Some(Self::Instant),
+                _ => None,
+            }
         }
     }
 }
@@ -11341,6 +13847,69 @@ pub struct DrmSchedProcessJobFtraceEvent {
     pub fence: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DrmSchedJobAddDepFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub fence_context: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub fence_seqno: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub ctx: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub seqno: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DrmSchedJobDoneFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub fence_context: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub fence_seqno: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DrmSchedJobQueueFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub job_count: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "3")]
+    pub hw_job_count: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "4")]
+    pub dev: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "5")]
+    pub fence_context: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "6")]
+    pub fence_seqno: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "7")]
+    pub client_id: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DrmSchedJobRunFtraceEvent {
+    #[prost(string, optional, tag = "1")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "2")]
+    pub job_count: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "3")]
+    pub hw_job_count: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "4")]
+    pub dev: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "5")]
+    pub fence_context: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "6")]
+    pub fence_seqno: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "7")]
+    pub client_id: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DrmSchedJobUnschedulableFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub fence_context: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub fence_seqno: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub ctx: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub seqno: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct HypEnterFtraceEvent {}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct HypExitFtraceEvent {}
@@ -11366,6 +13935,90 @@ pub struct HostMemAbortFtraceEvent {
     pub addr: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HostFfaCallFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub func_id: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub res_a1: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub res_a2: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub res_a3: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "5")]
+    pub res_a4: ::core::option::Option<u64>,
+    #[prost(int32, optional, tag = "6")]
+    pub handled: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "7")]
+    pub err: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct IommuIdmapFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub from: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub to: ::core::option::Option<u64>,
+    #[prost(int32, optional, tag = "3")]
+    pub prot: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct PsciMemProtectFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub count: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub was: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorHostHcallFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub id: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub invalid: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorHostSmcFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub id: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "2")]
+    pub forwarded: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorHypExitFtraceEvent {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorIommuIdmapFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub from: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub to: ::core::option::Option<u64>,
+    #[prost(int32, optional, tag = "3")]
+    pub prot: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorPsciMemProtectFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub count: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub was: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorHostMemAbortFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub esr: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub addr: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorHypEnterFtraceEvent {}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorIommuIdmapCompleteFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub map: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HypervisorVcpuIllegalTrapFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub esr: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct I2cReadFtraceEvent {
     #[prost(int32, optional, tag = "1")]
     pub adapter_nr: ::core::option::Option<i32>,
@@ -11378,7 +14031,7 @@ pub struct I2cReadFtraceEvent {
     #[prost(uint32, optional, tag = "5")]
     pub len: ::core::option::Option<u32>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct I2cWriteFtraceEvent {
     #[prost(int32, optional, tag = "1")]
     pub adapter_nr: ::core::option::Option<i32>,
@@ -11390,8 +14043,8 @@ pub struct I2cWriteFtraceEvent {
     pub flags: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "5")]
     pub len: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "6")]
-    pub buf: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "7")]
+    pub buf: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct I2cResultFtraceEvent {
@@ -11402,7 +14055,7 @@ pub struct I2cResultFtraceEvent {
     #[prost(int32, optional, tag = "3")]
     pub ret: ::core::option::Option<i32>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct I2cReplyFtraceEvent {
     #[prost(int32, optional, tag = "1")]
     pub adapter_nr: ::core::option::Option<i32>,
@@ -11414,8 +14067,8 @@ pub struct I2cReplyFtraceEvent {
     pub flags: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "5")]
     pub len: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "6")]
-    pub buf: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "7")]
+    pub buf: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SmbusReadFtraceEvent {
@@ -11533,6 +14186,16 @@ pub struct IrqHandlerExitFtraceEvent {
     pub irq: ::core::option::Option<i32>,
     #[prost(int32, optional, tag = "2")]
     pub ret: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LocalTimerEntryFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub vector: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LocalTimerExitFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub vector: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct KgslGpuFrequencyFtraceEvent {
@@ -12054,6 +14717,30 @@ pub struct IonBufferDestroyFtraceEvent {
     pub addr: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "2")]
     pub len: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MmAllocContigMigrateRangeInfoFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub start: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub end: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub nr_migrated: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub nr_reclaimed: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "5")]
+    pub nr_mapped: ::core::option::Option<u64>,
+    #[prost(int32, optional, tag = "6")]
+    pub migratetype: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DmabufRssStatFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub rss: ::core::option::Option<u64>,
+    #[prost(int64, optional, tag = "2")]
+    pub rss_delta: ::core::option::Option<i64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub i_ino: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct KvmAccessFaultFtraceEvent {
@@ -12686,6 +15373,15 @@ pub struct MaliMaliPmmcuresetwaitFtraceEvent {
     pub info_val: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MaliGpuPowerStateFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub change_ns: ::core::option::Option<u64>,
+    #[prost(int32, optional, tag = "2")]
+    pub from_state: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    pub to_state: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct MdpCmdKickoffFtraceEvent {
     #[prost(uint32, optional, tag = "1")]
     pub ctl_num: ::core::option::Option<u32>,
@@ -13056,21 +15752,21 @@ pub struct DsiCmdFifoStatusFtraceEvent {
     #[prost(uint32, optional, tag = "2")]
     pub payload: ::core::option::Option<u32>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DsiRxFtraceEvent {
     #[prost(uint32, optional, tag = "1")]
     pub cmd: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "2")]
-    pub rx_buf: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub rx_buf: ::core::option::Option<::prost::bytes::Bytes>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DsiTxFtraceEvent {
     #[prost(uint32, optional, tag = "1")]
     pub last: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "2")]
-    pub tx_buf: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "3")]
     pub r#type: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub tx_buf: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PanelWriteGenericFtraceEvent {
@@ -13086,6 +15782,13 @@ pub struct PanelWriteGenericFtraceEvent {
     pub r#type: ::core::option::Option<u32>,
     #[prost(int32, optional, tag = "6")]
     pub value: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GramCollisionFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub panel_index: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub collision_cnt: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SchedSwitchWithCtrsFtraceEvent {
@@ -13147,6 +15850,10 @@ pub struct PixelMmKswapdDoneFtraceEvent {
     pub delta_nr_scanned: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "2")]
     pub delta_nr_reclaimed: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub delta_nr_allocated: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub duration_ns: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct CpuFrequencyFtraceEvent {
@@ -13262,6 +15969,13 @@ pub struct DevicePmCallbackEndFtraceEvent {
     pub driver: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(int32, optional, tag = "3")]
     pub error: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GpuPowerStateFtraceEvent {
+    #[prost(int32, optional, tag = "1")]
+    pub old_state: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "2")]
+    pub new_state: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConsoleFtraceEvent {
@@ -13559,6 +16273,75 @@ pub struct ScmCallStartFtraceEvent {
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ScmCallEndFtraceEvent {}
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScsiDispatchCmdErrorFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub host_no: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub channel: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub id: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub lun: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub rtn: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub opcode: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub cmd_len: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub data_sglen: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub prot_sglen: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub prot_op: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "12")]
+    pub driver_tag: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "13")]
+    pub scheduler_tag: ::core::option::Option<i32>,
+    #[prost(bytes = "bytes", optional, tag = "14")]
+    pub cmnd: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScsiDispatchCmdTimeoutFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub host_no: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    pub channel: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub id: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub lun: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "5")]
+    pub result: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub opcode: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    pub cmd_len: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    pub data_sglen: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    pub prot_sglen: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub prot_op: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "12")]
+    pub driver_tag: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "13")]
+    pub scheduler_tag: ::core::option::Option<i32>,
+    #[prost(uint32, optional, tag = "14")]
+    pub sense_key: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "15")]
+    pub asc: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "16")]
+    pub ascq: ::core::option::Option<u32>,
+    #[prost(bytes = "bytes", optional, tag = "17")]
+    pub cmnd: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ScsiEhWakeupFtraceEvent {
+    #[prost(uint32, optional, tag = "1")]
+    pub host_no: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SdeTracingMarkWriteFtraceEvent {
     #[prost(int32, optional, tag = "1")]
     pub pid: ::core::option::Option<i32>,
@@ -13854,6 +16637,76 @@ pub struct ThermalExynosAcpmHighOverheadFtraceEvent {
     pub k_p: ::core::option::Option<i32>,
     #[prost(int32, optional, tag = "7")]
     pub k_i: ::core::option::Option<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HrtimerStartFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub hrtimer: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub function: ::core::option::Option<u64>,
+    #[prost(int64, optional, tag = "3")]
+    pub expires: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub softexpires: ::core::option::Option<i64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub mode: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HrtimerCancelFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub hrtimer: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HrtimerExpireEntryFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub hrtimer: ::core::option::Option<u64>,
+    #[prost(int64, optional, tag = "2")]
+    pub now: ::core::option::Option<i64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub function: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct HrtimerExpireExitFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub hrtimer: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TimerStartFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timer: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub function: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub expires: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub now: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag = "5")]
+    pub deferrable: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub flags: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "7")]
+    pub bucket_expiry: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TimerCancelFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timer: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TimerExpireEntryFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timer: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub now: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub function: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub baseclk: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TimerExpireExitFtraceEvent {
+    #[prost(uint64, optional, tag = "1")]
+    pub timer: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct TrustySmcFtraceEvent {
@@ -14423,6 +17276,8 @@ pub struct MmShrinkSlabEndFtraceEvent {
 pub struct WorkqueueActivateWorkFtraceEvent {
     #[prost(uint64, optional, tag = "1")]
     pub work: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub function: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct WorkqueueExecuteEndFtraceEvent {
@@ -14438,18 +17293,18 @@ pub struct WorkqueueExecuteStartFtraceEvent {
     #[prost(uint64, optional, tag = "2")]
     pub function: ::core::option::Option<u64>,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorkqueueQueueWorkFtraceEvent {
     #[prost(uint64, optional, tag = "1")]
     pub work: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "2")]
     pub function: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "3")]
-    pub workqueue: ::core::option::Option<u64>,
-    #[prost(uint32, optional, tag = "4")]
-    pub req_cpu: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "5")]
-    pub cpu: ::core::option::Option<u32>,
+    #[prost(int32, optional, tag = "4")]
+    pub req_cpu: ::core::option::Option<i32>,
+    #[prost(int32, optional, tag = "5")]
+    pub cpu: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "6")]
+    pub workqueue: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FtraceEvent {
@@ -14467,7 +17322,7 @@ pub struct FtraceEvent {
     pub common_flags: ::core::option::Option<u32>,
     #[prost(
         oneof = "ftrace_event::Event",
-        tags = "3, 4, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450, 451, 452, 453, 454, 455, 456, 457, 458, 460, 461, 462, 464, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 492, 493, 494, 495, 496, 497, 498, 499, 500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515, 516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539, 540, 541"
+        tags = "3, 4, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444, 445, 446, 447, 448, 449, 450, 451, 452, 453, 454, 455, 456, 457, 458, 460, 461, 462, 464, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 492, 493, 494, 495, 496, 497, 498, 499, 500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515, 516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539, 540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573, 574, 575, 576, 577, 578, 579, 580, 581, 582, 583, 584, 585, 586, 587, 588, 589, 590, 591, 592, 593, 594, 595, 596, 597, 598, 599, 600, 601, 602, 603"
     )]
     pub event: ::core::option::Option<ftrace_event::Event>,
 }
@@ -15536,6 +18391,130 @@ pub mod ftrace_event {
         SchedWakeupTaskAttr(super::SchedWakeupTaskAttrFtraceEvent),
         #[prost(message, tag = "541")]
         DevfreqFrequency(super::DevfreqFrequencyFtraceEvent),
+        #[prost(message, tag = "542")]
+        KprobeEvent(super::KprobeEvent),
+        #[prost(message, tag = "543")]
+        ParamSetValueCpm(super::ParamSetValueCpmFtraceEvent),
+        #[prost(message, tag = "544")]
+        DoSysOpen(super::DoSysOpenFtraceEvent),
+        #[prost(message, tag = "545")]
+        OpenExec(super::OpenExecFtraceEvent),
+        #[prost(message, tag = "546")]
+        BlockIoStart(super::BlockIoStartFtraceEvent),
+        #[prost(message, tag = "547")]
+        BlockIoDone(super::BlockIoDoneFtraceEvent),
+        #[prost(message, tag = "548")]
+        MaliGpuPowerState(super::MaliGpuPowerStateFtraceEvent),
+        #[prost(message, tag = "549")]
+        DpuDispDpuUnderrun(super::DpuDispDpuUnderrunFtraceEvent),
+        #[prost(message, tag = "550")]
+        DpuDispVblankIrqEnable(super::DpuDispVblankIrqEnableFtraceEvent),
+        #[prost(message, tag = "551")]
+        HrtimerStart(super::HrtimerStartFtraceEvent),
+        #[prost(message, tag = "552")]
+        HrtimerCancel(super::HrtimerCancelFtraceEvent),
+        #[prost(message, tag = "553")]
+        HrtimerExpireEntry(super::HrtimerExpireEntryFtraceEvent),
+        #[prost(message, tag = "554")]
+        HrtimerExpireExit(super::HrtimerExpireExitFtraceEvent),
+        #[prost(message, tag = "555")]
+        TimerStart(super::TimerStartFtraceEvent),
+        #[prost(message, tag = "556")]
+        TimerCancel(super::TimerCancelFtraceEvent),
+        #[prost(message, tag = "557")]
+        TimerExpireEntry(super::TimerExpireEntryFtraceEvent),
+        #[prost(message, tag = "558")]
+        TimerExpireExit(super::TimerExpireExitFtraceEvent),
+        #[prost(message, tag = "559")]
+        LocalTimerEntry(super::LocalTimerEntryFtraceEvent),
+        #[prost(message, tag = "560")]
+        LocalTimerExit(super::LocalTimerExitFtraceEvent),
+        #[prost(message, tag = "561")]
+        Dwc3AllocRequest(super::Dwc3AllocRequestFtraceEvent),
+        #[prost(message, tag = "562")]
+        Dwc3CompleteTrb(super::Dwc3CompleteTrbFtraceEvent),
+        #[prost(message, tag = "563")]
+        Dwc3CtrlReq(super::Dwc3CtrlReqFtraceEvent),
+        #[prost(message, tag = "564")]
+        Dwc3EpDequeue(super::Dwc3EpDequeueFtraceEvent),
+        #[prost(message, tag = "565")]
+        Dwc3EpQueue(super::Dwc3EpQueueFtraceEvent),
+        #[prost(message, tag = "566")]
+        Dwc3Event(super::Dwc3EventFtraceEvent),
+        #[prost(message, tag = "567")]
+        Dwc3FreeRequest(super::Dwc3FreeRequestFtraceEvent),
+        #[prost(message, tag = "568")]
+        Dwc3GadgetEpCmd(super::Dwc3GadgetEpCmdFtraceEvent),
+        #[prost(message, tag = "569")]
+        Dwc3GadgetEpDisable(super::Dwc3GadgetEpDisableFtraceEvent),
+        #[prost(message, tag = "570")]
+        Dwc3GadgetEpEnable(super::Dwc3GadgetEpEnableFtraceEvent),
+        #[prost(message, tag = "571")]
+        Dwc3GadgetGenericCmd(super::Dwc3GadgetGenericCmdFtraceEvent),
+        #[prost(message, tag = "572")]
+        Dwc3GadgetGiveback(super::Dwc3GadgetGivebackFtraceEvent),
+        #[prost(message, tag = "573")]
+        Dwc3PrepareTrb(super::Dwc3PrepareTrbFtraceEvent),
+        #[prost(message, tag = "574")]
+        Dwc3Readl(super::Dwc3ReadlFtraceEvent),
+        #[prost(message, tag = "575")]
+        Dwc3Writel(super::Dwc3WritelFtraceEvent),
+        #[prost(message, tag = "576")]
+        CmaAllocFinish(super::CmaAllocFinishFtraceEvent),
+        #[prost(message, tag = "577")]
+        MmAllocContigMigrateRangeInfo(super::MmAllocContigMigrateRangeInfoFtraceEvent),
+        #[prost(message, tag = "578")]
+        HostFfaCall(super::HostFfaCallFtraceEvent),
+        #[prost(message, tag = "579")]
+        DmabufRssStat(super::DmabufRssStatFtraceEvent),
+        #[prost(message, tag = "580")]
+        IommuIdmap(super::IommuIdmapFtraceEvent),
+        #[prost(message, tag = "581")]
+        PsciMemProtect(super::PsciMemProtectFtraceEvent),
+        #[prost(message, tag = "582")]
+        HypervisorHostHcall(super::HypervisorHostHcallFtraceEvent),
+        #[prost(message, tag = "583")]
+        HypervisorHostSmc(super::HypervisorHostSmcFtraceEvent),
+        #[prost(message, tag = "584")]
+        HypervisorHypExit(super::HypervisorHypExitFtraceEvent),
+        #[prost(message, tag = "585")]
+        HypervisorIommuIdmap(super::HypervisorIommuIdmapFtraceEvent),
+        #[prost(message, tag = "586")]
+        HypervisorPsciMemProtect(super::HypervisorPsciMemProtectFtraceEvent),
+        #[prost(message, tag = "587")]
+        HypervisorHostMemAbort(super::HypervisorHostMemAbortFtraceEvent),
+        #[prost(message, tag = "588")]
+        HypervisorHypEnter(super::HypervisorHypEnterFtraceEvent),
+        #[prost(message, tag = "589")]
+        HypervisorIommuIdmapComplete(super::HypervisorIommuIdmapCompleteFtraceEvent),
+        #[prost(message, tag = "590")]
+        HypervisorVcpuIllegalTrap(super::HypervisorVcpuIllegalTrapFtraceEvent),
+        #[prost(message, tag = "591")]
+        DrmSchedJobAddDep(super::DrmSchedJobAddDepFtraceEvent),
+        #[prost(message, tag = "592")]
+        DrmSchedJobDone(super::DrmSchedJobDoneFtraceEvent),
+        #[prost(message, tag = "593")]
+        DrmSchedJobQueue(super::DrmSchedJobQueueFtraceEvent),
+        #[prost(message, tag = "594")]
+        DrmSchedJobRun(super::DrmSchedJobRunFtraceEvent),
+        #[prost(message, tag = "595")]
+        DrmSchedJobUnschedulable(super::DrmSchedJobUnschedulableFtraceEvent),
+        #[prost(message, tag = "596")]
+        FwtpPerfettoCounter(super::FwtpPerfettoCounterFtraceEvent),
+        #[prost(message, tag = "597")]
+        ScsiDispatchCmdError(super::ScsiDispatchCmdErrorFtraceEvent),
+        #[prost(message, tag = "598")]
+        ScsiDispatchCmdTimeout(super::ScsiDispatchCmdTimeoutFtraceEvent),
+        #[prost(message, tag = "599")]
+        ScsiEhWakeup(super::ScsiEhWakeupFtraceEvent),
+        #[prost(message, tag = "600")]
+        FwtpPerfettoSlice(super::FwtpPerfettoSliceFtraceEvent),
+        #[prost(message, tag = "601")]
+        GpuPowerState(super::GpuPowerStateFtraceEvent),
+        #[prost(message, tag = "602")]
+        GramCollision(super::GramCollisionFtraceEvent),
+        #[prost(message, tag = "603")]
+        F2fsLockElapsedTime(super::F2fsLockElapsedTimeFtraceEvent),
     }
 }
 /// Per-CPU kernel buffer stats for the ftrace data source gathered from
@@ -15582,6 +18561,19 @@ pub struct FtraceCpuStats {
     #[prost(uint64, optional, tag = "9")]
     pub read_events: ::core::option::Option<u64>,
 }
+/// Kprobe statistical data, gathered from /sys/kernel/tracing/kprobe_profile.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct FtraceKprobeStats {
+    /// Cumulative number of kprobe events generated for this function
+    #[prost(int64, optional, tag = "1")]
+    pub hits: ::core::option::Option<i64>,
+    /// Cumulative number of kprobe events that could not be generated for this
+    /// function and were missed.  This happens when too much nesting
+    /// happens between a kprobe and its kretprobe, overflowing the
+    /// maxactives buffer.
+    #[prost(int64, optional, tag = "2")]
+    pub misses: ::core::option::Option<i64>,
+}
 /// Errors and kernel buffer stats for the ftrace data source.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FtraceStats {
@@ -15610,6 +18602,9 @@ pub struct FtraceStats {
     /// one or more atrace categories not available on the device.
     #[prost(string, optional, tag = "5")]
     pub atrace_errors: ::core::option::Option<::prost::alloc::string::String>,
+    /// Error message due to exclusivity violation of a single-tenant feature.
+    #[prost(string, optional, tag = "13")]
+    pub exclusive_feature_error: ::core::option::Option<::prost::alloc::string::String>,
     /// Ftrace events requested by the config but not present on device.
     #[prost(string, repeated, tag = "6")]
     pub unknown_ftrace_events: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -15634,6 +18629,19 @@ pub struct FtraceStats {
         tag = "9"
     )]
     pub ftrace_parse_errors: ::prost::alloc::vec::Vec<i32>,
+    /// Kprobe profile stats for functions hits and misses
+    #[prost(message, optional, tag = "10")]
+    pub kprobe_stats: ::core::option::Option<FtraceKprobeStats>,
+    /// Per-cpu buffer size as returned by buffer_size_kb in pages (rounded up).
+    /// Added in: perfetto v52.
+    #[prost(uint32, optional, tag = "11")]
+    pub cpu_buffer_size_pages: ::core::option::Option<u32>,
+    /// Per-cpu buffer size as cached by our implementation (ftrace muxer), based
+    /// on the value we're writing into the tracefs control file. Might not be
+    /// exactly equal to |cpu_buffer_size_pages| due to the kernel allocating extra
+    /// scratch pages (and/or other factors). Added in: perfetto v52.
+    #[prost(uint32, optional, tag = "12")]
+    pub cached_cpu_buffer_size_pages: ::core::option::Option<u32>,
 }
 /// Nested message and enum types in `FtraceStats`.
 pub mod ftrace_stats {
@@ -15683,36 +18691,38 @@ pub struct FtraceEventBundle {
     pub lost_events: ::core::option::Option<bool>,
     #[prost(message, optional, tag = "4")]
     pub compact_sched: ::core::option::Option<ftrace_event_bundle::CompactSched>,
-    /// traced_probes always sets the ftrace_clock to "boot". That is not available
-    /// in older kernels (v3.x). In that case we fallback on "global" or "local".
-    /// When we do that, we report the fallback clock in each bundle so we can do
-    /// proper clock syncing at parsing time in TraceProcessor. We cannot use the
-    /// TracePacket timestamp_clock_id because: (1) there is no per-packet
-    /// timestamp for ftrace bundles; (2) "global" does not match CLOCK_MONOTONIC.
-    /// Having a dedicated and explicit flag allows us to correct further misakes
-    /// in future by looking at the kernel version.
-    /// This field has been introduced in perfetto v19 / Android T (13).
-    /// This field is omitted when the ftrace clock is just "boot", as that is the
-    /// default assumption (and for consistency with the past).
+    /// Perfetto will by default try to use the boottime ("boot") clock for ftrace
+    /// timestamps as that counts during suspend, is available to userspace, and
+    /// is coherent across cpus.
+    ///
+    /// If this field is set, it means that a different clock was used during
+    /// recording. Either because the boot clock is unavailable (e.g. old kernels
+    /// before 3.x), or the trace config has set an incompatible option
+    /// (use_monotonic_raw_clock / preserve_ftrace_buffer). In that case,
+    /// trace_processor will do best-effort clock alignment using timestamp pairs
+    /// from |ftrace_timestamp| and |boot_timestamp| fields. This field is omitted
+    /// when the ftrace clock is "boot", as that is the default assumption.
+    ///
+    /// Some clocks (local/global) are technically per-cpu, but we make a
+    /// simplifying assumption that they are global, as their inter-cpu skew
+    /// should be reasonably bounded on modern systems.
+    ///
+    /// Added in: perfetto v19. Android T (13).
     #[prost(enumeration = "FtraceClock", optional, tag = "5")]
     pub ftrace_clock: ::core::option::Option<i32>,
-    /// The timestamp according to the ftrace clock, taken at the same instant
-    /// as |boot_timestamp|. This is used to sync ftrace events when a non-boot
-    /// clock is used as the ftrace clock. We don't use the ClockSnapshot packet
-    /// because the ftrace global/local clocks don't match any of the clock_gettime
-    /// domains and can be only read by traced_probes.
-    ///
-    /// Only set when |ftrace_clock| != FTRACE_CLOCK_UNSPECIFIED.
-    ///
+    /// The timestamp according to the ftrace clock, taken at the same instant as
+    /// |boot_timestamp|. Note: timestamping is done at buffer read time, so it
+    /// will be in the future relative to the data covered by this bundle.
     /// Implementation note: Populated by reading the 'now ts:' field in
-    /// tracefs/per_cpu/cpuX/stat.
+    /// tracefs/per_cpu/cpu0/stat.
+    ///
+    /// Set only if |ftrace_clock| != FTRACE_CLOCK_UNSPECIFIED.
     #[prost(int64, optional, tag = "6")]
     pub ftrace_timestamp: ::core::option::Option<i64>,
     /// The timestamp according to CLOCK_BOOTTIME, taken at the same instant as
-    /// |ftrace_timestamp|. See documentation of |ftrace_timestamp| for
-    /// more info.
+    /// |ftrace_timestamp|.
     ///
-    /// Only set when |ftrace_clock| != FTRACE_CLOCK_UNSPECIFIED.
+    /// Set only if |ftrace_clock| != FTRACE_CLOCK_UNSPECIFIED.
     #[prost(int64, optional, tag = "7")]
     pub boot_timestamp: ::core::option::Option<i64>,
     #[prost(message, repeated, tag = "8")]
@@ -15734,6 +18744,15 @@ pub struct FtraceEventBundle {
     /// Added in: perfetto v47.
     #[prost(uint64, optional, tag = "10")]
     pub previous_bundle_end_timestamp: ::core::option::Option<u64>,
+    #[prost(message, repeated, tag = "11")]
+    pub generic_event_descriptors:
+        ::prost::alloc::vec::Vec<ftrace_event_bundle::GenericEventDescriptor>,
+    /// Written only on android builds if the config sets |debug_ftrace_abi|.
+    /// Contains the raw ring buffer tracing page that the implementation could
+    /// not parse.
+    /// Addded in: perfetto v50.
+    #[prost(bytes = "bytes", optional, tag = "512")]
+    pub broken_abi_trace_page: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Nested message and enum types in `FtraceEventBundle`.
 pub mod ftrace_event_bundle {
@@ -15794,6 +18813,192 @@ pub mod ftrace_event_bundle {
         pub timestamp: ::core::option::Option<u64>,
         #[prost(enumeration = "super::FtraceParseStatus", optional, tag = "2")]
         pub status: ::core::option::Option<i32>,
+    }
+    /// Describes the serialised |FtraceEvent| protos for events not known at
+    /// compile time, when using the |denser_generic_event_encoding| option.
+    /// Addded in: perfetto v50.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct GenericEventDescriptor {
+        /// submessage id within FtraceEvent described by |event_descriptor|.
+        #[prost(int32, optional, tag = "1")]
+        pub field_id: ::core::option::Option<i32>,
+        /// optional: the event's group, e.g. "sched" for "sched/sched_switch".
+        /// The event name itself is in |event_descriptor.name|.
+        #[prost(string, optional, tag = "3")]
+        pub group_name: ::core::option::Option<::prost::alloc::string::String>,
+        /// serialised DescriptorProto.
+        #[prost(bytes = "bytes", optional, tag = "2")]
+        pub event_descriptor: ::core::option::Option<::prost::bytes::Bytes>,
+    }
+}
+/// GenericKernelCpuFrequencyEvent is the standard proto to capture CPU
+/// frequency change events in a generic kernel implementation.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GenericKernelCpuFrequencyEvent {
+    /// CPU in which the event occurred.
+    #[prost(int32, optional, tag = "1")]
+    pub cpu: ::core::option::Option<i32>,
+    /// Frequency (Hz) of the CPU.
+    #[prost(int64, optional, tag = "2")]
+    pub freq_hz: ::core::option::Option<i64>,
+}
+/// GenericKernelTaskStateEvent is the standard proto to capture thread state
+/// change events in a generic kernel implementation. This is mainly for the
+/// case where scheduler events are not directly supported in the kernel's
+/// tracing mechanism.
+///
+/// By capturing these task state events Perfetto is able to infer higher-level
+/// events such as context switches and task waking events, providing as much
+/// parity as possible with established tracing frameworks such as
+/// Linux's ftrace.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GenericKernelTaskStateEvent {
+    /// CPU in which the event occurred.
+    /// This field is only relevant with the TASK_STATE_RUNNING state. There is
+    /// no specific meaning to the cpu field in a non-running state event.
+    #[prost(int32, optional, tag = "1")]
+    pub cpu: ::core::option::Option<i32>,
+    /// Command name for the thread.
+    #[prost(string, optional, tag = "2")]
+    pub comm: ::core::option::Option<::prost::alloc::string::String>,
+    /// Thread id.
+    #[prost(int64, optional, tag = "3")]
+    pub tid: ::core::option::Option<i64>,
+    /// New state of the thread.
+    #[prost(
+        enumeration = "generic_kernel_task_state_event::TaskStateEnum",
+        optional,
+        tag = "4"
+    )]
+    pub state: ::core::option::Option<i32>,
+    /// Priority of the thread.
+    /// This value is OS agnostic and should only be interpreted based on the
+    /// kernel who emitted the message.
+    #[prost(int32, optional, tag = "5")]
+    pub prio: ::core::option::Option<i32>,
+}
+/// Nested message and enum types in `GenericKernelTaskStateEvent`.
+pub mod generic_kernel_task_state_event {
+    /// TaskStateEnum represents the valid states of a thread.
+    /// These states are a generic representation of the actual thread state and
+    /// don't necessarily map one-to-one to the states the actual OS kernel
+    /// tracks internally.
+    ///
+    /// Note: Consecutive TASK_STATE_RUNNING states for the same TID is considered
+    /// an error resulting in potential data loss.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum TaskStateEnum {
+        TaskStateUnknown = 0,
+        TaskStateCreated = 1,
+        TaskStateRunnable = 2,
+        TaskStateRunning = 3,
+        TaskStateInterruptibleSleep = 4,
+        TaskStateUninterruptibleSleep = 5,
+        TaskStateStopped = 6,
+        TaskStateDead = 7,
+        TaskStateDestroyed = 8,
+    }
+    impl TaskStateEnum {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::TaskStateUnknown => "TASK_STATE_UNKNOWN",
+                Self::TaskStateCreated => "TASK_STATE_CREATED",
+                Self::TaskStateRunnable => "TASK_STATE_RUNNABLE",
+                Self::TaskStateRunning => "TASK_STATE_RUNNING",
+                Self::TaskStateInterruptibleSleep => "TASK_STATE_INTERRUPTIBLE_SLEEP",
+                Self::TaskStateUninterruptibleSleep => "TASK_STATE_UNINTERRUPTIBLE_SLEEP",
+                Self::TaskStateStopped => "TASK_STATE_STOPPED",
+                Self::TaskStateDead => "TASK_STATE_DEAD",
+                Self::TaskStateDestroyed => "TASK_STATE_DESTROYED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "TASK_STATE_UNKNOWN" => Some(Self::TaskStateUnknown),
+                "TASK_STATE_CREATED" => Some(Self::TaskStateCreated),
+                "TASK_STATE_RUNNABLE" => Some(Self::TaskStateRunnable),
+                "TASK_STATE_RUNNING" => Some(Self::TaskStateRunning),
+                "TASK_STATE_INTERRUPTIBLE_SLEEP" => Some(Self::TaskStateInterruptibleSleep),
+                "TASK_STATE_UNINTERRUPTIBLE_SLEEP" => Some(Self::TaskStateUninterruptibleSleep),
+                "TASK_STATE_STOPPED" => Some(Self::TaskStateStopped),
+                "TASK_STATE_DEAD" => Some(Self::TaskStateDead),
+                "TASK_STATE_DESTROYED" => Some(Self::TaskStateDestroyed),
+                _ => None,
+            }
+        }
+    }
+}
+/// GenericKernelTaskRenameEvent is the standard proto to capture the renaming
+/// of a thread.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GenericKernelTaskRenameEvent {
+    /// Thread id.
+    #[prost(int64, optional, tag = "1")]
+    pub tid: ::core::option::Option<i64>,
+    /// New command name for the thread.
+    #[prost(string, optional, tag = "2")]
+    pub comm: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Metadata about the processes and threads in the trace.
+/// The main goal of this proto is to provide a generic kernel
+/// implementation a mechanism to outline its process structure.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GenericKernelProcessTree {
+    /// List of processes and threads in the kernel. These lists are incremental
+    /// and not exhaustive. A process and its threads might show up separately in
+    /// different ProcessTree messages. A thread might not show up at all, if
+    /// no sched switch activity was detected, for instance:
+    /// #0 { processes: \[{pid: 10, ...}\], threads: \[{tid: 11, pid: 10}\] }
+    /// #1 { threads: \[{tid: 12, pid: 10}\] }
+    /// #2 { processes: \[{pid: 20, ...}\], threads: \[{tid: 13, pid: 10}\] }
+    #[prost(message, repeated, tag = "1")]
+    pub processes: ::prost::alloc::vec::Vec<generic_kernel_process_tree::Process>,
+    #[prost(message, repeated, tag = "2")]
+    pub threads: ::prost::alloc::vec::Vec<generic_kernel_process_tree::Thread>,
+}
+/// Nested message and enum types in `GenericKernelProcessTree`.
+pub mod generic_kernel_process_tree {
+    /// Representation of a thread.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Thread {
+        /// Thread id.
+        #[prost(int64, optional, tag = "1")]
+        pub tid: ::core::option::Option<i64>,
+        /// Id of the parent process.
+        #[prost(int64, optional, tag = "2")]
+        pub pid: ::core::option::Option<i64>,
+        /// The command name of the thread.
+        #[prost(string, optional, tag = "3")]
+        pub comm: ::core::option::Option<::prost::alloc::string::String>,
+        /// True if thread is the main thread.
+        #[prost(bool, optional, tag = "4")]
+        pub is_main_thread: ::core::option::Option<bool>,
+        /// True if thread is an idle thread.
+        #[prost(bool, optional, tag = "5")]
+        pub is_idle: ::core::option::Option<bool>,
+    }
+    /// Representation of a process.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Process {
+        /// Process id.
+        #[prost(int64, optional, tag = "1")]
+        pub pid: ::core::option::Option<i64>,
+        /// Parent process id.
+        #[prost(int64, optional, tag = "2")]
+        pub ppid: ::core::option::Option<i64>,
+        /// The command line of the process.
+        /// If the cmdline has spaces in it, then we use the characters from
+        /// position 0 to the first instance of the space char (' ') as the name
+        /// of the process. If no spaces are present, then the entire cmdline is
+        /// used as the name.
+        #[prost(string, optional, tag = "3")]
+        pub cmdline: ::core::option::Option<::prost::alloc::string::String>,
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -15924,6 +19129,11 @@ pub struct GpuRenderStageEvent {
     /// optional. The Vulkan render pass handle.
     #[prost(uint64, optional, tag = "9")]
     pub render_pass_handle: ::core::option::Option<u64>,
+    /// optional. An ID for the render pass instance. This is used to correlate
+    /// different events on different queues produced by the same Vulkan render
+    /// pass instance.
+    #[prost(uint64, optional, tag = "16")]
+    pub render_pass_instance_id: ::core::option::Option<u64>,
     /// optional. A bit mask representing which render subpasses contributed to
     /// this render stage event.  Subpass index 0 is represented by setting the
     /// LSB of the mask.  Additional mask can be added for subpass index greater
@@ -16342,28 +19552,14 @@ pub mod vulkan_memory_event {
 /// TODO(fmayer): Move to the intern tables to a common location.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InternedString {
+    /// Interning key. Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "1")]
     pub iid: ::core::option::Option<u64>,
+    /// The actual string.
     #[prost(bytes = "bytes", optional, tag = "2")]
     pub str: ::core::option::Option<::prost::bytes::Bytes>,
 }
-/// A symbol field that is emitted after the trace is written. These tables would
-/// be appended as the last packets in the trace that the profiler will use, so
-/// that the actual trace need not be rewritten to symbolize the profiles.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProfiledFrameSymbols {
-    /// Use the frame id as the interning key for the symbols.
-    #[prost(uint64, optional, tag = "1")]
-    pub frame_iid: ::core::option::Option<u64>,
-    /// key to InternedString
-    #[prost(uint64, repeated, packed = "false", tag = "2")]
-    pub function_name_id: ::prost::alloc::vec::Vec<u64>,
-    /// key to InternedString
-    #[prost(uint64, repeated, packed = "false", tag = "3")]
-    pub file_name_id: ::prost::alloc::vec::Vec<u64>,
-    #[prost(uint32, repeated, packed = "false", tag = "4")]
-    pub line_number: ::prost::alloc::vec::Vec<u32>,
-}
+/// Source line info.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Line {
     #[prost(string, optional, tag = "1")]
@@ -16389,6 +19585,7 @@ pub struct AddressSymbols {
     pub lines: ::prost::alloc::vec::Vec<Line>,
 }
 /// Symbols for addresses seen in a module.
+/// Used in re-symbolisation of complete traces.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModuleSymbols {
     /// Fully qualified path to the mapping.
@@ -16406,9 +19603,11 @@ pub struct ModuleSymbols {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Mapping {
     /// Interning key.
+    /// Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "1")]
     pub iid: ::core::option::Option<u64>,
     /// Interning key.
+    /// Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "2")]
     pub build_id: ::core::option::Option<u64>,
     /// This is not set on Android 10.
@@ -16420,6 +19619,17 @@ pub struct Mapping {
     pub start: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "5")]
     pub end: ::core::option::Option<u64>,
+    /// Libunwindstack-specific concept, not to be confused with bionic linker's
+    /// notion of load_bias. Needed to correct relative pc addresses (as produced
+    /// by libunwindstack) when doing offline resymbolisation.
+    ///
+    /// For an executable ELF PT_LOAD segment, this is:
+    ///    p_vaddr - p_offset
+    ///
+    /// Where p_offset means that the code is at that offset into the ELF file on
+    /// disk. While p_vaddr is the offset at which the code gets *mapped*, relative
+    /// to where the linker loads the ELF into the address space. For most ELFs,
+    /// the two values are identical and therefore load_bias is zero.
     #[prost(uint64, optional, tag = "6")]
     pub load_bias: ::core::option::Option<u64>,
     /// E.g. \["system", "lib64", "libc.so"\]
@@ -16429,20 +19639,47 @@ pub struct Mapping {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct Frame {
-    /// Interning key
+    /// Interning key. Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "1")]
     pub iid: ::core::option::Option<u64>,
     /// E.g. "fopen"
     /// id of string.
     #[prost(uint64, optional, tag = "2")]
     pub function_name_id: ::core::option::Option<u64>,
+    /// The mapping in which this frame's instruction pointer resides.
+    /// iid of Mapping.iid.
+    ///
+    /// If set (non-zero), rel_pc MUST also be set. If mapping_id is 0 (not set),
+    /// this frame has no associated memory mapping (e.g., symbolized frames
+    /// without address information).
+    ///
+    /// Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "3")]
     pub mapping_id: ::core::option::Option<u64>,
+    /// Instruction pointer relative to the start of the mapping.
+    /// MUST be set if mapping_id is set (non-zero). Ignored if mapping_id is 0.
     #[prost(uint64, optional, tag = "4")]
     pub rel_pc: ::core::option::Option<u64>,
+    /// Source file path for this frame.
+    /// This is typically set during online symbolization when symbol information
+    /// is available at trace collection time. If not set, source file paths may be
+    /// added later via offline symbolization (see ModuleSymbols).
+    ///
+    /// Starts from 1, 0 is the same as "not set".
+    ///
+    /// iid of InternedData.source_paths.
+    #[prost(uint64, optional, tag = "5")]
+    pub source_path_iid: ::core::option::Option<u64>,
+    /// Line number in the source file for this frame.
+    /// This is typically set during online symbolization when symbol information
+    /// is available at trace collection time. If not set, line numbers may be
+    /// added later via offline symbolization (see ModuleSymbols).
+    #[prost(uint32, optional, tag = "6")]
+    pub line_number: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Callstack {
+    /// Interning key. Starts from 1, 0 is the same as "not set".
     #[prost(uint64, optional, tag = "1")]
     pub iid: ::core::option::Option<u64>,
     /// Frames of this callstack. Bottom frame first.
@@ -17465,6 +20702,10 @@ pub struct ChromeContentSettingsEventInfo {
     #[prost(uint32, optional, tag = "1")]
     pub number_of_exceptions: ::core::option::Option<u32>,
 }
+/// DEPRECATED. Only kept for backwards compatibility. Use |ChromeFrameReporter2|
+/// in
+/// <https://source.chromium.org/chromium/chromium/src/+/main:base/tracing/protos/chrome_track_event.proto>
+/// instead.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChromeFrameReporter {
     #[prost(enumeration = "chrome_frame_reporter::State", optional, tag = "1")]
@@ -17529,6 +20770,14 @@ pub struct ChromeFrameReporter {
     /// Whether the frame contained any content that is not fully recorded.
     #[prost(bool, optional, tag = "16")]
     pub checkerboarded_needs_record: ::core::option::Option<bool>,
+    /// viz::BeginFrameArgs.trace_id of the frame (before surface aggregation). See
+    /// also ChromeTrackEvent.EventLatency.surface_frame_trace_id.
+    #[prost(int64, optional, tag = "17")]
+    pub surface_frame_trace_id: ::core::option::Option<i64>,
+    /// gfx::PresentationFeedback.display_trace_id of the frame (after surface
+    /// aggregation). See also ChromeTrackEvent.EventLatency.display_trace_id.
+    #[prost(int64, optional, tag = "18")]
+    pub display_trace_id: ::core::option::Option<i64>,
 }
 /// Nested message and enum types in `ChromeFrameReporter`.
 pub mod chrome_frame_reporter {
@@ -17619,8 +20868,9 @@ pub mod chrome_frame_reporter {
         ScrollNone = 0,
         ScrollMainThread = 1,
         ScrollCompositorThread = 2,
+        ScrollRaster = 3,
         /// Used when it can't be determined whether a scroll is in progress or not.
-        ScrollUnknown = 3,
+        ScrollUnknown = 4,
     }
     impl ScrollState {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -17632,6 +20882,7 @@ pub mod chrome_frame_reporter {
                 Self::ScrollNone => "SCROLL_NONE",
                 Self::ScrollMainThread => "SCROLL_MAIN_THREAD",
                 Self::ScrollCompositorThread => "SCROLL_COMPOSITOR_THREAD",
+                Self::ScrollRaster => "SCROLL_RASTER",
                 Self::ScrollUnknown => "SCROLL_UNKNOWN",
             }
         }
@@ -17641,6 +20892,7 @@ pub mod chrome_frame_reporter {
                 "SCROLL_NONE" => Some(Self::ScrollNone),
                 "SCROLL_MAIN_THREAD" => Some(Self::ScrollMainThread),
                 "SCROLL_COMPOSITOR_THREAD" => Some(Self::ScrollCompositorThread),
+                "SCROLL_RASTER" => Some(Self::ScrollRaster),
                 "SCROLL_UNKNOWN" => Some(Self::ScrollUnknown),
                 _ => None,
             }
@@ -18245,7 +21497,7 @@ pub struct TaskExecution {
 /// their default track association) can be emitted as part of a
 /// TrackEventDefaults message.
 ///
-/// Next reserved id: 13 (up to 15). Next id: 52.
+/// Next reserved id: 13 (up to 15). Next id: 57.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TrackEvent {
     /// Names of categories of the event. In the client library, categories are a
@@ -18323,8 +21575,14 @@ pub struct TrackEvent {
     /// "terminating_flow_ids" to reduce memory consumption.
     #[prost(fixed64, repeated, packed = "false", tag = "48")]
     pub terminating_flow_ids: ::prost::alloc::vec::Vec<u64>,
-    /// Unstable key/value annotations shown in the trace viewer but not intended
-    /// for metrics use.
+    /// Debug annotations associated with this event. These are arbitrary key-value
+    /// pairs that can be used to attach additional information to the event.
+    /// See DebugAnnotation message for details on supported value types.
+    ///
+    /// For example, debug annotations can be used to attach a URL or resource
+    /// identifier to a network request event. Arrays, dictionaries and full
+    /// nested structures (e.g. arrays of dictionaries of dictionaries)
+    /// are supported.
     #[prost(message, repeated, tag = "4")]
     pub debug_annotations: ::prost::alloc::vec::Vec<DebugAnnotation>,
     /// Typed event arguments:
@@ -18344,6 +21602,11 @@ pub struct TrackEvent {
     pub chrome_histogram_sample: ::core::option::Option<ChromeHistogramSample>,
     #[prost(message, optional, tag = "29")]
     pub chrome_latency_info: ::core::option::Option<ChromeLatencyInfo>,
+    /// DEPRECATED. Only kept for backwards compatibility. Use the
+    /// |ChromeTrackEvent.frame_reporter| extension in
+    /// <https://source.chromium.org/chromium/chromium/src/+/main:base/tracing/protos/chrome_track_event.proto>
+    /// instead.
+    #[deprecated]
     #[prost(message, optional, tag = "32")]
     pub chrome_frame_reporter: ::core::option::Option<ChromeFrameReporter>,
     #[prost(message, optional, tag = "39")]
@@ -18380,6 +21643,36 @@ pub struct TrackEvent {
     /// negative) on each packet sequence (see CounterIncrementalBase).
     #[prost(oneof = "track_event::CounterValueField", tags = "30, 44")]
     pub counter_value_field: ::core::option::Option<track_event::CounterValueField>,
+    /// An opaque identifier to correlate this slice with other slices that are
+    /// considered part of the same logical operation, even if they are not
+    /// causally connected. Examples uses of a correlation id might be the number
+    /// of frame going through various stages of rendering in a GPU, the id for an
+    /// RPC request going through a distributed system, or the id of a network
+    /// request going through various stages of processing by the kernel.
+    ///
+    /// NOTE: if the events *are* causually connected, you probably want to use
+    /// flows instead of OR in addition to correlation ids.
+    ///
+    /// UIs can use this identifier to visually link these slices, for instance,
+    /// by assigning them a consistent color or highlighting the entire correlated
+    /// set when one slice is hovered.
+    ///
+    /// Only one field within this 'oneof' should be set to define the correlation.
+    #[prost(oneof = "track_event::CorrelationIdField", tags = "52, 53, 54")]
+    pub correlation_id_field: ::core::option::Option<track_event::CorrelationIdField>,
+    /// Callstack associated with this event. This captures the program stack at
+    /// the time the event occurred, useful for understanding what code path led
+    /// to the event.
+    ///
+    /// Two variants are supported:
+    /// - callstack: Inline callstack data (simpler when trace size is not a
+    ///    concern or callstacks are unique)
+    /// - callstack_iid: Reference to an interned Callstack in InternedData
+    ///    (efficient for repeated callstacks)
+    ///
+    /// Only one of these fields should be set.
+    #[prost(oneof = "track_event::CallstackField", tags = "55, 56")]
+    pub callstack_field: ::core::option::Option<track_event::CallstackField>,
     /// This field is used only if the source location represents the function that
     /// executes during this event.
     #[prost(oneof = "track_event::SourceLocationField", tags = "33, 34")]
@@ -18406,6 +21699,38 @@ pub struct TrackEvent {
 }
 /// Nested message and enum types in `TrackEvent`.
 pub mod track_event {
+    /// Inline callstack for TrackEvents when interning is not needed.
+    /// This is a simplified version of the profiling Callstack/Frame messages,
+    /// designed for cases where trace size is not critical or callstacks are
+    /// unique.
+    ///
+    /// Use this for simple callstacks with function names and source locations.
+    /// For binary/library information (mappings, build IDs, relative PCs), use
+    /// interned callstacks via callstack_iid instead.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Callstack {
+        /// Frames of this callstack, ordered from bottom (outermost) to top
+        /// (innermost). For example, if main() calls foo() which calls bar(), the
+        /// frames would be: \[main, foo, bar\]
+        #[prost(message, repeated, tag = "1")]
+        pub frames: ::prost::alloc::vec::Vec<callstack::Frame>,
+    }
+    /// Nested message and enum types in `Callstack`.
+    pub mod callstack {
+        /// Frame within an inline callstack.
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct Frame {
+            /// Function name, e.g., "malloc" or "std::vector<int>::push_back"
+            #[prost(string, optional, tag = "1")]
+            pub function_name: ::core::option::Option<::prost::alloc::string::String>,
+            /// Optional: Source file path, e.g., "/src/foo.cc"
+            #[prost(string, optional, tag = "2")]
+            pub source_file: ::core::option::Option<::prost::alloc::string::String>,
+            /// Optional: Line number in the source file
+            #[prost(uint32, optional, tag = "3")]
+            pub line_number: ::core::option::Option<u32>,
+        }
+    }
     /// Apart from {category, time, thread time, tid, pid}, other legacy trace
     /// event attributes are initially simply proxied for conversion to a JSON
     /// trace. We intend to gradually transition these attributes to similar native
@@ -18623,6 +21948,71 @@ pub mod track_event {
         #[prost(double, tag = "44")]
         DoubleCounterValue(f64),
     }
+    /// An opaque identifier to correlate this slice with other slices that are
+    /// considered part of the same logical operation, even if they are not
+    /// causally connected. Examples uses of a correlation id might be the number
+    /// of frame going through various stages of rendering in a GPU, the id for an
+    /// RPC request going through a distributed system, or the id of a network
+    /// request going through various stages of processing by the kernel.
+    ///
+    /// NOTE: if the events *are* causually connected, you probably want to use
+    /// flows instead of OR in addition to correlation ids.
+    ///
+    /// UIs can use this identifier to visually link these slices, for instance,
+    /// by assigning them a consistent color or highlighting the entire correlated
+    /// set when one slice is hovered.
+    ///
+    /// Only one field within this 'oneof' should be set to define the correlation.
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum CorrelationIdField {
+        /// A 64-bit unsigned integer used as the correlation ID.
+        ///
+        /// Best for performance and compact traces if the identifier is naturally
+        /// numerical or can be easily mapped to one by the trace producer.
+        #[prost(uint64, tag = "52")]
+        CorrelationId(u64),
+        /// A string value used as the correlation ID.
+        ///
+        /// Offers maximum flexibility for human-readable or complex identifiers
+        /// (e.g., GUIDs). Note: Using many unique, long strings may increase trace
+        /// size. For frequently repeated string identifiers, consider
+        /// 'correlation_id_string_iid'.
+        #[prost(string, tag = "53")]
+        CorrelationIdStr(::prost::alloc::string::String),
+        /// An interned string identifier (an IID) for correlation.
+        ///
+        /// This 64-bit ID refers to a string defined in the 'correlation_id_str'
+        /// field within the packet sequence's InternedData. This approach combines
+        /// the descriptiveness and uniqueness of strings with the efficiency of
+        /// integer IDs for storage and comparison, especially for identifiers that
+        /// repeat across many events.
+        #[prost(uint64, tag = "54")]
+        CorrelationIdStrIid(u64),
+    }
+    /// Callstack associated with this event. This captures the program stack at
+    /// the time the event occurred, useful for understanding what code path led
+    /// to the event.
+    ///
+    /// Two variants are supported:
+    /// - callstack: Inline callstack data (simpler when trace size is not a
+    ///    concern or callstacks are unique)
+    /// - callstack_iid: Reference to an interned Callstack in InternedData
+    ///    (efficient for repeated callstacks)
+    ///
+    /// Only one of these fields should be set.
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum CallstackField {
+        /// Inline callstack data. Use this for simplicity when interning is not
+        /// needed (e.g., for unique callstacks or when trace size is not critical).
+        #[prost(message, tag = "55")]
+        Callstack(Callstack),
+        /// Reference to interned Callstack (see InternedData.callstacks).
+        /// This is the efficient option when callstacks are repeated.
+        ///
+        /// Note: iids *always* start from 1. A value of 0 is considered "not set".
+        #[prost(uint64, tag = "56")]
+        CallstackIid(u64),
+    }
     /// This field is used only if the source location represents the function that
     /// executes during this event.
     #[derive(Clone, PartialEq, ::prost::Oneof)]
@@ -18720,7 +22110,7 @@ pub struct EventName {
 /// emitted proactively in advance of referring to them in later packets.
 ///
 /// Next reserved id: 8 (up to 15).
-/// Next id: 42.
+/// Next id: 45.
 ///
 /// TODO(eseckler): Replace iid fields inside interned messages with
 /// map<iid, message> type fields in InternedData.
@@ -18759,9 +22149,6 @@ pub struct InternedData {
     /// Names of functions used in frames below.
     #[prost(message, repeated, tag = "5")]
     pub function_names: ::prost::alloc::vec::Vec<InternedString>,
-    /// Symbols that were added to this trace after the fact.
-    #[prost(message, repeated, tag = "21")]
-    pub profiled_frame_symbols: ::prost::alloc::vec::Vec<ProfiledFrameSymbols>,
     /// Executable files mapped into processes.
     #[prost(message, repeated, tag = "19")]
     pub mappings: ::prost::alloc::vec::Vec<Mapping>,
@@ -18829,6 +22216,27 @@ pub struct InternedData {
     pub viewcapture_view_id: ::prost::alloc::vec::Vec<InternedString>,
     #[prost(message, repeated, tag = "41")]
     pub viewcapture_class_name: ::prost::alloc::vec::Vec<InternedString>,
+    #[prost(message, repeated, tag = "45")]
+    pub viewcapture_content_description: ::prost::alloc::vec::Vec<InternedString>,
+    #[prost(message, repeated, tag = "46")]
+    pub viewcapture_text: ::prost::alloc::vec::Vec<InternedString>,
+    /// Interned context for android.app_wakelocks.
+    #[prost(message, repeated, tag = "42")]
+    pub app_wakelock_info: ::prost::alloc::vec::Vec<AppWakelockInfo>,
+    /// Interned correlation ids in track_event.
+    #[prost(message, repeated, tag = "43")]
+    pub correlation_id_str: ::prost::alloc::vec::Vec<InternedString>,
+    /// Interned job names for Android Job Names. These are separate from
+    /// other strings because they are under app control.
+    #[prost(message, repeated, tag = "44")]
+    pub android_job_name: ::prost::alloc::vec::Vec<AndroidJobName>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AndroidJobName {
+    #[prost(uint64, optional, tag = "1")]
+    pub iid: ::core::option::Option<u64>,
+    #[prost(string, optional, tag = "2")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MemoryTrackerSnapshot {
@@ -19076,7 +22484,31 @@ pub mod perfetto_metatrace {
         CounterName(::prost::alloc::string::String),
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TraceProvenance {
+    #[prost(message, repeated, tag = "2")]
+    pub buffers: ::prost::alloc::vec::Vec<trace_provenance::Buffer>,
+}
+/// Nested message and enum types in `TraceProvenance`.
+pub mod trace_provenance {
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct Sequence {
+        /// The trusted_packet_sequence_id reported in each TracePacket.
+        #[prost(uint32, optional, tag = "1")]
+        pub id: ::core::option::Option<u32>,
+        /// ID of the producer, as per Producer.id.
+        #[prost(int32, optional, tag = "2")]
+        pub producer_id: ::core::option::Option<i32>,
+    }
+    /// Describes a trace buffer and all the sequences writing to it.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Buffer {
+        #[prost(message, repeated, tag = "1")]
+        pub sequences: ::prost::alloc::vec::Vec<Sequence>,
+    }
+}
 /// Events emitted by the tracing service.
+/// Next id: 12.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TracingServiceEvent {
     /// When each of the following booleans are set to true, they report the
@@ -19086,7 +22518,7 @@ pub struct TracingServiceEvent {
     /// they would generally be expected to have.
     #[prost(
         oneof = "tracing_service_event::EventType",
-        tags = "2, 1, 9, 3, 4, 5, 6, 7, 8"
+        tags = "2, 1, 9, 3, 4, 5, 6, 7, 8, 10, 11"
     )]
     pub event_type: ::core::option::Option<tracing_service_event::EventType>,
 }
@@ -19162,6 +22594,14 @@ pub mod tracing_service_event {
         /// did not reply on time.
         #[prost(message, tag = "8")]
         LastFlushSlowDataSources(DataSources),
+        /// If this was a cloned tracing session, emitted when the tracing serice
+        /// started the clone operation.
+        #[prost(bool, tag = "10")]
+        CloneStarted(bool),
+        /// If this was a cloned tracing session, emitted when the tracing service
+        /// finished the clone operation (for a specific buffer).
+        #[prost(uint32, tag = "11")]
+        BufferCloned(u32),
     }
 }
 /// Energy consumer based on aidl class:
@@ -19310,6 +22750,12 @@ pub struct PowerRails {
     pub rail_descriptor: ::prost::alloc::vec::Vec<power_rails::RailDescriptor>,
     #[prost(message, repeated, tag = "2")]
     pub energy_data: ::prost::alloc::vec::Vec<power_rails::EnergyData>,
+    /// A unique session id that can be used to match energy data to sets of
+    /// descriptors. The indices used by rail descriptors and energy data packets
+    /// are meant to be unique to a given session uuid. When multiple data sources
+    /// are running in parallel, each data source should use a unique id.
+    #[prost(uint64, optional, tag = "3")]
+    pub session_uuid: ::core::option::Option<u64>,
 }
 /// Nested message and enum types in `PowerRails`.
 pub mod power_rails {
@@ -19353,6 +22799,24 @@ pub struct ObfuscatedMember {
     /// ObfuscatedMember.
     #[prost(string, optional, tag = "2")]
     pub deobfuscated_name: ::core::option::Option<::prost::alloc::string::String>,
+    /// R8 inline method support: line number ranges for disambiguation.
+    /// When multiple methods map to the same obfuscated name, the line number
+    /// from the stack frame is used to select the correct mapping.
+    ///
+    /// Format in R8 mapping: "1:3:void foo():10:12 -> a"
+    /// - obfuscated_line_start/end = 1:3 (line range in obfuscated code)
+    /// - source_line_start/end = 10:12 (line range in original source)
+    ///
+    /// Methods with the same obfuscated_name and overlapping obfuscated line
+    /// ranges form an inline chain, ordered innermost (inlined) first.
+    #[prost(uint32, optional, tag = "3")]
+    pub obfuscated_line_start: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub obfuscated_line_end: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    pub source_line_start: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    pub source_line_end: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ObfuscatedClass {
@@ -19567,11 +23031,51 @@ pub struct HeapGraphObject {
     /// N.B. This is not the native size of this object.
     #[prost(int64, optional, tag = "8")]
     pub native_allocation_registry_size_field: ::core::option::Option<i64>,
+    /// To reduce the space required we only emit the heap type if it has changed
+    /// from the previous object we recorded.
+    #[prost(enumeration = "heap_graph_object::HeapType", optional, tag = "9")]
+    pub heap_type_delta: ::core::option::Option<i32>,
+    /// Ids of the Objects referred by this object, not via fields, but via
+    /// internal runtime structures.
+    #[prost(uint64, repeated, tag = "10")]
+    pub runtime_internal_object_id: ::prost::alloc::vec::Vec<u64>,
     #[prost(oneof = "heap_graph_object::Identifier", tags = "1, 7")]
     pub identifier: ::core::option::Option<heap_graph_object::Identifier>,
 }
 /// Nested message and enum types in `HeapGraphObject`.
 pub mod heap_graph_object {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum HeapType {
+        Unknown = 0,
+        App = 1,
+        Zygote = 2,
+        BootImage = 3,
+    }
+    impl HeapType {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "HEAP_TYPE_UNKNOWN",
+                Self::App => "HEAP_TYPE_APP",
+                Self::Zygote => "HEAP_TYPE_ZYGOTE",
+                Self::BootImage => "HEAP_TYPE_BOOT_IMAGE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "HEAP_TYPE_UNKNOWN" => Some(Self::Unknown),
+                "HEAP_TYPE_APP" => Some(Self::App),
+                "HEAP_TYPE_ZYGOTE" => Some(Self::Zygote),
+                "HEAP_TYPE_BOOT_IMAGE" => Some(Self::BootImage),
+                _ => None,
+            }
+        }
+    }
     #[derive(Clone, Copy, PartialEq, ::prost::Oneof)]
     pub enum Identifier {
         #[prost(uint64, tag = "1")]
@@ -20104,6 +23608,7 @@ pub mod perf_sample {
         ProfilerSkipReadStage = 1,
         ProfilerSkipUnwindStage = 2,
         ProfilerSkipUnwindEnqueue = 3,
+        ProfilerSkipNotInScope = 4,
     }
     impl SampleSkipReason {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -20116,6 +23621,7 @@ pub mod perf_sample {
                 Self::ProfilerSkipReadStage => "PROFILER_SKIP_READ_STAGE",
                 Self::ProfilerSkipUnwindStage => "PROFILER_SKIP_UNWIND_STAGE",
                 Self::ProfilerSkipUnwindEnqueue => "PROFILER_SKIP_UNWIND_ENQUEUE",
+                Self::ProfilerSkipNotInScope => "PROFILER_SKIP_NOT_IN_SCOPE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -20125,6 +23631,7 @@ pub mod perf_sample {
                 "PROFILER_SKIP_READ_STAGE" => Some(Self::ProfilerSkipReadStage),
                 "PROFILER_SKIP_UNWIND_STAGE" => Some(Self::ProfilerSkipUnwindStage),
                 "PROFILER_SKIP_UNWIND_ENQUEUE" => Some(Self::ProfilerSkipUnwindEnqueue),
+                "PROFILER_SKIP_NOT_IN_SCOPE" => Some(Self::ProfilerSkipNotInScope),
                 _ => None,
             }
         }
@@ -20298,6 +23805,9 @@ pub mod process_stats {
         /// Resolution of "clock ticks", usually 10ms.
         #[prost(uint64, optional, tag = "22")]
         pub runtime_kernel_mode: ::core::option::Option<u64>,
+        /// The total size of all dmabufs referenced by a process via FDs or VMAs.
+        #[prost(uint64, optional, tag = "24")]
+        pub dmabuf_rss_kb: ::core::option::Option<u64>,
     }
 }
 /// Metadata about the processes and threads in the trace.
@@ -20354,11 +23864,17 @@ pub mod process_tree {
         /// The parent process ID, as per getppid().
         #[prost(int32, optional, tag = "2")]
         pub ppid: ::core::option::Option<i32>,
-        /// The command line for the process, as per /proc/pid/cmdline.
-        /// If it is a kernel thread there will only be one cmdline field
-        /// and it will contain /proc/pid/comm.
+        /// The command line for the process, as per /proc/pid/cmdline, broken up on
+        /// NUL bytes.
+        /// If it is a kernel thread or a zombie, there will only be one cmdline
+        /// field and it will contain /proc/pid/comm.
         #[prost(string, repeated, tag = "3")]
         pub cmdline: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        /// If true, the |cmdline| field was filled with the main thread's "comm"
+        /// field instead.
+        /// Introduced in: perfetto v50.
+        #[prost(bool, optional, tag = "9")]
+        pub cmdline_is_comm: ::core::option::Option<bool>,
         /// The uid for the process, as per /proc/pid/status.
         #[prost(int32, optional, tag = "5")]
         pub uid: ::core::option::Option<i32>,
@@ -20373,6 +23889,13 @@ pub mod process_tree {
         /// Resolution of "clock ticks", usually 10ms.
         #[prost(uint64, optional, tag = "7")]
         pub process_start_from_boot: ::core::option::Option<u64>,
+        /// If true, the process is a kernel thread.
+        /// Set only on linux v6.4+. For traces from older devices, it is possible to
+        /// infer most kthreads by checking that they're a descendant of kthreadd
+        /// (pid=2), or are the idle process (pid=0).
+        /// Introduced in: perfetto v50.
+        #[prost(bool, optional, tag = "8")]
+        pub is_kthread: ::core::option::Option<bool>,
     }
 }
 /// Records the parameters for aligning clock readings between machines.
@@ -20515,6 +24038,9 @@ pub mod sys_stats {
         /// Time spent servicing softirqs.
         #[prost(uint64, optional, tag = "8")]
         pub softirq_ns: ::core::option::Option<u64>,
+        /// Time spent executing something else on host than this guest.
+        #[prost(uint64, optional, tag = "9")]
+        pub steal_ns: ::core::option::Option<u64>,
     }
     #[derive(Clone, Copy, PartialEq, ::prost::Message)]
     pub struct InterruptCount {
@@ -20649,65 +24175,6 @@ pub mod sys_stats {
         pub cpuidle_state_entry: ::prost::alloc::vec::Vec<CpuIdleStateEntry>,
     }
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Utsname {
-    #[prost(string, optional, tag = "1")]
-    pub sysname: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "2")]
-    pub version: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "3")]
-    pub release: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "4")]
-    pub machine: ::core::option::Option<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SystemInfo {
-    #[prost(message, optional, tag = "1")]
-    pub utsname: ::core::option::Option<Utsname>,
-    #[prost(string, optional, tag = "2")]
-    pub android_build_fingerprint: ::core::option::Option<::prost::alloc::string::String>,
-    /// The SoC model from which trace is collected
-    #[prost(string, optional, tag = "9")]
-    pub android_soc_model: ::core::option::Option<::prost::alloc::string::String>,
-    /// The hardware reversion from android device
-    #[prost(string, optional, tag = "10")]
-    pub android_hardware_revision: ::core::option::Option<::prost::alloc::string::String>,
-    /// The storage component from android_device. This field has been introduced
-    /// after Android W in Aug 2024 and is not supported on older versions.
-    #[prost(string, optional, tag = "11")]
-    pub android_storage_model: ::core::option::Option<::prost::alloc::string::String>,
-    /// The RAM component information from android device. This field has been
-    /// introduced after Android W in Aug 2024 and is not supported on older
-    /// versions.
-    #[prost(string, optional, tag = "12")]
-    pub android_ram_model: ::core::option::Option<::prost::alloc::string::String>,
-    /// The version of traced (the same returned by `traced --version`).
-    /// This is a human readable string with and its format varies depending on
-    /// the build system and the repo (standalone vs AOSP).
-    /// This is intended for human debugging only.
-    #[prost(string, optional, tag = "4")]
-    pub tracing_service_version: ::core::option::Option<::prost::alloc::string::String>,
-    /// The Android SDK vesion (e.g. 21 for L, 31 for S etc).
-    /// Introduced in Android T.
-    #[prost(uint64, optional, tag = "5")]
-    pub android_sdk_version: ::core::option::Option<u64>,
-    /// Kernel page size - sysconf(_SC_PAGESIZE).
-    #[prost(uint32, optional, tag = "6")]
-    pub page_size: ::core::option::Option<u32>,
-    /// Number of cpus - sysconf(_SC_NPROCESSORS_CONF).
-    /// Might be different to the number of online cpus.
-    /// Introduced in perfetto v44.
-    #[prost(uint32, optional, tag = "8")]
-    pub num_cpus: ::core::option::Option<u32>,
-    /// The timezone offset from UTC, as per strftime("%z"), in minutes.
-    /// Introduced in v38 / Android V.
-    #[prost(int32, optional, tag = "7")]
-    pub timezone_off_mins: ::core::option::Option<i32>,
-    /// Ticks per second - sysconf(_SC_CLK_TCK).
-    /// Not serialised as of perfetto v44.
-    #[prost(int64, optional, tag = "3")]
-    pub hz: ::core::option::Option<i64>,
-}
 /// Information about CPUs from procfs and sysfs.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuInfo {
@@ -20751,6 +24218,11 @@ pub mod cpu_info {
         /// the index of this CPU.
         #[prost(uint32, optional, tag = "3")]
         pub capacity: ::core::option::Option<u32>,
+        /// Features is a bitmap containing a bit set for each feature defined in
+        /// kCpuInfoFlags (cpu_info_flags_allowlist.h) for the corresponding array
+        /// index.
+        #[prost(uint64, optional, tag = "5")]
+        pub features: ::core::option::Option<u64>,
         /// Code to identify the CPU
         #[prost(oneof = "cpu::Identifier", tags = "4")]
         pub identifier: ::core::option::Option<cpu::Identifier>,
@@ -20782,6 +24254,10 @@ pub struct TestEvent {
     pub is_last: ::core::option::Option<bool>,
     #[prost(message, optional, tag = "5")]
     pub payload: ::core::option::Option<test_event::TestPayload>,
+    #[prost(message, optional, tag = "6")]
+    pub protovm_patch: ::core::option::Option<test_event::ProtoVmPatch>,
+    #[prost(message, optional, tag = "7")]
+    pub protovm_incremental_state: ::core::option::Option<test_event::ProtoVmIncrementalState>,
 }
 /// Nested message and enum types in `TestEvent`.
 pub mod test_event {
@@ -20802,6 +24278,22 @@ pub mod test_event {
         pub remaining_nesting_depth: ::core::option::Option<u32>,
         #[prost(message, repeated, tag = "7")]
         pub debug_annotations: ::prost::alloc::vec::Vec<super::DebugAnnotation>,
+    }
+    /// Simple ProtoVm patch and incremental state formats used for integration
+    /// testing
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ProtoVmPatch {
+        #[prost(string, optional, tag = "1")]
+        pub string_to_merge: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(int32, optional, tag = "2")]
+        pub int_to_merge: ::core::option::Option<i32>,
+    }
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ProtoVmIncrementalState {
+        #[prost(string, optional, tag = "1")]
+        pub string_merged: ::core::option::Option<::prost::alloc::string::String>,
+        #[prost(int32, optional, tag = "2")]
+        pub int_merged: ::core::option::Option<i32>,
     }
 }
 /// Default values for TracePacket fields that hold for a particular TraceWriter
@@ -21042,11 +24534,10 @@ pub mod thread_descriptor {
 /// Next id: 6.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChromeProcessDescriptor {
-    #[prost(
-        enumeration = "chrome_process_descriptor::ProcessType",
-        optional,
-        tag = "1"
-    )]
+    /// This is a chrome_enums::ProcessType from
+    /// //protos/third_party/chromium/chrome_enums.proto. The enum definition can't
+    /// be imported here because of a dependency loop.
+    #[prost(int32, optional, tag = "1")]
     pub process_type: ::core::option::Option<i32>,
     #[prost(int32, optional, tag = "2")]
     pub process_priority: ::core::option::Option<i32>,
@@ -21071,160 +24562,6 @@ pub struct ChromeProcessDescriptor {
     #[prost(uint64, optional, tag = "5")]
     pub crash_trace_id: ::core::option::Option<u64>,
 }
-/// Nested message and enum types in `ChromeProcessDescriptor`.
-pub mod chrome_process_descriptor {
-    /// See chromium's content::ProcessType.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-    #[repr(i32)]
-    pub enum ProcessType {
-        ProcessUnspecified = 0,
-        ProcessBrowser = 1,
-        ProcessRenderer = 2,
-        ProcessUtility = 3,
-        ProcessZygote = 4,
-        ProcessSandboxHelper = 5,
-        ProcessGpu = 6,
-        ProcessPpapiPlugin = 7,
-        ProcessPpapiBroker = 8,
-        ProcessServiceNetwork = 9,
-        ProcessServiceTracing = 10,
-        ProcessServiceStorage = 11,
-        ProcessServiceAudio = 12,
-        ProcessServiceDataDecoder = 13,
-        ProcessServiceUtilWin = 14,
-        ProcessServiceProxyResolver = 15,
-        ProcessServiceCdm = 16,
-        ProcessServiceVideoCapture = 17,
-        ProcessServiceUnzipper = 18,
-        ProcessServiceMirroring = 19,
-        ProcessServiceFilepatcher = 20,
-        ProcessServiceTts = 21,
-        ProcessServicePrinting = 22,
-        ProcessServiceQuarantine = 23,
-        ProcessServiceCrosLocalsearch = 24,
-        ProcessServiceCrosAssistantAudioDecoder = 25,
-        ProcessServiceFileutil = 26,
-        ProcessServicePrintcompositor = 27,
-        ProcessServicePaintpreview = 28,
-        ProcessServiceSpeechrecognition = 29,
-        ProcessServiceXrdevice = 30,
-        ProcessServiceReadicon = 31,
-        ProcessServiceLanguagedetection = 32,
-        ProcessServiceSharing = 33,
-        ProcessServiceMediaparser = 34,
-        ProcessServiceQrcodegenerator = 35,
-        ProcessServiceProfileimport = 36,
-        ProcessServiceIme = 37,
-        ProcessServiceRecording = 38,
-        ProcessServiceShapedetection = 39,
-        ProcessRendererExtension = 40,
-        ProcessServiceMediaFoundation = 41,
-    }
-    impl ProcessType {
-        /// String value of the enum field names used in the ProtoBuf definition.
-        ///
-        /// The values are not transformed in any way and thus are considered stable
-        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-        pub fn as_str_name(&self) -> &'static str {
-            match self {
-                Self::ProcessUnspecified => "PROCESS_UNSPECIFIED",
-                Self::ProcessBrowser => "PROCESS_BROWSER",
-                Self::ProcessRenderer => "PROCESS_RENDERER",
-                Self::ProcessUtility => "PROCESS_UTILITY",
-                Self::ProcessZygote => "PROCESS_ZYGOTE",
-                Self::ProcessSandboxHelper => "PROCESS_SANDBOX_HELPER",
-                Self::ProcessGpu => "PROCESS_GPU",
-                Self::ProcessPpapiPlugin => "PROCESS_PPAPI_PLUGIN",
-                Self::ProcessPpapiBroker => "PROCESS_PPAPI_BROKER",
-                Self::ProcessServiceNetwork => "PROCESS_SERVICE_NETWORK",
-                Self::ProcessServiceTracing => "PROCESS_SERVICE_TRACING",
-                Self::ProcessServiceStorage => "PROCESS_SERVICE_STORAGE",
-                Self::ProcessServiceAudio => "PROCESS_SERVICE_AUDIO",
-                Self::ProcessServiceDataDecoder => "PROCESS_SERVICE_DATA_DECODER",
-                Self::ProcessServiceUtilWin => "PROCESS_SERVICE_UTIL_WIN",
-                Self::ProcessServiceProxyResolver => "PROCESS_SERVICE_PROXY_RESOLVER",
-                Self::ProcessServiceCdm => "PROCESS_SERVICE_CDM",
-                Self::ProcessServiceVideoCapture => "PROCESS_SERVICE_VIDEO_CAPTURE",
-                Self::ProcessServiceUnzipper => "PROCESS_SERVICE_UNZIPPER",
-                Self::ProcessServiceMirroring => "PROCESS_SERVICE_MIRRORING",
-                Self::ProcessServiceFilepatcher => "PROCESS_SERVICE_FILEPATCHER",
-                Self::ProcessServiceTts => "PROCESS_SERVICE_TTS",
-                Self::ProcessServicePrinting => "PROCESS_SERVICE_PRINTING",
-                Self::ProcessServiceQuarantine => "PROCESS_SERVICE_QUARANTINE",
-                Self::ProcessServiceCrosLocalsearch => "PROCESS_SERVICE_CROS_LOCALSEARCH",
-                Self::ProcessServiceCrosAssistantAudioDecoder => {
-                    "PROCESS_SERVICE_CROS_ASSISTANT_AUDIO_DECODER"
-                }
-                Self::ProcessServiceFileutil => "PROCESS_SERVICE_FILEUTIL",
-                Self::ProcessServicePrintcompositor => "PROCESS_SERVICE_PRINTCOMPOSITOR",
-                Self::ProcessServicePaintpreview => "PROCESS_SERVICE_PAINTPREVIEW",
-                Self::ProcessServiceSpeechrecognition => "PROCESS_SERVICE_SPEECHRECOGNITION",
-                Self::ProcessServiceXrdevice => "PROCESS_SERVICE_XRDEVICE",
-                Self::ProcessServiceReadicon => "PROCESS_SERVICE_READICON",
-                Self::ProcessServiceLanguagedetection => "PROCESS_SERVICE_LANGUAGEDETECTION",
-                Self::ProcessServiceSharing => "PROCESS_SERVICE_SHARING",
-                Self::ProcessServiceMediaparser => "PROCESS_SERVICE_MEDIAPARSER",
-                Self::ProcessServiceQrcodegenerator => "PROCESS_SERVICE_QRCODEGENERATOR",
-                Self::ProcessServiceProfileimport => "PROCESS_SERVICE_PROFILEIMPORT",
-                Self::ProcessServiceIme => "PROCESS_SERVICE_IME",
-                Self::ProcessServiceRecording => "PROCESS_SERVICE_RECORDING",
-                Self::ProcessServiceShapedetection => "PROCESS_SERVICE_SHAPEDETECTION",
-                Self::ProcessRendererExtension => "PROCESS_RENDERER_EXTENSION",
-                Self::ProcessServiceMediaFoundation => "PROCESS_SERVICE_MEDIA_FOUNDATION",
-            }
-        }
-        /// Creates an enum from field names used in the ProtoBuf definition.
-        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-            match value {
-                "PROCESS_UNSPECIFIED" => Some(Self::ProcessUnspecified),
-                "PROCESS_BROWSER" => Some(Self::ProcessBrowser),
-                "PROCESS_RENDERER" => Some(Self::ProcessRenderer),
-                "PROCESS_UTILITY" => Some(Self::ProcessUtility),
-                "PROCESS_ZYGOTE" => Some(Self::ProcessZygote),
-                "PROCESS_SANDBOX_HELPER" => Some(Self::ProcessSandboxHelper),
-                "PROCESS_GPU" => Some(Self::ProcessGpu),
-                "PROCESS_PPAPI_PLUGIN" => Some(Self::ProcessPpapiPlugin),
-                "PROCESS_PPAPI_BROKER" => Some(Self::ProcessPpapiBroker),
-                "PROCESS_SERVICE_NETWORK" => Some(Self::ProcessServiceNetwork),
-                "PROCESS_SERVICE_TRACING" => Some(Self::ProcessServiceTracing),
-                "PROCESS_SERVICE_STORAGE" => Some(Self::ProcessServiceStorage),
-                "PROCESS_SERVICE_AUDIO" => Some(Self::ProcessServiceAudio),
-                "PROCESS_SERVICE_DATA_DECODER" => Some(Self::ProcessServiceDataDecoder),
-                "PROCESS_SERVICE_UTIL_WIN" => Some(Self::ProcessServiceUtilWin),
-                "PROCESS_SERVICE_PROXY_RESOLVER" => Some(Self::ProcessServiceProxyResolver),
-                "PROCESS_SERVICE_CDM" => Some(Self::ProcessServiceCdm),
-                "PROCESS_SERVICE_VIDEO_CAPTURE" => Some(Self::ProcessServiceVideoCapture),
-                "PROCESS_SERVICE_UNZIPPER" => Some(Self::ProcessServiceUnzipper),
-                "PROCESS_SERVICE_MIRRORING" => Some(Self::ProcessServiceMirroring),
-                "PROCESS_SERVICE_FILEPATCHER" => Some(Self::ProcessServiceFilepatcher),
-                "PROCESS_SERVICE_TTS" => Some(Self::ProcessServiceTts),
-                "PROCESS_SERVICE_PRINTING" => Some(Self::ProcessServicePrinting),
-                "PROCESS_SERVICE_QUARANTINE" => Some(Self::ProcessServiceQuarantine),
-                "PROCESS_SERVICE_CROS_LOCALSEARCH" => Some(Self::ProcessServiceCrosLocalsearch),
-                "PROCESS_SERVICE_CROS_ASSISTANT_AUDIO_DECODER" => {
-                    Some(Self::ProcessServiceCrosAssistantAudioDecoder)
-                }
-                "PROCESS_SERVICE_FILEUTIL" => Some(Self::ProcessServiceFileutil),
-                "PROCESS_SERVICE_PRINTCOMPOSITOR" => Some(Self::ProcessServicePrintcompositor),
-                "PROCESS_SERVICE_PAINTPREVIEW" => Some(Self::ProcessServicePaintpreview),
-                "PROCESS_SERVICE_SPEECHRECOGNITION" => Some(Self::ProcessServiceSpeechrecognition),
-                "PROCESS_SERVICE_XRDEVICE" => Some(Self::ProcessServiceXrdevice),
-                "PROCESS_SERVICE_READICON" => Some(Self::ProcessServiceReadicon),
-                "PROCESS_SERVICE_LANGUAGEDETECTION" => Some(Self::ProcessServiceLanguagedetection),
-                "PROCESS_SERVICE_SHARING" => Some(Self::ProcessServiceSharing),
-                "PROCESS_SERVICE_MEDIAPARSER" => Some(Self::ProcessServiceMediaparser),
-                "PROCESS_SERVICE_QRCODEGENERATOR" => Some(Self::ProcessServiceQrcodegenerator),
-                "PROCESS_SERVICE_PROFILEIMPORT" => Some(Self::ProcessServiceProfileimport),
-                "PROCESS_SERVICE_IME" => Some(Self::ProcessServiceIme),
-                "PROCESS_SERVICE_RECORDING" => Some(Self::ProcessServiceRecording),
-                "PROCESS_SERVICE_SHAPEDETECTION" => Some(Self::ProcessServiceShapedetection),
-                "PROCESS_RENDERER_EXTENSION" => Some(Self::ProcessRendererExtension),
-                "PROCESS_SERVICE_MEDIA_FOUNDATION" => Some(Self::ProcessServiceMediaFoundation),
-                _ => None,
-            }
-        }
-    }
-}
 /// Describes a Chrome thread's attributes. Emitted as part of a TrackDescriptor,
 /// usually by the thread's trace writer. Must be paired with a ThreadDescriptor
 /// in the same TrackDescriptor.
@@ -21232,170 +24569,18 @@ pub mod chrome_process_descriptor {
 /// Next id: 3.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ChromeThreadDescriptor {
-    #[prost(
-        enumeration = "chrome_thread_descriptor::ThreadType",
-        optional,
-        tag = "1"
-    )]
+    /// This is a chrome_enums::ThreadType from
+    /// //protos/third_party/chromium/chrome_enums.proto. The enum definition can't
+    /// be imported here because of a dependency loop.
+    #[prost(int32, optional, tag = "1")]
     pub thread_type: ::core::option::Option<i32>,
     /// To support old UI. New UI should determine default sorting by thread_type.
     #[prost(int32, optional, tag = "2")]
     pub legacy_sort_index: ::core::option::Option<i32>,
-}
-/// Nested message and enum types in `ChromeThreadDescriptor`.
-pub mod chrome_thread_descriptor {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-    #[repr(i32)]
-    pub enum ThreadType {
-        ThreadUnspecified = 0,
-        ThreadMain = 1,
-        ThreadIo = 2,
-        ThreadPoolBgWorker = 3,
-        ThreadPoolFgWorker = 4,
-        ThreadPoolFgBlocking = 5,
-        ThreadPoolBgBlocking = 6,
-        ThreadPoolService = 7,
-        ThreadCompositor = 8,
-        ThreadVizCompositor = 9,
-        ThreadCompositorWorker = 10,
-        ThreadServiceWorker = 11,
-        ThreadNetworkService = 12,
-        ThreadChildIo = 13,
-        ThreadBrowserIo = 14,
-        ThreadBrowserMain = 15,
-        ThreadRendererMain = 16,
-        ThreadUtilityMain = 17,
-        ThreadGpuMain = 18,
-        ThreadCacheBlockfile = 19,
-        ThreadMedia = 20,
-        ThreadAudioOutputdevice = 21,
-        ThreadAudioInputdevice = 22,
-        ThreadGpuMemory = 23,
-        ThreadGpuVsync = 24,
-        ThreadDxaVideodecoder = 25,
-        ThreadBrowserWatchdog = 26,
-        ThreadWebrtcNetwork = 27,
-        ThreadWindowOwner = 28,
-        ThreadWebrtcSignaling = 29,
-        ThreadWebrtcWorker = 30,
-        ThreadPpapiMain = 31,
-        ThreadGpuWatchdog = 32,
-        ThreadSwapper = 33,
-        ThreadGamepadPolling = 34,
-        ThreadWebcrypto = 35,
-        ThreadDatabase = 36,
-        ThreadProxyresolver = 37,
-        ThreadDevtoolsadb = 38,
-        ThreadNetworkconfigwatcher = 39,
-        ThreadWasapiRender = 40,
-        ThreadLoaderLockSampler = 41,
-        ThreadMemoryInfra = 50,
-        ThreadSamplingProfiler = 51,
-    }
-    impl ThreadType {
-        /// String value of the enum field names used in the ProtoBuf definition.
-        ///
-        /// The values are not transformed in any way and thus are considered stable
-        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-        pub fn as_str_name(&self) -> &'static str {
-            match self {
-                Self::ThreadUnspecified => "THREAD_UNSPECIFIED",
-                Self::ThreadMain => "THREAD_MAIN",
-                Self::ThreadIo => "THREAD_IO",
-                Self::ThreadPoolBgWorker => "THREAD_POOL_BG_WORKER",
-                Self::ThreadPoolFgWorker => "THREAD_POOL_FG_WORKER",
-                Self::ThreadPoolFgBlocking => "THREAD_POOL_FG_BLOCKING",
-                Self::ThreadPoolBgBlocking => "THREAD_POOL_BG_BLOCKING",
-                Self::ThreadPoolService => "THREAD_POOL_SERVICE",
-                Self::ThreadCompositor => "THREAD_COMPOSITOR",
-                Self::ThreadVizCompositor => "THREAD_VIZ_COMPOSITOR",
-                Self::ThreadCompositorWorker => "THREAD_COMPOSITOR_WORKER",
-                Self::ThreadServiceWorker => "THREAD_SERVICE_WORKER",
-                Self::ThreadNetworkService => "THREAD_NETWORK_SERVICE",
-                Self::ThreadChildIo => "THREAD_CHILD_IO",
-                Self::ThreadBrowserIo => "THREAD_BROWSER_IO",
-                Self::ThreadBrowserMain => "THREAD_BROWSER_MAIN",
-                Self::ThreadRendererMain => "THREAD_RENDERER_MAIN",
-                Self::ThreadUtilityMain => "THREAD_UTILITY_MAIN",
-                Self::ThreadGpuMain => "THREAD_GPU_MAIN",
-                Self::ThreadCacheBlockfile => "THREAD_CACHE_BLOCKFILE",
-                Self::ThreadMedia => "THREAD_MEDIA",
-                Self::ThreadAudioOutputdevice => "THREAD_AUDIO_OUTPUTDEVICE",
-                Self::ThreadAudioInputdevice => "THREAD_AUDIO_INPUTDEVICE",
-                Self::ThreadGpuMemory => "THREAD_GPU_MEMORY",
-                Self::ThreadGpuVsync => "THREAD_GPU_VSYNC",
-                Self::ThreadDxaVideodecoder => "THREAD_DXA_VIDEODECODER",
-                Self::ThreadBrowserWatchdog => "THREAD_BROWSER_WATCHDOG",
-                Self::ThreadWebrtcNetwork => "THREAD_WEBRTC_NETWORK",
-                Self::ThreadWindowOwner => "THREAD_WINDOW_OWNER",
-                Self::ThreadWebrtcSignaling => "THREAD_WEBRTC_SIGNALING",
-                Self::ThreadWebrtcWorker => "THREAD_WEBRTC_WORKER",
-                Self::ThreadPpapiMain => "THREAD_PPAPI_MAIN",
-                Self::ThreadGpuWatchdog => "THREAD_GPU_WATCHDOG",
-                Self::ThreadSwapper => "THREAD_SWAPPER",
-                Self::ThreadGamepadPolling => "THREAD_GAMEPAD_POLLING",
-                Self::ThreadWebcrypto => "THREAD_WEBCRYPTO",
-                Self::ThreadDatabase => "THREAD_DATABASE",
-                Self::ThreadProxyresolver => "THREAD_PROXYRESOLVER",
-                Self::ThreadDevtoolsadb => "THREAD_DEVTOOLSADB",
-                Self::ThreadNetworkconfigwatcher => "THREAD_NETWORKCONFIGWATCHER",
-                Self::ThreadWasapiRender => "THREAD_WASAPI_RENDER",
-                Self::ThreadLoaderLockSampler => "THREAD_LOADER_LOCK_SAMPLER",
-                Self::ThreadMemoryInfra => "THREAD_MEMORY_INFRA",
-                Self::ThreadSamplingProfiler => "THREAD_SAMPLING_PROFILER",
-            }
-        }
-        /// Creates an enum from field names used in the ProtoBuf definition.
-        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-            match value {
-                "THREAD_UNSPECIFIED" => Some(Self::ThreadUnspecified),
-                "THREAD_MAIN" => Some(Self::ThreadMain),
-                "THREAD_IO" => Some(Self::ThreadIo),
-                "THREAD_POOL_BG_WORKER" => Some(Self::ThreadPoolBgWorker),
-                "THREAD_POOL_FG_WORKER" => Some(Self::ThreadPoolFgWorker),
-                "THREAD_POOL_FG_BLOCKING" => Some(Self::ThreadPoolFgBlocking),
-                "THREAD_POOL_BG_BLOCKING" => Some(Self::ThreadPoolBgBlocking),
-                "THREAD_POOL_SERVICE" => Some(Self::ThreadPoolService),
-                "THREAD_COMPOSITOR" => Some(Self::ThreadCompositor),
-                "THREAD_VIZ_COMPOSITOR" => Some(Self::ThreadVizCompositor),
-                "THREAD_COMPOSITOR_WORKER" => Some(Self::ThreadCompositorWorker),
-                "THREAD_SERVICE_WORKER" => Some(Self::ThreadServiceWorker),
-                "THREAD_NETWORK_SERVICE" => Some(Self::ThreadNetworkService),
-                "THREAD_CHILD_IO" => Some(Self::ThreadChildIo),
-                "THREAD_BROWSER_IO" => Some(Self::ThreadBrowserIo),
-                "THREAD_BROWSER_MAIN" => Some(Self::ThreadBrowserMain),
-                "THREAD_RENDERER_MAIN" => Some(Self::ThreadRendererMain),
-                "THREAD_UTILITY_MAIN" => Some(Self::ThreadUtilityMain),
-                "THREAD_GPU_MAIN" => Some(Self::ThreadGpuMain),
-                "THREAD_CACHE_BLOCKFILE" => Some(Self::ThreadCacheBlockfile),
-                "THREAD_MEDIA" => Some(Self::ThreadMedia),
-                "THREAD_AUDIO_OUTPUTDEVICE" => Some(Self::ThreadAudioOutputdevice),
-                "THREAD_AUDIO_INPUTDEVICE" => Some(Self::ThreadAudioInputdevice),
-                "THREAD_GPU_MEMORY" => Some(Self::ThreadGpuMemory),
-                "THREAD_GPU_VSYNC" => Some(Self::ThreadGpuVsync),
-                "THREAD_DXA_VIDEODECODER" => Some(Self::ThreadDxaVideodecoder),
-                "THREAD_BROWSER_WATCHDOG" => Some(Self::ThreadBrowserWatchdog),
-                "THREAD_WEBRTC_NETWORK" => Some(Self::ThreadWebrtcNetwork),
-                "THREAD_WINDOW_OWNER" => Some(Self::ThreadWindowOwner),
-                "THREAD_WEBRTC_SIGNALING" => Some(Self::ThreadWebrtcSignaling),
-                "THREAD_WEBRTC_WORKER" => Some(Self::ThreadWebrtcWorker),
-                "THREAD_PPAPI_MAIN" => Some(Self::ThreadPpapiMain),
-                "THREAD_GPU_WATCHDOG" => Some(Self::ThreadGpuWatchdog),
-                "THREAD_SWAPPER" => Some(Self::ThreadSwapper),
-                "THREAD_GAMEPAD_POLLING" => Some(Self::ThreadGamepadPolling),
-                "THREAD_WEBCRYPTO" => Some(Self::ThreadWebcrypto),
-                "THREAD_DATABASE" => Some(Self::ThreadDatabase),
-                "THREAD_PROXYRESOLVER" => Some(Self::ThreadProxyresolver),
-                "THREAD_DEVTOOLSADB" => Some(Self::ThreadDevtoolsadb),
-                "THREAD_NETWORKCONFIGWATCHER" => Some(Self::ThreadNetworkconfigwatcher),
-                "THREAD_WASAPI_RENDER" => Some(Self::ThreadWasapiRender),
-                "THREAD_LOADER_LOCK_SAMPLER" => Some(Self::ThreadLoaderLockSampler),
-                "THREAD_MEMORY_INFRA" => Some(Self::ThreadMemoryInfra),
-                "THREAD_SAMPLING_PROFILER" => Some(Self::ThreadSamplingProfiler),
-                _ => None,
-            }
-        }
-    }
+    /// Indicates whether the thread's tid specified in the thread descriptor is
+    /// namespaced by Chromium's sandbox. Only set on Linux, and from Chrome M140.
+    #[prost(bool, optional, tag = "3")]
+    pub is_sandboxed_tid: ::core::option::Option<bool>,
 }
 /// Defines properties of a counter track, e.g. for built-in counters (thread
 /// time, instruction count, ..) or user-specified counters (e.g. memory usage of
@@ -21448,6 +24633,15 @@ pub struct CounterDescriptor {
     /// incremental state is cleared is effectively an absolute value.
     #[prost(bool, optional, tag = "5")]
     pub is_incremental: ::core::option::Option<bool>,
+    /// When visualizing multiple counter tracks, it is often useful to have them
+    /// share the same Y-axis range. This allows for easy comparison of their
+    /// values.
+    ///
+    /// All counter tracks with the same |y_axis_share_key| and the same parent
+    /// track (e.g. grouped under the same process track) will share their y-axis
+    /// range in the UI.
+    #[prost(string, optional, tag = "7")]
+    pub y_axis_share_key: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Nested message and enum types in `CounterDescriptor`.
 pub mod counter_descriptor {
@@ -21534,7 +24728,7 @@ pub mod counter_descriptor {
 /// |TrackEvent::track_uuid|. It is possible but not necessary to emit a
 /// TrackDescriptor for this implicit track.
 ///
-/// Next id: 11.
+/// Next id: 18.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TrackDescriptor {
     /// Unique ID that identifies this track. This ID is global to the whole trace.
@@ -21549,9 +24743,31 @@ pub struct TrackDescriptor {
     /// tracks. For example, to define an asynchronous track which is scoped to a
     /// specific process, specify the uuid for that process's process track here.
     /// Similarly, to associate a COUNTER_THREAD_TIME_NS counter track with a
-    /// thread, specify the uuid for that thread's thread track here.
+    /// thread, specify the uuid for that thread's thread track here. In general,
+    /// setting a parent will *nest* that track under the parent in the UI and in
+    /// the trace processor data model (with the important exception noted below).
+    ///
+    /// If not specified, the track will be a root track, i.e. not nested under any
+    /// other track.
+    ///
+    /// Note: if the `thread` or `process` fields are set, this value will be
+    /// *ignored* as priority is given to those fields.
+    ///
+    /// Note: if the parent is set to a track with `thread` or `process` fields
+    /// set, the track will *not* be nested under the parent in the UI and in the
+    /// trace processor data model. Instead, the track will inherit the parent's
+    /// thread/process association and will appear as a *sibling* of the parent.
+    /// This semantic exists for back-compat reasons as the UI used to work this
+    /// way for years and changing this leads to a lot of traces subtly breaking.
+    /// If you want to force nesting, create *another* intermediate track to act as
+    /// the parent.
     #[prost(uint64, optional, tag = "5")]
     pub parent_uuid: ::core::option::Option<u64>,
+    /// A human-readable description of the track providing more context about its
+    /// data. In the UI, this is shown in a popup when the track's help button is
+    /// clicked.
+    #[prost(string, optional, tag = "14")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
     /// Associate the track with a process, making it the process-global track.
     /// There should only be one such track per process (usually for instant
     /// events; trace processor uses this fact to detect pid reuse). If you need
@@ -21582,22 +24798,345 @@ pub struct TrackDescriptor {
     pub counter: ::core::option::Option<CounterDescriptor>,
     /// If true, forces Trace Processor to use separate tracks for track events
     /// and system events for the same thread.
+    ///
     /// Track events timestamps in Chrome have microsecond resolution, while
     /// system events use nanoseconds. It results in broken event nesting when
     /// track events and system events share a track.
     #[prost(bool, optional, tag = "9")]
     pub disallow_merging_with_system_tracks: ::core::option::Option<bool>,
-    /// Name of the track. Optional - if unspecified, it may be derived from the
-    /// process/thread name (process/thread tracks), the first event's name (async
-    /// tracks), or counter name (counter tracks).
-    #[prost(oneof = "track_descriptor::StaticOrDynamicName", tags = "2, 10")]
+    #[prost(
+        enumeration = "track_descriptor::ChildTracksOrdering",
+        optional,
+        tag = "11"
+    )]
+    pub child_ordering: ::core::option::Option<i32>,
+    /// An opaque value which allows specifying how two sibling tracks should be
+    /// ordered relative to each other: tracks with lower ranks will appear before
+    /// tracks with higher ranks. An unspecified rank will be treated as a rank of
+    /// 0.
+    ///
+    /// Note: this option is only relevant for tracks where the parent has
+    /// `child_ordering` set to `EXPLICIT`. It is ignored otherwise.
+    ///
+    /// Note: for tracks where the parent has `thread` or `process` are set, this
+    /// option is *ignored* (even if the parent's `child_ordering` is `EXPLICIT``).
+    /// See `parent_uuid` for details.
+    #[prost(int32, optional, tag = "12")]
+    pub sibling_order_rank: ::core::option::Option<i32>,
+    #[prost(
+        enumeration = "track_descriptor::SiblingMergeBehavior",
+        optional,
+        tag = "15"
+    )]
+    pub sibling_merge_behavior: ::core::option::Option<i32>,
+    /// Name of the track.
+    ///
+    /// Optional but *strongly recommended* to be specified in a `TrackDescriptor`
+    /// emitted before any `TrackEvent`s on the same track.
+    ///
+    /// Note: any name specified here will be *ignored* for the root thread scoped
+    /// tracks when `disallow_merging_with_system_tracks` is not set, as in this
+    /// case, the name of the track is shared by many different data sources and so
+    /// is centrally controlled by trace processor.
+    ///
+    /// It's strongly recommended to only emit the name for a track uuid *once*. If
+    /// a descriptor *has* to be emitted multiple times (e.g. between different
+    /// processes), it's recommended to ensure that the name is consistent across
+    /// all TrackDescriptors with the same `uuid`.
+    ///
+    /// If the the above recommendation is not followed and the same uuid is
+    /// emitted with different names, it is implementation defined how the final
+    /// name will be chosen and may change at any time.
+    ///
+    /// The current implementation of trace processor chooses the name in the
+    /// following way, depending on the value of the `sibling_merge_behavior`
+    /// field:
+    ///
+    /// 1. If `sibling_merge_behavior` is set to `SIBLING_MERGE_BEHAVIOR_NONE`:
+    ///    * The *last* non-null name in the whole trace according to trace order
+    ///      will be used.
+    ///    * If no non-null name is present in the whole trace, the trace processor
+    ///      may fall back to other sources to provide a name for the track (e.g.
+    ///      the first event name for slice tracks, the counter name for counter
+    ///      tracks). This is implementation defined and may change at any time.
+    ///
+    /// 2. If `sibling_merge_behavior` is set to any other value:
+    ///    * The first non-null name before the first event on the track *or on any
+    ///      descendant tracks* is processed will be used. For example, consider
+    ///      the following sequence of events:
+    ///        ts=100: TrackDescriptor(uuid=A)
+    ///        ts=200: TrackDescriptor(uuid=B, parent_uuid=A)
+    ///        ts=300: TrackDescriptor(uuid=A, name="Track A")
+    ///        ts=400: TrackEvent(track_uuid=B)
+    ///      In this case, the name for track A will be "Track A" because the
+    ///      descriptor with the name was emitted before the first event on a
+    ///      descendant track (B).
+    ///    * If no non-null name is present before the event is processed, the trace
+    ///      processor may fall back to other sources to provide a name for the
+    ///      track (e.g. the first event name for slice tracks, the counter name for
+    ///      counter tracks). This is implementation defined and may change at any
+    ///      time.
+    ///    * Note on processing order: In the standard trace processor pipeline,
+    ///      `TrackDescriptor`s are processed during a "tokenization" phase, which
+    ///      occurs before any `TrackEvent`s are parsed. This means that for a given
+    ///      track, all its descriptors in the trace are processed before its
+    ///      events. Consequently, the "first non-null name before the first event"
+    ///      will be the name from the first `TrackDescriptor` for that track in the
+    ///      trace file that has a non-null name. However, in a streaming parsing
+    ///      scenario, the timestamp order of descriptors and events is significant,
+    ///      and a descriptor arriving after an event has been processed will not be
+    ///      used to name the track.
+    #[prost(oneof = "track_descriptor::StaticOrDynamicName", tags = "2, 10, 13")]
     pub static_or_dynamic_name: ::core::option::Option<track_descriptor::StaticOrDynamicName>,
+    /// An opaque value which allows specifying which tracks should be merged
+    /// together.
+    ///
+    /// Only meaningful when `sibling_merge_behavior` is set to
+    /// `SIBLING_MERGE_BEHAVIOR_BY_SIBLING_MERGE_KEY`.
+    #[prost(oneof = "track_descriptor::SiblingMergeKeyField", tags = "16, 17")]
+    pub sibling_merge_key_field: ::core::option::Option<track_descriptor::SiblingMergeKeyField>,
 }
 /// Nested message and enum types in `TrackDescriptor`.
 pub mod track_descriptor {
-    /// Name of the track. Optional - if unspecified, it may be derived from the
-    /// process/thread name (process/thread tracks), the first event's name (async
-    /// tracks), or counter name (counter tracks).
+    /// Specifies how the UI should display child tracks of this track (i.e. tracks
+    /// where `parent_uuid` is specified to this track `uuid`). Note that this
+    /// value is simply a *hint* to the UI: the UI is not guarnateed to respect
+    /// this if it has a good reason not to do so.
+    ///
+    /// Note: for tracks where `thread` or `process` are set, this option is
+    /// *ignored*. See `parent_uuid` for details.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum ChildTracksOrdering {
+        /// The default ordering, with no bearing on how the UI will visualise the
+        /// tracks.
+        Unknown = 0,
+        /// Order tracks by `name` or `static_name` depending on which one has been
+        /// specified.
+        Lexicographic = 1,
+        /// Order tracks by the first `ts` event in a track.
+        Chronological = 2,
+        /// Order tracks by `sibling_order_rank` of child tracks. Child tracks with
+        /// the lower values will be shown before tracks with higher values. Tracks
+        /// with no value will be treated as having 0 rank.
+        Explicit = 3,
+    }
+    impl ChildTracksOrdering {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "UNKNOWN",
+                Self::Lexicographic => "LEXICOGRAPHIC",
+                Self::Chronological => "CHRONOLOGICAL",
+                Self::Explicit => "EXPLICIT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN" => Some(Self::Unknown),
+                "LEXICOGRAPHIC" => Some(Self::Lexicographic),
+                "CHRONOLOGICAL" => Some(Self::Chronological),
+                "EXPLICIT" => Some(Self::Explicit),
+                _ => None,
+            }
+        }
+    }
+    /// Specifies how the analysis tools should "merge" different sibling
+    /// TrackEvent tracks.
+    ///
+    /// For two or more tracks to be merged, they must be "eligible" siblings.
+    /// Eligibility is determined by the following rules:
+    /// 1. All tracks must have the same parent.
+    /// 2. All tracks must have the same `sibling_merge_behavior`. The only
+    ///     exception is `SIBLING_MERGE_BEHAVIOR_UNSPECIFIED` which is treated as
+    ///     `SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME`.
+    /// 3. Depending on the behavior, the corresponding key must match (e.g. `name`
+    ///     for `BY_TRACK_NAME`, `sibling_merge_key` for `BY_SIBLING_MERGE_KEY`).
+    ///
+    /// Specifically:
+    ///    - in the UI, all tracks which are merged together will be
+    ///      displayed as a single "visual" track.
+    ///    - in the trace processor, all tracks which are merged together will be
+    ///      "multiplexed" into n "analysis" tracks where n is the maximum number
+    ///      of tracks which have an active event at the same time.
+    ///
+    /// When tracks are merged togther, the properties for the merged track will be
+    /// chosen from the source tracks based on the following rules:
+    ///    - for `sibling_order_rank`: the rank of the merged track will be the
+    ///      smallest rank among the source tracks.
+    ///    - for all other properties: the property taken is unspecified and can
+    ///      be any value provided by one of the source tracks. This can lead to
+    ///      non-deterministic behavior.
+    ///       - examples of other properties include `name`, `child_ordering` etc.
+    ///       - because of this, it's strongly recommended to ensure that all source
+    ///         tracks have the same value for these properties.
+    ///       - the trace processor will also emit an error stat if it detects
+    ///         that the properties are not the same across all source tracks.
+    ///
+    /// Note: merging is done *recursively* so entire trees of tracks can be merged
+    /// together. To make this clearer, consider an example track hierarchy (in
+    /// the diagrams: "smk" refers to "sibling_merge_key", the first word on a
+    /// track line, like "Updater", is its 'name' property):
+    ///
+    ///    Initial track hierarchy:
+    ///      SystemActivity
+    ///      ├── AuthService (smk: "auth_main_cluster")
+    ///      │   └── LoginOp (smk: "login_v1")
+    ///      ├── AuthService (smk: "auth_main_cluster")
+    ///      │   └── LoginOp (smk: "login_v1")
+    ///      ├── AuthService (smk: "auth_backup_cluster")
+    ///      │   └── GuestOp (smk: "guest_v1")
+    ///      └── UserProfileService (smk: "profile_cluster")
+    ///          └── GetProfileOp (smk: "getprofile_v1")
+    ///
+    /// Merging outcomes:
+    ///
+    /// Scenario 1: Merging by `SIBLING_MERGE_BEHAVIOR_BY_SIBLING_MERGE_KEY`
+    ///    - The first two "AuthService" tracks merge because they share
+    ///      `smk: "auth_main_cluster"`. Their names are consistent ("AuthService"),
+    ///      aligning with recommendations. The merged track is named "AuthService".
+    ///    - The third "AuthService" track (with `smk: "auth_backup_cluster"`)
+    ///      remains separate, as its `sibling_merge_key` is different.
+    ///    - "UserProfileService" also remains separate.
+    ///    - Within the merged "AuthService" (from "auth_main_cluster"):
+    ///      "LoginOp" get merged as they have the same sibling merge key.
+    ///
+    ///    Resulting UI (when merging by SIBLING_MERGE_KEY):
+    ///      SystemActivity
+    ///      ├── AuthService (merged by smk: "auth_main_cluster")
+    ///      │   ├── LoginOp (merged by smk: "login_v1")
+    ///      ├── AuthService (smk: "auth_backup_cluster")
+    ///      │   └── GuestOp (smk: "guest_v1")
+    ///      └── UserProfileService (smk: "profile_cluster")
+    ///          └── GetProfileOp (smk: "getprofile_v1")
+    ///
+    /// Scenario 2: Merging by `SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME`
+    ///    - All three tracks named "AuthService" merge because they share the same
+    ///      name. The merged track is named "AuthService". The `sibling_merge_key`
+    ///      for this merged track would be taken from one of the source tracks
+    ///      (e.g., "auth_main_cluster" or "auth_backup_cluster"), which could be
+    ///      relevant if its children had key-based merge behaviors.
+    ///    - "UserProfileService" remains separate due to its different name.
+    ///    - Within the single merged "AuthService" track:
+    ///      "LoginOp", "GuestOp" become siblings. "LoginOp" tracks gets merged as
+    ///      they have the same name.
+    ///
+    ///    Resulting UI (when merging by SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME):
+    ///      SystemActivity
+    ///      ├── AuthService (merged from 3 "AuthService" tracks)
+    ///      │   ├── LoginOp (smk: "login_v1")
+    ///      │   └── GuestOp (smk: "guest_v1")
+    ///      └── UserProfileService (smk: "profile_cluster")
+    ///          └── GetProfileOp (smk: "getprofile_v1")
+    ///
+    /// Note: for tracks where `thread` or `process` are set, this option is
+    /// *ignored*. See `parent_uuid` for details.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum SiblingMergeBehavior {
+        /// When unspecified or not set, defaults to
+        /// `SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME`.
+        Unspecified = 0,
+        /// Merge this track with eligible siblings which have the same `name`.
+        ///
+        /// This is the default behavior.option.
+        ///
+        /// Fun fact: this is the default beahavior for legacy reasons as the UI has
+        /// worked this way for years and inherited this behavior from
+        /// chrome://tracing which has worked this way for even longer
+        ByTrackName = 1,
+        /// Never merge this track with any siblings. Useful if if this track has a
+        /// specific meaning and you want to see separately from any others.
+        None = 2,
+        /// Merge this track with eligible siblings which have the same
+        /// `sibling_merge_key`.
+        BySiblingMergeKey = 3,
+    }
+    impl SiblingMergeBehavior {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "SIBLING_MERGE_BEHAVIOR_UNSPECIFIED",
+                Self::ByTrackName => "SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME",
+                Self::None => "SIBLING_MERGE_BEHAVIOR_NONE",
+                Self::BySiblingMergeKey => "SIBLING_MERGE_BEHAVIOR_BY_SIBLING_MERGE_KEY",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "SIBLING_MERGE_BEHAVIOR_UNSPECIFIED" => Some(Self::Unspecified),
+                "SIBLING_MERGE_BEHAVIOR_BY_TRACK_NAME" => Some(Self::ByTrackName),
+                "SIBLING_MERGE_BEHAVIOR_NONE" => Some(Self::None),
+                "SIBLING_MERGE_BEHAVIOR_BY_SIBLING_MERGE_KEY" => Some(Self::BySiblingMergeKey),
+                _ => None,
+            }
+        }
+    }
+    /// Name of the track.
+    ///
+    /// Optional but *strongly recommended* to be specified in a `TrackDescriptor`
+    /// emitted before any `TrackEvent`s on the same track.
+    ///
+    /// Note: any name specified here will be *ignored* for the root thread scoped
+    /// tracks when `disallow_merging_with_system_tracks` is not set, as in this
+    /// case, the name of the track is shared by many different data sources and so
+    /// is centrally controlled by trace processor.
+    ///
+    /// It's strongly recommended to only emit the name for a track uuid *once*. If
+    /// a descriptor *has* to be emitted multiple times (e.g. between different
+    /// processes), it's recommended to ensure that the name is consistent across
+    /// all TrackDescriptors with the same `uuid`.
+    ///
+    /// If the the above recommendation is not followed and the same uuid is
+    /// emitted with different names, it is implementation defined how the final
+    /// name will be chosen and may change at any time.
+    ///
+    /// The current implementation of trace processor chooses the name in the
+    /// following way, depending on the value of the `sibling_merge_behavior`
+    /// field:
+    ///
+    /// 1. If `sibling_merge_behavior` is set to `SIBLING_MERGE_BEHAVIOR_NONE`:
+    ///    * The *last* non-null name in the whole trace according to trace order
+    ///      will be used.
+    ///    * If no non-null name is present in the whole trace, the trace processor
+    ///      may fall back to other sources to provide a name for the track (e.g.
+    ///      the first event name for slice tracks, the counter name for counter
+    ///      tracks). This is implementation defined and may change at any time.
+    ///
+    /// 2. If `sibling_merge_behavior` is set to any other value:
+    ///    * The first non-null name before the first event on the track *or on any
+    ///      descendant tracks* is processed will be used. For example, consider
+    ///      the following sequence of events:
+    ///        ts=100: TrackDescriptor(uuid=A)
+    ///        ts=200: TrackDescriptor(uuid=B, parent_uuid=A)
+    ///        ts=300: TrackDescriptor(uuid=A, name="Track A")
+    ///        ts=400: TrackEvent(track_uuid=B)
+    ///      In this case, the name for track A will be "Track A" because the
+    ///      descriptor with the name was emitted before the first event on a
+    ///      descendant track (B).
+    ///    * If no non-null name is present before the event is processed, the trace
+    ///      processor may fall back to other sources to provide a name for the
+    ///      track (e.g. the first event name for slice tracks, the counter name for
+    ///      counter tracks). This is implementation defined and may change at any
+    ///      time.
+    ///    * Note on processing order: In the standard trace processor pipeline,
+    ///      `TrackDescriptor`s are processed during a "tokenization" phase, which
+    ///      occurs before any `TrackEvent`s are parsed. This means that for a given
+    ///      track, all its descriptors in the trace are processed before its
+    ///      events. Consequently, the "first non-null name before the first event"
+    ///      will be the name from the first `TrackDescriptor` for that track in the
+    ///      trace file that has a non-null name. However, in a streaming parsing
+    ///      scenario, the timestamp order of descriptors and events is significant,
+    ///      and a descriptor arriving after an event has been processed will not be
+    ///      used to name the track.
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum StaticOrDynamicName {
         #[prost(string, tag = "2")]
@@ -21606,13 +25145,29 @@ pub mod track_descriptor {
         /// provided.
         #[prost(string, tag = "10")]
         StaticName(::prost::alloc::string::String),
+        /// Equivalent to name, used just to mark that the data is coming from
+        /// android.os.Trace.
+        #[prost(string, tag = "13")]
+        AtraceName(::prost::alloc::string::String),
+    }
+    /// An opaque value which allows specifying which tracks should be merged
+    /// together.
+    ///
+    /// Only meaningful when `sibling_merge_behavior` is set to
+    /// `SIBLING_MERGE_BEHAVIOR_BY_SIBLING_MERGE_KEY`.
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum SiblingMergeKeyField {
+        #[prost(string, tag = "16")]
+        SiblingMergeKey(::prost::alloc::string::String),
+        #[prost(uint64, tag = "17")]
+        SiblingMergeKeyInt(u64),
     }
 }
 /// Translation rules for the trace processor.
 /// See the comments for each rule type for specific meaning.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TranslationTable {
-    #[prost(oneof = "translation_table::Table", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "translation_table::Table", tags = "1, 2, 3, 4, 5, 6")]
     pub table: ::core::option::Option<translation_table::Table>,
 }
 /// Nested message and enum types in `TranslationTable`.
@@ -21629,6 +25184,8 @@ pub mod translation_table {
         SliceName(super::SliceNameTranslationTable),
         #[prost(message, tag = "5")]
         ProcessTrackName(super::ProcessTrackNameTranslationTable),
+        #[prost(message, tag = "6")]
+        ChromeStudy(super::ChromeStudyTranslationTable),
     }
 }
 /// Chrome histogram sample hash -> name translation rules.
@@ -21665,6 +25222,12 @@ pub struct ProcessTrackNameTranslationTable {
     pub raw_to_deobfuscated_name:
         ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
+/// Chrome study hash -> name translation rules.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChromeStudyTranslationTable {
+    #[prost(map = "uint64, string", tag = "1")]
+    pub hash_to_name: ::std::collections::HashMap<u64, ::prost::alloc::string::String>,
+}
 /// When a TracingSession receives a trigger it records the boot time nanoseconds
 /// in the TracePacket's timestamp field as well as the name of the producer that
 /// triggered it. We emit this data so filtering can be done on triggers received
@@ -21680,6 +25243,9 @@ pub struct Trigger {
     /// The verified UID of the producer.
     #[prost(int32, optional, tag = "3")]
     pub trusted_producer_uid: ::core::option::Option<i32>,
+    /// The value of stop_delay_ms from the configuration.
+    #[prost(uint64, optional, tag = "4")]
+    pub stop_delay_ms: ::core::option::Option<u64>,
 }
 /// Common state for UIs visualizing Perfetto traces.
 /// This message can be appended as a TracePacket by UIs to save the
@@ -21750,7 +25316,7 @@ pub mod ui_state {
 /// See the [Buffers and Dataflow](/docs/concepts/buffers.md) doc for details.
 ///
 /// Next reserved id: 14 (up to 15).
-/// Next id: 113.
+/// Next id: 127.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TracePacket {
     /// The timestamp of the TracePacket.
@@ -21829,7 +25395,7 @@ pub struct TracePacket {
     pub machine_id: ::core::option::Option<u32>,
     #[prost(
         oneof = "trace_packet::Data",
-        tags = "2, 9, 4, 5, 6, 7, 11, 89, 33, 34, 35, 37, 74, 75, 38, 40, 39, 45, 46, 109, 47, 48, 49, 51, 52, 53, 54, 56, 57, 62, 63, 65, 66, 67, 68, 69, 70, 71, 73, 76, 77, 78, 80, 81, 82, 83, 84, 86, 91, 55, 61, 64, 60, 43, 44, 1, 36, 50, 72, 88, 92, 90, 93, 94, 96, 97, 104, 105, 112, 95, 99, 100, 101, 102, 103, 107, 110, 111, 900"
+        tags = "2, 9, 4, 5, 6, 7, 11, 89, 33, 34, 35, 37, 74, 75, 38, 40, 39, 45, 46, 109, 47, 48, 49, 51, 52, 53, 54, 56, 57, 62, 63, 65, 66, 67, 68, 69, 70, 71, 73, 76, 77, 78, 80, 81, 82, 83, 84, 86, 91, 124, 125, 126, 61, 64, 60, 43, 44, 1, 36, 50, 72, 88, 92, 90, 93, 94, 96, 97, 104, 105, 112, 95, 99, 100, 101, 102, 103, 107, 110, 111, 113, 114, 115, 116, 117, 118, 120, 122, 119, 121, 123, 900"
     )]
     pub data: ::core::option::Option<trace_packet::Data>,
     /// Trusted user id of the producer which generated this packet. Keep in sync
@@ -21849,6 +25415,30 @@ pub struct TracePacket {
 }
 /// Nested message and enum types in `TracePacket`.
 pub mod trace_packet {
+    /// Encapsulates the state and configuration of the ProtoVM instances running
+    /// when the trace was snapshotted. This allows TP to re-instantiate the VMs
+    /// and use them to inflate patches into full-state packets.
+    /// Note: this message can't be defined in a dedicated file because it has a
+    /// recursive dependency with TracePacket (see 'state' field below).
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ProtoVms {
+        #[prost(message, repeated, tag = "1")]
+        pub instance: ::prost::alloc::vec::Vec<proto_vms::Instance>,
+    }
+    /// Nested message and enum types in `ProtoVms`.
+    pub mod proto_vms {
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct Instance {
+            #[prost(message, optional, tag = "1")]
+            pub program: ::core::option::Option<super::super::VmProgram>,
+            #[prost(message, optional, tag = "2")]
+            pub state: ::core::option::Option<super::super::TracePacket>,
+            #[prost(uint32, optional, tag = "3")]
+            pub memory_limit_kb: ::core::option::Option<u32>,
+            #[prost(int32, repeated, packed = "false", tag = "4")]
+            pub producer_id: ::prost::alloc::vec::Vec<i32>,
+        }
+    }
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum SequenceFlags {
@@ -21997,9 +25587,13 @@ pub mod trace_packet {
         AndroidSystemProperty(super::AndroidSystemProperty),
         #[prost(message, tag = "91")]
         EntityStateResidency(super::EntityStateResidency),
+        #[prost(message, tag = "124")]
+        TraceProvenance(super::TraceProvenance),
+        #[prost(message, tag = "125")]
+        Protovms(ProtoVms),
+        #[prost(message, tag = "126")]
+        TraceAttributes(super::TraceAttributes),
         /// Only used in profile packets.
-        #[prost(message, tag = "55")]
-        ProfiledFrameSymbols(super::ProfiledFrameSymbols),
         #[prost(message, tag = "61")]
         ModuleSymbols(super::ModuleSymbols),
         #[prost(message, tag = "64")]
@@ -22079,6 +25673,29 @@ pub mod trace_packet {
         PixelModemEvents(super::PixelModemEvents),
         #[prost(message, tag = "111")]
         PixelModemTokenDatabase(super::PixelModemTokenDatabase),
+        #[prost(message, tag = "113")]
+        CloneSnapshotTrigger(super::Trigger),
+        #[prost(message, tag = "114")]
+        BluetoothTraceEvent(super::BluetoothTraceEvent),
+        #[prost(message, tag = "115")]
+        KernelWakelockData(super::KernelWakelockData),
+        #[prost(message, tag = "116")]
+        AppWakelockBundle(super::AppWakelockBundle),
+        /// Generic events for a standard kernel implementation
+        #[prost(message, tag = "117")]
+        GenericKernelTaskStateEvent(super::GenericKernelTaskStateEvent),
+        #[prost(message, tag = "118")]
+        GenericKernelCpuFreqEvent(super::GenericKernelCpuFrequencyEvent),
+        #[prost(message, tag = "120")]
+        GenericKernelTaskRenameEvent(super::GenericKernelTaskRenameEvent),
+        #[prost(message, tag = "122")]
+        GenericKernelProcessTree(super::GenericKernelProcessTree),
+        #[prost(message, tag = "119")]
+        CpuPerUidData(super::CpuPerUidData),
+        #[prost(message, tag = "121")]
+        EvdevEvent(super::EvdevEvent),
+        #[prost(message, tag = "123")]
+        UserList(super::AndroidUserList),
         /// This field is only used for testing.
         /// In previous versions of this proto this field had the id 268435455
         /// This caused many problems:
@@ -22115,16 +25732,77 @@ pub struct Trace {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
+pub enum VmCursorEnum {
+    VmCursorUnspecified = 0,
+    VmCursorSrc = 1,
+    VmCursorDst = 2,
+    VmCursorBoth = 3,
+}
+impl VmCursorEnum {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::VmCursorUnspecified => "VM_CURSOR_UNSPECIFIED",
+            Self::VmCursorSrc => "VM_CURSOR_SRC",
+            Self::VmCursorDst => "VM_CURSOR_DST",
+            Self::VmCursorBoth => "VM_CURSOR_BOTH",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "VM_CURSOR_UNSPECIFIED" => Some(Self::VmCursorUnspecified),
+            "VM_CURSOR_SRC" => Some(Self::VmCursorSrc),
+            "VM_CURSOR_DST" => Some(Self::VmCursorDst),
+            "VM_CURSOR_BOTH" => Some(Self::VmCursorBoth),
+            _ => None,
+        }
+    }
+}
+/// Builtin clock domains used in Perfetto traces.
+///
+/// The default trace time clock is BUILTIN_CLOCK_TRACE_FILE: a synthetic clock
+/// representing the trace file's own timeline. Each trace file gets its own
+/// instance (scoped by trace file index).
+///
+/// For backwards compatibility, Perfetto proto traces register BOOTTIME as a
+/// fallback: if the first timestamp conversion uses a clock other than the
+/// trace file clock and no explicit clock snapshot data exists, the trace time
+/// is switched to BOOTTIME. This fallback does not fire for modern traces that
+/// include ClockSnapshots or that only use the trace file clock directly.
+///
+/// The `primary_trace_clock` field in ClockSnapshot can definitively override
+/// the trace time clock regardless of the above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
 pub enum BuiltinClock {
     Unknown = 0,
+    /// Corresponds to CLOCK_REALTIME. See clock_gettime(2).
     Realtime = 1,
+    /// Corresponds to CLOCK_REALTIME_COARSE. See clock_gettime(2).
     RealtimeCoarse = 2,
+    /// Corresponds to CLOCK_MONOTONIC. See clock_gettime(2).
     Monotonic = 3,
+    /// Corresponds to CLOCK_MONOTONIC_COARSE. See clock_gettime(2).
     MonotonicCoarse = 4,
+    /// Corresponds to CLOCK_MONOTONIC_RAW. See clock_gettime(2).
     MonotonicRaw = 5,
+    /// Corresponds to CLOCK_BOOTTIME. See clock_gettime(2).
+    /// For proto traces, this is used as a backwards-compatible fallback trace
+    /// time clock when no explicit clock snapshots are present.
     Boottime = 6,
+    /// TSC (Time Stamp Counter). Architecture-specific high-resolution counter.
     Tsc = 9,
+    /// Corresponds to the perf event clock (PERF_CLOCK).
     Perf = 10,
+    /// A synthetic clock representing the trace file's own timeline. Each trace
+    /// file gets its own instance (scoped by trace file index). This is the
+    /// default trace time clock before any clock snapshot or format-specific
+    /// override takes effect.
+    TraceFile = 11,
     MaxId = 63,
 }
 impl BuiltinClock {
@@ -22143,6 +25821,7 @@ impl BuiltinClock {
             Self::Boottime => "BUILTIN_CLOCK_BOOTTIME",
             Self::Tsc => "BUILTIN_CLOCK_TSC",
             Self::Perf => "BUILTIN_CLOCK_PERF",
+            Self::TraceFile => "BUILTIN_CLOCK_TRACE_FILE",
             Self::MaxId => "BUILTIN_CLOCK_MAX_ID",
         }
     }
@@ -22158,7 +25837,44 @@ impl BuiltinClock {
             "BUILTIN_CLOCK_BOOTTIME" => Some(Self::Boottime),
             "BUILTIN_CLOCK_TSC" => Some(Self::Tsc),
             "BUILTIN_CLOCK_PERF" => Some(Self::Perf),
+            "BUILTIN_CLOCK_TRACE_FILE" => Some(Self::TraceFile),
             "BUILTIN_CLOCK_MAX_ID" => Some(Self::MaxId),
+            _ => None,
+        }
+    }
+}
+/// Semantic types for string fields. This tells the filter what kind of
+/// data the field contains, so it can apply the right filtering rules.
+/// See /rfcs/0011-subset-string-filter-rules.md for design details.
+/// Introduced in: Perfetto v54.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SemanticType {
+    Unspecified = 0,
+    Atrace = 1,
+    Job = 2,
+    Wakelock = 3,
+}
+impl SemanticType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SEMANTIC_TYPE_UNSPECIFIED",
+            Self::Atrace => "SEMANTIC_TYPE_ATRACE",
+            Self::Job => "SEMANTIC_TYPE_JOB",
+            Self::Wakelock => "SEMANTIC_TYPE_WAKELOCK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SEMANTIC_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SEMANTIC_TYPE_ATRACE" => Some(Self::Atrace),
+            "SEMANTIC_TYPE_JOB" => Some(Self::Job),
+            "SEMANTIC_TYPE_WAKELOCK" => Some(Self::Wakelock),
             _ => None,
         }
     }
@@ -22355,11 +26071,9 @@ pub enum AtomId {
     AtomLmkKillOccurred = 51,
     AtomPictureInPictureStateChanged = 52,
     AtomWifiMulticastLockStateChanged = 53,
-    AtomLmkStateChanged = 54,
     AtomAppStartMemoryStateCaptured = 55,
     AtomShutdownSequenceReported = 56,
     AtomBootSequenceReported = 57,
-    AtomDaveyOccurred = 58,
     AtomOverlayStateChanged = 59,
     AtomForegroundServiceStateChanged = 60,
     AtomCallStateChanged = 61,
@@ -22676,7 +26390,6 @@ pub enum AtomId {
     AtomPrivacyToggleDialogInteraction = 382,
     AtomAppSearchOptimizeStatsReported = 383,
     AtomNonA11yToolServiceWarningReport = 384,
-    AtomAppSearchSetSchemaStatsReported = 385,
     AtomAppCompatStateChanged = 386,
     AtomSizeCompatRestartButtonEventReported = 387,
     AtomSplitscreenUiChanged = 388,
@@ -22701,7 +26414,6 @@ pub enum AtomId {
     AtomClipboardCleared = 408,
     AtomVmCreationRequested = 409,
     AtomNearbyDeviceScanStateChanged = 410,
-    AtomCameraCompatControlEventReported = 411,
     AtomApplicationLocalesChanged = 412,
     AtomMediametricsAudiotrackstatusReported = 413,
     AtomFoldStateDurationReported = 414,
@@ -22725,8 +26437,6 @@ pub enum AtomId {
     AtomHotwordDetectionServiceRestarted = 432,
     AtomHotwordDetectorKeyphraseTriggered = 433,
     AtomHotwordDetectorEvents = 434,
-    AtomAdServicesApiCalled = 435,
-    AtomAdServicesMesurementReportsUploaded = 436,
     AtomBootCompletedBroadcastCompletionLatencyReported = 437,
     AtomContactsIndexerUpdateStatsReported = 440,
     AtomAppBackgroundRestrictionsInfo = 441,
@@ -22770,25 +26480,14 @@ pub enum AtomId {
     AtomCbModuleErrorReported = 480,
     AtomCbServiceFeatureChanged = 481,
     AtomCbReceiverFeatureChanged = 482,
-    AtomJsscriptengineLatencyReported = 483,
     AtomPrivacySignalNotificationInteraction = 484,
     AtomPrivacySignalIssueCardInteraction = 485,
     AtomPrivacySignalsJobFailure = 486,
     AtomVibrationReported = 487,
     AtomUwbRangingStart = 489,
-    AtomMobileDataDownloadFileGroupStatusReported = 490,
     AtomAppCompactedV2 = 491,
-    AtomAdServicesSettingsUsageReported = 493,
     AtomDisplayBrightnessChanged = 494,
     AtomActivityActionBlocked = 495,
-    AtomBackgroundFetchProcessReported = 496,
-    AtomUpdateCustomAudienceProcessReported = 497,
-    AtomRunAdBiddingProcessReported = 498,
-    AtomRunAdScoringProcessReported = 499,
-    AtomRunAdSelectionProcessReported = 500,
-    AtomRunAdBiddingPerCaProcessReported = 501,
-    AtomMobileDataDownloadDownloadResultReported = 502,
-    AtomMobileDataDownloadFileGroupStorageStatsReported = 503,
     AtomNetworkDnsServerSupportReported = 504,
     AtomVmBooted = 505,
     AtomVmExited = 506,
@@ -22797,7 +26496,6 @@ pub enum AtomId {
     AtomMediametricsSpatializerdeviceenabledReported = 509,
     AtomMediametricsHeadtrackerdeviceenabledReported = 510,
     AtomMediametricsHeadtrackerdevicesupportedReported = 511,
-    AtomAdServicesMeasurementRegistrations = 512,
     AtomHearingAidInfoReported = 513,
     AtomDeviceWideJobConstraintChanged = 514,
     AtomAmbientModeChanged = 515,
@@ -22819,9 +26517,6 @@ pub enum AtomId {
     AtomBluetoothLocalSupportedFeaturesReported = 532,
     AtomBluetoothGattAppInfo = 533,
     AtomBrightnessConfigurationUpdated = 534,
-    AtomAdServicesGetTopicsReported = 535,
-    AtomAdServicesEpochComputationGetTopTopicsReported = 536,
-    AtomAdServicesEpochComputationClassifierReported = 537,
     AtomWearMediaOutputSwitcherLaunched = 538,
     AtomWearMediaOutputSwitcherFinished = 539,
     AtomWearMediaOutputSwitcherConnectionReported = 540,
@@ -22859,12 +26554,10 @@ pub enum AtomId {
     AtomMediametricsMidiDeviceCloseReported = 576,
     AtomBiometricTouchReported = 577,
     AtomHotwordAudioEgressEventReported = 578,
-    AtomAppSearchSchemaMigrationStatsReported = 579,
     AtomLocationEnabledStateChanged = 580,
     AtomImeRequestFinished = 581,
     AtomUsbComplianceWarningsReported = 582,
     AtomAppSupportedLocalesChanged = 583,
-    AtomGrammaticalInflectionChanged = 584,
     AtomMediaProviderVolumeRecoveryReported = 586,
     AtomBiometricPropertiesCollected = 587,
     AtomKernelWakeupAttributed = 588,
@@ -22877,7 +26570,11 @@ pub enum AtomId {
     AtomWsNotificationUpdated = 596,
     AtomNetworkValidationFailureStatsDailyReported = 601,
     AtomWsComplicationTapped = 602,
-    AtomWsWearTimeSession = 610,
+    AtomWsNotificationBlocking = 780,
+    AtomWsNotificationBridgemodeUpdated = 822,
+    AtomWsNotificationDismissalActioned = 823,
+    AtomWsNotificationActioned = 824,
+    AtomWsNotificationLatency = 880,
     AtomWifiBytesTransfer = 10000,
     AtomWifiBytesTransferByFgBg = 10001,
     AtomMobileBytesTransfer = 10002,
@@ -23050,6 +26747,405 @@ pub enum AtomId {
     AtomNotificationMemoryUse = 10174,
     AtomHdrCapabilities = 10175,
     AtomWsFavouriteWatchFaceListSnapshot = 10176,
+    AtomAccessibilityCheckResultReported = 910,
+    AtomAdaptiveAuthUnlockAfterLockReported = 820,
+    AtomThermalStatusCalled = 772,
+    AtomThermalHeadroomCalled = 773,
+    AtomThermalHeadroomThresholdsCalled = 774,
+    AtomAdpfHintSessionTidCleanup = 839,
+    AtomThermalHeadroomThresholds = 10201,
+    AtomAdpfSessionSnapshot = 10218,
+    AtomJsscriptengineLatencyReported = 483,
+    AtomAdServicesApiCalled = 435,
+    AtomAdServicesMesurementReportsUploaded = 436,
+    AtomMobileDataDownloadFileGroupStatusReported = 490,
+    AtomMobileDataDownloadDownloadResultReported = 502,
+    AtomAdServicesSettingsUsageReported = 493,
+    AtomBackgroundFetchProcessReported = 496,
+    AtomUpdateCustomAudienceProcessReported = 497,
+    AtomRunAdBiddingProcessReported = 498,
+    AtomRunAdScoringProcessReported = 499,
+    AtomRunAdSelectionProcessReported = 500,
+    AtomRunAdBiddingPerCaProcessReported = 501,
+    AtomMobileDataDownloadFileGroupStorageStatsReported = 503,
+    AtomAdServicesMeasurementRegistrations = 512,
+    AtomAdServicesGetTopicsReported = 535,
+    AtomAdServicesEpochComputationGetTopTopicsReported = 536,
+    AtomAdServicesEpochComputationClassifierReported = 537,
+    AtomAdServicesBackCompatGetTopicsReported = 598,
+    AtomAdServicesBackCompatEpochComputationClassifierReported = 599,
+    AtomAdServicesMeasurementDebugKeys = 640,
+    AtomAdServicesErrorReported = 662,
+    AtomAdServicesBackgroundJobsExecutionReported = 663,
+    AtomAdServicesMeasurementDelayedSourceRegistration = 673,
+    AtomAdServicesMeasurementAttribution = 674,
+    AtomAdServicesMeasurementJobs = 675,
+    AtomAdServicesMeasurementWipeout = 676,
+    AtomAdServicesMeasurementAdIdMatchForDebugKeys = 695,
+    AtomAdServicesEnrollmentDataStored = 697,
+    AtomAdServicesEnrollmentFileDownloaded = 698,
+    AtomAdServicesEnrollmentMatched = 699,
+    AtomAdServicesConsentMigrated = 702,
+    AtomAdServicesEnrollmentFailed = 714,
+    AtomAdServicesMeasurementClickVerification = 756,
+    AtomAdServicesEncryptionKeyFetched = 765,
+    AtomAdServicesEncryptionKeyDbTransactionEnded = 766,
+    AtomDestinationRegisteredBeacons = 767,
+    AtomReportInteractionApiCalled = 768,
+    AtomInteractionReportingTableCleared = 769,
+    AtomAppManifestConfigHelperCalled = 788,
+    AtomAdFilteringProcessJoinCaReported = 793,
+    AtomAdFilteringProcessAdSelectionReported = 794,
+    AtomAdCounterHistogramUpdaterReported = 795,
+    AtomSignatureVerification = 807,
+    AtomKAnonImmediateSignJoinStatusReported = 808,
+    AtomKAnonBackgroundJobStatusReported = 809,
+    AtomKAnonInitializeStatusReported = 810,
+    AtomKAnonSignStatusReported = 811,
+    AtomKAnonJoinStatusReported = 812,
+    AtomKAnonKeyAttestationStatusReported = 813,
+    AtomGetAdSelectionDataApiCalled = 814,
+    AtomGetAdSelectionDataBuyerInputGenerated = 815,
+    AtomBackgroundJobSchedulingReported = 834,
+    AtomTopicsEncryptionEpochComputationReported = 840,
+    AtomTopicsEncryptionGetTopicsReported = 841,
+    AtomAdservicesShellCommandCalled = 842,
+    AtomUpdateSignalsApiCalled = 843,
+    AtomEncodingJobRun = 844,
+    AtomEncodingJsFetch = 845,
+    AtomEncodingJsExecution = 846,
+    AtomPersistAdSelectionResultCalled = 847,
+    AtomServerAuctionKeyFetchCalled = 848,
+    AtomServerAuctionBackgroundKeyFetchEnabled = 849,
+    AtomAdServicesMeasurementProcessOdpRegistration = 864,
+    AtomAdServicesMeasurementNotifyRegistrationToOdp = 865,
+    AtomSelectAdsFromOutcomesApiCalled = 876,
+    AtomReportImpressionApiCalled = 877,
+    AtomAdServicesEnrollmentTransactionStats = 885,
+    AtomAdServicesCobaltLoggerEventReported = 902,
+    AtomAdServicesCobaltPeriodicJobEventReported = 903,
+    AtomUpdateSignalsProcessReported = 905,
+    AtomTopicsScheduleEpochJobSettingReported = 930,
+    AtomAiWallpapersButtonPressed = 706,
+    AtomAiWallpapersTemplateSelected = 707,
+    AtomAiWallpapersTermSelected = 708,
+    AtomAiWallpapersWallpaperSet = 709,
+    AtomAiWallpapersSessionSummary = 710,
+    AtomApexInstallationRequested = 732,
+    AtomApexInstallationStaged = 733,
+    AtomApexInstallationEnded = 734,
+    AtomAppSearchSetSchemaStatsReported = 385,
+    AtomAppSearchSchemaMigrationStatsReported = 579,
+    AtomAppSearchUsageSearchIntentStatsReported = 825,
+    AtomAppSearchUsageSearchIntentRawQueryStatsReported = 826,
+    AtomAppSearchAppsIndexerStatsReported = 909,
+    AtomArtDatumReported = 332,
+    AtomArtDeviceDatumReported = 550,
+    AtomArtDatumDeltaReported = 565,
+    AtomArtDex2oatReported = 929,
+    AtomArtDeviceStatus = 10205,
+    AtomBackgroundDexoptJobEnded = 467,
+    AtomPrerebootDexoptJobEnded = 883,
+    AtomOdrefreshReported = 366,
+    AtomOdsignReported = 548,
+    AtomAutofillUiEventReported = 603,
+    AtomAutofillFillRequestReported = 604,
+    AtomAutofillFillResponseReported = 605,
+    AtomAutofillSaveEventReported = 606,
+    AtomAutofillSessionCommitted = 607,
+    AtomAutofillFieldClassificationEventReported = 659,
+    AtomCarRecentsEventReported = 770,
+    AtomCarCalmModeEventReported = 797,
+    AtomCarWakeupFromSuspendReported = 852,
+    AtomPluginInitialized = 655,
+    AtomBluetoothHashedDeviceNameReported = 613,
+    AtomBluetoothL2capCocClientConnection = 614,
+    AtomBluetoothL2capCocServerConnection = 615,
+    AtomBluetoothLeSessionConnected = 656,
+    AtomRestrictedBluetoothDeviceNameReported = 666,
+    AtomBluetoothProfileConnectionAttempted = 696,
+    AtomBluetoothContentProfileErrorReported = 781,
+    AtomBluetoothRfcommConnectionAttempted = 782,
+    AtomRemoteDeviceInformationWithMetricId = 862,
+    AtomLeAppScanStateChanged = 870,
+    AtomLeRadioScanStopped = 871,
+    AtomLeScanResultReceived = 872,
+    AtomLeScanAbused = 873,
+    AtomLeAdvStateChanged = 874,
+    AtomLeAdvErrorReported = 875,
+    AtomA2dpSessionReported = 904,
+    AtomBluetoothCrossLayerEventReported = 916,
+    AtomBroadcastAudioSessionReported = 927,
+    AtomBroadcastAudioSyncReported = 928,
+    AtomBluetoothRfcommConnectionReportedAtClose = 982,
+    AtomBluetoothLeConnection = 988,
+    AtomBroadcastSent = 922,
+    AtomCameraFeatureCombinationQueryEvent = 900,
+    AtomCertificateTransparencyLogListStateChanged = 934,
+    AtomCertificateTransparencyLogListUpdateFailed = 972,
+    AtomDailyKeepaliveInfoReported = 650,
+    AtomNetworkRequestStateChanged = 779,
+    AtomTetheringActiveSessionsReported = 925,
+    AtomNetworkStatsRecorderFileOperated = 783,
+    AtomCoreNetworkingTerribleErrorOccurred = 979,
+    AtomApfSessionInfoReported = 777,
+    AtomIpClientRaInfoReported = 778,
+    AtomVpnConnectionStateChanged = 850,
+    AtomVpnConnectionReported = 851,
+    AtomCpuPolicy = 10199,
+    AtomCredentialManagerApiCalled = 585,
+    AtomCredentialManagerInitPhaseReported = 651,
+    AtomCredentialManagerCandidatePhaseReported = 652,
+    AtomCredentialManagerFinalPhaseReported = 653,
+    AtomCredentialManagerTotalReported = 667,
+    AtomCredentialManagerFinalnouidReported = 668,
+    AtomCredentialManagerGetReported = 669,
+    AtomCredentialManagerAuthClickReported = 670,
+    AtomCredentialManagerApiv2Called = 671,
+    AtomCronetEngineCreated = 703,
+    AtomCronetTrafficReported = 704,
+    AtomCronetEngineBuilderInitialized = 762,
+    AtomCronetHttpFlagsInitialized = 763,
+    AtomCronetInitialized = 764,
+    AtomDesktopModeUiChanged = 818,
+    AtomDesktopModeSessionTaskUpdate = 819,
+    AtomDesktopModeTaskSizeUpdated = 935,
+    AtomDeviceLockCheckInRequestReported = 726,
+    AtomDeviceLockProvisioningCompleteReported = 727,
+    AtomDeviceLockKioskAppRequestReported = 728,
+    AtomDeviceLockCheckInRetryReported = 789,
+    AtomDeviceLockProvisionFailureReported = 790,
+    AtomDeviceLockLockUnlockDeviceFailureReported = 791,
+    AtomDevicePolicyManagementMode = 10216,
+    AtomDevicePolicyState = 10217,
+    AtomDisplayModeDirectorVoteChanged = 792,
+    AtomExternalDisplayStateChanged = 806,
+    AtomDndStateChanged = 657,
+    AtomDreamSettingChanged = 705,
+    AtomDreamSettingSnapshot = 10192,
+    AtomExpressEventReported = 528,
+    AtomExpressHistogramSampleReported = 593,
+    AtomExpressUidEventReported = 644,
+    AtomExpressUidHistogramSampleReported = 658,
+    AtomFederatedComputeApiCalled = 712,
+    AtomFederatedComputeTrainingEventReported = 771,
+    AtomExampleIteratorNextLatencyReported = 838,
+    AtomFullScreenIntentLaunched = 631,
+    AtomBalAllowed = 632,
+    AtomInTaskActivityStarted = 685,
+    AtomDeviceOrientationChanged = 906,
+    AtomCachedAppsHighWatermark = 10189,
+    AtomStylusPredictionMetricsReported = 718,
+    AtomUserRiskEventReported = 725,
+    AtomMediaProjectionStateChanged = 729,
+    AtomMediaProjectionTargetChanged = 730,
+    AtomExcessiveBinderProxyCountReported = 853,
+    AtomProxyBytesTransferByFgBg = 10200,
+    AtomMobileBytesTransferByProcState = 10204,
+    AtomBiometricFrrNotification = 817,
+    AtomSensitiveContentMediaProjectionSession = 830,
+    AtomSensitiveNotificationAppProtectionSession = 831,
+    AtomSensitiveNotificationAppProtectionApplied = 832,
+    AtomSensitiveNotificationRedaction = 833,
+    AtomSensitiveContentAppProtection = 835,
+    AtomAppRestrictionStateChanged = 866,
+    AtomBatteryUsageStatsPerUid = 10209,
+    AtomPostgcMemorySnapshot = 924,
+    AtomPowerSaveTempAllowlistChanged = 926,
+    AtomAppOpAccessTracked = 931,
+    AtomContentOrFileUriEventReported = 933,
+    AtomApplicationGrammaticalInflectionChanged = 584,
+    AtomSystemGrammaticalInflectionChanged = 816,
+    AtomBatteryHealth = 10220,
+    AtomHdmiEarcStatusReported = 701,
+    AtomHdmiSoundbarModeStatusReported = 724,
+    AtomHealthConnectApiCalled = 616,
+    AtomHealthConnectUsageStats = 617,
+    AtomHealthConnectStorageStats = 618,
+    AtomHealthConnectApiInvoked = 643,
+    AtomExerciseRouteApiCalled = 654,
+    AtomHealthConnectExportInvoked = 907,
+    AtomHealthConnectImportInvoked = 918,
+    AtomHealthConnectExportImportStatsReported = 919,
+    AtomHealthConnectUiImpression = 623,
+    AtomHealthConnectUiInteraction = 624,
+    AtomHealthConnectAppOpenedReported = 625,
+    AtomHotwordEgressSizeAtomReported = 761,
+    AtomIkeSessionTerminated = 678,
+    AtomIkeLivenessCheckSessionValidated = 760,
+    AtomNegotiatedSecurityAssociation = 821,
+    AtomKeyboardConfigured = 682,
+    AtomKeyboardSystemsEventReported = 683,
+    AtomInputdeviceUsageReported = 686,
+    AtomInputEventLatencyReported = 932,
+    AtomTouchpadUsage = 10191,
+    AtomKernelOomKillOccurred = 754,
+    AtomEmergencyStateChanged = 633,
+    AtomChreSignificantMotionStateChanged = 868,
+    AtomPopulationDensityProviderLoadingReported = 1002,
+    AtomDensityBasedCoarseLocationsUsageReported = 1003,
+    AtomDensityBasedCoarseLocationsProviderQueryReported = 1004,
+    AtomMediaCodecReclaimRequestCompleted = 600,
+    AtomMediaCodecStarted = 641,
+    AtomMediaCodecStopped = 642,
+    AtomMediaCodecRendered = 684,
+    AtomMediaEditingEndedReported = 798,
+    AtomMteState = 10181,
+    AtomMicroxrDeviceBootCompleteReported = 901,
+    AtomNfcObserveModeStateChanged = 855,
+    AtomNfcFieldChanged = 856,
+    AtomNfcPollingLoopNotificationReported = 857,
+    AtomNfcProprietaryCapabilitiesReported = 858,
+    AtomOndevicepersonalizationApiCalled = 711,
+    AtomComponentStateChangedReported = 863,
+    AtomPdfLoadReported = 859,
+    AtomPdfApiUsageReported = 860,
+    AtomPdfSearchReported = 861,
+    AtomPressureStallInformation = 10229,
+    AtomPermissionRationaleDialogViewed = 645,
+    AtomPermissionRationaleDialogActionReported = 646,
+    AtomAppDataSharingUpdatesNotificationInteraction = 647,
+    AtomAppDataSharingUpdatesFragmentViewed = 648,
+    AtomAppDataSharingUpdatesFragmentActionReported = 649,
+    AtomEnhancedConfirmationDialogResultReported = 827,
+    AtomEnhancedConfirmationRestrictionCleared = 828,
+    AtomPhotopickerSessionInfoReported = 886,
+    AtomPhotopickerApiInfoReported = 887,
+    AtomPhotopickerUiEventLogged = 888,
+    AtomPhotopickerMediaItemStatusReported = 889,
+    AtomPhotopickerPreviewInfoLogged = 890,
+    AtomPhotopickerMenuInteractionLogged = 891,
+    AtomPhotopickerBannerInteractionLogged = 892,
+    AtomPhotopickerMediaLibraryInfoLogged = 893,
+    AtomPhotopickerPageInfoLogged = 894,
+    AtomPhotopickerMediaGridSyncInfoReported = 895,
+    AtomPhotopickerAlbumSyncInfoReported = 896,
+    AtomPhotopickerSearchInfoReported = 897,
+    AtomSearchDataExtractionDetailsReported = 898,
+    AtomEmbeddedPhotopickerInfoReported = 899,
+    AtomAtom9999 = 9999,
+    AtomAtom99999 = 99999,
+    AtomScreenOffReported = 776,
+    AtomScreenTimeoutOverrideReported = 836,
+    AtomScreenInteractiveSessionReported = 837,
+    AtomScreenDimReported = 867,
+    AtomMediaProviderDatabaseRollbackReported = 784,
+    AtomBackupSetupStatusReported = 785,
+    AtomRangingSessionConfigured = 993,
+    AtomRangingSessionStarted = 994,
+    AtomRangingSessionClosed = 995,
+    AtomRangingTechnologyStarted = 996,
+    AtomRangingTechnologyStopped = 997,
+    AtomRkpdPoolStats = 664,
+    AtomRkpdClientOperation = 665,
+    AtomSandboxApiCalled = 488,
+    AtomSandboxActivityEventOccurred = 735,
+    AtomSdkSandboxRestrictedAccessInSession = 796,
+    AtomSandboxSdkStorage = 10159,
+    AtomSelinuxAuditLog = 799,
+    AtomSettingsSpaReported = 622,
+    AtomTestExtensionAtomReported = 660,
+    AtomTestRestrictedAtomReported = 672,
+    AtomStatsSocketLossReported = 752,
+    AtomLockscreenShortcutSelected = 611,
+    AtomLockscreenShortcutTriggered = 612,
+    AtomLauncherImpressionEventV2 = 716,
+    AtomDisplaySwitchLatencyTracked = 753,
+    AtomNotificationListenerService = 829,
+    AtomNavHandleTouchPoints = 869,
+    AtomCommunalHubWidgetEventReported = 908,
+    AtomCommunalHubSnapshot = 10226,
+    AtomEmergencyNumberDialed = 637,
+    AtomCallStats = 10221,
+    AtomCallAudioRouteStats = 10222,
+    AtomTelecomApiStats = 10223,
+    AtomTelecomErrorStats = 10224,
+    AtomCellularRadioPowerStateChanged = 713,
+    AtomEmergencyNumbersInfo = 10180,
+    AtomDataNetworkValidation = 10207,
+    AtomDataRatStateChanged = 854,
+    AtomConnectedChannelChanged = 882,
+    AtomIwlanUnderlyingNetworkValidationResultReported = 923,
+    AtomQualifiedRatListChanged = 634,
+    AtomQnsImsCallDropStats = 635,
+    AtomQnsFallbackRestrictionChanged = 636,
+    AtomQnsRatPreferenceMismatchInfo = 10177,
+    AtomQnsHandoverTimeMillis = 10178,
+    AtomQnsHandoverPingpong = 10179,
+    AtomSatelliteController = 10182,
+    AtomSatelliteSession = 10183,
+    AtomSatelliteIncomingDatagram = 10184,
+    AtomSatelliteOutgoingDatagram = 10185,
+    AtomSatelliteProvision = 10186,
+    AtomSatelliteSosMessageRecommender = 10187,
+    AtomCarrierRoamingSatelliteSession = 10211,
+    AtomCarrierRoamingSatelliteControllerStats = 10212,
+    AtomControllerStatsPerPackage = 10213,
+    AtomSatelliteEntitlement = 10214,
+    AtomSatelliteConfigUpdater = 10215,
+    AtomSatelliteAccessController = 10219,
+    AtomCellularIdentifierDisclosed = 800,
+    AtomThreadnetworkTelemetryDataReported = 738,
+    AtomThreadnetworkTopoEntryRepeated = 739,
+    AtomThreadnetworkDeviceInfoReported = 740,
+    AtomBootIntegrityInfoReported = 775,
+    AtomTvLowPowerStandbyPolicy = 679,
+    AtomExternalTvInputEvent = 717,
+    AtomTestUprobestatsAtomReported = 915,
+    AtomUwbActivityInfo = 10188,
+    AtomMediatorUpdated = 721,
+    AtomSysproxyBluetoothBytesTransfer = 10196,
+    AtomSysproxyConnectionUpdated = 786,
+    AtomWearCompanionConnectionState = 921,
+    AtomMediaActionReported = 608,
+    AtomMediaControlsLaunched = 609,
+    AtomMediaSessionStateChanged = 677,
+    AtomWearMediaOutputSwitcherDeviceScanApiLatency = 757,
+    AtomWearMediaOutputSwitcherSassDeviceUnavailable = 758,
+    AtomWearMediaOutputSwitcherFastpairApiTimeout = 759,
+    AtomWearModeStateChanged = 715,
+    AtomRendererInitialized = 736,
+    AtomSchemaVersionReceived = 737,
+    AtomLayoutInspected = 741,
+    AtomLayoutExpressionInspected = 742,
+    AtomLayoutAnimationsInspected = 743,
+    AtomMaterialComponentsInspected = 744,
+    AtomTileRequested = 745,
+    AtomStateResponseReceived = 746,
+    AtomTileResponseReceived = 747,
+    AtomInflationFinished = 748,
+    AtomInflationFailed = 749,
+    AtomIgnoredInflationFailuresReported = 750,
+    AtomDrawableRendered = 751,
+    AtomWearTimeSyncRequested = 911,
+    AtomWearTimeUpdateStarted = 912,
+    AtomWearTimeSyncAttemptCompleted = 913,
+    AtomWearTimeChanged = 914,
+    AtomWearAdaptiveSuspendStatsReported = 619,
+    AtomWearPowerAnomalyServiceOperationalStatsReported = 620,
+    AtomWearPowerAnomalyServiceEventStatsReported = 621,
+    AtomWsWearTimeSession = 610,
+    AtomWsIncomingCallActionReported = 626,
+    AtomWsCallDisconnectionReported = 627,
+    AtomWsCallDurationReported = 628,
+    AtomWsCallUserExperienceLatencyReported = 629,
+    AtomWsCallInteractionReported = 630,
+    AtomWsOnBodyStateChanged = 787,
+    AtomWsWatchFaceRestrictedComplicationsImpacted = 802,
+    AtomWsWatchFaceDefaultRestrictedComplicationsRemoved = 803,
+    AtomWsComplicationsImpactedNotificationEventReported = 804,
+    AtomWsRemoteEventUsageReported = 920,
+    AtomWsBugreportRequested = 936,
+    AtomWsBugreportTriggered = 937,
+    AtomWsBugreportFinished = 938,
+    AtomWsBugreportResultReceived = 939,
+    AtomWsStandaloneModeSnapshot = 10197,
+    AtomWsFavoriteWatchFaceSnapshot = 10206,
+    AtomWsPhotosWatchFaceFeatureSnapshot = 10225,
+    AtomWsWatchFaceCustomizationSnapshot = 10227,
+    AtomWearPowerMenuOpened = 731,
+    AtomWearAssistantOpened = 755,
+    AtomFirstOverlayStateChanged = 917,
     AtomWifiAwareNdpReported = 638,
     AtomWifiAwareAttachReported = 639,
     AtomWifiSelfRecoveryTriggered = 661,
@@ -23064,126 +27160,17 @@ pub enum AtomId {
     AtomWifiLocalOnlyRequestScanTriggered = 693,
     AtomWifiThreadTaskExecuted = 694,
     AtomWifiStateChanged = 700,
+    AtomPnoScanStarted = 719,
+    AtomPnoScanStopped = 720,
+    AtomWifiIsUnusableReported = 722,
+    AtomWifiApCapabilitiesReported = 723,
+    AtomSoftApStateChanged = 805,
+    AtomScorerPredictionResultReported = 884,
     AtomWifiAwareCapabilities = 10190,
     AtomWifiModuleInfo = 10193,
-    AtomSettingsSpaReported = 622,
-    AtomExpressEventReported = 528,
-    AtomExpressHistogramSampleReported = 593,
-    AtomExpressUidEventReported = 644,
-    AtomExpressUidHistogramSampleReported = 658,
-    AtomPermissionRationaleDialogViewed = 645,
-    AtomPermissionRationaleDialogActionReported = 646,
-    AtomAppDataSharingUpdatesNotificationInteraction = 647,
-    AtomAppDataSharingUpdatesFragmentViewed = 648,
-    AtomAppDataSharingUpdatesFragmentActionReported = 649,
-    AtomWsIncomingCallActionReported = 626,
-    AtomWsCallDisconnectionReported = 627,
-    AtomWsCallDurationReported = 628,
-    AtomWsCallUserExperienceLatencyReported = 629,
-    AtomWsCallInteractionReported = 630,
-    AtomFullScreenIntentLaunched = 631,
-    AtomBalAllowed = 632,
-    AtomInTaskActivityStarted = 685,
-    AtomCachedAppsHighWatermark = 10189,
-    AtomOdrefreshReported = 366,
-    AtomOdsignReported = 548,
-    AtomArtDatumReported = 332,
-    AtomArtDeviceDatumReported = 550,
-    AtomArtDatumDeltaReported = 565,
-    AtomBackgroundDexoptJobEnded = 467,
-    AtomWearAdaptiveSuspendStatsReported = 619,
-    AtomWearPowerAnomalyServiceOperationalStatsReported = 620,
-    AtomWearPowerAnomalyServiceEventStatsReported = 621,
-    AtomEmergencyStateChanged = 633,
-    AtomDndStateChanged = 657,
-    AtomMteState = 10181,
-    AtomAdServicesBackCompatGetTopicsReported = 598,
-    AtomAdServicesBackCompatEpochComputationClassifierReported = 599,
-    AtomAdServicesMeasurementDebugKeys = 640,
-    AtomAdServicesErrorReported = 662,
-    AtomAdServicesBackgroundJobsExecutionReported = 663,
-    AtomAdServicesMeasurementDelayedSourceRegistration = 673,
-    AtomAdServicesMeasurementAttribution = 674,
-    AtomAdServicesMeasurementJobs = 675,
-    AtomAdServicesMeasurementWipeout = 676,
-    AtomAdServicesConsentMigrated = 702,
-    AtomRkpdPoolStats = 664,
-    AtomRkpdClientOperation = 665,
-    AtomAutofillUiEventReported = 603,
-    AtomAutofillFillRequestReported = 604,
-    AtomAutofillFillResponseReported = 605,
-    AtomAutofillSaveEventReported = 606,
-    AtomAutofillSessionCommitted = 607,
-    AtomAutofillFieldClassificationEventReported = 659,
-    AtomTestExtensionAtomReported = 660,
-    AtomTestRestrictedAtomReported = 672,
-    AtomStatsSocketLossReported = 752,
-    AtomPluginInitialized = 655,
-    AtomTvLowPowerStandbyPolicy = 679,
-    AtomLockscreenShortcutSelected = 611,
-    AtomLockscreenShortcutTriggered = 612,
-    AtomEmergencyNumbersInfo = 10180,
-    AtomQualifiedRatListChanged = 634,
-    AtomQnsImsCallDropStats = 635,
-    AtomQnsFallbackRestrictionChanged = 636,
-    AtomQnsRatPreferenceMismatchInfo = 10177,
-    AtomQnsHandoverTimeMillis = 10178,
-    AtomQnsHandoverPingpong = 10179,
-    AtomSatelliteController = 10182,
-    AtomSatelliteSession = 10183,
-    AtomSatelliteIncomingDatagram = 10184,
-    AtomSatelliteOutgoingDatagram = 10185,
-    AtomSatelliteProvision = 10186,
-    AtomSatelliteSosMessageRecommender = 10187,
-    AtomIkeSessionTerminated = 678,
-    AtomIkeLivenessCheckSessionValidated = 760,
-    AtomBluetoothHashedDeviceNameReported = 613,
-    AtomBluetoothL2capCocClientConnection = 614,
-    AtomBluetoothL2capCocServerConnection = 615,
-    AtomBluetoothLeSessionConnected = 656,
-    AtomRestrictedBluetoothDeviceNameReported = 666,
-    AtomBluetoothProfileConnectionAttempted = 696,
-    AtomHealthConnectUiImpression = 623,
-    AtomHealthConnectUiInteraction = 624,
-    AtomHealthConnectAppOpenedReported = 625,
-    AtomHealthConnectApiCalled = 616,
-    AtomHealthConnectUsageStats = 617,
-    AtomHealthConnectStorageStats = 618,
-    AtomHealthConnectApiInvoked = 643,
-    AtomExerciseRouteApiCalled = 654,
-    AtomAtom9999 = 9999,
-    AtomAtom99999 = 99999,
-    AtomThreadnetworkTelemetryDataReported = 738,
-    AtomThreadnetworkTopoEntryRepeated = 739,
-    AtomThreadnetworkDeviceInfoReported = 740,
-    AtomEmergencyNumberDialed = 637,
-    AtomSandboxApiCalled = 488,
-    AtomSandboxActivityEventOccurred = 735,
-    AtomSandboxSdkStorage = 10159,
-    AtomCronetEngineCreated = 703,
-    AtomCronetTrafficReported = 704,
-    AtomCronetEngineBuilderInitialized = 762,
-    AtomCronetHttpFlagsInitialized = 763,
-    AtomCronetInitialized = 764,
-    AtomDailyKeepaliveInfoReported = 650,
-    AtomIpClientRaInfoReported = 778,
-    AtomApfSessionInfoReported = 777,
-    AtomCredentialManagerApiCalled = 585,
-    AtomCredentialManagerInitPhaseReported = 651,
-    AtomCredentialManagerCandidatePhaseReported = 652,
-    AtomCredentialManagerFinalPhaseReported = 653,
-    AtomCredentialManagerTotalReported = 667,
-    AtomCredentialManagerFinalnouidReported = 668,
-    AtomCredentialManagerGetReported = 669,
-    AtomCredentialManagerAuthClickReported = 670,
-    AtomCredentialManagerApiv2Called = 671,
-    AtomUwbActivityInfo = 10188,
-    AtomMediaActionReported = 608,
-    AtomMediaControlsLaunched = 609,
-    AtomMediaCodecReclaimRequestCompleted = 600,
-    AtomMediaCodecStarted = 641,
-    AtomMediaCodecStopped = 642,
-    AtomMediaCodecRendered = 684,
+    AtomWifiSettingInfo = 10194,
+    AtomWifiComplexSettingInfo = 10195,
+    AtomWifiConfiguredNetworkInfo = 10198,
 }
 impl AtomId {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -23247,11 +27234,9 @@ impl AtomId {
             Self::AtomLmkKillOccurred => "ATOM_LMK_KILL_OCCURRED",
             Self::AtomPictureInPictureStateChanged => "ATOM_PICTURE_IN_PICTURE_STATE_CHANGED",
             Self::AtomWifiMulticastLockStateChanged => "ATOM_WIFI_MULTICAST_LOCK_STATE_CHANGED",
-            Self::AtomLmkStateChanged => "ATOM_LMK_STATE_CHANGED",
             Self::AtomAppStartMemoryStateCaptured => "ATOM_APP_START_MEMORY_STATE_CAPTURED",
             Self::AtomShutdownSequenceReported => "ATOM_SHUTDOWN_SEQUENCE_REPORTED",
             Self::AtomBootSequenceReported => "ATOM_BOOT_SEQUENCE_REPORTED",
-            Self::AtomDaveyOccurred => "ATOM_DAVEY_OCCURRED",
             Self::AtomOverlayStateChanged => "ATOM_OVERLAY_STATE_CHANGED",
             Self::AtomForegroundServiceStateChanged => "ATOM_FOREGROUND_SERVICE_STATE_CHANGED",
             Self::AtomCallStateChanged => "ATOM_CALL_STATE_CHANGED",
@@ -23678,9 +27663,6 @@ impl AtomId {
             Self::AtomNonA11yToolServiceWarningReport => {
                 "ATOM_NON_A11Y_TOOL_SERVICE_WARNING_REPORT"
             }
-            Self::AtomAppSearchSetSchemaStatsReported => {
-                "ATOM_APP_SEARCH_SET_SCHEMA_STATS_REPORTED"
-            }
             Self::AtomAppCompatStateChanged => "ATOM_APP_COMPAT_STATE_CHANGED",
             Self::AtomSizeCompatRestartButtonEventReported => {
                 "ATOM_SIZE_COMPAT_RESTART_BUTTON_EVENT_REPORTED"
@@ -23719,9 +27701,6 @@ impl AtomId {
             Self::AtomClipboardCleared => "ATOM_CLIPBOARD_CLEARED",
             Self::AtomVmCreationRequested => "ATOM_VM_CREATION_REQUESTED",
             Self::AtomNearbyDeviceScanStateChanged => "ATOM_NEARBY_DEVICE_SCAN_STATE_CHANGED",
-            Self::AtomCameraCompatControlEventReported => {
-                "ATOM_CAMERA_COMPAT_CONTROL_EVENT_REPORTED"
-            }
             Self::AtomApplicationLocalesChanged => "ATOM_APPLICATION_LOCALES_CHANGED",
             Self::AtomMediametricsAudiotrackstatusReported => {
                 "ATOM_MEDIAMETRICS_AUDIOTRACKSTATUS_REPORTED"
@@ -23759,10 +27738,6 @@ impl AtomId {
                 "ATOM_HOTWORD_DETECTOR_KEYPHRASE_TRIGGERED"
             }
             Self::AtomHotwordDetectorEvents => "ATOM_HOTWORD_DETECTOR_EVENTS",
-            Self::AtomAdServicesApiCalled => "ATOM_AD_SERVICES_API_CALLED",
-            Self::AtomAdServicesMesurementReportsUploaded => {
-                "ATOM_AD_SERVICES_MESUREMENT_REPORTS_UPLOADED"
-            }
             Self::AtomBootCompletedBroadcastCompletionLatencyReported => {
                 "ATOM_BOOT_COMPLETED_BROADCAST_COMPLETION_LATENCY_REPORTED"
             }
@@ -23834,7 +27809,6 @@ impl AtomId {
             Self::AtomCbModuleErrorReported => "ATOM_CB_MODULE_ERROR_REPORTED",
             Self::AtomCbServiceFeatureChanged => "ATOM_CB_SERVICE_FEATURE_CHANGED",
             Self::AtomCbReceiverFeatureChanged => "ATOM_CB_RECEIVER_FEATURE_CHANGED",
-            Self::AtomJsscriptengineLatencyReported => "ATOM_JSSCRIPTENGINE_LATENCY_REPORTED",
             Self::AtomPrivacySignalNotificationInteraction => {
                 "ATOM_PRIVACY_SIGNAL_NOTIFICATION_INTERACTION"
             }
@@ -23844,29 +27818,9 @@ impl AtomId {
             Self::AtomPrivacySignalsJobFailure => "ATOM_PRIVACY_SIGNALS_JOB_FAILURE",
             Self::AtomVibrationReported => "ATOM_VIBRATION_REPORTED",
             Self::AtomUwbRangingStart => "ATOM_UWB_RANGING_START",
-            Self::AtomMobileDataDownloadFileGroupStatusReported => {
-                "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STATUS_REPORTED"
-            }
             Self::AtomAppCompactedV2 => "ATOM_APP_COMPACTED_V2",
-            Self::AtomAdServicesSettingsUsageReported => "ATOM_AD_SERVICES_SETTINGS_USAGE_REPORTED",
             Self::AtomDisplayBrightnessChanged => "ATOM_DISPLAY_BRIGHTNESS_CHANGED",
             Self::AtomActivityActionBlocked => "ATOM_ACTIVITY_ACTION_BLOCKED",
-            Self::AtomBackgroundFetchProcessReported => "ATOM_BACKGROUND_FETCH_PROCESS_REPORTED",
-            Self::AtomUpdateCustomAudienceProcessReported => {
-                "ATOM_UPDATE_CUSTOM_AUDIENCE_PROCESS_REPORTED"
-            }
-            Self::AtomRunAdBiddingProcessReported => "ATOM_RUN_AD_BIDDING_PROCESS_REPORTED",
-            Self::AtomRunAdScoringProcessReported => "ATOM_RUN_AD_SCORING_PROCESS_REPORTED",
-            Self::AtomRunAdSelectionProcessReported => "ATOM_RUN_AD_SELECTION_PROCESS_REPORTED",
-            Self::AtomRunAdBiddingPerCaProcessReported => {
-                "ATOM_RUN_AD_BIDDING_PER_CA_PROCESS_REPORTED"
-            }
-            Self::AtomMobileDataDownloadDownloadResultReported => {
-                "ATOM_MOBILE_DATA_DOWNLOAD_DOWNLOAD_RESULT_REPORTED"
-            }
-            Self::AtomMobileDataDownloadFileGroupStorageStatsReported => {
-                "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STORAGE_STATS_REPORTED"
-            }
             Self::AtomNetworkDnsServerSupportReported => "ATOM_NETWORK_DNS_SERVER_SUPPORT_REPORTED",
             Self::AtomVmBooted => "ATOM_VM_BOOTED",
             Self::AtomVmExited => "ATOM_VM_EXITED",
@@ -23882,9 +27836,6 @@ impl AtomId {
             }
             Self::AtomMediametricsHeadtrackerdevicesupportedReported => {
                 "ATOM_MEDIAMETRICS_HEADTRACKERDEVICESUPPORTED_REPORTED"
-            }
-            Self::AtomAdServicesMeasurementRegistrations => {
-                "ATOM_AD_SERVICES_MEASUREMENT_REGISTRATIONS"
             }
             Self::AtomHearingAidInfoReported => "ATOM_HEARING_AID_INFO_REPORTED",
             Self::AtomDeviceWideJobConstraintChanged => "ATOM_DEVICE_WIDE_JOB_CONSTRAINT_CHANGED",
@@ -23919,13 +27870,6 @@ impl AtomId {
             }
             Self::AtomBluetoothGattAppInfo => "ATOM_BLUETOOTH_GATT_APP_INFO",
             Self::AtomBrightnessConfigurationUpdated => "ATOM_BRIGHTNESS_CONFIGURATION_UPDATED",
-            Self::AtomAdServicesGetTopicsReported => "ATOM_AD_SERVICES_GET_TOPICS_REPORTED",
-            Self::AtomAdServicesEpochComputationGetTopTopicsReported => {
-                "ATOM_AD_SERVICES_EPOCH_COMPUTATION_GET_TOP_TOPICS_REPORTED"
-            }
-            Self::AtomAdServicesEpochComputationClassifierReported => {
-                "ATOM_AD_SERVICES_EPOCH_COMPUTATION_CLASSIFIER_REPORTED"
-            }
             Self::AtomWearMediaOutputSwitcherLaunched => "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_LAUNCHED",
             Self::AtomWearMediaOutputSwitcherFinished => "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_FINISHED",
             Self::AtomWearMediaOutputSwitcherConnectionReported => {
@@ -23987,14 +27931,10 @@ impl AtomId {
             }
             Self::AtomBiometricTouchReported => "ATOM_BIOMETRIC_TOUCH_REPORTED",
             Self::AtomHotwordAudioEgressEventReported => "ATOM_HOTWORD_AUDIO_EGRESS_EVENT_REPORTED",
-            Self::AtomAppSearchSchemaMigrationStatsReported => {
-                "ATOM_APP_SEARCH_SCHEMA_MIGRATION_STATS_REPORTED"
-            }
             Self::AtomLocationEnabledStateChanged => "ATOM_LOCATION_ENABLED_STATE_CHANGED",
             Self::AtomImeRequestFinished => "ATOM_IME_REQUEST_FINISHED",
             Self::AtomUsbComplianceWarningsReported => "ATOM_USB_COMPLIANCE_WARNINGS_REPORTED",
             Self::AtomAppSupportedLocalesChanged => "ATOM_APP_SUPPORTED_LOCALES_CHANGED",
-            Self::AtomGrammaticalInflectionChanged => "ATOM_GRAMMATICAL_INFLECTION_CHANGED",
             Self::AtomMediaProviderVolumeRecoveryReported => {
                 "ATOM_MEDIA_PROVIDER_VOLUME_RECOVERY_REPORTED"
             }
@@ -24011,7 +27951,11 @@ impl AtomId {
                 "ATOM_NETWORK_VALIDATION_FAILURE_STATS_DAILY_REPORTED"
             }
             Self::AtomWsComplicationTapped => "ATOM_WS_COMPLICATION_TAPPED",
-            Self::AtomWsWearTimeSession => "ATOM_WS_WEAR_TIME_SESSION",
+            Self::AtomWsNotificationBlocking => "ATOM_WS_NOTIFICATION_BLOCKING",
+            Self::AtomWsNotificationBridgemodeUpdated => "ATOM_WS_NOTIFICATION_BRIDGEMODE_UPDATED",
+            Self::AtomWsNotificationDismissalActioned => "ATOM_WS_NOTIFICATION_DISMISSAL_ACTIONED",
+            Self::AtomWsNotificationActioned => "ATOM_WS_NOTIFICATION_ACTIONED",
+            Self::AtomWsNotificationLatency => "ATOM_WS_NOTIFICATION_LATENCY",
             Self::AtomWifiBytesTransfer => "ATOM_WIFI_BYTES_TRANSFER",
             Self::AtomWifiBytesTransferByFgBg => "ATOM_WIFI_BYTES_TRANSFER_BY_FG_BG",
             Self::AtomMobileBytesTransfer => "ATOM_MOBILE_BYTES_TRANSFER",
@@ -24214,73 +28158,53 @@ impl AtomId {
             Self::AtomWsFavouriteWatchFaceListSnapshot => {
                 "ATOM_WS_FAVOURITE_WATCH_FACE_LIST_SNAPSHOT"
             }
-            Self::AtomWifiAwareNdpReported => "ATOM_WIFI_AWARE_NDP_REPORTED",
-            Self::AtomWifiAwareAttachReported => "ATOM_WIFI_AWARE_ATTACH_REPORTED",
-            Self::AtomWifiSelfRecoveryTriggered => "ATOM_WIFI_SELF_RECOVERY_TRIGGERED",
-            Self::AtomSoftApStarted => "ATOM_SOFT_AP_STARTED",
-            Self::AtomSoftApStopped => "ATOM_SOFT_AP_STOPPED",
-            Self::AtomWifiLockReleased => "ATOM_WIFI_LOCK_RELEASED",
-            Self::AtomWifiLockDeactivated => "ATOM_WIFI_LOCK_DEACTIVATED",
-            Self::AtomWifiConfigSaved => "ATOM_WIFI_CONFIG_SAVED",
-            Self::AtomWifiAwareResourceUsingChanged => "ATOM_WIFI_AWARE_RESOURCE_USING_CHANGED",
-            Self::AtomWifiAwareHalApiCalled => "ATOM_WIFI_AWARE_HAL_API_CALLED",
-            Self::AtomWifiLocalOnlyRequestReceived => "ATOM_WIFI_LOCAL_ONLY_REQUEST_RECEIVED",
-            Self::AtomWifiLocalOnlyRequestScanTriggered => {
-                "ATOM_WIFI_LOCAL_ONLY_REQUEST_SCAN_TRIGGERED"
+            Self::AtomAccessibilityCheckResultReported => {
+                "ATOM_ACCESSIBILITY_CHECK_RESULT_REPORTED"
             }
-            Self::AtomWifiThreadTaskExecuted => "ATOM_WIFI_THREAD_TASK_EXECUTED",
-            Self::AtomWifiStateChanged => "ATOM_WIFI_STATE_CHANGED",
-            Self::AtomWifiAwareCapabilities => "ATOM_WIFI_AWARE_CAPABILITIES",
-            Self::AtomWifiModuleInfo => "ATOM_WIFI_MODULE_INFO",
-            Self::AtomSettingsSpaReported => "ATOM_SETTINGS_SPA_REPORTED",
-            Self::AtomExpressEventReported => "ATOM_EXPRESS_EVENT_REPORTED",
-            Self::AtomExpressHistogramSampleReported => "ATOM_EXPRESS_HISTOGRAM_SAMPLE_REPORTED",
-            Self::AtomExpressUidEventReported => "ATOM_EXPRESS_UID_EVENT_REPORTED",
-            Self::AtomExpressUidHistogramSampleReported => {
-                "ATOM_EXPRESS_UID_HISTOGRAM_SAMPLE_REPORTED"
+            Self::AtomAdaptiveAuthUnlockAfterLockReported => {
+                "ATOM_ADAPTIVE_AUTH_UNLOCK_AFTER_LOCK_REPORTED"
             }
-            Self::AtomPermissionRationaleDialogViewed => "ATOM_PERMISSION_RATIONALE_DIALOG_VIEWED",
-            Self::AtomPermissionRationaleDialogActionReported => {
-                "ATOM_PERMISSION_RATIONALE_DIALOG_ACTION_REPORTED"
+            Self::AtomThermalStatusCalled => "ATOM_THERMAL_STATUS_CALLED",
+            Self::AtomThermalHeadroomCalled => "ATOM_THERMAL_HEADROOM_CALLED",
+            Self::AtomThermalHeadroomThresholdsCalled => "ATOM_THERMAL_HEADROOM_THRESHOLDS_CALLED",
+            Self::AtomAdpfHintSessionTidCleanup => "ATOM_ADPF_HINT_SESSION_TID_CLEANUP",
+            Self::AtomThermalHeadroomThresholds => "ATOM_THERMAL_HEADROOM_THRESHOLDS",
+            Self::AtomAdpfSessionSnapshot => "ATOM_ADPF_SESSION_SNAPSHOT",
+            Self::AtomJsscriptengineLatencyReported => "ATOM_JSSCRIPTENGINE_LATENCY_REPORTED",
+            Self::AtomAdServicesApiCalled => "ATOM_AD_SERVICES_API_CALLED",
+            Self::AtomAdServicesMesurementReportsUploaded => {
+                "ATOM_AD_SERVICES_MESUREMENT_REPORTS_UPLOADED"
             }
-            Self::AtomAppDataSharingUpdatesNotificationInteraction => {
-                "ATOM_APP_DATA_SHARING_UPDATES_NOTIFICATION_INTERACTION"
+            Self::AtomMobileDataDownloadFileGroupStatusReported => {
+                "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STATUS_REPORTED"
             }
-            Self::AtomAppDataSharingUpdatesFragmentViewed => {
-                "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_VIEWED"
+            Self::AtomMobileDataDownloadDownloadResultReported => {
+                "ATOM_MOBILE_DATA_DOWNLOAD_DOWNLOAD_RESULT_REPORTED"
             }
-            Self::AtomAppDataSharingUpdatesFragmentActionReported => {
-                "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_ACTION_REPORTED"
+            Self::AtomAdServicesSettingsUsageReported => "ATOM_AD_SERVICES_SETTINGS_USAGE_REPORTED",
+            Self::AtomBackgroundFetchProcessReported => "ATOM_BACKGROUND_FETCH_PROCESS_REPORTED",
+            Self::AtomUpdateCustomAudienceProcessReported => {
+                "ATOM_UPDATE_CUSTOM_AUDIENCE_PROCESS_REPORTED"
             }
-            Self::AtomWsIncomingCallActionReported => "ATOM_WS_INCOMING_CALL_ACTION_REPORTED",
-            Self::AtomWsCallDisconnectionReported => "ATOM_WS_CALL_DISCONNECTION_REPORTED",
-            Self::AtomWsCallDurationReported => "ATOM_WS_CALL_DURATION_REPORTED",
-            Self::AtomWsCallUserExperienceLatencyReported => {
-                "ATOM_WS_CALL_USER_EXPERIENCE_LATENCY_REPORTED"
+            Self::AtomRunAdBiddingProcessReported => "ATOM_RUN_AD_BIDDING_PROCESS_REPORTED",
+            Self::AtomRunAdScoringProcessReported => "ATOM_RUN_AD_SCORING_PROCESS_REPORTED",
+            Self::AtomRunAdSelectionProcessReported => "ATOM_RUN_AD_SELECTION_PROCESS_REPORTED",
+            Self::AtomRunAdBiddingPerCaProcessReported => {
+                "ATOM_RUN_AD_BIDDING_PER_CA_PROCESS_REPORTED"
             }
-            Self::AtomWsCallInteractionReported => "ATOM_WS_CALL_INTERACTION_REPORTED",
-            Self::AtomFullScreenIntentLaunched => "ATOM_FULL_SCREEN_INTENT_LAUNCHED",
-            Self::AtomBalAllowed => "ATOM_BAL_ALLOWED",
-            Self::AtomInTaskActivityStarted => "ATOM_IN_TASK_ACTIVITY_STARTED",
-            Self::AtomCachedAppsHighWatermark => "ATOM_CACHED_APPS_HIGH_WATERMARK",
-            Self::AtomOdrefreshReported => "ATOM_ODREFRESH_REPORTED",
-            Self::AtomOdsignReported => "ATOM_ODSIGN_REPORTED",
-            Self::AtomArtDatumReported => "ATOM_ART_DATUM_REPORTED",
-            Self::AtomArtDeviceDatumReported => "ATOM_ART_DEVICE_DATUM_REPORTED",
-            Self::AtomArtDatumDeltaReported => "ATOM_ART_DATUM_DELTA_REPORTED",
-            Self::AtomBackgroundDexoptJobEnded => "ATOM_BACKGROUND_DEXOPT_JOB_ENDED",
-            Self::AtomWearAdaptiveSuspendStatsReported => {
-                "ATOM_WEAR_ADAPTIVE_SUSPEND_STATS_REPORTED"
+            Self::AtomMobileDataDownloadFileGroupStorageStatsReported => {
+                "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STORAGE_STATS_REPORTED"
             }
-            Self::AtomWearPowerAnomalyServiceOperationalStatsReported => {
-                "ATOM_WEAR_POWER_ANOMALY_SERVICE_OPERATIONAL_STATS_REPORTED"
+            Self::AtomAdServicesMeasurementRegistrations => {
+                "ATOM_AD_SERVICES_MEASUREMENT_REGISTRATIONS"
             }
-            Self::AtomWearPowerAnomalyServiceEventStatsReported => {
-                "ATOM_WEAR_POWER_ANOMALY_SERVICE_EVENT_STATS_REPORTED"
+            Self::AtomAdServicesGetTopicsReported => "ATOM_AD_SERVICES_GET_TOPICS_REPORTED",
+            Self::AtomAdServicesEpochComputationGetTopTopicsReported => {
+                "ATOM_AD_SERVICES_EPOCH_COMPUTATION_GET_TOP_TOPICS_REPORTED"
             }
-            Self::AtomEmergencyStateChanged => "ATOM_EMERGENCY_STATE_CHANGED",
-            Self::AtomDndStateChanged => "ATOM_DND_STATE_CHANGED",
-            Self::AtomMteState => "ATOM_MTE_STATE",
+            Self::AtomAdServicesEpochComputationClassifierReported => {
+                "ATOM_AD_SERVICES_EPOCH_COMPUTATION_CLASSIFIER_REPORTED"
+            }
             Self::AtomAdServicesBackCompatGetTopicsReported => {
                 "ATOM_AD_SERVICES_BACK_COMPAT_GET_TOPICS_REPORTED"
             }
@@ -24300,9 +28224,125 @@ impl AtomId {
             }
             Self::AtomAdServicesMeasurementJobs => "ATOM_AD_SERVICES_MEASUREMENT_JOBS",
             Self::AtomAdServicesMeasurementWipeout => "ATOM_AD_SERVICES_MEASUREMENT_WIPEOUT",
+            Self::AtomAdServicesMeasurementAdIdMatchForDebugKeys => {
+                "ATOM_AD_SERVICES_MEASUREMENT_AD_ID_MATCH_FOR_DEBUG_KEYS"
+            }
+            Self::AtomAdServicesEnrollmentDataStored => "ATOM_AD_SERVICES_ENROLLMENT_DATA_STORED",
+            Self::AtomAdServicesEnrollmentFileDownloaded => {
+                "ATOM_AD_SERVICES_ENROLLMENT_FILE_DOWNLOADED"
+            }
+            Self::AtomAdServicesEnrollmentMatched => "ATOM_AD_SERVICES_ENROLLMENT_MATCHED",
             Self::AtomAdServicesConsentMigrated => "ATOM_AD_SERVICES_CONSENT_MIGRATED",
-            Self::AtomRkpdPoolStats => "ATOM_RKPD_POOL_STATS",
-            Self::AtomRkpdClientOperation => "ATOM_RKPD_CLIENT_OPERATION",
+            Self::AtomAdServicesEnrollmentFailed => "ATOM_AD_SERVICES_ENROLLMENT_FAILED",
+            Self::AtomAdServicesMeasurementClickVerification => {
+                "ATOM_AD_SERVICES_MEASUREMENT_CLICK_VERIFICATION"
+            }
+            Self::AtomAdServicesEncryptionKeyFetched => "ATOM_AD_SERVICES_ENCRYPTION_KEY_FETCHED",
+            Self::AtomAdServicesEncryptionKeyDbTransactionEnded => {
+                "ATOM_AD_SERVICES_ENCRYPTION_KEY_DB_TRANSACTION_ENDED"
+            }
+            Self::AtomDestinationRegisteredBeacons => "ATOM_DESTINATION_REGISTERED_BEACONS",
+            Self::AtomReportInteractionApiCalled => "ATOM_REPORT_INTERACTION_API_CALLED",
+            Self::AtomInteractionReportingTableCleared => {
+                "ATOM_INTERACTION_REPORTING_TABLE_CLEARED"
+            }
+            Self::AtomAppManifestConfigHelperCalled => "ATOM_APP_MANIFEST_CONFIG_HELPER_CALLED",
+            Self::AtomAdFilteringProcessJoinCaReported => {
+                "ATOM_AD_FILTERING_PROCESS_JOIN_CA_REPORTED"
+            }
+            Self::AtomAdFilteringProcessAdSelectionReported => {
+                "ATOM_AD_FILTERING_PROCESS_AD_SELECTION_REPORTED"
+            }
+            Self::AtomAdCounterHistogramUpdaterReported => {
+                "ATOM_AD_COUNTER_HISTOGRAM_UPDATER_REPORTED"
+            }
+            Self::AtomSignatureVerification => "ATOM_SIGNATURE_VERIFICATION",
+            Self::AtomKAnonImmediateSignJoinStatusReported => {
+                "ATOM_K_ANON_IMMEDIATE_SIGN_JOIN_STATUS_REPORTED"
+            }
+            Self::AtomKAnonBackgroundJobStatusReported => {
+                "ATOM_K_ANON_BACKGROUND_JOB_STATUS_REPORTED"
+            }
+            Self::AtomKAnonInitializeStatusReported => "ATOM_K_ANON_INITIALIZE_STATUS_REPORTED",
+            Self::AtomKAnonSignStatusReported => "ATOM_K_ANON_SIGN_STATUS_REPORTED",
+            Self::AtomKAnonJoinStatusReported => "ATOM_K_ANON_JOIN_STATUS_REPORTED",
+            Self::AtomKAnonKeyAttestationStatusReported => {
+                "ATOM_K_ANON_KEY_ATTESTATION_STATUS_REPORTED"
+            }
+            Self::AtomGetAdSelectionDataApiCalled => "ATOM_GET_AD_SELECTION_DATA_API_CALLED",
+            Self::AtomGetAdSelectionDataBuyerInputGenerated => {
+                "ATOM_GET_AD_SELECTION_DATA_BUYER_INPUT_GENERATED"
+            }
+            Self::AtomBackgroundJobSchedulingReported => "ATOM_BACKGROUND_JOB_SCHEDULING_REPORTED",
+            Self::AtomTopicsEncryptionEpochComputationReported => {
+                "ATOM_TOPICS_ENCRYPTION_EPOCH_COMPUTATION_REPORTED"
+            }
+            Self::AtomTopicsEncryptionGetTopicsReported => {
+                "ATOM_TOPICS_ENCRYPTION_GET_TOPICS_REPORTED"
+            }
+            Self::AtomAdservicesShellCommandCalled => "ATOM_ADSERVICES_SHELL_COMMAND_CALLED",
+            Self::AtomUpdateSignalsApiCalled => "ATOM_UPDATE_SIGNALS_API_CALLED",
+            Self::AtomEncodingJobRun => "ATOM_ENCODING_JOB_RUN",
+            Self::AtomEncodingJsFetch => "ATOM_ENCODING_JS_FETCH",
+            Self::AtomEncodingJsExecution => "ATOM_ENCODING_JS_EXECUTION",
+            Self::AtomPersistAdSelectionResultCalled => "ATOM_PERSIST_AD_SELECTION_RESULT_CALLED",
+            Self::AtomServerAuctionKeyFetchCalled => "ATOM_SERVER_AUCTION_KEY_FETCH_CALLED",
+            Self::AtomServerAuctionBackgroundKeyFetchEnabled => {
+                "ATOM_SERVER_AUCTION_BACKGROUND_KEY_FETCH_ENABLED"
+            }
+            Self::AtomAdServicesMeasurementProcessOdpRegistration => {
+                "ATOM_AD_SERVICES_MEASUREMENT_PROCESS_ODP_REGISTRATION"
+            }
+            Self::AtomAdServicesMeasurementNotifyRegistrationToOdp => {
+                "ATOM_AD_SERVICES_MEASUREMENT_NOTIFY_REGISTRATION_TO_ODP"
+            }
+            Self::AtomSelectAdsFromOutcomesApiCalled => "ATOM_SELECT_ADS_FROM_OUTCOMES_API_CALLED",
+            Self::AtomReportImpressionApiCalled => "ATOM_REPORT_IMPRESSION_API_CALLED",
+            Self::AtomAdServicesEnrollmentTransactionStats => {
+                "ATOM_AD_SERVICES_ENROLLMENT_TRANSACTION_STATS"
+            }
+            Self::AtomAdServicesCobaltLoggerEventReported => {
+                "ATOM_AD_SERVICES_COBALT_LOGGER_EVENT_REPORTED"
+            }
+            Self::AtomAdServicesCobaltPeriodicJobEventReported => {
+                "ATOM_AD_SERVICES_COBALT_PERIODIC_JOB_EVENT_REPORTED"
+            }
+            Self::AtomUpdateSignalsProcessReported => "ATOM_UPDATE_SIGNALS_PROCESS_REPORTED",
+            Self::AtomTopicsScheduleEpochJobSettingReported => {
+                "ATOM_TOPICS_SCHEDULE_EPOCH_JOB_SETTING_REPORTED"
+            }
+            Self::AtomAiWallpapersButtonPressed => "ATOM_AI_WALLPAPERS_BUTTON_PRESSED",
+            Self::AtomAiWallpapersTemplateSelected => "ATOM_AI_WALLPAPERS_TEMPLATE_SELECTED",
+            Self::AtomAiWallpapersTermSelected => "ATOM_AI_WALLPAPERS_TERM_SELECTED",
+            Self::AtomAiWallpapersWallpaperSet => "ATOM_AI_WALLPAPERS_WALLPAPER_SET",
+            Self::AtomAiWallpapersSessionSummary => "ATOM_AI_WALLPAPERS_SESSION_SUMMARY",
+            Self::AtomApexInstallationRequested => "ATOM_APEX_INSTALLATION_REQUESTED",
+            Self::AtomApexInstallationStaged => "ATOM_APEX_INSTALLATION_STAGED",
+            Self::AtomApexInstallationEnded => "ATOM_APEX_INSTALLATION_ENDED",
+            Self::AtomAppSearchSetSchemaStatsReported => {
+                "ATOM_APP_SEARCH_SET_SCHEMA_STATS_REPORTED"
+            }
+            Self::AtomAppSearchSchemaMigrationStatsReported => {
+                "ATOM_APP_SEARCH_SCHEMA_MIGRATION_STATS_REPORTED"
+            }
+            Self::AtomAppSearchUsageSearchIntentStatsReported => {
+                "ATOM_APP_SEARCH_USAGE_SEARCH_INTENT_STATS_REPORTED"
+            }
+            Self::AtomAppSearchUsageSearchIntentRawQueryStatsReported => {
+                "ATOM_APP_SEARCH_USAGE_SEARCH_INTENT_RAW_QUERY_STATS_REPORTED"
+            }
+            Self::AtomAppSearchAppsIndexerStatsReported => {
+                "ATOM_APP_SEARCH_APPS_INDEXER_STATS_REPORTED"
+            }
+            Self::AtomArtDatumReported => "ATOM_ART_DATUM_REPORTED",
+            Self::AtomArtDeviceDatumReported => "ATOM_ART_DEVICE_DATUM_REPORTED",
+            Self::AtomArtDatumDeltaReported => "ATOM_ART_DATUM_DELTA_REPORTED",
+            Self::AtomArtDex2oatReported => "ATOM_ART_DEX2OAT_REPORTED",
+            Self::AtomArtDeviceStatus => "ATOM_ART_DEVICE_STATUS",
+            Self::AtomBackgroundDexoptJobEnded => "ATOM_BACKGROUND_DEXOPT_JOB_ENDED",
+            Self::AtomPrerebootDexoptJobEnded => "ATOM_PREREBOOT_DEXOPT_JOB_ENDED",
+            Self::AtomOdrefreshReported => "ATOM_ODREFRESH_REPORTED",
+            Self::AtomOdsignReported => "ATOM_ODSIGN_REPORTED",
             Self::AtomAutofillUiEventReported => "ATOM_AUTOFILL_UI_EVENT_REPORTED",
             Self::AtomAutofillFillRequestReported => "ATOM_AUTOFILL_FILL_REQUEST_REPORTED",
             Self::AtomAutofillFillResponseReported => "ATOM_AUTOFILL_FILL_RESPONSE_REPORTED",
@@ -24311,30 +28351,10 @@ impl AtomId {
             Self::AtomAutofillFieldClassificationEventReported => {
                 "ATOM_AUTOFILL_FIELD_CLASSIFICATION_EVENT_REPORTED"
             }
-            Self::AtomTestExtensionAtomReported => "ATOM_TEST_EXTENSION_ATOM_REPORTED",
-            Self::AtomTestRestrictedAtomReported => "ATOM_TEST_RESTRICTED_ATOM_REPORTED",
-            Self::AtomStatsSocketLossReported => "ATOM_STATS_SOCKET_LOSS_REPORTED",
+            Self::AtomCarRecentsEventReported => "ATOM_CAR_RECENTS_EVENT_REPORTED",
+            Self::AtomCarCalmModeEventReported => "ATOM_CAR_CALM_MODE_EVENT_REPORTED",
+            Self::AtomCarWakeupFromSuspendReported => "ATOM_CAR_WAKEUP_FROM_SUSPEND_REPORTED",
             Self::AtomPluginInitialized => "ATOM_PLUGIN_INITIALIZED",
-            Self::AtomTvLowPowerStandbyPolicy => "ATOM_TV_LOW_POWER_STANDBY_POLICY",
-            Self::AtomLockscreenShortcutSelected => "ATOM_LOCKSCREEN_SHORTCUT_SELECTED",
-            Self::AtomLockscreenShortcutTriggered => "ATOM_LOCKSCREEN_SHORTCUT_TRIGGERED",
-            Self::AtomEmergencyNumbersInfo => "ATOM_EMERGENCY_NUMBERS_INFO",
-            Self::AtomQualifiedRatListChanged => "ATOM_QUALIFIED_RAT_LIST_CHANGED",
-            Self::AtomQnsImsCallDropStats => "ATOM_QNS_IMS_CALL_DROP_STATS",
-            Self::AtomQnsFallbackRestrictionChanged => "ATOM_QNS_FALLBACK_RESTRICTION_CHANGED",
-            Self::AtomQnsRatPreferenceMismatchInfo => "ATOM_QNS_RAT_PREFERENCE_MISMATCH_INFO",
-            Self::AtomQnsHandoverTimeMillis => "ATOM_QNS_HANDOVER_TIME_MILLIS",
-            Self::AtomQnsHandoverPingpong => "ATOM_QNS_HANDOVER_PINGPONG",
-            Self::AtomSatelliteController => "ATOM_SATELLITE_CONTROLLER",
-            Self::AtomSatelliteSession => "ATOM_SATELLITE_SESSION",
-            Self::AtomSatelliteIncomingDatagram => "ATOM_SATELLITE_INCOMING_DATAGRAM",
-            Self::AtomSatelliteOutgoingDatagram => "ATOM_SATELLITE_OUTGOING_DATAGRAM",
-            Self::AtomSatelliteProvision => "ATOM_SATELLITE_PROVISION",
-            Self::AtomSatelliteSosMessageRecommender => "ATOM_SATELLITE_SOS_MESSAGE_RECOMMENDER",
-            Self::AtomIkeSessionTerminated => "ATOM_IKE_SESSION_TERMINATED",
-            Self::AtomIkeLivenessCheckSessionValidated => {
-                "ATOM_IKE_LIVENESS_CHECK_SESSION_VALIDATED"
-            }
             Self::AtomBluetoothHashedDeviceNameReported => {
                 "ATOM_BLUETOOTH_HASHED_DEVICE_NAME_REPORTED"
             }
@@ -24351,33 +28371,55 @@ impl AtomId {
             Self::AtomBluetoothProfileConnectionAttempted => {
                 "ATOM_BLUETOOTH_PROFILE_CONNECTION_ATTEMPTED"
             }
-            Self::AtomHealthConnectUiImpression => "ATOM_HEALTH_CONNECT_UI_IMPRESSION",
-            Self::AtomHealthConnectUiInteraction => "ATOM_HEALTH_CONNECT_UI_INTERACTION",
-            Self::AtomHealthConnectAppOpenedReported => "ATOM_HEALTH_CONNECT_APP_OPENED_REPORTED",
-            Self::AtomHealthConnectApiCalled => "ATOM_HEALTH_CONNECT_API_CALLED",
-            Self::AtomHealthConnectUsageStats => "ATOM_HEALTH_CONNECT_USAGE_STATS",
-            Self::AtomHealthConnectStorageStats => "ATOM_HEALTH_CONNECT_STORAGE_STATS",
-            Self::AtomHealthConnectApiInvoked => "ATOM_HEALTH_CONNECT_API_INVOKED",
-            Self::AtomExerciseRouteApiCalled => "ATOM_EXERCISE_ROUTE_API_CALLED",
-            Self::AtomAtom9999 => "ATOM_ATOM_9999",
-            Self::AtomAtom99999 => "ATOM_ATOM_99999",
-            Self::AtomThreadnetworkTelemetryDataReported => {
-                "ATOM_THREADNETWORK_TELEMETRY_DATA_REPORTED"
+            Self::AtomBluetoothContentProfileErrorReported => {
+                "ATOM_BLUETOOTH_CONTENT_PROFILE_ERROR_REPORTED"
             }
-            Self::AtomThreadnetworkTopoEntryRepeated => "ATOM_THREADNETWORK_TOPO_ENTRY_REPEATED",
-            Self::AtomThreadnetworkDeviceInfoReported => "ATOM_THREADNETWORK_DEVICE_INFO_REPORTED",
-            Self::AtomEmergencyNumberDialed => "ATOM_EMERGENCY_NUMBER_DIALED",
-            Self::AtomSandboxApiCalled => "ATOM_SANDBOX_API_CALLED",
-            Self::AtomSandboxActivityEventOccurred => "ATOM_SANDBOX_ACTIVITY_EVENT_OCCURRED",
-            Self::AtomSandboxSdkStorage => "ATOM_SANDBOX_SDK_STORAGE",
-            Self::AtomCronetEngineCreated => "ATOM_CRONET_ENGINE_CREATED",
-            Self::AtomCronetTrafficReported => "ATOM_CRONET_TRAFFIC_REPORTED",
-            Self::AtomCronetEngineBuilderInitialized => "ATOM_CRONET_ENGINE_BUILDER_INITIALIZED",
-            Self::AtomCronetHttpFlagsInitialized => "ATOM_CRONET_HTTP_FLAGS_INITIALIZED",
-            Self::AtomCronetInitialized => "ATOM_CRONET_INITIALIZED",
+            Self::AtomBluetoothRfcommConnectionAttempted => {
+                "ATOM_BLUETOOTH_RFCOMM_CONNECTION_ATTEMPTED"
+            }
+            Self::AtomRemoteDeviceInformationWithMetricId => {
+                "ATOM_REMOTE_DEVICE_INFORMATION_WITH_METRIC_ID"
+            }
+            Self::AtomLeAppScanStateChanged => "ATOM_LE_APP_SCAN_STATE_CHANGED",
+            Self::AtomLeRadioScanStopped => "ATOM_LE_RADIO_SCAN_STOPPED",
+            Self::AtomLeScanResultReceived => "ATOM_LE_SCAN_RESULT_RECEIVED",
+            Self::AtomLeScanAbused => "ATOM_LE_SCAN_ABUSED",
+            Self::AtomLeAdvStateChanged => "ATOM_LE_ADV_STATE_CHANGED",
+            Self::AtomLeAdvErrorReported => "ATOM_LE_ADV_ERROR_REPORTED",
+            Self::AtomA2dpSessionReported => "ATOM_A2DP_SESSION_REPORTED",
+            Self::AtomBluetoothCrossLayerEventReported => {
+                "ATOM_BLUETOOTH_CROSS_LAYER_EVENT_REPORTED"
+            }
+            Self::AtomBroadcastAudioSessionReported => "ATOM_BROADCAST_AUDIO_SESSION_REPORTED",
+            Self::AtomBroadcastAudioSyncReported => "ATOM_BROADCAST_AUDIO_SYNC_REPORTED",
+            Self::AtomBluetoothRfcommConnectionReportedAtClose => {
+                "ATOM_BLUETOOTH_RFCOMM_CONNECTION_REPORTED_AT_CLOSE"
+            }
+            Self::AtomBluetoothLeConnection => "ATOM_BLUETOOTH_LE_CONNECTION",
+            Self::AtomBroadcastSent => "ATOM_BROADCAST_SENT",
+            Self::AtomCameraFeatureCombinationQueryEvent => {
+                "ATOM_CAMERA_FEATURE_COMBINATION_QUERY_EVENT"
+            }
+            Self::AtomCertificateTransparencyLogListStateChanged => {
+                "ATOM_CERTIFICATE_TRANSPARENCY_LOG_LIST_STATE_CHANGED"
+            }
+            Self::AtomCertificateTransparencyLogListUpdateFailed => {
+                "ATOM_CERTIFICATE_TRANSPARENCY_LOG_LIST_UPDATE_FAILED"
+            }
             Self::AtomDailyKeepaliveInfoReported => "ATOM_DAILY_KEEPALIVE_INFO_REPORTED",
-            Self::AtomIpClientRaInfoReported => "ATOM_IP_CLIENT_RA_INFO_REPORTED",
+            Self::AtomNetworkRequestStateChanged => "ATOM_NETWORK_REQUEST_STATE_CHANGED",
+            Self::AtomTetheringActiveSessionsReported => "ATOM_TETHERING_ACTIVE_SESSIONS_REPORTED",
+            Self::AtomNetworkStatsRecorderFileOperated => {
+                "ATOM_NETWORK_STATS_RECORDER_FILE_OPERATED"
+            }
+            Self::AtomCoreNetworkingTerribleErrorOccurred => {
+                "ATOM_CORE_NETWORKING_TERRIBLE_ERROR_OCCURRED"
+            }
             Self::AtomApfSessionInfoReported => "ATOM_APF_SESSION_INFO_REPORTED",
+            Self::AtomIpClientRaInfoReported => "ATOM_IP_CLIENT_RA_INFO_REPORTED",
+            Self::AtomVpnConnectionStateChanged => "ATOM_VPN_CONNECTION_STATE_CHANGED",
+            Self::AtomVpnConnectionReported => "ATOM_VPN_CONNECTION_REPORTED",
+            Self::AtomCpuPolicy => "ATOM_CPU_POLICY",
             Self::AtomCredentialManagerApiCalled => "ATOM_CREDENTIAL_MANAGER_API_CALLED",
             Self::AtomCredentialManagerInitPhaseReported => {
                 "ATOM_CREDENTIAL_MANAGER_INIT_PHASE_REPORTED"
@@ -24397,15 +28439,389 @@ impl AtomId {
                 "ATOM_CREDENTIAL_MANAGER_AUTH_CLICK_REPORTED"
             }
             Self::AtomCredentialManagerApiv2Called => "ATOM_CREDENTIAL_MANAGER_APIV2_CALLED",
-            Self::AtomUwbActivityInfo => "ATOM_UWB_ACTIVITY_INFO",
-            Self::AtomMediaActionReported => "ATOM_MEDIA_ACTION_REPORTED",
-            Self::AtomMediaControlsLaunched => "ATOM_MEDIA_CONTROLS_LAUNCHED",
+            Self::AtomCronetEngineCreated => "ATOM_CRONET_ENGINE_CREATED",
+            Self::AtomCronetTrafficReported => "ATOM_CRONET_TRAFFIC_REPORTED",
+            Self::AtomCronetEngineBuilderInitialized => "ATOM_CRONET_ENGINE_BUILDER_INITIALIZED",
+            Self::AtomCronetHttpFlagsInitialized => "ATOM_CRONET_HTTP_FLAGS_INITIALIZED",
+            Self::AtomCronetInitialized => "ATOM_CRONET_INITIALIZED",
+            Self::AtomDesktopModeUiChanged => "ATOM_DESKTOP_MODE_UI_CHANGED",
+            Self::AtomDesktopModeSessionTaskUpdate => "ATOM_DESKTOP_MODE_SESSION_TASK_UPDATE",
+            Self::AtomDesktopModeTaskSizeUpdated => "ATOM_DESKTOP_MODE_TASK_SIZE_UPDATED",
+            Self::AtomDeviceLockCheckInRequestReported => {
+                "ATOM_DEVICE_LOCK_CHECK_IN_REQUEST_REPORTED"
+            }
+            Self::AtomDeviceLockProvisioningCompleteReported => {
+                "ATOM_DEVICE_LOCK_PROVISIONING_COMPLETE_REPORTED"
+            }
+            Self::AtomDeviceLockKioskAppRequestReported => {
+                "ATOM_DEVICE_LOCK_KIOSK_APP_REQUEST_REPORTED"
+            }
+            Self::AtomDeviceLockCheckInRetryReported => "ATOM_DEVICE_LOCK_CHECK_IN_RETRY_REPORTED",
+            Self::AtomDeviceLockProvisionFailureReported => {
+                "ATOM_DEVICE_LOCK_PROVISION_FAILURE_REPORTED"
+            }
+            Self::AtomDeviceLockLockUnlockDeviceFailureReported => {
+                "ATOM_DEVICE_LOCK_LOCK_UNLOCK_DEVICE_FAILURE_REPORTED"
+            }
+            Self::AtomDevicePolicyManagementMode => "ATOM_DEVICE_POLICY_MANAGEMENT_MODE",
+            Self::AtomDevicePolicyState => "ATOM_DEVICE_POLICY_STATE",
+            Self::AtomDisplayModeDirectorVoteChanged => "ATOM_DISPLAY_MODE_DIRECTOR_VOTE_CHANGED",
+            Self::AtomExternalDisplayStateChanged => "ATOM_EXTERNAL_DISPLAY_STATE_CHANGED",
+            Self::AtomDndStateChanged => "ATOM_DND_STATE_CHANGED",
+            Self::AtomDreamSettingChanged => "ATOM_DREAM_SETTING_CHANGED",
+            Self::AtomDreamSettingSnapshot => "ATOM_DREAM_SETTING_SNAPSHOT",
+            Self::AtomExpressEventReported => "ATOM_EXPRESS_EVENT_REPORTED",
+            Self::AtomExpressHistogramSampleReported => "ATOM_EXPRESS_HISTOGRAM_SAMPLE_REPORTED",
+            Self::AtomExpressUidEventReported => "ATOM_EXPRESS_UID_EVENT_REPORTED",
+            Self::AtomExpressUidHistogramSampleReported => {
+                "ATOM_EXPRESS_UID_HISTOGRAM_SAMPLE_REPORTED"
+            }
+            Self::AtomFederatedComputeApiCalled => "ATOM_FEDERATED_COMPUTE_API_CALLED",
+            Self::AtomFederatedComputeTrainingEventReported => {
+                "ATOM_FEDERATED_COMPUTE_TRAINING_EVENT_REPORTED"
+            }
+            Self::AtomExampleIteratorNextLatencyReported => {
+                "ATOM_EXAMPLE_ITERATOR_NEXT_LATENCY_REPORTED"
+            }
+            Self::AtomFullScreenIntentLaunched => "ATOM_FULL_SCREEN_INTENT_LAUNCHED",
+            Self::AtomBalAllowed => "ATOM_BAL_ALLOWED",
+            Self::AtomInTaskActivityStarted => "ATOM_IN_TASK_ACTIVITY_STARTED",
+            Self::AtomDeviceOrientationChanged => "ATOM_DEVICE_ORIENTATION_CHANGED",
+            Self::AtomCachedAppsHighWatermark => "ATOM_CACHED_APPS_HIGH_WATERMARK",
+            Self::AtomStylusPredictionMetricsReported => "ATOM_STYLUS_PREDICTION_METRICS_REPORTED",
+            Self::AtomUserRiskEventReported => "ATOM_USER_RISK_EVENT_REPORTED",
+            Self::AtomMediaProjectionStateChanged => "ATOM_MEDIA_PROJECTION_STATE_CHANGED",
+            Self::AtomMediaProjectionTargetChanged => "ATOM_MEDIA_PROJECTION_TARGET_CHANGED",
+            Self::AtomExcessiveBinderProxyCountReported => {
+                "ATOM_EXCESSIVE_BINDER_PROXY_COUNT_REPORTED"
+            }
+            Self::AtomProxyBytesTransferByFgBg => "ATOM_PROXY_BYTES_TRANSFER_BY_FG_BG",
+            Self::AtomMobileBytesTransferByProcState => "ATOM_MOBILE_BYTES_TRANSFER_BY_PROC_STATE",
+            Self::AtomBiometricFrrNotification => "ATOM_BIOMETRIC_FRR_NOTIFICATION",
+            Self::AtomSensitiveContentMediaProjectionSession => {
+                "ATOM_SENSITIVE_CONTENT_MEDIA_PROJECTION_SESSION"
+            }
+            Self::AtomSensitiveNotificationAppProtectionSession => {
+                "ATOM_SENSITIVE_NOTIFICATION_APP_PROTECTION_SESSION"
+            }
+            Self::AtomSensitiveNotificationAppProtectionApplied => {
+                "ATOM_SENSITIVE_NOTIFICATION_APP_PROTECTION_APPLIED"
+            }
+            Self::AtomSensitiveNotificationRedaction => "ATOM_SENSITIVE_NOTIFICATION_REDACTION",
+            Self::AtomSensitiveContentAppProtection => "ATOM_SENSITIVE_CONTENT_APP_PROTECTION",
+            Self::AtomAppRestrictionStateChanged => "ATOM_APP_RESTRICTION_STATE_CHANGED",
+            Self::AtomBatteryUsageStatsPerUid => "ATOM_BATTERY_USAGE_STATS_PER_UID",
+            Self::AtomPostgcMemorySnapshot => "ATOM_POSTGC_MEMORY_SNAPSHOT",
+            Self::AtomPowerSaveTempAllowlistChanged => "ATOM_POWER_SAVE_TEMP_ALLOWLIST_CHANGED",
+            Self::AtomAppOpAccessTracked => "ATOM_APP_OP_ACCESS_TRACKED",
+            Self::AtomContentOrFileUriEventReported => "ATOM_CONTENT_OR_FILE_URI_EVENT_REPORTED",
+            Self::AtomApplicationGrammaticalInflectionChanged => {
+                "ATOM_APPLICATION_GRAMMATICAL_INFLECTION_CHANGED"
+            }
+            Self::AtomSystemGrammaticalInflectionChanged => {
+                "ATOM_SYSTEM_GRAMMATICAL_INFLECTION_CHANGED"
+            }
+            Self::AtomBatteryHealth => "ATOM_BATTERY_HEALTH",
+            Self::AtomHdmiEarcStatusReported => "ATOM_HDMI_EARC_STATUS_REPORTED",
+            Self::AtomHdmiSoundbarModeStatusReported => "ATOM_HDMI_SOUNDBAR_MODE_STATUS_REPORTED",
+            Self::AtomHealthConnectApiCalled => "ATOM_HEALTH_CONNECT_API_CALLED",
+            Self::AtomHealthConnectUsageStats => "ATOM_HEALTH_CONNECT_USAGE_STATS",
+            Self::AtomHealthConnectStorageStats => "ATOM_HEALTH_CONNECT_STORAGE_STATS",
+            Self::AtomHealthConnectApiInvoked => "ATOM_HEALTH_CONNECT_API_INVOKED",
+            Self::AtomExerciseRouteApiCalled => "ATOM_EXERCISE_ROUTE_API_CALLED",
+            Self::AtomHealthConnectExportInvoked => "ATOM_HEALTH_CONNECT_EXPORT_INVOKED",
+            Self::AtomHealthConnectImportInvoked => "ATOM_HEALTH_CONNECT_IMPORT_INVOKED",
+            Self::AtomHealthConnectExportImportStatsReported => {
+                "ATOM_HEALTH_CONNECT_EXPORT_IMPORT_STATS_REPORTED"
+            }
+            Self::AtomHealthConnectUiImpression => "ATOM_HEALTH_CONNECT_UI_IMPRESSION",
+            Self::AtomHealthConnectUiInteraction => "ATOM_HEALTH_CONNECT_UI_INTERACTION",
+            Self::AtomHealthConnectAppOpenedReported => "ATOM_HEALTH_CONNECT_APP_OPENED_REPORTED",
+            Self::AtomHotwordEgressSizeAtomReported => "ATOM_HOTWORD_EGRESS_SIZE_ATOM_REPORTED",
+            Self::AtomIkeSessionTerminated => "ATOM_IKE_SESSION_TERMINATED",
+            Self::AtomIkeLivenessCheckSessionValidated => {
+                "ATOM_IKE_LIVENESS_CHECK_SESSION_VALIDATED"
+            }
+            Self::AtomNegotiatedSecurityAssociation => "ATOM_NEGOTIATED_SECURITY_ASSOCIATION",
+            Self::AtomKeyboardConfigured => "ATOM_KEYBOARD_CONFIGURED",
+            Self::AtomKeyboardSystemsEventReported => "ATOM_KEYBOARD_SYSTEMS_EVENT_REPORTED",
+            Self::AtomInputdeviceUsageReported => "ATOM_INPUTDEVICE_USAGE_REPORTED",
+            Self::AtomInputEventLatencyReported => "ATOM_INPUT_EVENT_LATENCY_REPORTED",
+            Self::AtomTouchpadUsage => "ATOM_TOUCHPAD_USAGE",
+            Self::AtomKernelOomKillOccurred => "ATOM_KERNEL_OOM_KILL_OCCURRED",
+            Self::AtomEmergencyStateChanged => "ATOM_EMERGENCY_STATE_CHANGED",
+            Self::AtomChreSignificantMotionStateChanged => {
+                "ATOM_CHRE_SIGNIFICANT_MOTION_STATE_CHANGED"
+            }
+            Self::AtomPopulationDensityProviderLoadingReported => {
+                "ATOM_POPULATION_DENSITY_PROVIDER_LOADING_REPORTED"
+            }
+            Self::AtomDensityBasedCoarseLocationsUsageReported => {
+                "ATOM_DENSITY_BASED_COARSE_LOCATIONS_USAGE_REPORTED"
+            }
+            Self::AtomDensityBasedCoarseLocationsProviderQueryReported => {
+                "ATOM_DENSITY_BASED_COARSE_LOCATIONS_PROVIDER_QUERY_REPORTED"
+            }
             Self::AtomMediaCodecReclaimRequestCompleted => {
                 "ATOM_MEDIA_CODEC_RECLAIM_REQUEST_COMPLETED"
             }
             Self::AtomMediaCodecStarted => "ATOM_MEDIA_CODEC_STARTED",
             Self::AtomMediaCodecStopped => "ATOM_MEDIA_CODEC_STOPPED",
             Self::AtomMediaCodecRendered => "ATOM_MEDIA_CODEC_RENDERED",
+            Self::AtomMediaEditingEndedReported => "ATOM_MEDIA_EDITING_ENDED_REPORTED",
+            Self::AtomMteState => "ATOM_MTE_STATE",
+            Self::AtomMicroxrDeviceBootCompleteReported => {
+                "ATOM_MICROXR_DEVICE_BOOT_COMPLETE_REPORTED"
+            }
+            Self::AtomNfcObserveModeStateChanged => "ATOM_NFC_OBSERVE_MODE_STATE_CHANGED",
+            Self::AtomNfcFieldChanged => "ATOM_NFC_FIELD_CHANGED",
+            Self::AtomNfcPollingLoopNotificationReported => {
+                "ATOM_NFC_POLLING_LOOP_NOTIFICATION_REPORTED"
+            }
+            Self::AtomNfcProprietaryCapabilitiesReported => {
+                "ATOM_NFC_PROPRIETARY_CAPABILITIES_REPORTED"
+            }
+            Self::AtomOndevicepersonalizationApiCalled => "ATOM_ONDEVICEPERSONALIZATION_API_CALLED",
+            Self::AtomComponentStateChangedReported => "ATOM_COMPONENT_STATE_CHANGED_REPORTED",
+            Self::AtomPdfLoadReported => "ATOM_PDF_LOAD_REPORTED",
+            Self::AtomPdfApiUsageReported => "ATOM_PDF_API_USAGE_REPORTED",
+            Self::AtomPdfSearchReported => "ATOM_PDF_SEARCH_REPORTED",
+            Self::AtomPressureStallInformation => "ATOM_PRESSURE_STALL_INFORMATION",
+            Self::AtomPermissionRationaleDialogViewed => "ATOM_PERMISSION_RATIONALE_DIALOG_VIEWED",
+            Self::AtomPermissionRationaleDialogActionReported => {
+                "ATOM_PERMISSION_RATIONALE_DIALOG_ACTION_REPORTED"
+            }
+            Self::AtomAppDataSharingUpdatesNotificationInteraction => {
+                "ATOM_APP_DATA_SHARING_UPDATES_NOTIFICATION_INTERACTION"
+            }
+            Self::AtomAppDataSharingUpdatesFragmentViewed => {
+                "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_VIEWED"
+            }
+            Self::AtomAppDataSharingUpdatesFragmentActionReported => {
+                "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_ACTION_REPORTED"
+            }
+            Self::AtomEnhancedConfirmationDialogResultReported => {
+                "ATOM_ENHANCED_CONFIRMATION_DIALOG_RESULT_REPORTED"
+            }
+            Self::AtomEnhancedConfirmationRestrictionCleared => {
+                "ATOM_ENHANCED_CONFIRMATION_RESTRICTION_CLEARED"
+            }
+            Self::AtomPhotopickerSessionInfoReported => "ATOM_PHOTOPICKER_SESSION_INFO_REPORTED",
+            Self::AtomPhotopickerApiInfoReported => "ATOM_PHOTOPICKER_API_INFO_REPORTED",
+            Self::AtomPhotopickerUiEventLogged => "ATOM_PHOTOPICKER_UI_EVENT_LOGGED",
+            Self::AtomPhotopickerMediaItemStatusReported => {
+                "ATOM_PHOTOPICKER_MEDIA_ITEM_STATUS_REPORTED"
+            }
+            Self::AtomPhotopickerPreviewInfoLogged => "ATOM_PHOTOPICKER_PREVIEW_INFO_LOGGED",
+            Self::AtomPhotopickerMenuInteractionLogged => {
+                "ATOM_PHOTOPICKER_MENU_INTERACTION_LOGGED"
+            }
+            Self::AtomPhotopickerBannerInteractionLogged => {
+                "ATOM_PHOTOPICKER_BANNER_INTERACTION_LOGGED"
+            }
+            Self::AtomPhotopickerMediaLibraryInfoLogged => {
+                "ATOM_PHOTOPICKER_MEDIA_LIBRARY_INFO_LOGGED"
+            }
+            Self::AtomPhotopickerPageInfoLogged => "ATOM_PHOTOPICKER_PAGE_INFO_LOGGED",
+            Self::AtomPhotopickerMediaGridSyncInfoReported => {
+                "ATOM_PHOTOPICKER_MEDIA_GRID_SYNC_INFO_REPORTED"
+            }
+            Self::AtomPhotopickerAlbumSyncInfoReported => {
+                "ATOM_PHOTOPICKER_ALBUM_SYNC_INFO_REPORTED"
+            }
+            Self::AtomPhotopickerSearchInfoReported => "ATOM_PHOTOPICKER_SEARCH_INFO_REPORTED",
+            Self::AtomSearchDataExtractionDetailsReported => {
+                "ATOM_SEARCH_DATA_EXTRACTION_DETAILS_REPORTED"
+            }
+            Self::AtomEmbeddedPhotopickerInfoReported => "ATOM_EMBEDDED_PHOTOPICKER_INFO_REPORTED",
+            Self::AtomAtom9999 => "ATOM_ATOM_9999",
+            Self::AtomAtom99999 => "ATOM_ATOM_99999",
+            Self::AtomScreenOffReported => "ATOM_SCREEN_OFF_REPORTED",
+            Self::AtomScreenTimeoutOverrideReported => "ATOM_SCREEN_TIMEOUT_OVERRIDE_REPORTED",
+            Self::AtomScreenInteractiveSessionReported => {
+                "ATOM_SCREEN_INTERACTIVE_SESSION_REPORTED"
+            }
+            Self::AtomScreenDimReported => "ATOM_SCREEN_DIM_REPORTED",
+            Self::AtomMediaProviderDatabaseRollbackReported => {
+                "ATOM_MEDIA_PROVIDER_DATABASE_ROLLBACK_REPORTED"
+            }
+            Self::AtomBackupSetupStatusReported => "ATOM_BACKUP_SETUP_STATUS_REPORTED",
+            Self::AtomRangingSessionConfigured => "ATOM_RANGING_SESSION_CONFIGURED",
+            Self::AtomRangingSessionStarted => "ATOM_RANGING_SESSION_STARTED",
+            Self::AtomRangingSessionClosed => "ATOM_RANGING_SESSION_CLOSED",
+            Self::AtomRangingTechnologyStarted => "ATOM_RANGING_TECHNOLOGY_STARTED",
+            Self::AtomRangingTechnologyStopped => "ATOM_RANGING_TECHNOLOGY_STOPPED",
+            Self::AtomRkpdPoolStats => "ATOM_RKPD_POOL_STATS",
+            Self::AtomRkpdClientOperation => "ATOM_RKPD_CLIENT_OPERATION",
+            Self::AtomSandboxApiCalled => "ATOM_SANDBOX_API_CALLED",
+            Self::AtomSandboxActivityEventOccurred => "ATOM_SANDBOX_ACTIVITY_EVENT_OCCURRED",
+            Self::AtomSdkSandboxRestrictedAccessInSession => {
+                "ATOM_SDK_SANDBOX_RESTRICTED_ACCESS_IN_SESSION"
+            }
+            Self::AtomSandboxSdkStorage => "ATOM_SANDBOX_SDK_STORAGE",
+            Self::AtomSelinuxAuditLog => "ATOM_SELINUX_AUDIT_LOG",
+            Self::AtomSettingsSpaReported => "ATOM_SETTINGS_SPA_REPORTED",
+            Self::AtomTestExtensionAtomReported => "ATOM_TEST_EXTENSION_ATOM_REPORTED",
+            Self::AtomTestRestrictedAtomReported => "ATOM_TEST_RESTRICTED_ATOM_REPORTED",
+            Self::AtomStatsSocketLossReported => "ATOM_STATS_SOCKET_LOSS_REPORTED",
+            Self::AtomLockscreenShortcutSelected => "ATOM_LOCKSCREEN_SHORTCUT_SELECTED",
+            Self::AtomLockscreenShortcutTriggered => "ATOM_LOCKSCREEN_SHORTCUT_TRIGGERED",
+            Self::AtomLauncherImpressionEventV2 => "ATOM_LAUNCHER_IMPRESSION_EVENT_V2",
+            Self::AtomDisplaySwitchLatencyTracked => "ATOM_DISPLAY_SWITCH_LATENCY_TRACKED",
+            Self::AtomNotificationListenerService => "ATOM_NOTIFICATION_LISTENER_SERVICE",
+            Self::AtomNavHandleTouchPoints => "ATOM_NAV_HANDLE_TOUCH_POINTS",
+            Self::AtomCommunalHubWidgetEventReported => "ATOM_COMMUNAL_HUB_WIDGET_EVENT_REPORTED",
+            Self::AtomCommunalHubSnapshot => "ATOM_COMMUNAL_HUB_SNAPSHOT",
+            Self::AtomEmergencyNumberDialed => "ATOM_EMERGENCY_NUMBER_DIALED",
+            Self::AtomCallStats => "ATOM_CALL_STATS",
+            Self::AtomCallAudioRouteStats => "ATOM_CALL_AUDIO_ROUTE_STATS",
+            Self::AtomTelecomApiStats => "ATOM_TELECOM_API_STATS",
+            Self::AtomTelecomErrorStats => "ATOM_TELECOM_ERROR_STATS",
+            Self::AtomCellularRadioPowerStateChanged => "ATOM_CELLULAR_RADIO_POWER_STATE_CHANGED",
+            Self::AtomEmergencyNumbersInfo => "ATOM_EMERGENCY_NUMBERS_INFO",
+            Self::AtomDataNetworkValidation => "ATOM_DATA_NETWORK_VALIDATION",
+            Self::AtomDataRatStateChanged => "ATOM_DATA_RAT_STATE_CHANGED",
+            Self::AtomConnectedChannelChanged => "ATOM_CONNECTED_CHANNEL_CHANGED",
+            Self::AtomIwlanUnderlyingNetworkValidationResultReported => {
+                "ATOM_IWLAN_UNDERLYING_NETWORK_VALIDATION_RESULT_REPORTED"
+            }
+            Self::AtomQualifiedRatListChanged => "ATOM_QUALIFIED_RAT_LIST_CHANGED",
+            Self::AtomQnsImsCallDropStats => "ATOM_QNS_IMS_CALL_DROP_STATS",
+            Self::AtomQnsFallbackRestrictionChanged => "ATOM_QNS_FALLBACK_RESTRICTION_CHANGED",
+            Self::AtomQnsRatPreferenceMismatchInfo => "ATOM_QNS_RAT_PREFERENCE_MISMATCH_INFO",
+            Self::AtomQnsHandoverTimeMillis => "ATOM_QNS_HANDOVER_TIME_MILLIS",
+            Self::AtomQnsHandoverPingpong => "ATOM_QNS_HANDOVER_PINGPONG",
+            Self::AtomSatelliteController => "ATOM_SATELLITE_CONTROLLER",
+            Self::AtomSatelliteSession => "ATOM_SATELLITE_SESSION",
+            Self::AtomSatelliteIncomingDatagram => "ATOM_SATELLITE_INCOMING_DATAGRAM",
+            Self::AtomSatelliteOutgoingDatagram => "ATOM_SATELLITE_OUTGOING_DATAGRAM",
+            Self::AtomSatelliteProvision => "ATOM_SATELLITE_PROVISION",
+            Self::AtomSatelliteSosMessageRecommender => "ATOM_SATELLITE_SOS_MESSAGE_RECOMMENDER",
+            Self::AtomCarrierRoamingSatelliteSession => "ATOM_CARRIER_ROAMING_SATELLITE_SESSION",
+            Self::AtomCarrierRoamingSatelliteControllerStats => {
+                "ATOM_CARRIER_ROAMING_SATELLITE_CONTROLLER_STATS"
+            }
+            Self::AtomControllerStatsPerPackage => "ATOM_CONTROLLER_STATS_PER_PACKAGE",
+            Self::AtomSatelliteEntitlement => "ATOM_SATELLITE_ENTITLEMENT",
+            Self::AtomSatelliteConfigUpdater => "ATOM_SATELLITE_CONFIG_UPDATER",
+            Self::AtomSatelliteAccessController => "ATOM_SATELLITE_ACCESS_CONTROLLER",
+            Self::AtomCellularIdentifierDisclosed => "ATOM_CELLULAR_IDENTIFIER_DISCLOSED",
+            Self::AtomThreadnetworkTelemetryDataReported => {
+                "ATOM_THREADNETWORK_TELEMETRY_DATA_REPORTED"
+            }
+            Self::AtomThreadnetworkTopoEntryRepeated => "ATOM_THREADNETWORK_TOPO_ENTRY_REPEATED",
+            Self::AtomThreadnetworkDeviceInfoReported => "ATOM_THREADNETWORK_DEVICE_INFO_REPORTED",
+            Self::AtomBootIntegrityInfoReported => "ATOM_BOOT_INTEGRITY_INFO_REPORTED",
+            Self::AtomTvLowPowerStandbyPolicy => "ATOM_TV_LOW_POWER_STANDBY_POLICY",
+            Self::AtomExternalTvInputEvent => "ATOM_EXTERNAL_TV_INPUT_EVENT",
+            Self::AtomTestUprobestatsAtomReported => "ATOM_TEST_UPROBESTATS_ATOM_REPORTED",
+            Self::AtomUwbActivityInfo => "ATOM_UWB_ACTIVITY_INFO",
+            Self::AtomMediatorUpdated => "ATOM_MEDIATOR_UPDATED",
+            Self::AtomSysproxyBluetoothBytesTransfer => "ATOM_SYSPROXY_BLUETOOTH_BYTES_TRANSFER",
+            Self::AtomSysproxyConnectionUpdated => "ATOM_SYSPROXY_CONNECTION_UPDATED",
+            Self::AtomWearCompanionConnectionState => "ATOM_WEAR_COMPANION_CONNECTION_STATE",
+            Self::AtomMediaActionReported => "ATOM_MEDIA_ACTION_REPORTED",
+            Self::AtomMediaControlsLaunched => "ATOM_MEDIA_CONTROLS_LAUNCHED",
+            Self::AtomMediaSessionStateChanged => "ATOM_MEDIA_SESSION_STATE_CHANGED",
+            Self::AtomWearMediaOutputSwitcherDeviceScanApiLatency => {
+                "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_DEVICE_SCAN_API_LATENCY"
+            }
+            Self::AtomWearMediaOutputSwitcherSassDeviceUnavailable => {
+                "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_SASS_DEVICE_UNAVAILABLE"
+            }
+            Self::AtomWearMediaOutputSwitcherFastpairApiTimeout => {
+                "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_FASTPAIR_API_TIMEOUT"
+            }
+            Self::AtomWearModeStateChanged => "ATOM_WEAR_MODE_STATE_CHANGED",
+            Self::AtomRendererInitialized => "ATOM_RENDERER_INITIALIZED",
+            Self::AtomSchemaVersionReceived => "ATOM_SCHEMA_VERSION_RECEIVED",
+            Self::AtomLayoutInspected => "ATOM_LAYOUT_INSPECTED",
+            Self::AtomLayoutExpressionInspected => "ATOM_LAYOUT_EXPRESSION_INSPECTED",
+            Self::AtomLayoutAnimationsInspected => "ATOM_LAYOUT_ANIMATIONS_INSPECTED",
+            Self::AtomMaterialComponentsInspected => "ATOM_MATERIAL_COMPONENTS_INSPECTED",
+            Self::AtomTileRequested => "ATOM_TILE_REQUESTED",
+            Self::AtomStateResponseReceived => "ATOM_STATE_RESPONSE_RECEIVED",
+            Self::AtomTileResponseReceived => "ATOM_TILE_RESPONSE_RECEIVED",
+            Self::AtomInflationFinished => "ATOM_INFLATION_FINISHED",
+            Self::AtomInflationFailed => "ATOM_INFLATION_FAILED",
+            Self::AtomIgnoredInflationFailuresReported => {
+                "ATOM_IGNORED_INFLATION_FAILURES_REPORTED"
+            }
+            Self::AtomDrawableRendered => "ATOM_DRAWABLE_RENDERED",
+            Self::AtomWearTimeSyncRequested => "ATOM_WEAR_TIME_SYNC_REQUESTED",
+            Self::AtomWearTimeUpdateStarted => "ATOM_WEAR_TIME_UPDATE_STARTED",
+            Self::AtomWearTimeSyncAttemptCompleted => "ATOM_WEAR_TIME_SYNC_ATTEMPT_COMPLETED",
+            Self::AtomWearTimeChanged => "ATOM_WEAR_TIME_CHANGED",
+            Self::AtomWearAdaptiveSuspendStatsReported => {
+                "ATOM_WEAR_ADAPTIVE_SUSPEND_STATS_REPORTED"
+            }
+            Self::AtomWearPowerAnomalyServiceOperationalStatsReported => {
+                "ATOM_WEAR_POWER_ANOMALY_SERVICE_OPERATIONAL_STATS_REPORTED"
+            }
+            Self::AtomWearPowerAnomalyServiceEventStatsReported => {
+                "ATOM_WEAR_POWER_ANOMALY_SERVICE_EVENT_STATS_REPORTED"
+            }
+            Self::AtomWsWearTimeSession => "ATOM_WS_WEAR_TIME_SESSION",
+            Self::AtomWsIncomingCallActionReported => "ATOM_WS_INCOMING_CALL_ACTION_REPORTED",
+            Self::AtomWsCallDisconnectionReported => "ATOM_WS_CALL_DISCONNECTION_REPORTED",
+            Self::AtomWsCallDurationReported => "ATOM_WS_CALL_DURATION_REPORTED",
+            Self::AtomWsCallUserExperienceLatencyReported => {
+                "ATOM_WS_CALL_USER_EXPERIENCE_LATENCY_REPORTED"
+            }
+            Self::AtomWsCallInteractionReported => "ATOM_WS_CALL_INTERACTION_REPORTED",
+            Self::AtomWsOnBodyStateChanged => "ATOM_WS_ON_BODY_STATE_CHANGED",
+            Self::AtomWsWatchFaceRestrictedComplicationsImpacted => {
+                "ATOM_WS_WATCH_FACE_RESTRICTED_COMPLICATIONS_IMPACTED"
+            }
+            Self::AtomWsWatchFaceDefaultRestrictedComplicationsRemoved => {
+                "ATOM_WS_WATCH_FACE_DEFAULT_RESTRICTED_COMPLICATIONS_REMOVED"
+            }
+            Self::AtomWsComplicationsImpactedNotificationEventReported => {
+                "ATOM_WS_COMPLICATIONS_IMPACTED_NOTIFICATION_EVENT_REPORTED"
+            }
+            Self::AtomWsRemoteEventUsageReported => "ATOM_WS_REMOTE_EVENT_USAGE_REPORTED",
+            Self::AtomWsBugreportRequested => "ATOM_WS_BUGREPORT_REQUESTED",
+            Self::AtomWsBugreportTriggered => "ATOM_WS_BUGREPORT_TRIGGERED",
+            Self::AtomWsBugreportFinished => "ATOM_WS_BUGREPORT_FINISHED",
+            Self::AtomWsBugreportResultReceived => "ATOM_WS_BUGREPORT_RESULT_RECEIVED",
+            Self::AtomWsStandaloneModeSnapshot => "ATOM_WS_STANDALONE_MODE_SNAPSHOT",
+            Self::AtomWsFavoriteWatchFaceSnapshot => "ATOM_WS_FAVORITE_WATCH_FACE_SNAPSHOT",
+            Self::AtomWsPhotosWatchFaceFeatureSnapshot => {
+                "ATOM_WS_PHOTOS_WATCH_FACE_FEATURE_SNAPSHOT"
+            }
+            Self::AtomWsWatchFaceCustomizationSnapshot => {
+                "ATOM_WS_WATCH_FACE_CUSTOMIZATION_SNAPSHOT"
+            }
+            Self::AtomWearPowerMenuOpened => "ATOM_WEAR_POWER_MENU_OPENED",
+            Self::AtomWearAssistantOpened => "ATOM_WEAR_ASSISTANT_OPENED",
+            Self::AtomFirstOverlayStateChanged => "ATOM_FIRST_OVERLAY_STATE_CHANGED",
+            Self::AtomWifiAwareNdpReported => "ATOM_WIFI_AWARE_NDP_REPORTED",
+            Self::AtomWifiAwareAttachReported => "ATOM_WIFI_AWARE_ATTACH_REPORTED",
+            Self::AtomWifiSelfRecoveryTriggered => "ATOM_WIFI_SELF_RECOVERY_TRIGGERED",
+            Self::AtomSoftApStarted => "ATOM_SOFT_AP_STARTED",
+            Self::AtomSoftApStopped => "ATOM_SOFT_AP_STOPPED",
+            Self::AtomWifiLockReleased => "ATOM_WIFI_LOCK_RELEASED",
+            Self::AtomWifiLockDeactivated => "ATOM_WIFI_LOCK_DEACTIVATED",
+            Self::AtomWifiConfigSaved => "ATOM_WIFI_CONFIG_SAVED",
+            Self::AtomWifiAwareResourceUsingChanged => "ATOM_WIFI_AWARE_RESOURCE_USING_CHANGED",
+            Self::AtomWifiAwareHalApiCalled => "ATOM_WIFI_AWARE_HAL_API_CALLED",
+            Self::AtomWifiLocalOnlyRequestReceived => "ATOM_WIFI_LOCAL_ONLY_REQUEST_RECEIVED",
+            Self::AtomWifiLocalOnlyRequestScanTriggered => {
+                "ATOM_WIFI_LOCAL_ONLY_REQUEST_SCAN_TRIGGERED"
+            }
+            Self::AtomWifiThreadTaskExecuted => "ATOM_WIFI_THREAD_TASK_EXECUTED",
+            Self::AtomWifiStateChanged => "ATOM_WIFI_STATE_CHANGED",
+            Self::AtomPnoScanStarted => "ATOM_PNO_SCAN_STARTED",
+            Self::AtomPnoScanStopped => "ATOM_PNO_SCAN_STOPPED",
+            Self::AtomWifiIsUnusableReported => "ATOM_WIFI_IS_UNUSABLE_REPORTED",
+            Self::AtomWifiApCapabilitiesReported => "ATOM_WIFI_AP_CAPABILITIES_REPORTED",
+            Self::AtomSoftApStateChanged => "ATOM_SOFT_AP_STATE_CHANGED",
+            Self::AtomScorerPredictionResultReported => "ATOM_SCORER_PREDICTION_RESULT_REPORTED",
+            Self::AtomWifiAwareCapabilities => "ATOM_WIFI_AWARE_CAPABILITIES",
+            Self::AtomWifiModuleInfo => "ATOM_WIFI_MODULE_INFO",
+            Self::AtomWifiSettingInfo => "ATOM_WIFI_SETTING_INFO",
+            Self::AtomWifiComplexSettingInfo => "ATOM_WIFI_COMPLEX_SETTING_INFO",
+            Self::AtomWifiConfiguredNetworkInfo => "ATOM_WIFI_CONFIGURED_NETWORK_INFO",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -24472,11 +28888,9 @@ impl AtomId {
             "ATOM_WIFI_MULTICAST_LOCK_STATE_CHANGED" => {
                 Some(Self::AtomWifiMulticastLockStateChanged)
             }
-            "ATOM_LMK_STATE_CHANGED" => Some(Self::AtomLmkStateChanged),
             "ATOM_APP_START_MEMORY_STATE_CAPTURED" => Some(Self::AtomAppStartMemoryStateCaptured),
             "ATOM_SHUTDOWN_SEQUENCE_REPORTED" => Some(Self::AtomShutdownSequenceReported),
             "ATOM_BOOT_SEQUENCE_REPORTED" => Some(Self::AtomBootSequenceReported),
-            "ATOM_DAVEY_OCCURRED" => Some(Self::AtomDaveyOccurred),
             "ATOM_OVERLAY_STATE_CHANGED" => Some(Self::AtomOverlayStateChanged),
             "ATOM_FOREGROUND_SERVICE_STATE_CHANGED" => {
                 Some(Self::AtomForegroundServiceStateChanged)
@@ -24981,9 +29395,6 @@ impl AtomId {
             "ATOM_NON_A11Y_TOOL_SERVICE_WARNING_REPORT" => {
                 Some(Self::AtomNonA11yToolServiceWarningReport)
             }
-            "ATOM_APP_SEARCH_SET_SCHEMA_STATS_REPORTED" => {
-                Some(Self::AtomAppSearchSetSchemaStatsReported)
-            }
             "ATOM_APP_COMPAT_STATE_CHANGED" => Some(Self::AtomAppCompatStateChanged),
             "ATOM_SIZE_COMPAT_RESTART_BUTTON_EVENT_REPORTED" => {
                 Some(Self::AtomSizeCompatRestartButtonEventReported)
@@ -25028,9 +29439,6 @@ impl AtomId {
             "ATOM_CLIPBOARD_CLEARED" => Some(Self::AtomClipboardCleared),
             "ATOM_VM_CREATION_REQUESTED" => Some(Self::AtomVmCreationRequested),
             "ATOM_NEARBY_DEVICE_SCAN_STATE_CHANGED" => Some(Self::AtomNearbyDeviceScanStateChanged),
-            "ATOM_CAMERA_COMPAT_CONTROL_EVENT_REPORTED" => {
-                Some(Self::AtomCameraCompatControlEventReported)
-            }
             "ATOM_APPLICATION_LOCALES_CHANGED" => Some(Self::AtomApplicationLocalesChanged),
             "ATOM_MEDIAMETRICS_AUDIOTRACKSTATUS_REPORTED" => {
                 Some(Self::AtomMediametricsAudiotrackstatusReported)
@@ -25072,10 +29480,6 @@ impl AtomId {
                 Some(Self::AtomHotwordDetectorKeyphraseTriggered)
             }
             "ATOM_HOTWORD_DETECTOR_EVENTS" => Some(Self::AtomHotwordDetectorEvents),
-            "ATOM_AD_SERVICES_API_CALLED" => Some(Self::AtomAdServicesApiCalled),
-            "ATOM_AD_SERVICES_MESUREMENT_REPORTS_UPLOADED" => {
-                Some(Self::AtomAdServicesMesurementReportsUploaded)
-            }
             "ATOM_BOOT_COMPLETED_BROADCAST_COMPLETION_LATENCY_REPORTED" => {
                 Some(Self::AtomBootCompletedBroadcastCompletionLatencyReported)
             }
@@ -25165,7 +29569,6 @@ impl AtomId {
             "ATOM_CB_MODULE_ERROR_REPORTED" => Some(Self::AtomCbModuleErrorReported),
             "ATOM_CB_SERVICE_FEATURE_CHANGED" => Some(Self::AtomCbServiceFeatureChanged),
             "ATOM_CB_RECEIVER_FEATURE_CHANGED" => Some(Self::AtomCbReceiverFeatureChanged),
-            "ATOM_JSSCRIPTENGINE_LATENCY_REPORTED" => Some(Self::AtomJsscriptengineLatencyReported),
             "ATOM_PRIVACY_SIGNAL_NOTIFICATION_INTERACTION" => {
                 Some(Self::AtomPrivacySignalNotificationInteraction)
             }
@@ -25175,35 +29578,9 @@ impl AtomId {
             "ATOM_PRIVACY_SIGNALS_JOB_FAILURE" => Some(Self::AtomPrivacySignalsJobFailure),
             "ATOM_VIBRATION_REPORTED" => Some(Self::AtomVibrationReported),
             "ATOM_UWB_RANGING_START" => Some(Self::AtomUwbRangingStart),
-            "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STATUS_REPORTED" => {
-                Some(Self::AtomMobileDataDownloadFileGroupStatusReported)
-            }
             "ATOM_APP_COMPACTED_V2" => Some(Self::AtomAppCompactedV2),
-            "ATOM_AD_SERVICES_SETTINGS_USAGE_REPORTED" => {
-                Some(Self::AtomAdServicesSettingsUsageReported)
-            }
             "ATOM_DISPLAY_BRIGHTNESS_CHANGED" => Some(Self::AtomDisplayBrightnessChanged),
             "ATOM_ACTIVITY_ACTION_BLOCKED" => Some(Self::AtomActivityActionBlocked),
-            "ATOM_BACKGROUND_FETCH_PROCESS_REPORTED" => {
-                Some(Self::AtomBackgroundFetchProcessReported)
-            }
-            "ATOM_UPDATE_CUSTOM_AUDIENCE_PROCESS_REPORTED" => {
-                Some(Self::AtomUpdateCustomAudienceProcessReported)
-            }
-            "ATOM_RUN_AD_BIDDING_PROCESS_REPORTED" => Some(Self::AtomRunAdBiddingProcessReported),
-            "ATOM_RUN_AD_SCORING_PROCESS_REPORTED" => Some(Self::AtomRunAdScoringProcessReported),
-            "ATOM_RUN_AD_SELECTION_PROCESS_REPORTED" => {
-                Some(Self::AtomRunAdSelectionProcessReported)
-            }
-            "ATOM_RUN_AD_BIDDING_PER_CA_PROCESS_REPORTED" => {
-                Some(Self::AtomRunAdBiddingPerCaProcessReported)
-            }
-            "ATOM_MOBILE_DATA_DOWNLOAD_DOWNLOAD_RESULT_REPORTED" => {
-                Some(Self::AtomMobileDataDownloadDownloadResultReported)
-            }
-            "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STORAGE_STATS_REPORTED" => {
-                Some(Self::AtomMobileDataDownloadFileGroupStorageStatsReported)
-            }
             "ATOM_NETWORK_DNS_SERVER_SUPPORT_REPORTED" => {
                 Some(Self::AtomNetworkDnsServerSupportReported)
             }
@@ -25223,9 +29600,6 @@ impl AtomId {
             }
             "ATOM_MEDIAMETRICS_HEADTRACKERDEVICESUPPORTED_REPORTED" => {
                 Some(Self::AtomMediametricsHeadtrackerdevicesupportedReported)
-            }
-            "ATOM_AD_SERVICES_MEASUREMENT_REGISTRATIONS" => {
-                Some(Self::AtomAdServicesMeasurementRegistrations)
             }
             "ATOM_HEARING_AID_INFO_REPORTED" => Some(Self::AtomHearingAidInfoReported),
             "ATOM_DEVICE_WIDE_JOB_CONSTRAINT_CHANGED" => {
@@ -25265,13 +29639,6 @@ impl AtomId {
             "ATOM_BLUETOOTH_GATT_APP_INFO" => Some(Self::AtomBluetoothGattAppInfo),
             "ATOM_BRIGHTNESS_CONFIGURATION_UPDATED" => {
                 Some(Self::AtomBrightnessConfigurationUpdated)
-            }
-            "ATOM_AD_SERVICES_GET_TOPICS_REPORTED" => Some(Self::AtomAdServicesGetTopicsReported),
-            "ATOM_AD_SERVICES_EPOCH_COMPUTATION_GET_TOP_TOPICS_REPORTED" => {
-                Some(Self::AtomAdServicesEpochComputationGetTopTopicsReported)
-            }
-            "ATOM_AD_SERVICES_EPOCH_COMPUTATION_CLASSIFIER_REPORTED" => {
-                Some(Self::AtomAdServicesEpochComputationClassifierReported)
             }
             "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_LAUNCHED" => {
                 Some(Self::AtomWearMediaOutputSwitcherLaunched)
@@ -25346,16 +29713,12 @@ impl AtomId {
             "ATOM_HOTWORD_AUDIO_EGRESS_EVENT_REPORTED" => {
                 Some(Self::AtomHotwordAudioEgressEventReported)
             }
-            "ATOM_APP_SEARCH_SCHEMA_MIGRATION_STATS_REPORTED" => {
-                Some(Self::AtomAppSearchSchemaMigrationStatsReported)
-            }
             "ATOM_LOCATION_ENABLED_STATE_CHANGED" => Some(Self::AtomLocationEnabledStateChanged),
             "ATOM_IME_REQUEST_FINISHED" => Some(Self::AtomImeRequestFinished),
             "ATOM_USB_COMPLIANCE_WARNINGS_REPORTED" => {
                 Some(Self::AtomUsbComplianceWarningsReported)
             }
             "ATOM_APP_SUPPORTED_LOCALES_CHANGED" => Some(Self::AtomAppSupportedLocalesChanged),
-            "ATOM_GRAMMATICAL_INFLECTION_CHANGED" => Some(Self::AtomGrammaticalInflectionChanged),
             "ATOM_MEDIA_PROVIDER_VOLUME_RECOVERY_REPORTED" => {
                 Some(Self::AtomMediaProviderVolumeRecoveryReported)
             }
@@ -25372,7 +29735,15 @@ impl AtomId {
                 Some(Self::AtomNetworkValidationFailureStatsDailyReported)
             }
             "ATOM_WS_COMPLICATION_TAPPED" => Some(Self::AtomWsComplicationTapped),
-            "ATOM_WS_WEAR_TIME_SESSION" => Some(Self::AtomWsWearTimeSession),
+            "ATOM_WS_NOTIFICATION_BLOCKING" => Some(Self::AtomWsNotificationBlocking),
+            "ATOM_WS_NOTIFICATION_BRIDGEMODE_UPDATED" => {
+                Some(Self::AtomWsNotificationBridgemodeUpdated)
+            }
+            "ATOM_WS_NOTIFICATION_DISMISSAL_ACTIONED" => {
+                Some(Self::AtomWsNotificationDismissalActioned)
+            }
+            "ATOM_WS_NOTIFICATION_ACTIONED" => Some(Self::AtomWsNotificationActioned),
+            "ATOM_WS_NOTIFICATION_LATENCY" => Some(Self::AtomWsNotificationLatency),
             "ATOM_WIFI_BYTES_TRANSFER" => Some(Self::AtomWifiBytesTransfer),
             "ATOM_WIFI_BYTES_TRANSFER_BY_FG_BG" => Some(Self::AtomWifiBytesTransferByFgBg),
             "ATOM_MOBILE_BYTES_TRANSFER" => Some(Self::AtomMobileBytesTransfer),
@@ -25595,79 +29966,61 @@ impl AtomId {
             "ATOM_WS_FAVOURITE_WATCH_FACE_LIST_SNAPSHOT" => {
                 Some(Self::AtomWsFavouriteWatchFaceListSnapshot)
             }
-            "ATOM_WIFI_AWARE_NDP_REPORTED" => Some(Self::AtomWifiAwareNdpReported),
-            "ATOM_WIFI_AWARE_ATTACH_REPORTED" => Some(Self::AtomWifiAwareAttachReported),
-            "ATOM_WIFI_SELF_RECOVERY_TRIGGERED" => Some(Self::AtomWifiSelfRecoveryTriggered),
-            "ATOM_SOFT_AP_STARTED" => Some(Self::AtomSoftApStarted),
-            "ATOM_SOFT_AP_STOPPED" => Some(Self::AtomSoftApStopped),
-            "ATOM_WIFI_LOCK_RELEASED" => Some(Self::AtomWifiLockReleased),
-            "ATOM_WIFI_LOCK_DEACTIVATED" => Some(Self::AtomWifiLockDeactivated),
-            "ATOM_WIFI_CONFIG_SAVED" => Some(Self::AtomWifiConfigSaved),
-            "ATOM_WIFI_AWARE_RESOURCE_USING_CHANGED" => {
-                Some(Self::AtomWifiAwareResourceUsingChanged)
+            "ATOM_ACCESSIBILITY_CHECK_RESULT_REPORTED" => {
+                Some(Self::AtomAccessibilityCheckResultReported)
             }
-            "ATOM_WIFI_AWARE_HAL_API_CALLED" => Some(Self::AtomWifiAwareHalApiCalled),
-            "ATOM_WIFI_LOCAL_ONLY_REQUEST_RECEIVED" => Some(Self::AtomWifiLocalOnlyRequestReceived),
-            "ATOM_WIFI_LOCAL_ONLY_REQUEST_SCAN_TRIGGERED" => {
-                Some(Self::AtomWifiLocalOnlyRequestScanTriggered)
+            "ATOM_ADAPTIVE_AUTH_UNLOCK_AFTER_LOCK_REPORTED" => {
+                Some(Self::AtomAdaptiveAuthUnlockAfterLockReported)
             }
-            "ATOM_WIFI_THREAD_TASK_EXECUTED" => Some(Self::AtomWifiThreadTaskExecuted),
-            "ATOM_WIFI_STATE_CHANGED" => Some(Self::AtomWifiStateChanged),
-            "ATOM_WIFI_AWARE_CAPABILITIES" => Some(Self::AtomWifiAwareCapabilities),
-            "ATOM_WIFI_MODULE_INFO" => Some(Self::AtomWifiModuleInfo),
-            "ATOM_SETTINGS_SPA_REPORTED" => Some(Self::AtomSettingsSpaReported),
-            "ATOM_EXPRESS_EVENT_REPORTED" => Some(Self::AtomExpressEventReported),
-            "ATOM_EXPRESS_HISTOGRAM_SAMPLE_REPORTED" => {
-                Some(Self::AtomExpressHistogramSampleReported)
+            "ATOM_THERMAL_STATUS_CALLED" => Some(Self::AtomThermalStatusCalled),
+            "ATOM_THERMAL_HEADROOM_CALLED" => Some(Self::AtomThermalHeadroomCalled),
+            "ATOM_THERMAL_HEADROOM_THRESHOLDS_CALLED" => {
+                Some(Self::AtomThermalHeadroomThresholdsCalled)
             }
-            "ATOM_EXPRESS_UID_EVENT_REPORTED" => Some(Self::AtomExpressUidEventReported),
-            "ATOM_EXPRESS_UID_HISTOGRAM_SAMPLE_REPORTED" => {
-                Some(Self::AtomExpressUidHistogramSampleReported)
+            "ATOM_ADPF_HINT_SESSION_TID_CLEANUP" => Some(Self::AtomAdpfHintSessionTidCleanup),
+            "ATOM_THERMAL_HEADROOM_THRESHOLDS" => Some(Self::AtomThermalHeadroomThresholds),
+            "ATOM_ADPF_SESSION_SNAPSHOT" => Some(Self::AtomAdpfSessionSnapshot),
+            "ATOM_JSSCRIPTENGINE_LATENCY_REPORTED" => Some(Self::AtomJsscriptengineLatencyReported),
+            "ATOM_AD_SERVICES_API_CALLED" => Some(Self::AtomAdServicesApiCalled),
+            "ATOM_AD_SERVICES_MESUREMENT_REPORTS_UPLOADED" => {
+                Some(Self::AtomAdServicesMesurementReportsUploaded)
             }
-            "ATOM_PERMISSION_RATIONALE_DIALOG_VIEWED" => {
-                Some(Self::AtomPermissionRationaleDialogViewed)
+            "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STATUS_REPORTED" => {
+                Some(Self::AtomMobileDataDownloadFileGroupStatusReported)
             }
-            "ATOM_PERMISSION_RATIONALE_DIALOG_ACTION_REPORTED" => {
-                Some(Self::AtomPermissionRationaleDialogActionReported)
+            "ATOM_MOBILE_DATA_DOWNLOAD_DOWNLOAD_RESULT_REPORTED" => {
+                Some(Self::AtomMobileDataDownloadDownloadResultReported)
             }
-            "ATOM_APP_DATA_SHARING_UPDATES_NOTIFICATION_INTERACTION" => {
-                Some(Self::AtomAppDataSharingUpdatesNotificationInteraction)
+            "ATOM_AD_SERVICES_SETTINGS_USAGE_REPORTED" => {
+                Some(Self::AtomAdServicesSettingsUsageReported)
             }
-            "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_VIEWED" => {
-                Some(Self::AtomAppDataSharingUpdatesFragmentViewed)
+            "ATOM_BACKGROUND_FETCH_PROCESS_REPORTED" => {
+                Some(Self::AtomBackgroundFetchProcessReported)
             }
-            "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_ACTION_REPORTED" => {
-                Some(Self::AtomAppDataSharingUpdatesFragmentActionReported)
+            "ATOM_UPDATE_CUSTOM_AUDIENCE_PROCESS_REPORTED" => {
+                Some(Self::AtomUpdateCustomAudienceProcessReported)
             }
-            "ATOM_WS_INCOMING_CALL_ACTION_REPORTED" => Some(Self::AtomWsIncomingCallActionReported),
-            "ATOM_WS_CALL_DISCONNECTION_REPORTED" => Some(Self::AtomWsCallDisconnectionReported),
-            "ATOM_WS_CALL_DURATION_REPORTED" => Some(Self::AtomWsCallDurationReported),
-            "ATOM_WS_CALL_USER_EXPERIENCE_LATENCY_REPORTED" => {
-                Some(Self::AtomWsCallUserExperienceLatencyReported)
+            "ATOM_RUN_AD_BIDDING_PROCESS_REPORTED" => Some(Self::AtomRunAdBiddingProcessReported),
+            "ATOM_RUN_AD_SCORING_PROCESS_REPORTED" => Some(Self::AtomRunAdScoringProcessReported),
+            "ATOM_RUN_AD_SELECTION_PROCESS_REPORTED" => {
+                Some(Self::AtomRunAdSelectionProcessReported)
             }
-            "ATOM_WS_CALL_INTERACTION_REPORTED" => Some(Self::AtomWsCallInteractionReported),
-            "ATOM_FULL_SCREEN_INTENT_LAUNCHED" => Some(Self::AtomFullScreenIntentLaunched),
-            "ATOM_BAL_ALLOWED" => Some(Self::AtomBalAllowed),
-            "ATOM_IN_TASK_ACTIVITY_STARTED" => Some(Self::AtomInTaskActivityStarted),
-            "ATOM_CACHED_APPS_HIGH_WATERMARK" => Some(Self::AtomCachedAppsHighWatermark),
-            "ATOM_ODREFRESH_REPORTED" => Some(Self::AtomOdrefreshReported),
-            "ATOM_ODSIGN_REPORTED" => Some(Self::AtomOdsignReported),
-            "ATOM_ART_DATUM_REPORTED" => Some(Self::AtomArtDatumReported),
-            "ATOM_ART_DEVICE_DATUM_REPORTED" => Some(Self::AtomArtDeviceDatumReported),
-            "ATOM_ART_DATUM_DELTA_REPORTED" => Some(Self::AtomArtDatumDeltaReported),
-            "ATOM_BACKGROUND_DEXOPT_JOB_ENDED" => Some(Self::AtomBackgroundDexoptJobEnded),
-            "ATOM_WEAR_ADAPTIVE_SUSPEND_STATS_REPORTED" => {
-                Some(Self::AtomWearAdaptiveSuspendStatsReported)
+            "ATOM_RUN_AD_BIDDING_PER_CA_PROCESS_REPORTED" => {
+                Some(Self::AtomRunAdBiddingPerCaProcessReported)
             }
-            "ATOM_WEAR_POWER_ANOMALY_SERVICE_OPERATIONAL_STATS_REPORTED" => {
-                Some(Self::AtomWearPowerAnomalyServiceOperationalStatsReported)
+            "ATOM_MOBILE_DATA_DOWNLOAD_FILE_GROUP_STORAGE_STATS_REPORTED" => {
+                Some(Self::AtomMobileDataDownloadFileGroupStorageStatsReported)
             }
-            "ATOM_WEAR_POWER_ANOMALY_SERVICE_EVENT_STATS_REPORTED" => {
-                Some(Self::AtomWearPowerAnomalyServiceEventStatsReported)
+            "ATOM_AD_SERVICES_MEASUREMENT_REGISTRATIONS" => {
+                Some(Self::AtomAdServicesMeasurementRegistrations)
             }
-            "ATOM_EMERGENCY_STATE_CHANGED" => Some(Self::AtomEmergencyStateChanged),
-            "ATOM_DND_STATE_CHANGED" => Some(Self::AtomDndStateChanged),
-            "ATOM_MTE_STATE" => Some(Self::AtomMteState),
+            "ATOM_AD_SERVICES_GET_TOPICS_REPORTED" => Some(Self::AtomAdServicesGetTopicsReported),
+            "ATOM_AD_SERVICES_EPOCH_COMPUTATION_GET_TOP_TOPICS_REPORTED" => {
+                Some(Self::AtomAdServicesEpochComputationGetTopTopicsReported)
+            }
+            "ATOM_AD_SERVICES_EPOCH_COMPUTATION_CLASSIFIER_REPORTED" => {
+                Some(Self::AtomAdServicesEpochComputationClassifierReported)
+            }
             "ATOM_AD_SERVICES_BACK_COMPAT_GET_TOPICS_REPORTED" => {
                 Some(Self::AtomAdServicesBackCompatGetTopicsReported)
             }
@@ -25689,9 +30042,139 @@ impl AtomId {
             }
             "ATOM_AD_SERVICES_MEASUREMENT_JOBS" => Some(Self::AtomAdServicesMeasurementJobs),
             "ATOM_AD_SERVICES_MEASUREMENT_WIPEOUT" => Some(Self::AtomAdServicesMeasurementWipeout),
+            "ATOM_AD_SERVICES_MEASUREMENT_AD_ID_MATCH_FOR_DEBUG_KEYS" => {
+                Some(Self::AtomAdServicesMeasurementAdIdMatchForDebugKeys)
+            }
+            "ATOM_AD_SERVICES_ENROLLMENT_DATA_STORED" => {
+                Some(Self::AtomAdServicesEnrollmentDataStored)
+            }
+            "ATOM_AD_SERVICES_ENROLLMENT_FILE_DOWNLOADED" => {
+                Some(Self::AtomAdServicesEnrollmentFileDownloaded)
+            }
+            "ATOM_AD_SERVICES_ENROLLMENT_MATCHED" => Some(Self::AtomAdServicesEnrollmentMatched),
             "ATOM_AD_SERVICES_CONSENT_MIGRATED" => Some(Self::AtomAdServicesConsentMigrated),
-            "ATOM_RKPD_POOL_STATS" => Some(Self::AtomRkpdPoolStats),
-            "ATOM_RKPD_CLIENT_OPERATION" => Some(Self::AtomRkpdClientOperation),
+            "ATOM_AD_SERVICES_ENROLLMENT_FAILED" => Some(Self::AtomAdServicesEnrollmentFailed),
+            "ATOM_AD_SERVICES_MEASUREMENT_CLICK_VERIFICATION" => {
+                Some(Self::AtomAdServicesMeasurementClickVerification)
+            }
+            "ATOM_AD_SERVICES_ENCRYPTION_KEY_FETCHED" => {
+                Some(Self::AtomAdServicesEncryptionKeyFetched)
+            }
+            "ATOM_AD_SERVICES_ENCRYPTION_KEY_DB_TRANSACTION_ENDED" => {
+                Some(Self::AtomAdServicesEncryptionKeyDbTransactionEnded)
+            }
+            "ATOM_DESTINATION_REGISTERED_BEACONS" => Some(Self::AtomDestinationRegisteredBeacons),
+            "ATOM_REPORT_INTERACTION_API_CALLED" => Some(Self::AtomReportInteractionApiCalled),
+            "ATOM_INTERACTION_REPORTING_TABLE_CLEARED" => {
+                Some(Self::AtomInteractionReportingTableCleared)
+            }
+            "ATOM_APP_MANIFEST_CONFIG_HELPER_CALLED" => {
+                Some(Self::AtomAppManifestConfigHelperCalled)
+            }
+            "ATOM_AD_FILTERING_PROCESS_JOIN_CA_REPORTED" => {
+                Some(Self::AtomAdFilteringProcessJoinCaReported)
+            }
+            "ATOM_AD_FILTERING_PROCESS_AD_SELECTION_REPORTED" => {
+                Some(Self::AtomAdFilteringProcessAdSelectionReported)
+            }
+            "ATOM_AD_COUNTER_HISTOGRAM_UPDATER_REPORTED" => {
+                Some(Self::AtomAdCounterHistogramUpdaterReported)
+            }
+            "ATOM_SIGNATURE_VERIFICATION" => Some(Self::AtomSignatureVerification),
+            "ATOM_K_ANON_IMMEDIATE_SIGN_JOIN_STATUS_REPORTED" => {
+                Some(Self::AtomKAnonImmediateSignJoinStatusReported)
+            }
+            "ATOM_K_ANON_BACKGROUND_JOB_STATUS_REPORTED" => {
+                Some(Self::AtomKAnonBackgroundJobStatusReported)
+            }
+            "ATOM_K_ANON_INITIALIZE_STATUS_REPORTED" => {
+                Some(Self::AtomKAnonInitializeStatusReported)
+            }
+            "ATOM_K_ANON_SIGN_STATUS_REPORTED" => Some(Self::AtomKAnonSignStatusReported),
+            "ATOM_K_ANON_JOIN_STATUS_REPORTED" => Some(Self::AtomKAnonJoinStatusReported),
+            "ATOM_K_ANON_KEY_ATTESTATION_STATUS_REPORTED" => {
+                Some(Self::AtomKAnonKeyAttestationStatusReported)
+            }
+            "ATOM_GET_AD_SELECTION_DATA_API_CALLED" => Some(Self::AtomGetAdSelectionDataApiCalled),
+            "ATOM_GET_AD_SELECTION_DATA_BUYER_INPUT_GENERATED" => {
+                Some(Self::AtomGetAdSelectionDataBuyerInputGenerated)
+            }
+            "ATOM_BACKGROUND_JOB_SCHEDULING_REPORTED" => {
+                Some(Self::AtomBackgroundJobSchedulingReported)
+            }
+            "ATOM_TOPICS_ENCRYPTION_EPOCH_COMPUTATION_REPORTED" => {
+                Some(Self::AtomTopicsEncryptionEpochComputationReported)
+            }
+            "ATOM_TOPICS_ENCRYPTION_GET_TOPICS_REPORTED" => {
+                Some(Self::AtomTopicsEncryptionGetTopicsReported)
+            }
+            "ATOM_ADSERVICES_SHELL_COMMAND_CALLED" => Some(Self::AtomAdservicesShellCommandCalled),
+            "ATOM_UPDATE_SIGNALS_API_CALLED" => Some(Self::AtomUpdateSignalsApiCalled),
+            "ATOM_ENCODING_JOB_RUN" => Some(Self::AtomEncodingJobRun),
+            "ATOM_ENCODING_JS_FETCH" => Some(Self::AtomEncodingJsFetch),
+            "ATOM_ENCODING_JS_EXECUTION" => Some(Self::AtomEncodingJsExecution),
+            "ATOM_PERSIST_AD_SELECTION_RESULT_CALLED" => {
+                Some(Self::AtomPersistAdSelectionResultCalled)
+            }
+            "ATOM_SERVER_AUCTION_KEY_FETCH_CALLED" => Some(Self::AtomServerAuctionKeyFetchCalled),
+            "ATOM_SERVER_AUCTION_BACKGROUND_KEY_FETCH_ENABLED" => {
+                Some(Self::AtomServerAuctionBackgroundKeyFetchEnabled)
+            }
+            "ATOM_AD_SERVICES_MEASUREMENT_PROCESS_ODP_REGISTRATION" => {
+                Some(Self::AtomAdServicesMeasurementProcessOdpRegistration)
+            }
+            "ATOM_AD_SERVICES_MEASUREMENT_NOTIFY_REGISTRATION_TO_ODP" => {
+                Some(Self::AtomAdServicesMeasurementNotifyRegistrationToOdp)
+            }
+            "ATOM_SELECT_ADS_FROM_OUTCOMES_API_CALLED" => {
+                Some(Self::AtomSelectAdsFromOutcomesApiCalled)
+            }
+            "ATOM_REPORT_IMPRESSION_API_CALLED" => Some(Self::AtomReportImpressionApiCalled),
+            "ATOM_AD_SERVICES_ENROLLMENT_TRANSACTION_STATS" => {
+                Some(Self::AtomAdServicesEnrollmentTransactionStats)
+            }
+            "ATOM_AD_SERVICES_COBALT_LOGGER_EVENT_REPORTED" => {
+                Some(Self::AtomAdServicesCobaltLoggerEventReported)
+            }
+            "ATOM_AD_SERVICES_COBALT_PERIODIC_JOB_EVENT_REPORTED" => {
+                Some(Self::AtomAdServicesCobaltPeriodicJobEventReported)
+            }
+            "ATOM_UPDATE_SIGNALS_PROCESS_REPORTED" => Some(Self::AtomUpdateSignalsProcessReported),
+            "ATOM_TOPICS_SCHEDULE_EPOCH_JOB_SETTING_REPORTED" => {
+                Some(Self::AtomTopicsScheduleEpochJobSettingReported)
+            }
+            "ATOM_AI_WALLPAPERS_BUTTON_PRESSED" => Some(Self::AtomAiWallpapersButtonPressed),
+            "ATOM_AI_WALLPAPERS_TEMPLATE_SELECTED" => Some(Self::AtomAiWallpapersTemplateSelected),
+            "ATOM_AI_WALLPAPERS_TERM_SELECTED" => Some(Self::AtomAiWallpapersTermSelected),
+            "ATOM_AI_WALLPAPERS_WALLPAPER_SET" => Some(Self::AtomAiWallpapersWallpaperSet),
+            "ATOM_AI_WALLPAPERS_SESSION_SUMMARY" => Some(Self::AtomAiWallpapersSessionSummary),
+            "ATOM_APEX_INSTALLATION_REQUESTED" => Some(Self::AtomApexInstallationRequested),
+            "ATOM_APEX_INSTALLATION_STAGED" => Some(Self::AtomApexInstallationStaged),
+            "ATOM_APEX_INSTALLATION_ENDED" => Some(Self::AtomApexInstallationEnded),
+            "ATOM_APP_SEARCH_SET_SCHEMA_STATS_REPORTED" => {
+                Some(Self::AtomAppSearchSetSchemaStatsReported)
+            }
+            "ATOM_APP_SEARCH_SCHEMA_MIGRATION_STATS_REPORTED" => {
+                Some(Self::AtomAppSearchSchemaMigrationStatsReported)
+            }
+            "ATOM_APP_SEARCH_USAGE_SEARCH_INTENT_STATS_REPORTED" => {
+                Some(Self::AtomAppSearchUsageSearchIntentStatsReported)
+            }
+            "ATOM_APP_SEARCH_USAGE_SEARCH_INTENT_RAW_QUERY_STATS_REPORTED" => {
+                Some(Self::AtomAppSearchUsageSearchIntentRawQueryStatsReported)
+            }
+            "ATOM_APP_SEARCH_APPS_INDEXER_STATS_REPORTED" => {
+                Some(Self::AtomAppSearchAppsIndexerStatsReported)
+            }
+            "ATOM_ART_DATUM_REPORTED" => Some(Self::AtomArtDatumReported),
+            "ATOM_ART_DEVICE_DATUM_REPORTED" => Some(Self::AtomArtDeviceDatumReported),
+            "ATOM_ART_DATUM_DELTA_REPORTED" => Some(Self::AtomArtDatumDeltaReported),
+            "ATOM_ART_DEX2OAT_REPORTED" => Some(Self::AtomArtDex2oatReported),
+            "ATOM_ART_DEVICE_STATUS" => Some(Self::AtomArtDeviceStatus),
+            "ATOM_BACKGROUND_DEXOPT_JOB_ENDED" => Some(Self::AtomBackgroundDexoptJobEnded),
+            "ATOM_PREREBOOT_DEXOPT_JOB_ENDED" => Some(Self::AtomPrerebootDexoptJobEnded),
+            "ATOM_ODREFRESH_REPORTED" => Some(Self::AtomOdrefreshReported),
+            "ATOM_ODSIGN_REPORTED" => Some(Self::AtomOdsignReported),
             "ATOM_AUTOFILL_UI_EVENT_REPORTED" => Some(Self::AtomAutofillUiEventReported),
             "ATOM_AUTOFILL_FILL_REQUEST_REPORTED" => Some(Self::AtomAutofillFillRequestReported),
             "ATOM_AUTOFILL_FILL_RESPONSE_REPORTED" => Some(Self::AtomAutofillFillResponseReported),
@@ -25700,34 +30183,10 @@ impl AtomId {
             "ATOM_AUTOFILL_FIELD_CLASSIFICATION_EVENT_REPORTED" => {
                 Some(Self::AtomAutofillFieldClassificationEventReported)
             }
-            "ATOM_TEST_EXTENSION_ATOM_REPORTED" => Some(Self::AtomTestExtensionAtomReported),
-            "ATOM_TEST_RESTRICTED_ATOM_REPORTED" => Some(Self::AtomTestRestrictedAtomReported),
-            "ATOM_STATS_SOCKET_LOSS_REPORTED" => Some(Self::AtomStatsSocketLossReported),
+            "ATOM_CAR_RECENTS_EVENT_REPORTED" => Some(Self::AtomCarRecentsEventReported),
+            "ATOM_CAR_CALM_MODE_EVENT_REPORTED" => Some(Self::AtomCarCalmModeEventReported),
+            "ATOM_CAR_WAKEUP_FROM_SUSPEND_REPORTED" => Some(Self::AtomCarWakeupFromSuspendReported),
             "ATOM_PLUGIN_INITIALIZED" => Some(Self::AtomPluginInitialized),
-            "ATOM_TV_LOW_POWER_STANDBY_POLICY" => Some(Self::AtomTvLowPowerStandbyPolicy),
-            "ATOM_LOCKSCREEN_SHORTCUT_SELECTED" => Some(Self::AtomLockscreenShortcutSelected),
-            "ATOM_LOCKSCREEN_SHORTCUT_TRIGGERED" => Some(Self::AtomLockscreenShortcutTriggered),
-            "ATOM_EMERGENCY_NUMBERS_INFO" => Some(Self::AtomEmergencyNumbersInfo),
-            "ATOM_QUALIFIED_RAT_LIST_CHANGED" => Some(Self::AtomQualifiedRatListChanged),
-            "ATOM_QNS_IMS_CALL_DROP_STATS" => Some(Self::AtomQnsImsCallDropStats),
-            "ATOM_QNS_FALLBACK_RESTRICTION_CHANGED" => {
-                Some(Self::AtomQnsFallbackRestrictionChanged)
-            }
-            "ATOM_QNS_RAT_PREFERENCE_MISMATCH_INFO" => Some(Self::AtomQnsRatPreferenceMismatchInfo),
-            "ATOM_QNS_HANDOVER_TIME_MILLIS" => Some(Self::AtomQnsHandoverTimeMillis),
-            "ATOM_QNS_HANDOVER_PINGPONG" => Some(Self::AtomQnsHandoverPingpong),
-            "ATOM_SATELLITE_CONTROLLER" => Some(Self::AtomSatelliteController),
-            "ATOM_SATELLITE_SESSION" => Some(Self::AtomSatelliteSession),
-            "ATOM_SATELLITE_INCOMING_DATAGRAM" => Some(Self::AtomSatelliteIncomingDatagram),
-            "ATOM_SATELLITE_OUTGOING_DATAGRAM" => Some(Self::AtomSatelliteOutgoingDatagram),
-            "ATOM_SATELLITE_PROVISION" => Some(Self::AtomSatelliteProvision),
-            "ATOM_SATELLITE_SOS_MESSAGE_RECOMMENDER" => {
-                Some(Self::AtomSatelliteSosMessageRecommender)
-            }
-            "ATOM_IKE_SESSION_TERMINATED" => Some(Self::AtomIkeSessionTerminated),
-            "ATOM_IKE_LIVENESS_CHECK_SESSION_VALIDATED" => {
-                Some(Self::AtomIkeLivenessCheckSessionValidated)
-            }
             "ATOM_BLUETOOTH_HASHED_DEVICE_NAME_REPORTED" => {
                 Some(Self::AtomBluetoothHashedDeviceNameReported)
             }
@@ -25744,41 +30203,59 @@ impl AtomId {
             "ATOM_BLUETOOTH_PROFILE_CONNECTION_ATTEMPTED" => {
                 Some(Self::AtomBluetoothProfileConnectionAttempted)
             }
-            "ATOM_HEALTH_CONNECT_UI_IMPRESSION" => Some(Self::AtomHealthConnectUiImpression),
-            "ATOM_HEALTH_CONNECT_UI_INTERACTION" => Some(Self::AtomHealthConnectUiInteraction),
-            "ATOM_HEALTH_CONNECT_APP_OPENED_REPORTED" => {
-                Some(Self::AtomHealthConnectAppOpenedReported)
+            "ATOM_BLUETOOTH_CONTENT_PROFILE_ERROR_REPORTED" => {
+                Some(Self::AtomBluetoothContentProfileErrorReported)
             }
-            "ATOM_HEALTH_CONNECT_API_CALLED" => Some(Self::AtomHealthConnectApiCalled),
-            "ATOM_HEALTH_CONNECT_USAGE_STATS" => Some(Self::AtomHealthConnectUsageStats),
-            "ATOM_HEALTH_CONNECT_STORAGE_STATS" => Some(Self::AtomHealthConnectStorageStats),
-            "ATOM_HEALTH_CONNECT_API_INVOKED" => Some(Self::AtomHealthConnectApiInvoked),
-            "ATOM_EXERCISE_ROUTE_API_CALLED" => Some(Self::AtomExerciseRouteApiCalled),
-            "ATOM_ATOM_9999" => Some(Self::AtomAtom9999),
-            "ATOM_ATOM_99999" => Some(Self::AtomAtom99999),
-            "ATOM_THREADNETWORK_TELEMETRY_DATA_REPORTED" => {
-                Some(Self::AtomThreadnetworkTelemetryDataReported)
+            "ATOM_BLUETOOTH_RFCOMM_CONNECTION_ATTEMPTED" => {
+                Some(Self::AtomBluetoothRfcommConnectionAttempted)
             }
-            "ATOM_THREADNETWORK_TOPO_ENTRY_REPEATED" => {
-                Some(Self::AtomThreadnetworkTopoEntryRepeated)
+            "ATOM_REMOTE_DEVICE_INFORMATION_WITH_METRIC_ID" => {
+                Some(Self::AtomRemoteDeviceInformationWithMetricId)
             }
-            "ATOM_THREADNETWORK_DEVICE_INFO_REPORTED" => {
-                Some(Self::AtomThreadnetworkDeviceInfoReported)
+            "ATOM_LE_APP_SCAN_STATE_CHANGED" => Some(Self::AtomLeAppScanStateChanged),
+            "ATOM_LE_RADIO_SCAN_STOPPED" => Some(Self::AtomLeRadioScanStopped),
+            "ATOM_LE_SCAN_RESULT_RECEIVED" => Some(Self::AtomLeScanResultReceived),
+            "ATOM_LE_SCAN_ABUSED" => Some(Self::AtomLeScanAbused),
+            "ATOM_LE_ADV_STATE_CHANGED" => Some(Self::AtomLeAdvStateChanged),
+            "ATOM_LE_ADV_ERROR_REPORTED" => Some(Self::AtomLeAdvErrorReported),
+            "ATOM_A2DP_SESSION_REPORTED" => Some(Self::AtomA2dpSessionReported),
+            "ATOM_BLUETOOTH_CROSS_LAYER_EVENT_REPORTED" => {
+                Some(Self::AtomBluetoothCrossLayerEventReported)
             }
-            "ATOM_EMERGENCY_NUMBER_DIALED" => Some(Self::AtomEmergencyNumberDialed),
-            "ATOM_SANDBOX_API_CALLED" => Some(Self::AtomSandboxApiCalled),
-            "ATOM_SANDBOX_ACTIVITY_EVENT_OCCURRED" => Some(Self::AtomSandboxActivityEventOccurred),
-            "ATOM_SANDBOX_SDK_STORAGE" => Some(Self::AtomSandboxSdkStorage),
-            "ATOM_CRONET_ENGINE_CREATED" => Some(Self::AtomCronetEngineCreated),
-            "ATOM_CRONET_TRAFFIC_REPORTED" => Some(Self::AtomCronetTrafficReported),
-            "ATOM_CRONET_ENGINE_BUILDER_INITIALIZED" => {
-                Some(Self::AtomCronetEngineBuilderInitialized)
+            "ATOM_BROADCAST_AUDIO_SESSION_REPORTED" => {
+                Some(Self::AtomBroadcastAudioSessionReported)
             }
-            "ATOM_CRONET_HTTP_FLAGS_INITIALIZED" => Some(Self::AtomCronetHttpFlagsInitialized),
-            "ATOM_CRONET_INITIALIZED" => Some(Self::AtomCronetInitialized),
+            "ATOM_BROADCAST_AUDIO_SYNC_REPORTED" => Some(Self::AtomBroadcastAudioSyncReported),
+            "ATOM_BLUETOOTH_RFCOMM_CONNECTION_REPORTED_AT_CLOSE" => {
+                Some(Self::AtomBluetoothRfcommConnectionReportedAtClose)
+            }
+            "ATOM_BLUETOOTH_LE_CONNECTION" => Some(Self::AtomBluetoothLeConnection),
+            "ATOM_BROADCAST_SENT" => Some(Self::AtomBroadcastSent),
+            "ATOM_CAMERA_FEATURE_COMBINATION_QUERY_EVENT" => {
+                Some(Self::AtomCameraFeatureCombinationQueryEvent)
+            }
+            "ATOM_CERTIFICATE_TRANSPARENCY_LOG_LIST_STATE_CHANGED" => {
+                Some(Self::AtomCertificateTransparencyLogListStateChanged)
+            }
+            "ATOM_CERTIFICATE_TRANSPARENCY_LOG_LIST_UPDATE_FAILED" => {
+                Some(Self::AtomCertificateTransparencyLogListUpdateFailed)
+            }
             "ATOM_DAILY_KEEPALIVE_INFO_REPORTED" => Some(Self::AtomDailyKeepaliveInfoReported),
-            "ATOM_IP_CLIENT_RA_INFO_REPORTED" => Some(Self::AtomIpClientRaInfoReported),
+            "ATOM_NETWORK_REQUEST_STATE_CHANGED" => Some(Self::AtomNetworkRequestStateChanged),
+            "ATOM_TETHERING_ACTIVE_SESSIONS_REPORTED" => {
+                Some(Self::AtomTetheringActiveSessionsReported)
+            }
+            "ATOM_NETWORK_STATS_RECORDER_FILE_OPERATED" => {
+                Some(Self::AtomNetworkStatsRecorderFileOperated)
+            }
+            "ATOM_CORE_NETWORKING_TERRIBLE_ERROR_OCCURRED" => {
+                Some(Self::AtomCoreNetworkingTerribleErrorOccurred)
+            }
             "ATOM_APF_SESSION_INFO_REPORTED" => Some(Self::AtomApfSessionInfoReported),
+            "ATOM_IP_CLIENT_RA_INFO_REPORTED" => Some(Self::AtomIpClientRaInfoReported),
+            "ATOM_VPN_CONNECTION_STATE_CHANGED" => Some(Self::AtomVpnConnectionStateChanged),
+            "ATOM_VPN_CONNECTION_REPORTED" => Some(Self::AtomVpnConnectionReported),
+            "ATOM_CPU_POLICY" => Some(Self::AtomCpuPolicy),
             "ATOM_CREDENTIAL_MANAGER_API_CALLED" => Some(Self::AtomCredentialManagerApiCalled),
             "ATOM_CREDENTIAL_MANAGER_INIT_PHASE_REPORTED" => {
                 Some(Self::AtomCredentialManagerInitPhaseReported)
@@ -25800,15 +30277,449 @@ impl AtomId {
                 Some(Self::AtomCredentialManagerAuthClickReported)
             }
             "ATOM_CREDENTIAL_MANAGER_APIV2_CALLED" => Some(Self::AtomCredentialManagerApiv2Called),
-            "ATOM_UWB_ACTIVITY_INFO" => Some(Self::AtomUwbActivityInfo),
-            "ATOM_MEDIA_ACTION_REPORTED" => Some(Self::AtomMediaActionReported),
-            "ATOM_MEDIA_CONTROLS_LAUNCHED" => Some(Self::AtomMediaControlsLaunched),
+            "ATOM_CRONET_ENGINE_CREATED" => Some(Self::AtomCronetEngineCreated),
+            "ATOM_CRONET_TRAFFIC_REPORTED" => Some(Self::AtomCronetTrafficReported),
+            "ATOM_CRONET_ENGINE_BUILDER_INITIALIZED" => {
+                Some(Self::AtomCronetEngineBuilderInitialized)
+            }
+            "ATOM_CRONET_HTTP_FLAGS_INITIALIZED" => Some(Self::AtomCronetHttpFlagsInitialized),
+            "ATOM_CRONET_INITIALIZED" => Some(Self::AtomCronetInitialized),
+            "ATOM_DESKTOP_MODE_UI_CHANGED" => Some(Self::AtomDesktopModeUiChanged),
+            "ATOM_DESKTOP_MODE_SESSION_TASK_UPDATE" => Some(Self::AtomDesktopModeSessionTaskUpdate),
+            "ATOM_DESKTOP_MODE_TASK_SIZE_UPDATED" => Some(Self::AtomDesktopModeTaskSizeUpdated),
+            "ATOM_DEVICE_LOCK_CHECK_IN_REQUEST_REPORTED" => {
+                Some(Self::AtomDeviceLockCheckInRequestReported)
+            }
+            "ATOM_DEVICE_LOCK_PROVISIONING_COMPLETE_REPORTED" => {
+                Some(Self::AtomDeviceLockProvisioningCompleteReported)
+            }
+            "ATOM_DEVICE_LOCK_KIOSK_APP_REQUEST_REPORTED" => {
+                Some(Self::AtomDeviceLockKioskAppRequestReported)
+            }
+            "ATOM_DEVICE_LOCK_CHECK_IN_RETRY_REPORTED" => {
+                Some(Self::AtomDeviceLockCheckInRetryReported)
+            }
+            "ATOM_DEVICE_LOCK_PROVISION_FAILURE_REPORTED" => {
+                Some(Self::AtomDeviceLockProvisionFailureReported)
+            }
+            "ATOM_DEVICE_LOCK_LOCK_UNLOCK_DEVICE_FAILURE_REPORTED" => {
+                Some(Self::AtomDeviceLockLockUnlockDeviceFailureReported)
+            }
+            "ATOM_DEVICE_POLICY_MANAGEMENT_MODE" => Some(Self::AtomDevicePolicyManagementMode),
+            "ATOM_DEVICE_POLICY_STATE" => Some(Self::AtomDevicePolicyState),
+            "ATOM_DISPLAY_MODE_DIRECTOR_VOTE_CHANGED" => {
+                Some(Self::AtomDisplayModeDirectorVoteChanged)
+            }
+            "ATOM_EXTERNAL_DISPLAY_STATE_CHANGED" => Some(Self::AtomExternalDisplayStateChanged),
+            "ATOM_DND_STATE_CHANGED" => Some(Self::AtomDndStateChanged),
+            "ATOM_DREAM_SETTING_CHANGED" => Some(Self::AtomDreamSettingChanged),
+            "ATOM_DREAM_SETTING_SNAPSHOT" => Some(Self::AtomDreamSettingSnapshot),
+            "ATOM_EXPRESS_EVENT_REPORTED" => Some(Self::AtomExpressEventReported),
+            "ATOM_EXPRESS_HISTOGRAM_SAMPLE_REPORTED" => {
+                Some(Self::AtomExpressHistogramSampleReported)
+            }
+            "ATOM_EXPRESS_UID_EVENT_REPORTED" => Some(Self::AtomExpressUidEventReported),
+            "ATOM_EXPRESS_UID_HISTOGRAM_SAMPLE_REPORTED" => {
+                Some(Self::AtomExpressUidHistogramSampleReported)
+            }
+            "ATOM_FEDERATED_COMPUTE_API_CALLED" => Some(Self::AtomFederatedComputeApiCalled),
+            "ATOM_FEDERATED_COMPUTE_TRAINING_EVENT_REPORTED" => {
+                Some(Self::AtomFederatedComputeTrainingEventReported)
+            }
+            "ATOM_EXAMPLE_ITERATOR_NEXT_LATENCY_REPORTED" => {
+                Some(Self::AtomExampleIteratorNextLatencyReported)
+            }
+            "ATOM_FULL_SCREEN_INTENT_LAUNCHED" => Some(Self::AtomFullScreenIntentLaunched),
+            "ATOM_BAL_ALLOWED" => Some(Self::AtomBalAllowed),
+            "ATOM_IN_TASK_ACTIVITY_STARTED" => Some(Self::AtomInTaskActivityStarted),
+            "ATOM_DEVICE_ORIENTATION_CHANGED" => Some(Self::AtomDeviceOrientationChanged),
+            "ATOM_CACHED_APPS_HIGH_WATERMARK" => Some(Self::AtomCachedAppsHighWatermark),
+            "ATOM_STYLUS_PREDICTION_METRICS_REPORTED" => {
+                Some(Self::AtomStylusPredictionMetricsReported)
+            }
+            "ATOM_USER_RISK_EVENT_REPORTED" => Some(Self::AtomUserRiskEventReported),
+            "ATOM_MEDIA_PROJECTION_STATE_CHANGED" => Some(Self::AtomMediaProjectionStateChanged),
+            "ATOM_MEDIA_PROJECTION_TARGET_CHANGED" => Some(Self::AtomMediaProjectionTargetChanged),
+            "ATOM_EXCESSIVE_BINDER_PROXY_COUNT_REPORTED" => {
+                Some(Self::AtomExcessiveBinderProxyCountReported)
+            }
+            "ATOM_PROXY_BYTES_TRANSFER_BY_FG_BG" => Some(Self::AtomProxyBytesTransferByFgBg),
+            "ATOM_MOBILE_BYTES_TRANSFER_BY_PROC_STATE" => {
+                Some(Self::AtomMobileBytesTransferByProcState)
+            }
+            "ATOM_BIOMETRIC_FRR_NOTIFICATION" => Some(Self::AtomBiometricFrrNotification),
+            "ATOM_SENSITIVE_CONTENT_MEDIA_PROJECTION_SESSION" => {
+                Some(Self::AtomSensitiveContentMediaProjectionSession)
+            }
+            "ATOM_SENSITIVE_NOTIFICATION_APP_PROTECTION_SESSION" => {
+                Some(Self::AtomSensitiveNotificationAppProtectionSession)
+            }
+            "ATOM_SENSITIVE_NOTIFICATION_APP_PROTECTION_APPLIED" => {
+                Some(Self::AtomSensitiveNotificationAppProtectionApplied)
+            }
+            "ATOM_SENSITIVE_NOTIFICATION_REDACTION" => {
+                Some(Self::AtomSensitiveNotificationRedaction)
+            }
+            "ATOM_SENSITIVE_CONTENT_APP_PROTECTION" => {
+                Some(Self::AtomSensitiveContentAppProtection)
+            }
+            "ATOM_APP_RESTRICTION_STATE_CHANGED" => Some(Self::AtomAppRestrictionStateChanged),
+            "ATOM_BATTERY_USAGE_STATS_PER_UID" => Some(Self::AtomBatteryUsageStatsPerUid),
+            "ATOM_POSTGC_MEMORY_SNAPSHOT" => Some(Self::AtomPostgcMemorySnapshot),
+            "ATOM_POWER_SAVE_TEMP_ALLOWLIST_CHANGED" => {
+                Some(Self::AtomPowerSaveTempAllowlistChanged)
+            }
+            "ATOM_APP_OP_ACCESS_TRACKED" => Some(Self::AtomAppOpAccessTracked),
+            "ATOM_CONTENT_OR_FILE_URI_EVENT_REPORTED" => {
+                Some(Self::AtomContentOrFileUriEventReported)
+            }
+            "ATOM_APPLICATION_GRAMMATICAL_INFLECTION_CHANGED" => {
+                Some(Self::AtomApplicationGrammaticalInflectionChanged)
+            }
+            "ATOM_SYSTEM_GRAMMATICAL_INFLECTION_CHANGED" => {
+                Some(Self::AtomSystemGrammaticalInflectionChanged)
+            }
+            "ATOM_BATTERY_HEALTH" => Some(Self::AtomBatteryHealth),
+            "ATOM_HDMI_EARC_STATUS_REPORTED" => Some(Self::AtomHdmiEarcStatusReported),
+            "ATOM_HDMI_SOUNDBAR_MODE_STATUS_REPORTED" => {
+                Some(Self::AtomHdmiSoundbarModeStatusReported)
+            }
+            "ATOM_HEALTH_CONNECT_API_CALLED" => Some(Self::AtomHealthConnectApiCalled),
+            "ATOM_HEALTH_CONNECT_USAGE_STATS" => Some(Self::AtomHealthConnectUsageStats),
+            "ATOM_HEALTH_CONNECT_STORAGE_STATS" => Some(Self::AtomHealthConnectStorageStats),
+            "ATOM_HEALTH_CONNECT_API_INVOKED" => Some(Self::AtomHealthConnectApiInvoked),
+            "ATOM_EXERCISE_ROUTE_API_CALLED" => Some(Self::AtomExerciseRouteApiCalled),
+            "ATOM_HEALTH_CONNECT_EXPORT_INVOKED" => Some(Self::AtomHealthConnectExportInvoked),
+            "ATOM_HEALTH_CONNECT_IMPORT_INVOKED" => Some(Self::AtomHealthConnectImportInvoked),
+            "ATOM_HEALTH_CONNECT_EXPORT_IMPORT_STATS_REPORTED" => {
+                Some(Self::AtomHealthConnectExportImportStatsReported)
+            }
+            "ATOM_HEALTH_CONNECT_UI_IMPRESSION" => Some(Self::AtomHealthConnectUiImpression),
+            "ATOM_HEALTH_CONNECT_UI_INTERACTION" => Some(Self::AtomHealthConnectUiInteraction),
+            "ATOM_HEALTH_CONNECT_APP_OPENED_REPORTED" => {
+                Some(Self::AtomHealthConnectAppOpenedReported)
+            }
+            "ATOM_HOTWORD_EGRESS_SIZE_ATOM_REPORTED" => {
+                Some(Self::AtomHotwordEgressSizeAtomReported)
+            }
+            "ATOM_IKE_SESSION_TERMINATED" => Some(Self::AtomIkeSessionTerminated),
+            "ATOM_IKE_LIVENESS_CHECK_SESSION_VALIDATED" => {
+                Some(Self::AtomIkeLivenessCheckSessionValidated)
+            }
+            "ATOM_NEGOTIATED_SECURITY_ASSOCIATION" => Some(Self::AtomNegotiatedSecurityAssociation),
+            "ATOM_KEYBOARD_CONFIGURED" => Some(Self::AtomKeyboardConfigured),
+            "ATOM_KEYBOARD_SYSTEMS_EVENT_REPORTED" => Some(Self::AtomKeyboardSystemsEventReported),
+            "ATOM_INPUTDEVICE_USAGE_REPORTED" => Some(Self::AtomInputdeviceUsageReported),
+            "ATOM_INPUT_EVENT_LATENCY_REPORTED" => Some(Self::AtomInputEventLatencyReported),
+            "ATOM_TOUCHPAD_USAGE" => Some(Self::AtomTouchpadUsage),
+            "ATOM_KERNEL_OOM_KILL_OCCURRED" => Some(Self::AtomKernelOomKillOccurred),
+            "ATOM_EMERGENCY_STATE_CHANGED" => Some(Self::AtomEmergencyStateChanged),
+            "ATOM_CHRE_SIGNIFICANT_MOTION_STATE_CHANGED" => {
+                Some(Self::AtomChreSignificantMotionStateChanged)
+            }
+            "ATOM_POPULATION_DENSITY_PROVIDER_LOADING_REPORTED" => {
+                Some(Self::AtomPopulationDensityProviderLoadingReported)
+            }
+            "ATOM_DENSITY_BASED_COARSE_LOCATIONS_USAGE_REPORTED" => {
+                Some(Self::AtomDensityBasedCoarseLocationsUsageReported)
+            }
+            "ATOM_DENSITY_BASED_COARSE_LOCATIONS_PROVIDER_QUERY_REPORTED" => {
+                Some(Self::AtomDensityBasedCoarseLocationsProviderQueryReported)
+            }
             "ATOM_MEDIA_CODEC_RECLAIM_REQUEST_COMPLETED" => {
                 Some(Self::AtomMediaCodecReclaimRequestCompleted)
             }
             "ATOM_MEDIA_CODEC_STARTED" => Some(Self::AtomMediaCodecStarted),
             "ATOM_MEDIA_CODEC_STOPPED" => Some(Self::AtomMediaCodecStopped),
             "ATOM_MEDIA_CODEC_RENDERED" => Some(Self::AtomMediaCodecRendered),
+            "ATOM_MEDIA_EDITING_ENDED_REPORTED" => Some(Self::AtomMediaEditingEndedReported),
+            "ATOM_MTE_STATE" => Some(Self::AtomMteState),
+            "ATOM_MICROXR_DEVICE_BOOT_COMPLETE_REPORTED" => {
+                Some(Self::AtomMicroxrDeviceBootCompleteReported)
+            }
+            "ATOM_NFC_OBSERVE_MODE_STATE_CHANGED" => Some(Self::AtomNfcObserveModeStateChanged),
+            "ATOM_NFC_FIELD_CHANGED" => Some(Self::AtomNfcFieldChanged),
+            "ATOM_NFC_POLLING_LOOP_NOTIFICATION_REPORTED" => {
+                Some(Self::AtomNfcPollingLoopNotificationReported)
+            }
+            "ATOM_NFC_PROPRIETARY_CAPABILITIES_REPORTED" => {
+                Some(Self::AtomNfcProprietaryCapabilitiesReported)
+            }
+            "ATOM_ONDEVICEPERSONALIZATION_API_CALLED" => {
+                Some(Self::AtomOndevicepersonalizationApiCalled)
+            }
+            "ATOM_COMPONENT_STATE_CHANGED_REPORTED" => {
+                Some(Self::AtomComponentStateChangedReported)
+            }
+            "ATOM_PDF_LOAD_REPORTED" => Some(Self::AtomPdfLoadReported),
+            "ATOM_PDF_API_USAGE_REPORTED" => Some(Self::AtomPdfApiUsageReported),
+            "ATOM_PDF_SEARCH_REPORTED" => Some(Self::AtomPdfSearchReported),
+            "ATOM_PRESSURE_STALL_INFORMATION" => Some(Self::AtomPressureStallInformation),
+            "ATOM_PERMISSION_RATIONALE_DIALOG_VIEWED" => {
+                Some(Self::AtomPermissionRationaleDialogViewed)
+            }
+            "ATOM_PERMISSION_RATIONALE_DIALOG_ACTION_REPORTED" => {
+                Some(Self::AtomPermissionRationaleDialogActionReported)
+            }
+            "ATOM_APP_DATA_SHARING_UPDATES_NOTIFICATION_INTERACTION" => {
+                Some(Self::AtomAppDataSharingUpdatesNotificationInteraction)
+            }
+            "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_VIEWED" => {
+                Some(Self::AtomAppDataSharingUpdatesFragmentViewed)
+            }
+            "ATOM_APP_DATA_SHARING_UPDATES_FRAGMENT_ACTION_REPORTED" => {
+                Some(Self::AtomAppDataSharingUpdatesFragmentActionReported)
+            }
+            "ATOM_ENHANCED_CONFIRMATION_DIALOG_RESULT_REPORTED" => {
+                Some(Self::AtomEnhancedConfirmationDialogResultReported)
+            }
+            "ATOM_ENHANCED_CONFIRMATION_RESTRICTION_CLEARED" => {
+                Some(Self::AtomEnhancedConfirmationRestrictionCleared)
+            }
+            "ATOM_PHOTOPICKER_SESSION_INFO_REPORTED" => {
+                Some(Self::AtomPhotopickerSessionInfoReported)
+            }
+            "ATOM_PHOTOPICKER_API_INFO_REPORTED" => Some(Self::AtomPhotopickerApiInfoReported),
+            "ATOM_PHOTOPICKER_UI_EVENT_LOGGED" => Some(Self::AtomPhotopickerUiEventLogged),
+            "ATOM_PHOTOPICKER_MEDIA_ITEM_STATUS_REPORTED" => {
+                Some(Self::AtomPhotopickerMediaItemStatusReported)
+            }
+            "ATOM_PHOTOPICKER_PREVIEW_INFO_LOGGED" => Some(Self::AtomPhotopickerPreviewInfoLogged),
+            "ATOM_PHOTOPICKER_MENU_INTERACTION_LOGGED" => {
+                Some(Self::AtomPhotopickerMenuInteractionLogged)
+            }
+            "ATOM_PHOTOPICKER_BANNER_INTERACTION_LOGGED" => {
+                Some(Self::AtomPhotopickerBannerInteractionLogged)
+            }
+            "ATOM_PHOTOPICKER_MEDIA_LIBRARY_INFO_LOGGED" => {
+                Some(Self::AtomPhotopickerMediaLibraryInfoLogged)
+            }
+            "ATOM_PHOTOPICKER_PAGE_INFO_LOGGED" => Some(Self::AtomPhotopickerPageInfoLogged),
+            "ATOM_PHOTOPICKER_MEDIA_GRID_SYNC_INFO_REPORTED" => {
+                Some(Self::AtomPhotopickerMediaGridSyncInfoReported)
+            }
+            "ATOM_PHOTOPICKER_ALBUM_SYNC_INFO_REPORTED" => {
+                Some(Self::AtomPhotopickerAlbumSyncInfoReported)
+            }
+            "ATOM_PHOTOPICKER_SEARCH_INFO_REPORTED" => {
+                Some(Self::AtomPhotopickerSearchInfoReported)
+            }
+            "ATOM_SEARCH_DATA_EXTRACTION_DETAILS_REPORTED" => {
+                Some(Self::AtomSearchDataExtractionDetailsReported)
+            }
+            "ATOM_EMBEDDED_PHOTOPICKER_INFO_REPORTED" => {
+                Some(Self::AtomEmbeddedPhotopickerInfoReported)
+            }
+            "ATOM_ATOM_9999" => Some(Self::AtomAtom9999),
+            "ATOM_ATOM_99999" => Some(Self::AtomAtom99999),
+            "ATOM_SCREEN_OFF_REPORTED" => Some(Self::AtomScreenOffReported),
+            "ATOM_SCREEN_TIMEOUT_OVERRIDE_REPORTED" => {
+                Some(Self::AtomScreenTimeoutOverrideReported)
+            }
+            "ATOM_SCREEN_INTERACTIVE_SESSION_REPORTED" => {
+                Some(Self::AtomScreenInteractiveSessionReported)
+            }
+            "ATOM_SCREEN_DIM_REPORTED" => Some(Self::AtomScreenDimReported),
+            "ATOM_MEDIA_PROVIDER_DATABASE_ROLLBACK_REPORTED" => {
+                Some(Self::AtomMediaProviderDatabaseRollbackReported)
+            }
+            "ATOM_BACKUP_SETUP_STATUS_REPORTED" => Some(Self::AtomBackupSetupStatusReported),
+            "ATOM_RANGING_SESSION_CONFIGURED" => Some(Self::AtomRangingSessionConfigured),
+            "ATOM_RANGING_SESSION_STARTED" => Some(Self::AtomRangingSessionStarted),
+            "ATOM_RANGING_SESSION_CLOSED" => Some(Self::AtomRangingSessionClosed),
+            "ATOM_RANGING_TECHNOLOGY_STARTED" => Some(Self::AtomRangingTechnologyStarted),
+            "ATOM_RANGING_TECHNOLOGY_STOPPED" => Some(Self::AtomRangingTechnologyStopped),
+            "ATOM_RKPD_POOL_STATS" => Some(Self::AtomRkpdPoolStats),
+            "ATOM_RKPD_CLIENT_OPERATION" => Some(Self::AtomRkpdClientOperation),
+            "ATOM_SANDBOX_API_CALLED" => Some(Self::AtomSandboxApiCalled),
+            "ATOM_SANDBOX_ACTIVITY_EVENT_OCCURRED" => Some(Self::AtomSandboxActivityEventOccurred),
+            "ATOM_SDK_SANDBOX_RESTRICTED_ACCESS_IN_SESSION" => {
+                Some(Self::AtomSdkSandboxRestrictedAccessInSession)
+            }
+            "ATOM_SANDBOX_SDK_STORAGE" => Some(Self::AtomSandboxSdkStorage),
+            "ATOM_SELINUX_AUDIT_LOG" => Some(Self::AtomSelinuxAuditLog),
+            "ATOM_SETTINGS_SPA_REPORTED" => Some(Self::AtomSettingsSpaReported),
+            "ATOM_TEST_EXTENSION_ATOM_REPORTED" => Some(Self::AtomTestExtensionAtomReported),
+            "ATOM_TEST_RESTRICTED_ATOM_REPORTED" => Some(Self::AtomTestRestrictedAtomReported),
+            "ATOM_STATS_SOCKET_LOSS_REPORTED" => Some(Self::AtomStatsSocketLossReported),
+            "ATOM_LOCKSCREEN_SHORTCUT_SELECTED" => Some(Self::AtomLockscreenShortcutSelected),
+            "ATOM_LOCKSCREEN_SHORTCUT_TRIGGERED" => Some(Self::AtomLockscreenShortcutTriggered),
+            "ATOM_LAUNCHER_IMPRESSION_EVENT_V2" => Some(Self::AtomLauncherImpressionEventV2),
+            "ATOM_DISPLAY_SWITCH_LATENCY_TRACKED" => Some(Self::AtomDisplaySwitchLatencyTracked),
+            "ATOM_NOTIFICATION_LISTENER_SERVICE" => Some(Self::AtomNotificationListenerService),
+            "ATOM_NAV_HANDLE_TOUCH_POINTS" => Some(Self::AtomNavHandleTouchPoints),
+            "ATOM_COMMUNAL_HUB_WIDGET_EVENT_REPORTED" => {
+                Some(Self::AtomCommunalHubWidgetEventReported)
+            }
+            "ATOM_COMMUNAL_HUB_SNAPSHOT" => Some(Self::AtomCommunalHubSnapshot),
+            "ATOM_EMERGENCY_NUMBER_DIALED" => Some(Self::AtomEmergencyNumberDialed),
+            "ATOM_CALL_STATS" => Some(Self::AtomCallStats),
+            "ATOM_CALL_AUDIO_ROUTE_STATS" => Some(Self::AtomCallAudioRouteStats),
+            "ATOM_TELECOM_API_STATS" => Some(Self::AtomTelecomApiStats),
+            "ATOM_TELECOM_ERROR_STATS" => Some(Self::AtomTelecomErrorStats),
+            "ATOM_CELLULAR_RADIO_POWER_STATE_CHANGED" => {
+                Some(Self::AtomCellularRadioPowerStateChanged)
+            }
+            "ATOM_EMERGENCY_NUMBERS_INFO" => Some(Self::AtomEmergencyNumbersInfo),
+            "ATOM_DATA_NETWORK_VALIDATION" => Some(Self::AtomDataNetworkValidation),
+            "ATOM_DATA_RAT_STATE_CHANGED" => Some(Self::AtomDataRatStateChanged),
+            "ATOM_CONNECTED_CHANNEL_CHANGED" => Some(Self::AtomConnectedChannelChanged),
+            "ATOM_IWLAN_UNDERLYING_NETWORK_VALIDATION_RESULT_REPORTED" => {
+                Some(Self::AtomIwlanUnderlyingNetworkValidationResultReported)
+            }
+            "ATOM_QUALIFIED_RAT_LIST_CHANGED" => Some(Self::AtomQualifiedRatListChanged),
+            "ATOM_QNS_IMS_CALL_DROP_STATS" => Some(Self::AtomQnsImsCallDropStats),
+            "ATOM_QNS_FALLBACK_RESTRICTION_CHANGED" => {
+                Some(Self::AtomQnsFallbackRestrictionChanged)
+            }
+            "ATOM_QNS_RAT_PREFERENCE_MISMATCH_INFO" => Some(Self::AtomQnsRatPreferenceMismatchInfo),
+            "ATOM_QNS_HANDOVER_TIME_MILLIS" => Some(Self::AtomQnsHandoverTimeMillis),
+            "ATOM_QNS_HANDOVER_PINGPONG" => Some(Self::AtomQnsHandoverPingpong),
+            "ATOM_SATELLITE_CONTROLLER" => Some(Self::AtomSatelliteController),
+            "ATOM_SATELLITE_SESSION" => Some(Self::AtomSatelliteSession),
+            "ATOM_SATELLITE_INCOMING_DATAGRAM" => Some(Self::AtomSatelliteIncomingDatagram),
+            "ATOM_SATELLITE_OUTGOING_DATAGRAM" => Some(Self::AtomSatelliteOutgoingDatagram),
+            "ATOM_SATELLITE_PROVISION" => Some(Self::AtomSatelliteProvision),
+            "ATOM_SATELLITE_SOS_MESSAGE_RECOMMENDER" => {
+                Some(Self::AtomSatelliteSosMessageRecommender)
+            }
+            "ATOM_CARRIER_ROAMING_SATELLITE_SESSION" => {
+                Some(Self::AtomCarrierRoamingSatelliteSession)
+            }
+            "ATOM_CARRIER_ROAMING_SATELLITE_CONTROLLER_STATS" => {
+                Some(Self::AtomCarrierRoamingSatelliteControllerStats)
+            }
+            "ATOM_CONTROLLER_STATS_PER_PACKAGE" => Some(Self::AtomControllerStatsPerPackage),
+            "ATOM_SATELLITE_ENTITLEMENT" => Some(Self::AtomSatelliteEntitlement),
+            "ATOM_SATELLITE_CONFIG_UPDATER" => Some(Self::AtomSatelliteConfigUpdater),
+            "ATOM_SATELLITE_ACCESS_CONTROLLER" => Some(Self::AtomSatelliteAccessController),
+            "ATOM_CELLULAR_IDENTIFIER_DISCLOSED" => Some(Self::AtomCellularIdentifierDisclosed),
+            "ATOM_THREADNETWORK_TELEMETRY_DATA_REPORTED" => {
+                Some(Self::AtomThreadnetworkTelemetryDataReported)
+            }
+            "ATOM_THREADNETWORK_TOPO_ENTRY_REPEATED" => {
+                Some(Self::AtomThreadnetworkTopoEntryRepeated)
+            }
+            "ATOM_THREADNETWORK_DEVICE_INFO_REPORTED" => {
+                Some(Self::AtomThreadnetworkDeviceInfoReported)
+            }
+            "ATOM_BOOT_INTEGRITY_INFO_REPORTED" => Some(Self::AtomBootIntegrityInfoReported),
+            "ATOM_TV_LOW_POWER_STANDBY_POLICY" => Some(Self::AtomTvLowPowerStandbyPolicy),
+            "ATOM_EXTERNAL_TV_INPUT_EVENT" => Some(Self::AtomExternalTvInputEvent),
+            "ATOM_TEST_UPROBESTATS_ATOM_REPORTED" => Some(Self::AtomTestUprobestatsAtomReported),
+            "ATOM_UWB_ACTIVITY_INFO" => Some(Self::AtomUwbActivityInfo),
+            "ATOM_MEDIATOR_UPDATED" => Some(Self::AtomMediatorUpdated),
+            "ATOM_SYSPROXY_BLUETOOTH_BYTES_TRANSFER" => {
+                Some(Self::AtomSysproxyBluetoothBytesTransfer)
+            }
+            "ATOM_SYSPROXY_CONNECTION_UPDATED" => Some(Self::AtomSysproxyConnectionUpdated),
+            "ATOM_WEAR_COMPANION_CONNECTION_STATE" => Some(Self::AtomWearCompanionConnectionState),
+            "ATOM_MEDIA_ACTION_REPORTED" => Some(Self::AtomMediaActionReported),
+            "ATOM_MEDIA_CONTROLS_LAUNCHED" => Some(Self::AtomMediaControlsLaunched),
+            "ATOM_MEDIA_SESSION_STATE_CHANGED" => Some(Self::AtomMediaSessionStateChanged),
+            "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_DEVICE_SCAN_API_LATENCY" => {
+                Some(Self::AtomWearMediaOutputSwitcherDeviceScanApiLatency)
+            }
+            "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_SASS_DEVICE_UNAVAILABLE" => {
+                Some(Self::AtomWearMediaOutputSwitcherSassDeviceUnavailable)
+            }
+            "ATOM_WEAR_MEDIA_OUTPUT_SWITCHER_FASTPAIR_API_TIMEOUT" => {
+                Some(Self::AtomWearMediaOutputSwitcherFastpairApiTimeout)
+            }
+            "ATOM_WEAR_MODE_STATE_CHANGED" => Some(Self::AtomWearModeStateChanged),
+            "ATOM_RENDERER_INITIALIZED" => Some(Self::AtomRendererInitialized),
+            "ATOM_SCHEMA_VERSION_RECEIVED" => Some(Self::AtomSchemaVersionReceived),
+            "ATOM_LAYOUT_INSPECTED" => Some(Self::AtomLayoutInspected),
+            "ATOM_LAYOUT_EXPRESSION_INSPECTED" => Some(Self::AtomLayoutExpressionInspected),
+            "ATOM_LAYOUT_ANIMATIONS_INSPECTED" => Some(Self::AtomLayoutAnimationsInspected),
+            "ATOM_MATERIAL_COMPONENTS_INSPECTED" => Some(Self::AtomMaterialComponentsInspected),
+            "ATOM_TILE_REQUESTED" => Some(Self::AtomTileRequested),
+            "ATOM_STATE_RESPONSE_RECEIVED" => Some(Self::AtomStateResponseReceived),
+            "ATOM_TILE_RESPONSE_RECEIVED" => Some(Self::AtomTileResponseReceived),
+            "ATOM_INFLATION_FINISHED" => Some(Self::AtomInflationFinished),
+            "ATOM_INFLATION_FAILED" => Some(Self::AtomInflationFailed),
+            "ATOM_IGNORED_INFLATION_FAILURES_REPORTED" => {
+                Some(Self::AtomIgnoredInflationFailuresReported)
+            }
+            "ATOM_DRAWABLE_RENDERED" => Some(Self::AtomDrawableRendered),
+            "ATOM_WEAR_TIME_SYNC_REQUESTED" => Some(Self::AtomWearTimeSyncRequested),
+            "ATOM_WEAR_TIME_UPDATE_STARTED" => Some(Self::AtomWearTimeUpdateStarted),
+            "ATOM_WEAR_TIME_SYNC_ATTEMPT_COMPLETED" => Some(Self::AtomWearTimeSyncAttemptCompleted),
+            "ATOM_WEAR_TIME_CHANGED" => Some(Self::AtomWearTimeChanged),
+            "ATOM_WEAR_ADAPTIVE_SUSPEND_STATS_REPORTED" => {
+                Some(Self::AtomWearAdaptiveSuspendStatsReported)
+            }
+            "ATOM_WEAR_POWER_ANOMALY_SERVICE_OPERATIONAL_STATS_REPORTED" => {
+                Some(Self::AtomWearPowerAnomalyServiceOperationalStatsReported)
+            }
+            "ATOM_WEAR_POWER_ANOMALY_SERVICE_EVENT_STATS_REPORTED" => {
+                Some(Self::AtomWearPowerAnomalyServiceEventStatsReported)
+            }
+            "ATOM_WS_WEAR_TIME_SESSION" => Some(Self::AtomWsWearTimeSession),
+            "ATOM_WS_INCOMING_CALL_ACTION_REPORTED" => Some(Self::AtomWsIncomingCallActionReported),
+            "ATOM_WS_CALL_DISCONNECTION_REPORTED" => Some(Self::AtomWsCallDisconnectionReported),
+            "ATOM_WS_CALL_DURATION_REPORTED" => Some(Self::AtomWsCallDurationReported),
+            "ATOM_WS_CALL_USER_EXPERIENCE_LATENCY_REPORTED" => {
+                Some(Self::AtomWsCallUserExperienceLatencyReported)
+            }
+            "ATOM_WS_CALL_INTERACTION_REPORTED" => Some(Self::AtomWsCallInteractionReported),
+            "ATOM_WS_ON_BODY_STATE_CHANGED" => Some(Self::AtomWsOnBodyStateChanged),
+            "ATOM_WS_WATCH_FACE_RESTRICTED_COMPLICATIONS_IMPACTED" => {
+                Some(Self::AtomWsWatchFaceRestrictedComplicationsImpacted)
+            }
+            "ATOM_WS_WATCH_FACE_DEFAULT_RESTRICTED_COMPLICATIONS_REMOVED" => {
+                Some(Self::AtomWsWatchFaceDefaultRestrictedComplicationsRemoved)
+            }
+            "ATOM_WS_COMPLICATIONS_IMPACTED_NOTIFICATION_EVENT_REPORTED" => {
+                Some(Self::AtomWsComplicationsImpactedNotificationEventReported)
+            }
+            "ATOM_WS_REMOTE_EVENT_USAGE_REPORTED" => Some(Self::AtomWsRemoteEventUsageReported),
+            "ATOM_WS_BUGREPORT_REQUESTED" => Some(Self::AtomWsBugreportRequested),
+            "ATOM_WS_BUGREPORT_TRIGGERED" => Some(Self::AtomWsBugreportTriggered),
+            "ATOM_WS_BUGREPORT_FINISHED" => Some(Self::AtomWsBugreportFinished),
+            "ATOM_WS_BUGREPORT_RESULT_RECEIVED" => Some(Self::AtomWsBugreportResultReceived),
+            "ATOM_WS_STANDALONE_MODE_SNAPSHOT" => Some(Self::AtomWsStandaloneModeSnapshot),
+            "ATOM_WS_FAVORITE_WATCH_FACE_SNAPSHOT" => Some(Self::AtomWsFavoriteWatchFaceSnapshot),
+            "ATOM_WS_PHOTOS_WATCH_FACE_FEATURE_SNAPSHOT" => {
+                Some(Self::AtomWsPhotosWatchFaceFeatureSnapshot)
+            }
+            "ATOM_WS_WATCH_FACE_CUSTOMIZATION_SNAPSHOT" => {
+                Some(Self::AtomWsWatchFaceCustomizationSnapshot)
+            }
+            "ATOM_WEAR_POWER_MENU_OPENED" => Some(Self::AtomWearPowerMenuOpened),
+            "ATOM_WEAR_ASSISTANT_OPENED" => Some(Self::AtomWearAssistantOpened),
+            "ATOM_FIRST_OVERLAY_STATE_CHANGED" => Some(Self::AtomFirstOverlayStateChanged),
+            "ATOM_WIFI_AWARE_NDP_REPORTED" => Some(Self::AtomWifiAwareNdpReported),
+            "ATOM_WIFI_AWARE_ATTACH_REPORTED" => Some(Self::AtomWifiAwareAttachReported),
+            "ATOM_WIFI_SELF_RECOVERY_TRIGGERED" => Some(Self::AtomWifiSelfRecoveryTriggered),
+            "ATOM_SOFT_AP_STARTED" => Some(Self::AtomSoftApStarted),
+            "ATOM_SOFT_AP_STOPPED" => Some(Self::AtomSoftApStopped),
+            "ATOM_WIFI_LOCK_RELEASED" => Some(Self::AtomWifiLockReleased),
+            "ATOM_WIFI_LOCK_DEACTIVATED" => Some(Self::AtomWifiLockDeactivated),
+            "ATOM_WIFI_CONFIG_SAVED" => Some(Self::AtomWifiConfigSaved),
+            "ATOM_WIFI_AWARE_RESOURCE_USING_CHANGED" => {
+                Some(Self::AtomWifiAwareResourceUsingChanged)
+            }
+            "ATOM_WIFI_AWARE_HAL_API_CALLED" => Some(Self::AtomWifiAwareHalApiCalled),
+            "ATOM_WIFI_LOCAL_ONLY_REQUEST_RECEIVED" => Some(Self::AtomWifiLocalOnlyRequestReceived),
+            "ATOM_WIFI_LOCAL_ONLY_REQUEST_SCAN_TRIGGERED" => {
+                Some(Self::AtomWifiLocalOnlyRequestScanTriggered)
+            }
+            "ATOM_WIFI_THREAD_TASK_EXECUTED" => Some(Self::AtomWifiThreadTaskExecuted),
+            "ATOM_WIFI_STATE_CHANGED" => Some(Self::AtomWifiStateChanged),
+            "ATOM_PNO_SCAN_STARTED" => Some(Self::AtomPnoScanStarted),
+            "ATOM_PNO_SCAN_STOPPED" => Some(Self::AtomPnoScanStopped),
+            "ATOM_WIFI_IS_UNUSABLE_REPORTED" => Some(Self::AtomWifiIsUnusableReported),
+            "ATOM_WIFI_AP_CAPABILITIES_REPORTED" => Some(Self::AtomWifiApCapabilitiesReported),
+            "ATOM_SOFT_AP_STATE_CHANGED" => Some(Self::AtomSoftApStateChanged),
+            "ATOM_SCORER_PREDICTION_RESULT_REPORTED" => {
+                Some(Self::AtomScorerPredictionResultReported)
+            }
+            "ATOM_WIFI_AWARE_CAPABILITIES" => Some(Self::AtomWifiAwareCapabilities),
+            "ATOM_WIFI_MODULE_INFO" => Some(Self::AtomWifiModuleInfo),
+            "ATOM_WIFI_SETTING_INFO" => Some(Self::AtomWifiSettingInfo),
+            "ATOM_WIFI_COMPLEX_SETTING_INFO" => Some(Self::AtomWifiComplexSettingInfo),
+            "ATOM_WIFI_CONFIGURED_NETWORK_INFO" => Some(Self::AtomWifiConfiguredNetworkInfo),
             _ => None,
         }
     }
@@ -26537,6 +31448,52 @@ impl VmstatCounters {
             "VMSTAT_WORKINGSET_REFAULT_FILE" => Some(Self::VmstatWorkingsetRefaultFile),
             "VMSTAT_WORKINGSET_RESTORE_ANON" => Some(Self::VmstatWorkingsetRestoreAnon),
             "VMSTAT_WORKINGSET_RESTORE_FILE" => Some(Self::VmstatWorkingsetRestoreFile),
+            _ => None,
+        }
+    }
+}
+/// Describes the packet type and direction. CMD and EVT are unidirectional, so
+/// no need to differentiate the direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BluetoothTracePacketType {
+    HciCmd = 1,
+    HciEvt = 2,
+    HciAclRx = 3,
+    HciAclTx = 4,
+    HciScoRx = 5,
+    HciScoTx = 6,
+    HciIsoRx = 7,
+    HciIsoTx = 8,
+}
+impl BluetoothTracePacketType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::HciCmd => "HCI_CMD",
+            Self::HciEvt => "HCI_EVT",
+            Self::HciAclRx => "HCI_ACL_RX",
+            Self::HciAclTx => "HCI_ACL_TX",
+            Self::HciScoRx => "HCI_SCO_RX",
+            Self::HciScoTx => "HCI_SCO_TX",
+            Self::HciIsoRx => "HCI_ISO_RX",
+            Self::HciIsoTx => "HCI_ISO_TX",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "HCI_CMD" => Some(Self::HciCmd),
+            "HCI_EVT" => Some(Self::HciEvt),
+            "HCI_ACL_RX" => Some(Self::HciAclRx),
+            "HCI_ACL_TX" => Some(Self::HciAclTx),
+            "HCI_SCO_RX" => Some(Self::HciScoRx),
+            "HCI_SCO_TX" => Some(Self::HciScoTx),
+            "HCI_ISO_RX" => Some(Self::HciIsoRx),
+            "HCI_ISO_TX" => Some(Self::HciIsoTx),
             _ => None,
         }
     }

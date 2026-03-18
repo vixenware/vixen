@@ -16,8 +16,8 @@ use std::time::Instant;
 use prost::Message;
 
 use crate::perfetto_proto_generated::{
-    DebugAnnotation, ProcessDescriptor, ThreadDescriptor, Trace, TracePacket, TrackDescriptor,
-    TrackEvent, debug_annotation, trace_packet, track_descriptor, track_event,
+    DebugAnnotation, ProcessDescriptor, Trace, TracePacket, TrackDescriptor, TrackEvent,
+    debug_annotation, trace_packet, track_descriptor, track_event,
 };
 
 pub type EventArgs = facet_value::Value;
@@ -118,6 +118,9 @@ struct TrackMetadata {
     name: Option<String>,
     sort_index: Option<i64>,
     parent_track_id: Option<u64>,
+    child_ordering: Option<i32>,
+    sibling_order_rank: Option<i32>,
+    sibling_merge_behavior: Option<i32>,
 }
 
 impl RecorderInner {
@@ -179,6 +182,9 @@ impl RecorderInner {
         name: Option<String>,
         sort_index: Option<i64>,
         parent_track_id: Option<u64>,
+        child_ordering: Option<i32>,
+        sibling_order_rank: Option<i32>,
+        sibling_merge_behavior: Option<i32>,
     ) {
         self.track_metadata.lock().unwrap().insert(
             track_id,
@@ -186,17 +192,11 @@ impl RecorderInner {
                 name,
                 sort_index,
                 parent_track_id,
+                child_ordering,
+                sibling_order_rank,
+                sibling_merge_behavior,
             },
         );
-    }
-
-    fn track_metadata(&self, track_id: u64) -> TrackMetadata {
-        self.track_metadata
-            .lock()
-            .unwrap()
-            .get(&track_id)
-            .cloned()
-            .unwrap_or_default()
     }
 }
 
@@ -295,12 +295,34 @@ impl EventRecorder {
         sort_index: i64,
         parent_track_id: Option<u64>,
     ) -> DetachedTrack {
+        self.acquire_detached_track_with_descriptor(
+            name,
+            sort_index,
+            parent_track_id,
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub fn acquire_detached_track_with_descriptor(
+        &self,
+        name: impl Into<String>,
+        sort_index: i64,
+        parent_track_id: Option<u64>,
+        child_ordering: Option<i32>,
+        sibling_order_rank: Option<i32>,
+        sibling_merge_behavior: Option<i32>,
+    ) -> DetachedTrack {
         let track_id = self.inner.acquire_persistent_track_id();
         self.inner.set_track_metadata(
             track_id,
             Some(name.into()),
             Some(sort_index),
             parent_track_id,
+            child_ordering,
+            sibling_order_rank,
+            sibling_merge_behavior,
         );
         DetachedTrack {
             inner: Arc::clone(&self.inner),
@@ -529,6 +551,14 @@ fn process_descriptor_packet() -> TracePacket {
     }
 }
 
+fn default_child_ordering() -> i32 {
+    track_descriptor::ChildTracksOrdering::Explicit as i32
+}
+
+fn default_sibling_merge_behavior() -> i32 {
+    track_descriptor::SiblingMergeBehavior::None as i32
+}
+
 fn track_descriptor_packet(
     track_id: u64,
     metadata: TrackMetadata,
@@ -553,16 +583,20 @@ fn track_descriptor_packet(
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(track_uuid(track_id)),
             parent_uuid: Some(parent_track_id.map(track_uuid).unwrap_or_else(process_uuid)),
-            thread: parent_track_id.is_none().then(|| ThreadDescriptor {
-                pid: Some(1),
-                tid: Some(track_tid(track_id)),
-                thread_name: Some(track_name.clone()),
-                legacy_sort_index: Some(
-                    metadata.sort_index.unwrap_or((track_id as i64) * 10) as i32
-                ),
-                ..ThreadDescriptor::default()
-            }),
             static_or_dynamic_name: Some(track_descriptor::StaticOrDynamicName::Name(track_name)),
+            child_ordering: Some(
+                metadata
+                    .child_ordering
+                    .unwrap_or_else(default_child_ordering),
+            ),
+            sibling_order_rank: metadata
+                .sibling_order_rank
+                .or(metadata.sort_index.map(|index| index as i32)),
+            sibling_merge_behavior: Some(
+                metadata
+                    .sibling_merge_behavior
+                    .unwrap_or_else(default_sibling_merge_behavior),
+            ),
             disallow_merging_with_system_tracks: Some(true),
             ..TrackDescriptor::default()
         })),
@@ -694,14 +728,6 @@ fn root_track_id(track_id: u64, metadata_by_track: &HashMap<u64, TrackMetadata>)
 fn track_sequence_id(track_id: u64, metadata_by_track: &HashMap<u64, TrackMetadata>) -> u32 {
     let root_track_id = root_track_id(track_id, metadata_by_track);
     u32::try_from(root_track_id.saturating_add(2)).unwrap_or(u32::MAX)
-}
-
-fn track_tid(track_id: u64) -> i32 {
-    if track_id == 0 {
-        0
-    } else {
-        i32::try_from(track_id).unwrap_or(i32::MAX)
-    }
 }
 
 fn us_to_ns(timestamp_us: u64) -> u64 {

@@ -12,7 +12,7 @@ pub mod events;
 pub use events::{ErasedEventSink, ErasedSpan, EventRecorder, EventSink, current_trace_track_id};
 
 #[allow(dead_code)]
-mod perfetto_proto_generated;
+pub mod perfetto_proto_generated;
 
 mod exec;
 pub use exec::{
