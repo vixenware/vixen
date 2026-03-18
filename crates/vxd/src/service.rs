@@ -194,6 +194,8 @@ type SnapshotTreeFuture<'a> =
 type SnapshotTreeEntryFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(DirEntryKind, u64), String>> + Send + 'a>>;
 
+pub(crate) const BUILD_VX_CONFIG_IMPORT_PATH: &str = "vixen:config";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostRelation {
     SameHost,
@@ -1108,6 +1110,9 @@ pub struct VxdService {
     /// Shared daemon-side activity registry used by `vx ps`
     activity_registry: ActivityRegistry,
 
+    /// Optional virtual build.vx config module exposed as `import("vixen:config")`.
+    build_vx_config_path: Option<Utf8PathBuf>,
+
     /// In-flight deduplication for identical exec root mount preparation.
     exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
 
@@ -1129,6 +1134,7 @@ pub(crate) struct VxdServiceDeps {
     pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
     pub(crate) activity_registry: ActivityRegistry,
+    pub(crate) build_vx_config_path: Option<Utf8PathBuf>,
 }
 
 pub(crate) fn exec_mounts_singleflight_key(mounts: &[ExecMount]) -> Option<String> {
@@ -3889,6 +3895,7 @@ struct BuildVxRuntime {
     activity_registry: ActivityRegistry,
     exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
     workspace_root: Utf8PathBuf,
+    config_module_path: Option<Utf8PathBuf>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     exec_fs_tree_snapshot_cache: Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
@@ -4091,43 +4098,65 @@ impl BuildVxRuntime {
         &self,
         request: &EvalImportRequest,
     ) -> std::result::Result<Utf8PathBuf, PoisonError> {
-        let from_source = Utf8Path::new(&request.from_source_id);
-        let from_dir = from_source.parent().ok_or_else(|| {
+        resolve_build_vx_import_path(self.config_module_path.as_ref(), request)
+    }
+}
+
+pub(crate) fn resolve_build_vx_import_path(
+    config_module_path: Option<&Utf8PathBuf>,
+    request: &EvalImportRequest,
+) -> std::result::Result<Utf8PathBuf, PoisonError> {
+    if request.path == BUILD_VX_CONFIG_IMPORT_PATH {
+        return config_module_path.cloned().ok_or_else(|| {
             exec_bridge_poison(
                 PoisonKind::UserFail,
                 format!(
-                    "cannot resolve import {} from source {}",
+                    "import {} is unavailable because VIXEN_CONFIG_PATH is not set and no default config was found",
+                    request.path
+                ),
+                &request.demand_chain,
+            )
+        });
+    }
+
+    let from_source = Utf8Path::new(&request.from_source_id);
+    let from_dir = from_source.parent().ok_or_else(|| {
+        exec_bridge_poison(
+            PoisonKind::UserFail,
+            format!(
+                "cannot resolve import {} from source {}",
+                request.path, request.from_source_id
+            ),
+            &request.demand_chain,
+        )
+    })?;
+
+    let requested = Utf8Path::new(&request.path);
+    let candidates = if requested.extension().is_some() {
+        vec![from_dir.join(requested)]
+    } else {
+        vec![
+            from_dir.join(requested),
+            from_dir.join(format!("{}.vx", request.path)),
+        ]
+    };
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| {
+            exec_bridge_poison(
+                PoisonKind::UserFail,
+                format!(
+                    "import {} from {} did not resolve to a file",
                     request.path, request.from_source_id
                 ),
                 &request.demand_chain,
             )
-        })?;
+        })
+}
 
-        let requested = Utf8Path::new(&request.path);
-        let candidates = if requested.extension().is_some() {
-            vec![from_dir.join(requested)]
-        } else {
-            vec![
-                from_dir.join(requested),
-                from_dir.join(format!("{}.vx", request.path)),
-            ]
-        };
-
-        candidates
-            .into_iter()
-            .find(|candidate| candidate.exists())
-            .ok_or_else(|| {
-                exec_bridge_poison(
-                    PoisonKind::UserFail,
-                    format!(
-                        "import {} from {} did not resolve to a file",
-                        request.path, request.from_source_id
-                    ),
-                    &request.demand_chain,
-                )
-            })
-    }
-
+impl BuildVxRuntime {
     async fn run_stabilize_via_store(
         &self,
         request: EvalStabilizeRequest,
@@ -4546,6 +4575,7 @@ impl VxdService {
             build_vx_executors,
             store_handle,
             activity_registry,
+            build_vx_config_path,
         } = deps;
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -4612,6 +4642,7 @@ impl VxdService {
             )),
             spawn_tracker,
             activity_registry,
+            build_vx_config_path,
             exec_mount_prep_inflight: Arc::new(SyncMutex::new(
                 "vxd/exec_mount_prep_inflight",
                 HashMap::new(),
@@ -4638,6 +4669,7 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             activity_registry: self.activity_registry.clone(),
+            build_vx_config_path: self.build_vx_config_path.clone(),
             exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
             // Per-connection state: fresh for each session
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
@@ -4858,6 +4890,7 @@ impl VxdService {
                     activity_registry: self.activity_registry.clone(),
                     exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
                     workspace_root: request.project_path.clone(),
+                    config_module_path: self.build_vx_config_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
                     exec_fs_tree_snapshot_cache: Arc::new(SyncMutex::new(
                         "build_vx_fs_tree_snapshot_cache",

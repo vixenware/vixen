@@ -1,0 +1,19 @@
+fn platforms(env: Map[String, String]) {
+  if env.has("VX_PLATFORMS") (
+    env.get("VX_PLATFORMS").split(",")
+  ) else (
+    ["local"]
+  )
+}
+
+fn executor_for_platform(name: String) {
+  if name == "local" (
+    executor_class("default")
+  ) else if name == "orb" (
+    executor_class("ssh:orb")
+  ) else if name == "toast" (
+    executor_class("ssh:toast")
+  ) else (
+    fail `unknown platform: ${name}`
+  )
+}

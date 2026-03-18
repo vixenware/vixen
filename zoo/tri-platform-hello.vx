@@ -1,3 +1,5 @@
+let config = import("vixen:config");
+
 struct Toolchain {
   os: String,
   arch: String,
@@ -52,9 +54,7 @@ int answer(void) {
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree %{
-    @local => compile_hello(executor_class("default")),
-    @orb => compile_hello(executor_class("ssh:orb")),
-    @toast => compile_hello(executor_class("ssh:toast")),
-  }
+  config.platforms(env)
+    .map((name) => Tree %{ @({name}) => compile_hello(config.executor_for_platform(name)) })
+    .merge()
 }

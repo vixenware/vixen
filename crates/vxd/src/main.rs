@@ -126,6 +126,9 @@ struct Args {
 
     /// Additional build.vx executor class mappings.
     build_vx_executor_classes: Vec<BuildVxExecutorClassConfig>,
+
+    /// Optional build.vx config module exposed via the virtual import path.
+    build_vx_config_path: Option<Utf8PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3323,12 +3326,24 @@ fn resolve_args(cli: CliArgs) -> Result<Args> {
         .transpose()?
         .unwrap_or_default();
 
+    let build_vx_config_path = std::env::var("VIXEN_CONFIG_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(Utf8PathBuf::from)
+        .or_else(|| {
+            resolve_vixen_repo_root()
+                .ok()
+                .map(|repo_root| repo_root.join("zoo/vixen-config.default.vx"))
+                .filter(|path| path.exists())
+        });
+
     Ok(Args {
         vx_home,
         store_endpoint,
         exec_endpoint,
         bind,
         build_vx_executor_classes,
+        build_vx_config_path,
     })
 }
 
@@ -3365,6 +3380,7 @@ struct ServiceClients {
     build_vx_executors: crate::service::BuildVxExecutors,
     store_handle: Arc<ServiceHandle>,
     activity_registry: ActivityRegistry,
+    build_vx_config_path: Option<Utf8PathBuf>,
 }
 
 #[derive(Clone)]
@@ -3628,6 +3644,7 @@ async fn ensure_services(
         build_vx_executors,
         store_handle: Arc::new(store_handle),
         activity_registry,
+        build_vx_config_path: args.build_vx_config_path.clone(),
     })
 }
 
@@ -3787,6 +3804,7 @@ async fn async_main() -> Result<()> {
             exec_endpoint: args.exec_endpoint.clone(),
             bind: args.bind.clone(),
             build_vx_executor_classes: args.build_vx_executor_classes.clone(),
+            build_vx_config_path: args.build_vx_config_path.clone(),
         };
         let spawn_tracker = spawn_tracker.clone();
         let gate = Arc::clone(&gate);
@@ -3811,6 +3829,7 @@ async fn async_main() -> Result<()> {
                                     build_vx_executors: clients.build_vx_executors,
                                     store_handle: clients.store_handle,
                                     activity_registry: clients.activity_registry,
+                                    build_vx_config_path: clients.build_vx_config_path,
                                 },
                             )
                             .await,

@@ -1,3 +1,5 @@
+let config = import("vixen:config");
+
 let core_sources = [
   @lapi.c, @lcode.c, @lctype.c, @ldebug.c, @ldo.c, @ldump.c,
   @lfunc.c, @lgc.c, @llex.c, @lmem.c, @lobject.c, @lopcodes.c,
@@ -172,9 +174,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree %{
-    @local => build_lua(workspace, executor_class("default")),
-    @orb => build_lua(workspace, executor_class("ssh:orb")),
-    @toast => build_lua(workspace, executor_class("ssh:toast")),
-  }
+  config.platforms(env)
+    .map((name) => Tree %{ @({name}) => build_lua(workspace, config.executor_for_platform(name)) })
+    .merge()
 }

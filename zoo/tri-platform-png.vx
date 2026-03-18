@@ -1,6 +1,7 @@
 let zlib = import("./zlib-lib");
 let libpng = import("./libpng-lib");
 let pnggen = import("./pnggen-app");
+let config = import("vixen:config");
 
 fn render_png(class: ExecutorClass, exe) {
   let static_name = @static.png;
@@ -47,26 +48,8 @@ fn build_for(workspace: Path, class: ExecutorClass) {
   render_png(class, app)
 }
 
-fn build_platform(workspace: Path, name: String) {
-  if name == "local" (
-    build_for(workspace, executor_class("default"))
-  ) else if name == "orb" (
-    build_for(workspace, executor_class("ssh:orb"))
-  ) else if name == "toast" (
-    build_for(workspace, executor_class("ssh:toast"))
-  ) else (
-    fail `unknown platform: ${name}`
-  )
-}
-
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  let selected =
-    if env.has("VX_PLATFORMS") (
-      env.get("VX_PLATFORMS").split(",")
-    ) else (
-      ["local", "orb", "toast"]
-    );
-  selected
-    .map((name) => Tree %{ @({name}) => build_platform(workspace, name) })
+  config.platforms(env)
+    .map((name) => Tree %{ @({name}) => build_for(workspace, config.executor_for_platform(name)) })
     .merge()
 }

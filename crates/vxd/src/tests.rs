@@ -15,7 +15,7 @@ use arborium::{GrammarStore, Highlighter};
 use arborium_highlight::spans_to_themed;
 use arborium_theme::theme::builtin;
 use ariadne::{Color as AriadneColor, Config as AriadneConfig, Label, Report, ReportKind, Source};
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use concolor::ColorChoice;
 use moire::task::FutureExt;
 use roam_core::acceptor;
@@ -31,9 +31,9 @@ use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
-    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecPathValue, ExecRequest, MapValue,
-    PathValue, RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
-    TransportValue, TreeValue, Value,
+    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecPathValue, ExecRequest,
+    ImportRequest as EvalImportRequest, MapValue, PathValue, RenderRequest as EvalRenderRequest,
+    ShippedFunction, TransportBlock, TransportFnDef, TransportValue, TreeValue, Value,
 };
 use vx_io::boot::{BootDispatcher, BootGate, GracefulShutdown};
 use vx_io::net::Listener;
@@ -645,6 +645,41 @@ fn build_vx_discover_summary_includes_executor_class() {
     });
 
     assert_eq!(summary, "build.vx discover[class:default]");
+}
+
+#[test]
+fn build_vx_virtual_config_import_uses_config_path() {
+    let config_path = Utf8PathBuf::from("/tmp/vixen-config.vx");
+    let resolved = crate::service::resolve_build_vx_import_path(
+        Some(&config_path),
+        &EvalImportRequest {
+            path: crate::service::BUILD_VX_CONFIG_IMPORT_PATH.to_string(),
+            from_source_id: "/workspace/build.vx".to_string(),
+            demand_chain: DemandChain::new(),
+        },
+    )
+    .expect("virtual config import should resolve");
+
+    assert_eq!(resolved, config_path);
+}
+
+#[test]
+fn build_vx_virtual_config_import_requires_config_path() {
+    let error = crate::service::resolve_build_vx_import_path(
+        None,
+        &EvalImportRequest {
+            path: crate::service::BUILD_VX_CONFIG_IMPORT_PATH.to_string(),
+            from_source_id: "/workspace/build.vx".to_string(),
+            demand_chain: DemandChain::new(),
+        },
+    )
+    .expect_err("missing config path should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("VIXEN_CONFIG_PATH is not set and no default config was found")
+    );
 }
 
 #[test]
@@ -1890,6 +1925,7 @@ impl BuildServiceDaemonTestEnv {
                 build_vx_executors,
                 store_handle: Arc::clone(&store_handle),
                 activity_registry: crate::activity::ActivityRegistry::new(),
+                build_vx_config_path: None,
             },
         )
         .await;
