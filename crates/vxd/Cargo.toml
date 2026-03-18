@@ -21,6 +21,7 @@ roam-types = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
+futures-util = { workspace = true }
 blake3 = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }

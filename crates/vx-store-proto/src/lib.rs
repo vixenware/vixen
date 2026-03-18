@@ -655,6 +655,8 @@ pub enum RemoteTraceSpan {
 pub struct RemoteTraceEvent {
     pub span: RemoteTraceSpan,
     pub phase: RemoteTracePhase,
+    pub instance_id: u64,
+    pub label: String,
 }
 
 /// Progress update streamed during long-running store operations (downloads, extraction).
@@ -681,11 +683,37 @@ impl StoreProgress {
     }
 
     pub fn trace(span: RemoteTraceSpan, phase: RemoteTracePhase) -> Self {
+        Self::trace_labeled_with_id(span, phase, 0, String::new())
+    }
+
+    pub fn trace_labeled(
+        span: RemoteTraceSpan,
+        phase: RemoteTracePhase,
+        label: impl Into<String>,
+    ) -> Self {
+        Self::trace_labeled_with_id(span, phase, 0, label)
+    }
+
+    pub fn trace_with_id(span: RemoteTraceSpan, phase: RemoteTracePhase, instance_id: u64) -> Self {
+        Self::trace_labeled_with_id(span, phase, instance_id, String::new())
+    }
+
+    pub fn trace_labeled_with_id(
+        span: RemoteTraceSpan,
+        phase: RemoteTracePhase,
+        instance_id: u64,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
             message: String::new(),
             current: None,
             total: None,
-            trace_event: Some(RemoteTraceEvent { span, phase }),
+            trace_event: Some(RemoteTraceEvent {
+                span,
+                phase,
+                instance_id,
+                label: label.into(),
+            }),
         }
     }
 }

@@ -53,6 +53,22 @@ pub(crate) async fn send_progress_best_effort(
     }
 }
 
+pub(crate) async fn send_progress_reliably(
+    progress: &roam::Tx<StoreProgress>,
+    update: StoreProgress,
+) -> Result<(), roam::TxError> {
+    let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
+    loop {
+        match progress.send(update.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(roam::TxError::Unbound) if Instant::now() < deadline => {
+                tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// What kind of action is being executed (affects default timeout).
 #[derive(Debug)]
 pub enum ActionKind {

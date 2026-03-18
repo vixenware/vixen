@@ -24,18 +24,31 @@ use crate::eval_boundary::{
     commit_value_to_transport, evaluate_shipped_discover, evaluate_shipped_verification,
     invoke_shipped_observer,
 };
-use crate::sandbox::{ActionKind, CommandError, send_progress_best_effort};
+use crate::sandbox::{ActionKind, CommandError, send_progress_reliably};
 
 async fn emit_runner_progress_trace(progress: &roam::Tx<StoreProgress>, span: RemoteTraceSpan) {
-    send_progress_best_effort(
+    let _ = send_progress_reliably(
         progress,
         StoreProgress::trace(span, RemoteTracePhase::Begin),
     )
     .await;
 }
 
+async fn emit_runner_progress_trace_labeled(
+    progress: &roam::Tx<StoreProgress>,
+    span: RemoteTraceSpan,
+    label: impl Into<String>,
+) {
+    let _ = send_progress_reliably(
+        progress,
+        StoreProgress::trace_labeled(span, RemoteTracePhase::Begin, label),
+    )
+    .await;
+}
+
 async fn end_runner_progress_trace(progress: &roam::Tx<StoreProgress>, span: RemoteTraceSpan) {
-    send_progress_best_effort(progress, StoreProgress::trace(span, RemoteTracePhase::End)).await;
+    let _ =
+        send_progress_reliably(progress, StoreProgress::trace(span, RemoteTracePhase::End)).await;
 }
 
 async fn with_runner_progress_trace<T>(
@@ -629,426 +642,466 @@ impl RunnerService {
             writable_roots = request.writable_roots.len(),
             "preparing VFS run action"
         );
-        emit_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
-
-        let mount_start = Instant::now();
-
-        for mount in &request.tree_mounts {
-            if !is_tree_mount_path(&mount.mount) {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!(
-                        "tree mount '{}' must be a relative VFS path",
-                        mount.mount
-                    )),
-                );
-            }
+        struct PreparedRun {
+            cwd: Utf8PathBuf,
+            program_path: String,
+            cmd: moire::process::Command,
+            expanded_args: Vec<String>,
+            expanded_env: Vec<String>,
+            action_desc: String,
+            action_kind: ActionKind,
+            verification_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
         }
 
-        for mount in &request.file_mounts {
-            if !is_relative_vfs_path(&mount.path) {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!(
-                        "file mount '{}' must be a relative VFS path",
-                        mount.path
-                    )),
-                );
-            }
-        }
+        let prepared_run = with_runner_progress_trace(
+            &progress,
+            RemoteTraceSpan::RunnerPrepareVfs,
+            async {
+                let mount_start = Instant::now();
 
-        for root in &request.writable_roots {
-            if !is_relative_vfs_path(root) {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!(
-                        "writable root '{root}' must be a relative VFS path"
-                    )),
-                );
-            }
-        }
-
-        // r[impl exec.mount]
-        // Mount CAS trees into the prefix.
-        for mount in &request.tree_mounts {
-            match self.cas.get_node(NodeHash(mount.manifest)).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return run_failure_result(
-                        start,
-                        -1,
-                        String::new(),
-                        String::new(),
-                        Some(format!(
-                            "tree manifest {} not found in CAS (mount '{}')",
-                            mount.manifest, mount.mount
-                        )),
-                    );
-                }
-                Err(e) => {
-                    self.remove_action_prefix(&action.prefix_id).await;
-                    return run_failure_result(
-                        start,
-                        -1,
-                        String::new(),
-                        String::new(),
-                        Some(format!("failed to fetch tree manifest: {e:?}")),
-                    );
-                }
-            }
-
-            if let Err(e) = self
-                .vfs
-                .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
-                .named("runner.run_vfs.mount_tree")
-                .await
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!("failed to mount tree '{}': {e}", mount.mount)),
-                );
-            }
-        }
-
-        // Materialize individual files from node manifests into a tree and mount it.
-        if !request.file_mounts.is_empty() {
-            for fm in &request.file_mounts {
-                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
-                    Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
-                        Ok(CasNode::Manifest(m)) => m,
-                        Ok(_) => {
-                            self.remove_action_prefix(&action.prefix_id).await;
-                            return run_failure_result(
-                                start,
-                                -1,
-                                String::new(),
-                                String::new(),
-                                Some(format!(
-                                    "input manifest {} is not a Manifest node",
-                                    fm.manifest
-                                )),
-                            );
-                        }
-                        Err(e) => {
-                            self.remove_action_prefix(&action.prefix_id).await;
-                            return run_failure_result(
-                                start,
-                                -1,
-                                String::new(),
-                                String::new(),
-                                Some(format!(
-                                    "failed to decode input manifest {}: {}",
-                                    fm.manifest, e
-                                )),
-                            );
-                        }
-                    },
-                    Ok(None) => {
+                for mount in &request.tree_mounts {
+                    if !is_tree_mount_path(&mount.mount) {
                         self.remove_action_prefix(&action.prefix_id).await;
-                        return run_failure_result(
-                            start,
-                            -1,
-                            String::new(),
-                            String::new(),
-                            Some(format!("input manifest {} not found in CAS", fm.manifest)),
-                        );
-                    }
-                    Err(e) => {
-                        self.remove_action_prefix(&action.prefix_id).await;
-                        return run_failure_result(
-                            start,
-                            -1,
-                            String::new(),
-                            String::new(),
-                            Some(format!("failed to fetch input manifest: {e:?}")),
-                        );
-                    }
-                };
-
-                let entry = match manifest.outputs.iter().find(|o| o.logical == fm.logical) {
-                    Some(e) => e,
-                    None => {
-                        self.remove_action_prefix(&action.prefix_id).await;
-                        return run_failure_result(
+                        return Err(run_failure_result(
                             start,
                             -1,
                             String::new(),
                             String::new(),
                             Some(format!(
-                                "input manifest {} missing logical output '{}'",
-                                fm.manifest, fm.logical
+                                "tree mount '{}' must be a relative VFS path",
+                                mount.mount
                             )),
-                        );
+                        ));
                     }
-                };
+                }
 
-                let (blob_hash, blob_size) = match &entry.blob {
-                    OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
-                    OutputBlobRef::Large {
-                        content_hash, size, ..
-                    } => (content_hash.0, *size),
-                };
-                if let Err(e) = self
-                    .vfs
-                    .add_file_to_prefix(
-                        &action.prefix_id,
-                        &fm.path,
-                        blob_hash,
-                        blob_size,
-                        entry.executable,
+                for mount in &request.file_mounts {
+                    if !is_relative_vfs_path(&mount.path) {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "file mount '{}' must be a relative VFS path",
+                                mount.path
+                            )),
+                        ));
+                    }
+                }
+
+                for root in &request.writable_roots {
+                    if !is_relative_vfs_path(root) {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "writable root '{root}' must be a relative VFS path"
+                            )),
+                        ));
+                    }
+                }
+
+                for mount in &request.tree_mounts {
+                    match self.cas.get_node(NodeHash(mount.manifest)).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return Err(run_failure_result(
+                                start,
+                                -1,
+                                String::new(),
+                                String::new(),
+                                Some(format!(
+                                    "tree manifest {} not found in CAS (mount '{}')",
+                                    mount.manifest, mount.mount
+                                )),
+                            ));
+                        }
+                        Err(e) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return Err(run_failure_result(
+                                start,
+                                -1,
+                                String::new(),
+                                String::new(),
+                                Some(format!("failed to fetch tree manifest: {e:?}")),
+                            ));
+                        }
+                    }
+
+                    if let Err(e) = self
+                        .vfs
+                        .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
+                        .named("runner.run_vfs.mount_tree")
+                        .await
+                    {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("failed to mount tree '{}': {e}", mount.mount)),
+                        ));
+                    }
+                }
+
+                if !request.file_mounts.is_empty() {
+                    for fm in &request.file_mounts {
+                        let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
+                            Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
+                                Ok(CasNode::Manifest(m)) => m,
+                                Ok(_) => {
+                                    self.remove_action_prefix(&action.prefix_id).await;
+                                    return Err(run_failure_result(
+                                        start,
+                                        -1,
+                                        String::new(),
+                                        String::new(),
+                                        Some(format!(
+                                            "input manifest {} is not a Manifest node",
+                                            fm.manifest
+                                        )),
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.remove_action_prefix(&action.prefix_id).await;
+                                    return Err(run_failure_result(
+                                        start,
+                                        -1,
+                                        String::new(),
+                                        String::new(),
+                                        Some(format!(
+                                            "failed to decode input manifest {}: {}",
+                                            fm.manifest, e
+                                        )),
+                                    ));
+                                }
+                            },
+                            Ok(None) => {
+                                self.remove_action_prefix(&action.prefix_id).await;
+                                return Err(run_failure_result(
+                                    start,
+                                    -1,
+                                    String::new(),
+                                    String::new(),
+                                    Some(format!(
+                                        "input manifest {} not found in CAS",
+                                        fm.manifest
+                                    )),
+                                ));
+                            }
+                            Err(e) => {
+                                self.remove_action_prefix(&action.prefix_id).await;
+                                return Err(run_failure_result(
+                                    start,
+                                    -1,
+                                    String::new(),
+                                    String::new(),
+                                    Some(format!("failed to fetch input manifest: {e:?}")),
+                                ));
+                            }
+                        };
+
+                        let entry = match manifest.outputs.iter().find(|o| o.logical == fm.logical)
+                        {
+                            Some(e) => e,
+                            None => {
+                                self.remove_action_prefix(&action.prefix_id).await;
+                                return Err(run_failure_result(
+                                    start,
+                                    -1,
+                                    String::new(),
+                                    String::new(),
+                                    Some(format!(
+                                        "input manifest {} missing logical output '{}'",
+                                        fm.manifest, fm.logical
+                                    )),
+                                ));
+                            }
+                        };
+
+                        let (blob_hash, blob_size) = match &entry.blob {
+                            OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
+                            OutputBlobRef::Large {
+                                content_hash, size, ..
+                            } => (content_hash.0, *size),
+                        };
+                        if let Err(e) = self
+                            .vfs
+                            .add_file_to_prefix(
+                                &action.prefix_id,
+                                &fm.path,
+                                blob_hash,
+                                blob_size,
+                                entry.executable,
+                            )
+                            .named("runner.run_vfs.add_file_to_prefix")
+                            .await
+                        {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return Err(run_failure_result(
+                                start,
+                                -1,
+                                String::new(),
+                                String::new(),
+                                Some(format!(
+                                    "failed to materialize file mount '{}': {e}",
+                                    fm.path
+                                )),
+                            ));
+                        }
+                    }
+                }
+
+                for root in &request.writable_roots {
+                    if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, root).await {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("failed to create writable root '{root}': {e}")),
+                        ));
+                    }
+                }
+                let create_dirs = explicit_dirs_to_materialize(&request);
+                for dir in &create_dirs {
+                    if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("failed to create explicit dir '{dir}': {e}")),
+                        ));
+                    }
+                }
+                let parent_dirs = parent_dirs_to_materialize(&request);
+                for dir in &parent_dirs {
+                    if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("failed to create writable dir '{dir}': {e}")),
+                        ));
+                    }
+                }
+
+                info!(
+                    action.prefix_id = %action.prefix_id,
+                    tree_mounts = %summarize_list(
+                        &request
+                            .tree_mounts
+                            .iter()
+                            .map(|mount| mount.mount.clone())
+                            .collect::<Vec<_>>(),
+                        6
+                    ),
+                    file_mounts = %summarize_list(
+                        &request
+                            .file_mounts
+                            .iter()
+                            .map(|mount| mount.path.clone())
+                            .collect::<Vec<_>>(),
+                        6
+                    ),
+                    writable_roots = %summarize_list(&request.writable_roots, 6),
+                    create_dirs = %summarize_list(&create_dirs, 6),
+                    parent_dirs = %summarize_list(&parent_dirs, 6),
+                    elapsed_secs = mount_start.elapsed().as_secs_f32(),
+                    "prepared VFS inputs"
+                );
+
+                #[cfg(windows)]
+                if !request.tree_mounts.is_empty() {
+                    match self.vfs.describe_prefix_state(&action.prefix_id).await {
+                        Ok(summary) => {
+                            info!(
+                                action.prefix_id = %action.prefix_id,
+                                prefix_found = summary.prefix_found,
+                                total_items = summary.total_items,
+                                total_prefixes = summary.total_prefixes,
+                                path_mappings_count = summary.path_mappings_count,
+                                root_children = %summarize_list(&summary.root_children, 12),
+                                prefix_children = %summarize_list(&summary.prefix_children, 12),
+                                src_children = %summarize_list(&summary.src_children, 12),
+                                toolchain_children = %summarize_list(&summary.toolchain_children, 12),
+                                toolchain_bin_children = %summarize_list(&summary.toolchain_bin_children, 12),
+                                path_mappings_sample = %summarize_list(&summary.path_mappings_sample, 12),
+                                src_path_mappings_sample = %summarize_list(
+                                    &summary.src_path_mappings_sample,
+                                    16
+                                ),
+                                "VFS prefix state after preparing inputs"
+                            );
+                        }
+                        Err(error) => {
+                            info!(
+                                action.prefix_id = %action.prefix_id,
+                                %error,
+                                "failed to describe VFS state after preparing inputs"
+                            );
+                        }
+                    }
+                }
+
+                for arg in &request.args {
+                    if let RunArg::Path(path) = arg
+                        && !path_is_covered(
+                            path,
+                            &request.tree_mounts,
+                            &request.file_mounts,
+                            &request.writable_roots,
+                        )
+                    {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "path arg '{}' is not covered by a mount or writable root",
+                                path
+                            )),
+                        ));
+                    }
+                }
+
+                for (key, value) in &request.env {
+                    if let RunArg::Path(path) = value
+                        && !path_is_covered(
+                            path,
+                            &request.tree_mounts,
+                            &request.file_mounts,
+                            &request.writable_roots,
+                        )
+                    {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "env path '{}' for '{}' is not covered by a mount or writable root",
+                                path, key
+                            )),
+                        ));
+                    }
+                }
+
+                if let Some(cwd) = &request.cwd
+                    && !path_is_covered(
+                        cwd,
+                        &request.tree_mounts,
+                        &request.file_mounts,
+                        &request.writable_roots,
                     )
-                    .named("runner.run_vfs.add_file_to_prefix")
-                    .await
                 {
                     self.remove_action_prefix(&action.prefix_id).await;
-                    return run_failure_result(
+                    return Err(run_failure_result(
                         start,
                         -1,
                         String::new(),
                         String::new(),
                         Some(format!(
-                            "failed to materialize file mount '{}': {e}",
-                            fm.path
+                            "cwd '{cwd}' is not covered by a mount or writable root"
                         )),
-                    );
+                    ));
                 }
-            }
-        }
 
-        // r[impl exec.writable]
-        for root in &request.writable_roots {
-            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, root).await {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!("failed to create writable root '{root}': {e}")),
-                );
-            }
-        }
-        let create_dirs = explicit_dirs_to_materialize(&request);
-        for dir in &create_dirs {
-            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!("failed to create explicit dir '{dir}': {e}")),
-                );
-            }
-        }
-        let parent_dirs = parent_dirs_to_materialize(&request);
-        for dir in &parent_dirs {
-            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!("failed to create writable dir '{dir}': {e}")),
-                );
-            }
-        }
+                let cwd = request
+                    .cwd
+                    .as_deref()
+                    .map(|p| action.prefix_path.join(p))
+                    .unwrap_or_else(|| action.prefix_path.clone());
 
-        info!(
-            action.prefix_id = %action.prefix_id,
-            tree_mounts = %summarize_list(
-                &request
-                    .tree_mounts
+                let program_path = resolve_program_path(
+                    &request.program,
+                    Self::render_run_arg(&request.program),
+                    &cwd,
+                );
+                let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
+                let expanded_args = request
+                    .args
                     .iter()
-                    .map(|mount| mount.mount.clone())
-                    .collect::<Vec<_>>(),
-                6
-            ),
-            file_mounts = %summarize_list(
-                &request
-                    .file_mounts
+                    .map(Self::render_run_arg)
+                    .collect::<Vec<_>>();
+                for arg in &expanded_args {
+                    cmd.arg(arg);
+                }
+                cmd.current_dir(cwd.as_str());
+
+                if request.clear_env {
+                    action.hermetic_env(&mut cmd);
+                }
+
+                let expanded_env = request
+                    .env
                     .iter()
-                    .map(|mount| mount.path.clone())
-                    .collect::<Vec<_>>(),
-                6
-            ),
-            writable_roots = %summarize_list(&request.writable_roots, 6),
-            create_dirs = %summarize_list(&create_dirs, 6),
-            parent_dirs = %summarize_list(&parent_dirs, 6),
-            elapsed_secs = mount_start.elapsed().as_secs_f32(),
-            "prepared VFS inputs"
-        );
-
-        #[cfg(windows)]
-        if !request.tree_mounts.is_empty() {
-            match self.vfs.describe_prefix_state(&action.prefix_id).await {
-                Ok(summary) => {
-                    info!(
-                        action.prefix_id = %action.prefix_id,
-                        prefix_found = summary.prefix_found,
-                        total_items = summary.total_items,
-                        total_prefixes = summary.total_prefixes,
-                        path_mappings_count = summary.path_mappings_count,
-                        root_children = %summarize_list(&summary.root_children, 12),
-                        prefix_children = %summarize_list(&summary.prefix_children, 12),
-                        src_children = %summarize_list(&summary.src_children, 12),
-                        toolchain_children = %summarize_list(&summary.toolchain_children, 12),
-                        toolchain_bin_children = %summarize_list(&summary.toolchain_bin_children, 12),
-                        path_mappings_sample = %summarize_list(&summary.path_mappings_sample, 12),
-                        src_path_mappings_sample = %summarize_list(
-                            &summary.src_path_mappings_sample,
-                            16
-                        ),
-                        "VFS prefix state after preparing inputs"
-                    );
+                    .map(|(key, value)| format!("{key}={}", Self::render_run_arg(value)))
+                    .collect::<Vec<_>>();
+                for (k, v) in &request.env {
+                    cmd.env(k, Self::render_run_arg(v));
                 }
-                Err(error) => {
-                    info!(
-                        action.prefix_id = %action.prefix_id,
-                        %error,
-                        "failed to describe VFS state after preparing inputs"
-                    );
-                }
-            }
-        }
 
-        for arg in &request.args {
-            if let RunArg::Path(path) = arg
-                && !path_is_covered(
-                    path,
-                    &request.tree_mounts,
-                    &request.file_mounts,
-                    &request.writable_roots,
-                )
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!(
-                        "path arg '{}' is not covered by a mount or writable root",
-                        path
-                    )),
+                let action_desc = format!(
+                    "{} {}",
+                    request.program.as_str(),
+                    request.args.first().map(RunArg::as_str).unwrap_or_default()
                 );
-            }
-        }
 
-        for (key, value) in &request.env {
-            if let RunArg::Path(path) = value
-                && !path_is_covered(
-                    path,
-                    &request.tree_mounts,
-                    &request.file_mounts,
-                    &request.writable_roots,
-                )
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!(
-                        "env path '{}' for '{}' is not covered by a mount or writable root",
-                        path, key
-                    )),
-                );
-            }
-        }
+                let action_kind = if request.args.iter().any(|arg| arg.as_str() == "-c") {
+                    ActionKind::CcCompile
+                } else {
+                    ActionKind::CcLink
+                };
+                let verification_task = request
+                    .eval
+                    .as_ref()
+                    .filter(|eval| !eval.verification_obligations.is_empty())
+                    .cloned()
+                    .map(|eval| spawn_blocking(move || evaluate_shipped_verification(&eval)));
 
-        if let Some(cwd) = &request.cwd
-            && !path_is_covered(
-                cwd,
-                &request.tree_mounts,
-                &request.file_mounts,
-                &request.writable_roots,
-            )
-        {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return run_failure_result(
-                start,
-                -1,
-                String::new(),
-                String::new(),
-                Some(format!(
-                    "cwd '{cwd}' is not covered by a mount or writable root"
-                )),
-            );
-        }
+                Ok(PreparedRun {
+                    cwd,
+                    program_path,
+                    cmd,
+                    expanded_args,
+                    expanded_env,
+                    action_desc,
+                    action_kind,
+                    verification_task,
+                })
+            },
+        )
+        .await;
 
-        let cwd = request
-            .cwd
-            .as_deref()
-            .map(|p| action.prefix_path.join(p))
-            .unwrap_or_else(|| action.prefix_path.clone());
-
-        let program_path = resolve_program_path(
-            &request.program,
-            Self::render_run_arg(&request.program),
-            &cwd,
-        );
-        let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
-        let expanded_args = request
-            .args
-            .iter()
-            .map(Self::render_run_arg)
-            .collect::<Vec<_>>();
-        for arg in &expanded_args {
-            cmd.arg(arg);
-        }
-        cmd.current_dir(cwd.as_str());
-
-        if request.clear_env {
-            action.hermetic_env(&mut cmd);
-        }
-
-        let expanded_env = request
-            .env
-            .iter()
-            .map(|(key, value)| format!("{key}={}", Self::render_run_arg(value)))
-            .collect::<Vec<_>>();
-        for (k, v) in &request.env {
-            cmd.env(k, Self::render_run_arg(v));
-        }
-        end_runner_progress_trace(&progress, RemoteTraceSpan::RunnerPrepareVfs).await;
-
-        let action_desc = format!(
-            "{} {}",
-            request.program.as_str(),
-            request.args.first().map(RunArg::as_str).unwrap_or_default()
-        );
-
-        let action_kind = if request.args.iter().any(|arg| arg.as_str() == "-c") {
-            ActionKind::CcCompile
-        } else {
-            ActionKind::CcLink
+        let PreparedRun {
+            cwd,
+            program_path,
+            cmd,
+            expanded_args,
+            expanded_env,
+            action_desc,
+            action_kind,
+            verification_task,
+        } = match prepared_run {
+            Ok(prepared) => prepared,
+            Err(result) => return result,
         };
-        let verification_task = request
-            .eval
-            .as_ref()
-            .filter(|eval| !eval.verification_obligations.is_empty())
-            .cloned()
-            .map(|eval| spawn_blocking(move || evaluate_shipped_verification(&eval)));
 
         info!(
             action.prefix_id = %action.prefix_id,
@@ -1081,7 +1134,12 @@ impl RunnerService {
         );
         let command_start = Instant::now();
 
-        emit_runner_progress_trace(&progress, RemoteTraceSpan::RunnerCommand).await;
+        emit_runner_progress_trace_labeled(
+            &progress,
+            RemoteTraceSpan::RunnerCommand,
+            action_desc.clone(),
+        )
+        .await;
         let (progress, output) =
             crate::sandbox::run_sandboxed_command(cmd, &action_kind, &action_desc, progress, None)
                 .named("runner.run_vfs.run_sandboxed_command")
@@ -1299,16 +1357,21 @@ impl RunnerService {
             action_desc,
             "removing action prefix"
         );
-        with_runner_progress_trace(
-            &progress,
-            RemoteTraceSpan::RunnerCleanup,
-            self.remove_action_prefix(&action.prefix_id),
-        )
-        .await;
-        info!(
-            action.prefix_id = %action.prefix_id,
-            action_desc,
-            "removed action prefix"
+        let cleanup_service = self.clone();
+        let cleanup_prefix_id = action.prefix_id.clone();
+        let cleanup_action_desc = action_desc.to_string();
+        moire::task::spawn(
+            async move {
+                cleanup_service
+                    .remove_action_prefix(&cleanup_prefix_id)
+                    .await;
+                info!(
+                    action.prefix_id = %cleanup_prefix_id,
+                    action_desc = cleanup_action_desc,
+                    "removed action prefix"
+                );
+            }
+            .named("runner.run_vfs.cleanup_prefix"),
         );
 
         run_success_result(

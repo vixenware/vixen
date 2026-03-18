@@ -4,37 +4,69 @@
 //! state. Before they cross back over RPC, blobs and trees must be committed
 //! into CAS-backed runtime values.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures_util::future::try_join_all;
 use vx_eval::{
     BlobValue, DemandChain, DiscoveredValue, Engine, MapValue, PathValue, PoisonError, PoisonKind,
     StructValue, TransportPoisonError, TransportValue, TreeValue, Value, verify_host_obligations,
 };
 use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
-use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
+use vx_store_proto::chunking::{
+    PreparedBlob, list_missing_chunks, list_missing_nodes, prepare_blob, store_prepared_blob,
+};
 use vx_store_proto::{
     BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash,
     RemoteTracePhase, RemoteTraceSpan, StoreClient, StoreProgress,
 };
 
-use crate::sandbox::send_progress_best_effort;
+use crate::sandbox::send_progress_reliably;
 
 type BoundaryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransportPoisonError>> + Send + 'a>>;
+
+static NEXT_REMOTE_TRACE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct PreparedBlobUpload {
+    prepared: PreparedBlob,
+    data: Vec<u8>,
+    label: String,
+}
+
+#[derive(Debug, Default)]
+struct TreeCommitPlan {
+    blobs: Vec<PreparedBlobUpload>,
+    nodes: Vec<(NodeHash, Vec<u8>, String)>,
+}
+
+impl TreeCommitPlan {
+    fn extend(&mut self, other: Self) {
+        self.blobs.extend(other.blobs);
+        self.nodes.extend(other.nodes);
+    }
+}
 
 async fn emit_remote_trace(
     progress: Option<&roam::Tx<StoreProgress>>,
     span: RemoteTraceSpan,
     phase: RemoteTracePhase,
+    instance_id: u64,
+    label: Option<&str>,
 ) {
     if let Some(progress) = progress {
-        send_progress_best_effort(progress, StoreProgress::trace(span, phase)).await;
+        let trace = match label {
+            Some(label) => StoreProgress::trace_labeled_with_id(span, phase, instance_id, label),
+            None => StoreProgress::trace_with_id(span, phase, instance_id),
+        };
+        let _ = send_progress_reliably(progress, trace).await;
     }
 }
 
@@ -43,9 +75,37 @@ async fn with_remote_trace<T>(
     span: RemoteTraceSpan,
     future: impl Future<Output = Result<T, TransportPoisonError>>,
 ) -> Result<T, TransportPoisonError> {
-    emit_remote_trace(progress, span, RemoteTracePhase::Begin).await;
+    let instance_id = NEXT_REMOTE_TRACE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    emit_remote_trace(progress, span, RemoteTracePhase::Begin, instance_id, None).await;
     let result = future.await;
-    emit_remote_trace(progress, span, RemoteTracePhase::End).await;
+    emit_remote_trace(progress, span, RemoteTracePhase::End, instance_id, None).await;
+    result
+}
+
+async fn with_remote_trace_labeled<T>(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    label: &str,
+    future: impl Future<Output = Result<T, TransportPoisonError>>,
+) -> Result<T, TransportPoisonError> {
+    let instance_id = NEXT_REMOTE_TRACE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    emit_remote_trace(
+        progress,
+        span,
+        RemoteTracePhase::Begin,
+        instance_id,
+        Some(label),
+    )
+    .await;
+    let result = future.await;
+    emit_remote_trace(
+        progress,
+        span,
+        RemoteTracePhase::End,
+        instance_id,
+        Some(label),
+    )
+    .await;
     result
 }
 
@@ -293,12 +353,44 @@ fn commit_inline_tree<'a>(
     progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
+        let (hash, total_size, plan) = prepare_inline_tree(cas, entries, String::new()).await?;
+        upload_tree_commit_plan(cas, plan, progress).await?;
+        Ok((hash, total_size))
+    })
+}
+
+fn prepare_tree<'a>(
+    cas: &'a StoreClient,
+    tree: TreeValue,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
+    Box::pin(async move {
+        match tree {
+            TreeValue::Inline { entries, .. } => {
+                prepare_inline_tree(cas, entries, display_path).await
+            }
+            TreeValue::FsDir(path) => prepare_fs_tree(cas, path, display_path).await,
+            TreeValue::Store(root) => {
+                let total_size = directory_total_size(cas, root).await?;
+                Ok((root, total_size, TreeCommitPlan::default()))
+            }
+        }
+    })
+}
+
+fn prepare_inline_tree<'a>(
+    cas: &'a StoreClient,
+    entries: Arc<[(Arc<str>, Value)]>,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
+    Box::pin(async move {
         let mut names = BTreeSet::new();
         let mut sorted: Vec<(Arc<str>, Value)> = entries.iter().cloned().collect();
         sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
 
         let mut dir_entries = Vec::with_capacity(sorted.len());
         let mut total_size = 0u64;
+        let mut plan = TreeCommitPlan::default();
         for (name, value) in sorted {
             validate_tree_entry_name(name.as_ref()).map_err(boundary_user_poison)?;
             if !names.insert(name.to_string()) {
@@ -306,14 +398,19 @@ fn commit_inline_tree<'a>(
                     "duplicate tree entry '{name}'"
                 )));
             }
-            let (kind, size) = commit_tree_entry(cas, value, progress).await?;
+            let entry_path = join_display_path(&display_path, &name);
+            let (kind, size, entry_plan) = prepare_tree_entry(cas, value, entry_path).await?;
             total_size += size;
+            plan.extend(entry_plan);
             dir_entries.push(DirEntry {
                 name: name.to_string(),
                 kind,
             });
         }
-        store_directory_node(cas, dir_entries, total_size, progress).await
+        let (hash, bytes) = serialize_directory_node(dir_entries, total_size);
+        plan.nodes
+            .push((hash, bytes, display_path_label(&display_path)));
+        Ok((hash, total_size, plan))
     })
 }
 
@@ -323,6 +420,18 @@ fn commit_fs_tree<'a>(
     progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
+        let (hash, total_size, plan) = prepare_fs_tree(cas, root, String::new()).await?;
+        upload_tree_commit_plan(cas, plan, progress).await?;
+        Ok((hash, total_size))
+    })
+}
+
+fn prepare_fs_tree<'a>(
+    cas: &'a StoreClient,
+    root: PathValue,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
+    Box::pin(async move {
         let mut read_dir = fs::read_dir(root.as_str()).map_err(|error| {
             boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
         })?;
@@ -331,7 +440,6 @@ fn commit_fs_tree<'a>(
             boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
         })? {
             let name = entry.file_name().to_string_lossy().to_string();
-            // Skip macOS AppleDouble resource fork files
             if name.starts_with("._") {
                 continue;
             }
@@ -341,88 +449,48 @@ fn commit_fs_tree<'a>(
 
         let mut dir_entries = Vec::with_capacity(names.len());
         let mut total_size = 0u64;
+        let mut plan = TreeCommitPlan::default();
         for name in names {
             validate_tree_entry_name(&name).map_err(boundary_user_poison)?;
             let child = root.join(&name);
             let metadata = fs::metadata(child.as_str()).map_err(|error| {
                 boundary_user_poison(format!("failed to stat {}: {error}", child.as_str()))
             })?;
-            let (kind, size) = if metadata.is_dir() {
-                let (hash, total_size) = commit_fs_tree(cas, child, progress).await?;
-                (DirEntryKind::Dir { hash }, total_size)
+            let child_display_path = join_display_path(&display_path, &name);
+            let (kind, size, child_plan) = if metadata.is_dir() {
+                let (hash, child_total_size, child_plan) =
+                    prepare_fs_tree(cas, child, child_display_path).await?;
+                (DirEntryKind::Dir { hash }, child_total_size, child_plan)
             } else {
                 let bytes = fs::read(child.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", child.as_str()))
                 })?;
-                let blob_ref = with_remote_trace(
-                    progress,
-                    RemoteTraceSpan::RunnerObserverCommitStoreBlob,
-                    store_blob_bytes(cas, &bytes, progress),
-                )
-                .await?;
                 let executable =
                     is_executable_path(child.as_str()).map_err(boundary_user_poison)?;
-                let size = blob_ref_size(&blob_ref);
-                (dir_entry_kind_from_blob_ref(&blob_ref, executable), size)
+                prepare_blob_entry(bytes, executable, child_display_path)
             };
             total_size += size;
+            plan.extend(child_plan);
             dir_entries.push(DirEntry { name, kind });
         }
-        store_directory_node(cas, dir_entries, total_size, progress).await
+        let (hash, bytes) = serialize_directory_node(dir_entries, total_size);
+        plan.nodes
+            .push((hash, bytes, display_path_label(&display_path)));
+        Ok((hash, total_size, plan))
     })
 }
 
-fn commit_tree_entry<'a>(
+fn prepare_tree_entry<'a>(
     cas: &'a StoreClient,
     value: Value,
-    progress: Option<&'a roam::Tx<StoreProgress>>,
-) -> BoundaryFuture<'a, (DirEntryKind, u64)> {
+    display_path: String,
+) -> BoundaryFuture<'a, (DirEntryKind, u64, TreeCommitPlan)> {
     Box::pin(async move {
         match value {
-            Value::Blob(blob) => {
-                let (blob_ref, executable) = match blob {
-                    BlobValue::Inline { bytes, executable } => (
-                        with_remote_trace(
-                            progress,
-                            RemoteTraceSpan::RunnerObserverCommitStoreBlob,
-                            store_blob_bytes(cas, bytes.as_ref(), progress),
-                        )
-                        .await?,
-                        executable,
-                    ),
-                    BlobValue::FsFile { path, executable } => {
-                        let bytes = fs::read(path.as_str()).map_err(|error| {
-                            boundary_user_poison(format!(
-                                "failed to read {}: {error}",
-                                path.as_str()
-                            ))
-                        })?;
-                        (
-                            with_remote_trace(
-                                progress,
-                                RemoteTraceSpan::RunnerObserverCommitStoreBlob,
-                                store_blob_bytes(cas, &bytes, progress),
-                            )
-                            .await?,
-                            executable,
-                        )
-                    }
-                    BlobValue::Store {
-                        blob_ref,
-                        executable,
-                    } => (blob_ref, executable),
-                };
-                let size = blob_ref_size(&blob_ref);
-                Ok((dir_entry_kind_from_blob_ref(&blob_ref, executable), size))
-            }
+            Value::Blob(blob) => prepare_blob_value(blob, display_path),
             Value::Tree(tree) => {
-                let (hash, total_size) = with_remote_trace(
-                    progress,
-                    RemoteTraceSpan::RunnerObserverCommitTree,
-                    commit_tree(cas, tree, progress),
-                )
-                .await?;
-                Ok((DirEntryKind::Dir { hash }, total_size))
+                let (hash, total_size, plan) = prepare_tree(cas, tree, display_path).await?;
+                Ok((DirEntryKind::Dir { hash }, total_size, plan))
             }
             other => Err(boundary_user_poison(format!(
                 "tree entries must be Blob or Tree, got {}",
@@ -430,6 +498,209 @@ fn commit_tree_entry<'a>(
             ))),
         }
     })
+}
+
+fn prepare_blob_value(
+    blob: BlobValue,
+    display_path: String,
+) -> Result<(DirEntryKind, u64, TreeCommitPlan), TransportPoisonError> {
+    match blob {
+        BlobValue::Inline { bytes, executable } => {
+            let (blob_ref, blob_plan) =
+                prepare_blob_upload(bytes.as_ref().to_vec(), display_path.clone());
+            let size = blob_ref_size(&blob_ref);
+            Ok((
+                dir_entry_kind_from_blob_ref(&blob_ref, executable),
+                size,
+                TreeCommitPlan {
+                    blobs: vec![blob_plan],
+                    nodes: Vec::new(),
+                },
+            ))
+        }
+        BlobValue::FsFile { path, executable } => {
+            let bytes = fs::read(path.as_str()).map_err(|error| {
+                boundary_user_poison(format!("failed to read {}: {error}", path.as_str()))
+            })?;
+            let (blob_ref, blob_plan) = prepare_blob_upload(bytes, display_path.clone());
+            let size = blob_ref_size(&blob_ref);
+            Ok((
+                dir_entry_kind_from_blob_ref(&blob_ref, executable),
+                size,
+                TreeCommitPlan {
+                    blobs: vec![blob_plan],
+                    nodes: Vec::new(),
+                },
+            ))
+        }
+        BlobValue::Store {
+            blob_ref,
+            executable,
+        } => Ok((
+            dir_entry_kind_from_blob_ref(&blob_ref, executable),
+            blob_ref_size(&blob_ref),
+            TreeCommitPlan::default(),
+        )),
+    }
+}
+
+fn prepare_blob_entry(
+    bytes: Vec<u8>,
+    executable: bool,
+    display_path: String,
+) -> (DirEntryKind, u64, TreeCommitPlan) {
+    let (blob_ref, blob_plan) = prepare_blob_upload(bytes, display_path);
+    let size = blob_ref_size(&blob_ref);
+    (
+        dir_entry_kind_from_blob_ref(&blob_ref, executable),
+        size,
+        TreeCommitPlan {
+            blobs: vec![blob_plan],
+            nodes: Vec::new(),
+        },
+    )
+}
+
+fn prepare_blob_upload(data: Vec<u8>, label: String) -> (BlobRef, PreparedBlobUpload) {
+    let prepared = prepare_blob(&data);
+    let blob_ref = prepared.to_blob_ref();
+    (
+        blob_ref,
+        PreparedBlobUpload {
+            prepared,
+            data,
+            label,
+        },
+    )
+}
+
+fn join_display_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn display_path_label(path: &str) -> String {
+    if path.is_empty() {
+        ".".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn summarize_upload_label(kind: &str, labels: &[String]) -> String {
+    let mut unique = BTreeSet::new();
+    for label in labels {
+        unique.insert(label.as_str());
+    }
+    let labels = unique.into_iter().collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => kind.to_string(),
+        [only] => format!("{kind}({only})"),
+        [first, second] => format!("{kind}({first}, {second})"),
+        [first, second, ..] => format!("{kind}({first}, {second}, +{} more)", labels.len() - 2),
+    }
+}
+
+fn serialize_directory_node(entries: Vec<DirEntry>, total_size: u64) -> (NodeHash, Vec<u8>) {
+    let directory = CasNode::Directory(DirectoryNode {
+        entries,
+        total_size,
+    });
+    let (bytes, hash) = directory.to_bytes_and_hash();
+    (hash, bytes)
+}
+
+async fn upload_tree_commit_plan(
+    cas: &StoreClient,
+    plan: TreeCommitPlan,
+    progress: Option<&roam::Tx<StoreProgress>>,
+) -> Result<(), TransportPoisonError> {
+    let mut chunk_uploads = HashMap::new();
+    let mut node_uploads = HashMap::new();
+    let mut blob_labels = Vec::new();
+    let mut node_labels = Vec::new();
+
+    for blob in plan.blobs {
+        blob_labels.push(display_path_label(&blob.label));
+        for chunk in &blob.prepared.chunks {
+            chunk_uploads.entry(chunk.hash).or_insert_with(|| {
+                blob.data[chunk.offset..chunk.offset + chunk.size as usize].to_vec()
+            });
+        }
+        if let Some(blob_node) = blob.prepared.blob_node {
+            node_uploads
+                .entry(blob_node.node_hash)
+                .or_insert(blob_node.serialized_bytes);
+        }
+    }
+
+    for (hash, bytes, label) in plan.nodes {
+        node_labels.push(display_path_label(&label));
+        node_uploads.entry(hash).or_insert(bytes);
+    }
+
+    let chunk_hashes: Vec<_> = chunk_uploads.keys().copied().collect();
+    let node_hashes: Vec<_> = node_uploads.keys().copied().collect();
+
+    let (missing_chunks, missing_nodes) = tokio::try_join!(
+        async {
+            list_missing_chunks(cas, chunk_hashes)
+                .await
+                .map_err(boundary_user_poison)
+        },
+        async {
+            list_missing_nodes(cas, node_hashes)
+                .await
+                .map_err(boundary_user_poison)
+        },
+    )?;
+
+    let missing_chunks: HashSet<_> = missing_chunks.into_iter().collect();
+    let missing_nodes: HashSet<_> = missing_nodes.into_iter().collect();
+    let blob_trace_label = summarize_upload_label("store_blob", &blob_labels);
+    let node_trace_label = summarize_upload_label("store_node", &node_labels);
+
+    tokio::try_join!(
+        with_remote_trace_labeled(
+            progress,
+            RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+            &blob_trace_label,
+            async {
+                let uploads = chunk_uploads
+                    .into_iter()
+                    .filter(|(hash, _)| missing_chunks.contains(hash))
+                    .map(|(hash, data)| async move {
+                        cas.put_chunk(hash, data)
+                            .await
+                            .map_err(|error| boundary_user_poison(format!("{error:?}")))
+                    });
+                try_join_all(uploads).await?;
+                Ok(())
+            }
+        ),
+        with_remote_trace_labeled(
+            progress,
+            RemoteTraceSpan::RunnerObserverCommitStoreNode,
+            &node_trace_label,
+            async {
+                let uploads = node_uploads
+                    .into_iter()
+                    .filter(|(hash, _)| missing_nodes.contains(hash))
+                    .map(|(hash, data)| async move {
+                        cas.put_node(hash, data)
+                            .await
+                            .map_err(|error| boundary_user_poison(format!("{error:?}")))
+                    });
+                try_join_all(uploads).await?;
+                Ok(())
+            }
+        ),
+    )?;
+
+    Ok(())
 }
 
 async fn store_blob_bytes(
@@ -441,31 +712,6 @@ async fn store_blob_bytes(
     store_prepared_blob(cas, &prepared, bytes)
         .await
         .map_err(boundary_user_poison)
-}
-
-async fn store_directory_node(
-    cas: &StoreClient,
-    entries: Vec<DirEntry>,
-    total_size: u64,
-    progress: Option<&roam::Tx<StoreProgress>>,
-) -> Result<(NodeHash, u64), TransportPoisonError> {
-    let directory = CasNode::Directory(DirectoryNode {
-        entries,
-        total_size,
-    });
-    let (bytes, hash) = directory.to_bytes_and_hash();
-    with_remote_trace(
-        progress,
-        RemoteTraceSpan::RunnerObserverCommitStoreNode,
-        async {
-            put_node_if_missing(cas, hash, bytes)
-                .await
-                .map_err(boundary_user_poison)?;
-            Ok(())
-        },
-    )
-    .await?;
-    Ok((hash, total_size))
 }
 
 async fn directory_total_size(

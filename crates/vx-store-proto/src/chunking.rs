@@ -149,14 +149,8 @@ pub async fn store_prepared_blob(
         }
     }
 
-    let mut missing_hashes = HashSet::with_capacity(unique_hashes.len());
-    for batch in unique_hashes.chunks(MAX_MISSING_CHUNKS_BATCH) {
-        let missing = store
-            .list_missing_chunks(batch.to_vec())
-            .await
-            .map_err(|error| format!("{error:?}"))?;
-        missing_hashes.extend(missing);
-    }
+    let missing_hashes = list_missing_chunks(store, unique_hashes).await?;
+    let missing_hashes: HashSet<_> = missing_hashes.into_iter().collect();
 
     let mut uploaded_hashes = HashSet::with_capacity(missing_hashes.len());
     for chunk in &prepared.chunks {
@@ -190,6 +184,21 @@ pub async fn store_prepared_blob(
             size: data.len() as u64,
         })
     }
+}
+
+pub async fn list_missing_chunks(
+    store: &StoreClient,
+    hashes: Vec<ChunkHash>,
+) -> Result<Vec<ChunkHash>, String> {
+    let mut missing = Vec::new();
+    for batch in hashes.chunks(MAX_MISSING_CHUNKS_BATCH) {
+        let batch_missing = store
+            .list_missing_chunks(batch.to_vec())
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        missing.extend(batch_missing);
+    }
+    Ok(missing)
 }
 
 pub async fn put_chunk_if_missing(
