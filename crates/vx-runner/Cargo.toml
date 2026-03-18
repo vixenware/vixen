@@ -16,6 +16,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 vx-tracing = { workspace = true }
 facet = { workspace = true }
+facet-postcard = { workspace = true }
 figue = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
@@ -31,6 +32,7 @@ jiff = { workspace = true }
 fastrand = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
+blake3 = { workspace = true }
 
 vx-cache = { workspace = true }
 vx-store-proto = { workspace = true }
@@ -46,7 +48,6 @@ tempfile = { workspace = true }
 find-msvc-tools = "0.1"
 
 [dev-dependencies]
-blake3 = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 
 [lints]

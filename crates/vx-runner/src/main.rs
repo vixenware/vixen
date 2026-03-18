@@ -24,11 +24,13 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
+use std::collections::HashMap;
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerDispatcher;
+use vx_runner_proto::TransportValue;
 use vx_store_proto::StoreClient;
 
 use crate::vfsd_client::VfsdClient as VfsClient;
@@ -312,6 +314,9 @@ pub struct RunnerServiceInner {
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
+
+    /// Cache committed discovery results while this daemon stays alive.
+    discover_cache: std::sync::Mutex<HashMap<String, TransportValue>>,
 }
 
 /// Exec service handle - cloneable wrapper around shared inner state
@@ -348,6 +353,7 @@ impl RunnerService {
                 _store_handle: store_handle,
                 _vfsd_handle: vfsd_handle,
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
+                discover_cache: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }

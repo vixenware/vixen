@@ -1160,9 +1160,7 @@ mod tests {
         let expected_hash = blake3::hash(b"toolchain-v1").to_hex().to_string();
         let source = format!(
             r#"fn probe(host: Host) {{
-                   host.read({path:?});
-                   host.hash({path:?});
-                   host.read({path:?})
+                   [host.read({path:?}), host.hash({path:?}), host.read({path:?})]
                  }}
 
                  fn make() {{ probe }}"#,
@@ -1188,20 +1186,58 @@ mod tests {
             .expect("discover should evaluate");
 
         match transport {
-            vx_eval::TransportValue::Discovered { value, obligations } => {
-                assert_eq!(
-                    obligations,
-                    vec![HostObservation::Read {
-                        path: tool_path.to_string_lossy().to_string(),
-                        content_hash: expected_hash,
-                    }]
-                );
-                match *value {
-                    vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. }) => {}
-                    other => panic!("expected committed blob, got {other:?}"),
+            vx_eval::TransportValue::Array(items) => {
+                assert_eq!(items.len(), 3);
+                match &items[0] {
+                    vx_eval::TransportValue::Discovered { value, obligations } => {
+                        assert_eq!(
+                            obligations,
+                            &vec![HostObservation::Read {
+                                path: tool_path.to_string_lossy().to_string(),
+                                content_hash: expected_hash.clone(),
+                            }]
+                        );
+                        assert!(matches!(
+                            value.as_ref(),
+                            vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. })
+                        ));
+                    }
+                    other => panic!("expected discovered blob, got {other:?}"),
+                }
+                match &items[1] {
+                    vx_eval::TransportValue::Discovered { value, obligations } => {
+                        assert_eq!(
+                            obligations,
+                            &vec![HostObservation::Hash {
+                                path: tool_path.to_string_lossy().to_string(),
+                                content_hash: expected_hash.clone(),
+                            }]
+                        );
+                        assert!(matches!(
+                            value.as_ref(),
+                            vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. })
+                        ));
+                    }
+                    other => panic!("expected discovered hash blob, got {other:?}"),
+                }
+                match &items[2] {
+                    vx_eval::TransportValue::Discovered { value, obligations } => {
+                        assert_eq!(
+                            obligations,
+                            &vec![HostObservation::Read {
+                                path: tool_path.to_string_lossy().to_string(),
+                                content_hash: expected_hash,
+                            }]
+                        );
+                        assert!(matches!(
+                            value.as_ref(),
+                            vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. })
+                        ));
+                    }
+                    other => panic!("expected discovered blob, got {other:?}"),
                 }
             }
-            other => panic!("expected discovered transport value, got {other:?}"),
+            other => panic!("expected array transport value, got {other:?}"),
         }
     }
 

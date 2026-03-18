@@ -227,12 +227,16 @@ fn windows_bootstrap_root_falls_back_to_home_cache() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_remote_launch_script_exports_vx_home_for_runner() {
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("pkill -9 -f"));
+fn ssh_bootstrap_remote_start_script_daemonizes_runner() {
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_START_SCRIPT.contains("nohup"));
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_START_SCRIPT.contains("pkill -9 -f"));
     assert!(
-        crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT
+        crate::SSH_BOOTSTRAP_REMOTE_START_SCRIPT
             .contains("\"$checkout_dir/target/release/vx-store\" --root \"$store_root\"")
+    );
+    assert!(
+        crate::SSH_BOOTSTRAP_REMOTE_START_SCRIPT
+            .contains("\"$checkout_dir/target/release/vx-runner\"")
     );
 }
 
@@ -305,6 +309,7 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
     assert!(script.contains("$runnerEndpoint"));
     assert!(script.contains("target\\release\\vx-store.exe"));
     assert!(script.contains("target\\release\\vx-runner.exe"));
+    assert!(script.contains("Start-Process -FilePath $runnerExe"));
 }
 
 #[cfg(unix)]

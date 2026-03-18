@@ -3975,6 +3975,7 @@ dependencies = [
  "camino",
  "eyre",
  "facet",
+ "facet-postcard",
  "fastrand",
  "figue",
  "find-msvc-tools",

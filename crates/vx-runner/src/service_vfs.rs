@@ -4,13 +4,17 @@
 //! Files are served lazily from CAS via the Vixen mount.
 
 use camino::{Utf8Path, Utf8PathBuf};
+use facet_postcard::to_vec as postcard_to_vec;
 use moire::task::FutureExt;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
 use tracing::info;
-use vx_eval::{HostObservation, PathValue, TransportPoisonError, Value};
+use vx_eval::{
+    DemandChain, HostObservation, PathValue, PoisonError, PoisonKind, TransportPoisonError, Value,
+    verify_host_obligations,
+};
 use vx_runner_proto::{
     DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunRequest, RunResult,
     RunTreeMount, TransportValue,
@@ -549,13 +553,68 @@ fn sandbox_write_root(request: &RunRequest) -> Option<String> {
     common_relative_ancestor(&request.writable_roots)
 }
 
+fn discover_request_cache_key(request: &DiscoverRequest) -> Result<String, TransportPoisonError> {
+    let bytes = postcard_to_vec(request).map_err(|error| {
+        TransportPoisonError::from(&PoisonError::new(
+            PoisonKind::UserFail,
+            format!("discover cache key: {error}"),
+            DemandChain::default(),
+        ))
+    })?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn cached_discover_value_is_valid(value: &TransportValue) -> bool {
+    match value {
+        TransportValue::Discovered { obligations, .. } => {
+            verify_host_obligations(obligations).is_ok()
+        }
+        _ => true,
+    }
+}
+
 impl RunnerService {
     pub async fn discover_vfs(&self, request: DiscoverRequest) -> DiscoverResult {
+        let cache_key = match discover_request_cache_key(&request) {
+            Ok(key) => key,
+            Err(poison) => {
+                return DiscoverResult {
+                    value: None,
+                    poison: Some(poison),
+                };
+            }
+        };
+
+        if let Some(cached) = self
+            .discover_cache
+            .lock()
+            .expect("discover cache poisoned")
+            .get(&cache_key)
+            .cloned()
+        {
+            if cached_discover_value_is_valid(&cached) {
+                return DiscoverResult {
+                    value: Some(cached),
+                    poison: None,
+                };
+            }
+            self.discover_cache
+                .lock()
+                .expect("discover cache poisoned")
+                .remove(&cache_key);
+        }
+
         match evaluate_shipped_discover(self.cas.as_ref(), &request).await {
-            Ok(value) => DiscoverResult {
-                value: Some(value),
-                poison: None,
-            },
+            Ok(value) => {
+                self.discover_cache
+                    .lock()
+                    .expect("discover cache poisoned")
+                    .insert(cache_key, value.clone());
+                DiscoverResult {
+                    value: Some(value),
+                    poison: None,
+                }
+            }
             Err(poison) => DiscoverResult {
                 value: None,
                 poison: Some(poison),
@@ -1387,7 +1446,9 @@ impl RunnerService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vx_eval::ExecutorSelector;
+    use std::fs;
+    use tempfile::TempDir;
+    use vx_eval::{ExecutorSelector, HostObservation};
     use vx_store_proto::Blake3Hash;
 
     #[test]
@@ -1659,6 +1720,28 @@ mod tests {
         let program = RunArg::literal("cc");
 
         assert_eq!(resolve_program_path(&program, "cc".to_string(), cwd), "cc");
+    }
+
+    #[test]
+    fn cached_discover_values_require_valid_obligations() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("tool.txt");
+        fs::write(&path, "toolchain-v1").expect("write host file");
+        let expected_hash = blake3::hash(b"toolchain-v1").to_hex().to_string();
+
+        let cached = TransportValue::Discovered {
+            value: Box::new(TransportValue::String("ok".into())),
+            obligations: vec![HostObservation::Read {
+                path: path.to_string_lossy().to_string(),
+                content_hash: expected_hash,
+            }],
+        };
+
+        assert!(cached_discover_value_is_valid(&cached));
+
+        fs::write(&path, "toolchain-v2").expect("rewrite host file");
+
+        assert!(!cached_discover_value_is_valid(&cached));
     }
 
     #[test]

@@ -570,7 +570,7 @@ where
 }
 
 #[cfg(unix)]
-const SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT: &str = r#"set -euo pipefail
+const SSH_BOOTSTRAP_REMOTE_START_SCRIPT: &str = r#"set -euo pipefail
 checkout_dir="$1"
 vx_home="$2"
 store_root="$3"
@@ -586,19 +586,22 @@ while pgrep -f "$checkout_dir/target/release/vx-runner" >/dev/null; do sleep 0.1
 while pgrep -f "$checkout_dir/target/release/vx-store" >/dev/null; do sleep 0.1; done
 while pgrep -f "$checkout_dir/target/release/vx-vfsd" >/dev/null; do sleep 0.1; done
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
-trap 'jobs -p | xargs -r kill || true' EXIT
-"$checkout_dir/target/release/vx-store" --root "$store_root" --listen "unix:$store_socket" &
+nohup "$checkout_dir/target/release/vx-store" --root "$store_root" --listen "unix:$store_socket" >>"$vx_home/store.log" 2>&1 &
 for _ in $(seq 1 200); do
   [ -S "$store_socket" ] && break
   sleep 0.1
 done
 [ -S "$store_socket" ] || { echo "vx-store did not create $store_socket" >&2; exit 1; }
-export VX_HOME="$vx_home"
-exec "$checkout_dir/target/release/vx-runner" \
+nohup env VX_HOME="$vx_home" "$checkout_dir/target/release/vx-runner" \
   --vx-home "$vx_home" \
   --store "unix:$store_socket" \
   --vfsd "unix:$vfsd_socket" \
-  --listen "unix:$runner_socket"
+  --listen "unix:$runner_socket" >>"$vx_home/runner.log" 2>&1 &
+for _ in $(seq 1 200); do
+  [ -S "$runner_socket" ] && break
+  sleep 0.1
+done
+[ -S "$runner_socket" ] || { echo "vx-runner did not create $runner_socket" >&2; exit 1; }
 "#;
 
 #[cfg(unix)]
@@ -698,9 +701,16 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
             "  }} catch {{ Start-Sleep -Milliseconds 100 }} ",
             "}}; ",
             "if (-not $storeReady) {{ throw ('vx-store did not start listening on ' + $storeEndpoint) }}; ",
-            "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
-            "finally {{ ",
-            "if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}"
+            "$runnerProc = Start-Process -FilePath $runnerExe -ArgumentList @('--vx-home', $vxHome, '--store', $storeEndpoint, '--vfsd', $vfsdEndpoint, '--listen', $runnerEndpoint) -PassThru; ",
+            "$runnerReady = $false; ",
+            "for ($i = 0; $i -lt 200; $i++) {{ ",
+            "  try {{ ",
+            "    $client = [System.Net.Sockets.TcpClient]::new(); ",
+            "    try {{ $client.Connect('127.0.0.1', [int]($runnerEndpoint.Split(':')[1])); $runnerReady = $true; break }} ",
+            "    finally {{ $client.Dispose() }} ",
+            "  }} catch {{ Start-Sleep -Milliseconds 100 }} ",
+            "}}; ",
+            "if (-not $runnerReady) {{ throw ('vx-runner did not start listening on ' + $runnerEndpoint) }} "
         ),
         vx_home = vx_home,
         store_root = store_root,
@@ -1009,29 +1019,43 @@ async fn detect_ssh_bootstrap_target(
 }
 
 #[cfg(unix)]
-async fn allocate_windows_ssh_bootstrap_ports(
+async fn ensure_windows_ssh_bootstrap_ports(
     control_path: &Utf8Path,
     target: &str,
+    bootstrap_root: &str,
+    class_label: &str,
 ) -> Result<(u16, u16, u16)> {
-    let output = ssh_control_output_windows(
-        control_path,
-        target,
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let state_dir = format!(r"{bootstrap_root}\{class_slug}");
+    let ports_path = format!(r"{state_dir}\ports.txt");
+    let script = format!(
         concat!(
+            "$stateDir = '{state_dir}'; ",
+            "$portsPath = '{ports_path}'; ",
+            "New-Item -ItemType Directory -Force -Path $stateDir | Out-Null; ",
+            "if (Test-Path $portsPath) {{ ",
+            "  $raw = (Get-Content -Raw $portsPath).Trim(); ",
+            "  if ($raw -match '^\\d+,\\d+,\\d+$') {{ Write-Output $raw; exit 0 }} ",
+            "}}; ",
             "$listeners = @(); ",
-            "for ($port = 30000; $port -lt 49152 -and $listeners.Count -lt 3; $port++) { ",
-            "  try { ",
+            "for ($port = 30000; $port -lt 49152 -and $listeners.Count -lt 3; $port++) {{ ",
+            "  try {{ ",
             "    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port); ",
             "    $listener.Start(); ",
             "    $listeners += $listener; ",
-            "  } catch { } ",
-            "}; ",
-            "if ($listeners.Count -ne 3) { throw 'failed to reserve three Windows bootstrap ports outside the dynamic range' }; ",
-            "$ports = $listeners | ForEach-Object { $_.LocalEndpoint.Port }; ",
-            "$listeners | ForEach-Object { $_.Stop() }; ",
-            "$ports -join ','"
+            "  }} catch {{ }} ",
+            "}}; ",
+            "if ($listeners.Count -ne 3) {{ throw 'failed to reserve three Windows bootstrap ports outside the dynamic range' }}; ",
+            "$ports = $listeners | ForEach-Object {{ $_.LocalEndpoint.Port }}; ",
+            "$listeners | ForEach-Object {{ $_.Stop() }}; ",
+            "$raw = ($ports -join ','); ",
+            "Set-Content -NoNewline -Path $portsPath -Value $raw; ",
+            "Write-Output $raw"
         ),
-    )
-    .await?;
+        state_dir = powershell_single_quote(&state_dir),
+        ports_path = powershell_single_quote(&ports_path),
+    );
+    let output = ssh_control_output_windows(control_path, target, &script).await?;
 
     let ports = output
         .split(',')
@@ -2701,6 +2725,153 @@ async fn boot_and_connect_store_with_upstream(
 }
 
 #[cfg(unix)]
+fn remove_local_endpoint_artifact(endpoint: &Endpoint) -> Result<()> {
+    if let Endpoint::Local(path) = endpoint
+        && path.exists()
+    {
+        let _ = std::fs::remove_file(path.as_std_path());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_ssh_bootstrap_forwarder(
+    control_path: &Utf8Path,
+    target: &str,
+    local_store_endpoint: &Endpoint,
+    local_runner_endpoint: &Endpoint,
+    store_remote: &str,
+    runner_remote: &str,
+    ssh_stdout_file: fs::File,
+    ssh_stderr_file: fs::File,
+) -> Result<Child> {
+    remove_local_endpoint_artifact(local_store_endpoint)?;
+    remove_local_endpoint_artifact(local_runner_endpoint)?;
+
+    let mut command = moire::process::Command::new("ssh");
+    command
+        .arg("-S")
+        .arg(control_path)
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("-L")
+        .arg(ssh_forward_spec(local_store_endpoint, store_remote)?)
+        .arg("-L")
+        .arg(ssh_forward_spec(local_runner_endpoint, runner_remote)?)
+        .arg("-N")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(ssh_stdout_file))
+        .stderr(Stdio::from(ssh_stderr_file))
+        .kill_on_drop(true);
+    command.spawn().map_err(Into::into)
+}
+
+#[cfg(unix)]
+async fn try_connect_ssh_bootstrap_reuse(
+    class_label: &str,
+    target: &str,
+    control_path: &Utf8Path,
+    local_store_endpoint: &Endpoint,
+    local_runner_endpoint: &Endpoint,
+    store_remote: &str,
+    runner_remote: &str,
+    ssh_stdout_file: fs::File,
+    ssh_stderr_file: fs::File,
+) -> Result<Option<SshBootstrapConnection>> {
+    let child = spawn_ssh_bootstrap_forwarder(
+        control_path,
+        target,
+        local_store_endpoint,
+        local_runner_endpoint,
+        store_remote,
+        runner_remote,
+        ssh_stdout_file,
+        ssh_stderr_file,
+    )?;
+
+    let store_attempt = connect_endpoint_with_backoff(
+        &format!("vx-store[{class_label}]"),
+        local_store_endpoint,
+        Duration::from_secs(2),
+    )
+    .await;
+    let runner_attempt = connect_endpoint_with_backoff(
+        &format!("vx-runner[{class_label}]"),
+        local_runner_endpoint,
+        Duration::from_secs(2),
+    )
+    .await;
+
+    match (store_attempt, runner_attempt) {
+        (Ok((store_caller, store_session_handle)), Ok((runner_caller, runner_session_handle))) => {
+            Ok(Some(SshBootstrapConnection {
+                runner_handle: ServiceHandle {
+                    child: Some(child),
+                    caller: runner_caller,
+                    session_handle: runner_session_handle,
+                },
+                store_handle: ServiceHandle {
+                    child: None,
+                    caller: store_caller,
+                    session_handle: store_session_handle,
+                },
+            }))
+        }
+        _ => {
+            drop(child);
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn start_ssh_bootstrap_remote_services_unix(
+    control_path: &Utf8Path,
+    target: &str,
+    paths: &SshBootstrapPaths,
+) -> Result<()> {
+    ssh_control_output_unix(
+        control_path,
+        target,
+        &[
+            "sh",
+            "-lc",
+            SSH_BOOTSTRAP_REMOTE_START_SCRIPT,
+            "sh",
+            &paths.checkout_dir,
+            &paths.vx_home,
+            &paths.store_root,
+            &paths.store_socket,
+            &paths.vfsd_socket,
+            &paths.runner_socket,
+        ],
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(unix)]
+async fn start_ssh_bootstrap_remote_services_windows(
+    control_path: &Utf8Path,
+    target: &str,
+    checkout_dir: &str,
+    paths: &SshBootstrapWindowsPaths,
+) -> Result<()> {
+    ssh_control_output_windows(
+        control_path,
+        target,
+        &ssh_bootstrap_windows_command(checkout_dir, paths),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(unix)]
 async fn connect_ssh_bootstrap_runner(
     vx_home: &Utf8PathBuf,
     class_label: &str,
@@ -2794,91 +2965,103 @@ async fn connect_ssh_bootstrap_runner(
         )
         .await;
         let mut windows_checkout = None;
-        let (
-            local_store_endpoint,
-            local_runner_endpoint,
-            store_remote,
-            runner_remote,
-            remote_command,
-        ) = match target_info.platform {
-            SshBootstrapTargetPlatform::Unix => {
-                let local_runner_endpoint =
-                    ssh_bootstrap_local_socket_endpoint(class_label, "runner");
-                let local_runner_socket = match &local_runner_endpoint {
-                    Endpoint::Local(path) => path.clone(),
-                    Endpoint::Tcp { .. } => unreachable!("unix ssh bootstrap uses local sockets"),
-                };
-                let local_store_endpoint =
-                    ssh_bootstrap_local_socket_endpoint(class_label, "store");
-                let local_store_socket = match &local_store_endpoint {
-                    Endpoint::Local(path) => path.clone(),
-                    Endpoint::Tcp { .. } => unreachable!("unix ssh bootstrap uses local sockets"),
-                };
-                if let Some(parent) = local_runner_socket.parent() {
-                    std::fs::create_dir_all(parent)?;
+        let (local_store_endpoint, local_runner_endpoint, store_remote, runner_remote) =
+            match target_info.platform {
+                SshBootstrapTargetPlatform::Unix => {
+                    let local_runner_endpoint =
+                        ssh_bootstrap_local_socket_endpoint(class_label, "runner");
+                    let local_runner_socket = match &local_runner_endpoint {
+                        Endpoint::Local(path) => path.clone(),
+                        Endpoint::Tcp { .. } => {
+                            unreachable!("unix ssh bootstrap uses local sockets")
+                        }
+                    };
+                    let local_store_endpoint =
+                        ssh_bootstrap_local_socket_endpoint(class_label, "store");
+                    let local_store_socket = match &local_store_endpoint {
+                        Endpoint::Local(path) => path.clone(),
+                        Endpoint::Tcp { .. } => {
+                            unreachable!("unix ssh bootstrap uses local sockets")
+                        }
+                    };
+                    if let Some(parent) = local_runner_socket.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    if local_runner_socket.exists() {
+                        let _ = std::fs::remove_file(local_runner_socket.as_std_path());
+                    }
+                    if local_store_socket.exists() {
+                        let _ = std::fs::remove_file(local_store_socket.as_std_path());
+                    }
+                    let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+                    (
+                        local_store_endpoint,
+                        local_runner_endpoint,
+                        paths.store_socket,
+                        paths.runner_socket,
+                    )
                 }
-                if local_runner_socket.exists() {
-                    let _ = std::fs::remove_file(local_runner_socket.as_std_path());
+                SshBootstrapTargetPlatform::Windows => {
+                    let (remote_store_port, remote_vfsd_port, remote_runner_port) =
+                        ensure_windows_ssh_bootstrap_ports(
+                            &control_path,
+                            target,
+                            target_info.windows_bootstrap_root(),
+                            class_label,
+                        )
+                        .await?;
+                    let checkout_paths = ssh_bootstrap_windows_paths(
+                        target_info.windows_bootstrap_root(),
+                        &target_info.home,
+                        class_label,
+                        remote_store_port,
+                        remote_vfsd_port,
+                        remote_runner_port,
+                    );
+                    windows_checkout = Some(checkout_paths.clone());
+                    let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
+                    let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
+                    (
+                        local_store_endpoint,
+                        local_runner_endpoint,
+                        checkout_paths.store_endpoint,
+                        checkout_paths.runner_endpoint,
+                    )
                 }
-                if local_store_socket.exists() {
-                    let _ = std::fs::remove_file(local_store_socket.as_std_path());
-                }
-                let paths = ssh_bootstrap_paths(&target_info.home, class_label);
-                let socket_suffix = ssh_bootstrap_unique_suffix();
-                let store_socket = format!("{}/store-{socket_suffix}.sock", paths.vx_home);
-                let vfsd_socket = format!("{}/vfsd-{socket_suffix}.sock", paths.vx_home);
-                let runner_socket = format!("{}/runner-{socket_suffix}.sock", paths.vx_home);
-                let remote_command = format!(
-                    "sh -lc {} sh {} {} {} {} {} {}",
-                    shell_quote(SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT),
-                    shell_quote(&paths.checkout_dir),
-                    shell_quote(&paths.vx_home),
-                    shell_quote(&paths.store_root),
-                    shell_quote(&store_socket),
-                    shell_quote(&vfsd_socket),
-                    shell_quote(&runner_socket),
-                );
-                (
-                    local_store_endpoint,
-                    local_runner_endpoint,
-                    store_socket,
-                    runner_socket,
-                    remote_command,
-                )
-            }
-            SshBootstrapTargetPlatform::Windows => {
-                let checkout_paths = ssh_bootstrap_windows_paths(
-                    target_info.windows_bootstrap_root(),
-                    &target_info.home,
-                    class_label,
-                    0,
-                    0,
-                    0,
-                );
-                let checkout_dir = checkout_paths.checkout_dir.clone();
-                windows_checkout = Some(checkout_paths);
-                let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
-                let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
-                let (remote_store_port, remote_vfsd_port, remote_runner_port) =
-                    allocate_windows_ssh_bootstrap_ports(&control_path, target).await?;
-                let paths = ssh_bootstrap_windows_paths(
-                    target_info.windows_bootstrap_root(),
-                    &target_info.home,
-                    class_label,
-                    remote_store_port,
-                    remote_vfsd_port,
-                    remote_runner_port,
-                );
-                let remote_command = ssh_bootstrap_windows_command(&checkout_dir, &paths);
-                (
-                    local_store_endpoint,
-                    local_runner_endpoint,
-                    paths.store_endpoint,
-                    paths.runner_endpoint,
-                    remote_command,
-                )
-            }
-        };
+            };
+
+        emit_ssh_bootstrap_progress(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            format!("checking for existing remote runner on {target}"),
+            activity,
+        )
+        .await;
+        if let Some(mut connection) = try_connect_ssh_bootstrap_reuse(
+            class_label,
+            target,
+            &control_path,
+            &local_store_endpoint,
+            &local_runner_endpoint,
+            &store_remote,
+            &runner_remote,
+            ssh_stdout_file.try_clone()?,
+            ssh_stderr_file.try_clone()?,
+        )
+        .await?
+        {
+            connection.store_handle.child = Some(master_child);
+            emit_ssh_bootstrap_progress(
+                boot_tx,
+                &progress_listener,
+                class_label,
+                format!("reused remote store and runner on {target}"),
+                activity,
+            )
+            .await;
+            return Ok(connection);
+        }
 
         emit_ssh_bootstrap_progress(
             boot_tx,
@@ -2947,27 +3130,43 @@ async fn connect_ssh_bootstrap_runner(
             }
         }
 
-        let mut command = moire::process::Command::new("ssh");
-        command
-            .arg("-S")
-            .arg(&control_path)
-            .arg("-o")
-            .arg("ExitOnForwardFailure=yes")
-            .arg("-o")
-            .arg("ServerAliveInterval=30")
-            .arg("-o")
-            .arg("ServerAliveCountMax=3")
-            .arg("-L")
-            .arg(ssh_forward_spec(&local_store_endpoint, &store_remote)?)
-            .arg("-L")
-            .arg(ssh_forward_spec(&local_runner_endpoint, &runner_remote)?)
-            .arg(target)
-            .arg(remote_command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(ssh_stdout_file))
-            .stderr(Stdio::from(ssh_stderr_file))
-            .kill_on_drop(true);
-        let child = command.spawn()?;
+        emit_ssh_bootstrap_progress(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            format!("starting remote store and runner daemons on {target}"),
+            activity,
+        )
+        .await;
+        match (&target_info.platform, windows_checkout.as_ref()) {
+            (SshBootstrapTargetPlatform::Unix, _) => {
+                let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+                start_ssh_bootstrap_remote_services_unix(&control_path, target, &paths).await?;
+            }
+            (SshBootstrapTargetPlatform::Windows, Some(paths)) => {
+                start_ssh_bootstrap_remote_services_windows(
+                    &control_path,
+                    target,
+                    &paths.checkout_dir,
+                    paths,
+                )
+                .await?;
+            }
+            (SshBootstrapTargetPlatform::Windows, None) => {
+                eyre::bail!("missing Windows ssh bootstrap checkout paths for {target}");
+            }
+        }
+
+        let child = spawn_ssh_bootstrap_forwarder(
+            &control_path,
+            target,
+            &local_store_endpoint,
+            &local_runner_endpoint,
+            &store_remote,
+            &runner_remote,
+            ssh_stdout_file,
+            ssh_stderr_file,
+        )?;
         emit_ssh_bootstrap_progress(
             boot_tx,
             &progress_listener,

@@ -81,8 +81,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     fn to_string(self) -> String self.path;
   }
 
-  // let class = executor_class("default");
-  let class = executor_class("ssh:orb");
+  let class = executor_class("default");
 
   let tools =
     discover(class, (host) =>
