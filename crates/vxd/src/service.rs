@@ -2581,8 +2581,15 @@ async fn publish_acquire_cache_entry(
 pub(crate) async fn run_build_vx_acquire_via_store(
     store: &Arc<StoreClient>,
     request: EvalAcquireRequest,
+    event_recorder: Option<&vx_eval::EventRecorder>,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let trace_args = value!({
+        "display_name": ("acquire(..)"),
+        "url": ((request.url.clone())),
+        "digest": ((request.digest.clone())),
+        "extract": ((request.extract.clone().unwrap_or_default())),
+    });
     let digest = AcquireDigest::parse(&request.digest)
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let extract_format = request
@@ -2598,9 +2605,35 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         extract_format.map(AcquireArchiveFormat::cache_key_tag),
     );
 
-    let acquired = if let Some(cached) = store.lookup(cache_key).await.map_err(|error| {
-        exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
-    })? {
+    let cached = {
+        let _lookup_span = event_recorder.map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "acquire.lookup",
+                value!({
+                    "display_name": ("acquire lookup"),
+                    "cache_key": ((cache_key.to_hex().to_string())),
+                    ..trace_args.clone(),
+                }),
+            )
+        });
+        store.lookup(cache_key).await.map_err(|error| {
+            exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+        })?
+    };
+
+    let acquired = if let Some(cached) = cached {
+        let _cached_span = event_recorder.map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "acquire.load_cached",
+                value!({
+                    "display_name": ("load cached acquire"),
+                    "manifest_hash": ((cached.to_string())),
+                    ..trace_args.clone(),
+                }),
+            )
+        });
         match extract_format {
             Some(_) => Value::Tree(TreeValue::Store(cached)),
             None => load_acquired_blob_from_manifest(store, cached)
@@ -2610,63 +2643,141 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 })?,
         }
     } else {
-        let bytes = vx_http::get_bytes(&request.url).await.map_err(|error| {
-            exec_bridge_poison(
-                PoisonKind::UserFail,
-                format!("failed to acquire {}: {error}", request.url),
-                &demand_chain,
-            )
-        })?;
-        digest
-            .verify(&bytes)
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let bytes = {
+            let _download_span = event_recorder.map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "acquire.download",
+                    value!({
+                        "display_name": ("download acquire payload"),
+                        ..trace_args.clone(),
+                    }),
+                )
+            });
+            vx_http::get_bytes(&request.url).await.map_err(|error| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("failed to acquire {}: {error}", request.url),
+                    &demand_chain,
+                )
+            })?
+        };
+        {
+            let _verify_span = event_recorder.map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "acquire.verify",
+                    value!({
+                        "display_name": ("verify acquire digest"),
+                        "bytes": ((bytes.len() as u64)),
+                        ..trace_args.clone(),
+                    }),
+                )
+            });
+            digest.verify(&bytes).map_err(|message| {
+                exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+            })?;
+        }
 
         match extract_format {
             Some(format) => {
                 let files = Arc::new(SyncMutex::new("vxd/acquire_file_info", HashMap::new()));
                 let files_for_extract = Arc::clone(&files);
                 let store_for_extract = Arc::clone(store);
-                let tree = vx_tarball::extract_to_tree(
-                    std::io::Cursor::new(bytes),
-                    format.compression(),
-                    0,
-                    async move |data: Vec<u8>| {
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                        let prepared = prepare_blob(&data);
-                        let blob_ref =
-                            store_prepared_blob(&store_for_extract, &prepared, &data).await?;
-                        files_for_extract.lock().insert(content_hash.0, blob_ref);
-                        Ok(content_hash.0)
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    exec_bridge_poison(
-                        PoisonKind::UserFail,
-                        format!("failed to extract {}: {error}", request.url),
-                        &demand_chain,
+                let tree = {
+                    let _extract_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.extract",
+                            value!({
+                                "display_name": ("extract acquire archive"),
+                                "compression": ((format.compression().as_str().to_string())),
+                                "bytes": ((bytes.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    vx_tarball::extract_to_tree(
+                        std::io::Cursor::new(bytes),
+                        format.compression(),
+                        0,
+                        async move |data: Vec<u8>| {
+                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                            let prepared = prepare_blob(&data);
+                            let blob_ref =
+                                store_prepared_blob(&store_for_extract, &prepared, &data).await?;
+                            files_for_extract.lock().insert(content_hash.0, blob_ref);
+                            Ok(content_hash.0)
+                        },
                     )
-                })?;
+                    .await
+                    .map_err(|error| {
+                        exec_bridge_poison(
+                            PoisonKind::UserFail,
+                            format!("failed to extract {}: {error}", request.url),
+                            &demand_chain,
+                        )
+                    })?
+                };
                 let files = files.lock().clone();
-                let (root, _) = store_acquired_tree_manifest(store, &tree, &files)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
-                publish_acquire_cache_entry(store, cache_key, root)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                let (root, _) = {
+                    let _manifest_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_tree",
+                            value!({
+                                "display_name": ("store acquire tree"),
+                                "files": ((files.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    store_acquired_tree_manifest(store, &tree, &files)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?
+                };
+                {
+                    let _publish_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.publish_cache",
+                            value!({
+                                "display_name": ("publish acquire cache"),
+                                "root": ((root.to_string())),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    publish_acquire_cache_entry(store, cache_key, root)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?;
+                }
                 Value::Tree(TreeValue::Store(root))
             }
             None => {
                 let prepared = prepare_blob(&bytes);
-                let blob_ref = store_prepared_blob(store, &prepared, &bytes)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                let blob_ref = {
+                    let _store_blob_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_blob",
+                            value!({
+                                "display_name": ("store acquire blob"),
+                                "bytes": ((bytes.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    store_prepared_blob(store, &prepared, &bytes)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?
+                };
 
                 let manifest = NodeManifest {
                     node_id: NodeId("acquire:blob".to_string()),
@@ -2680,21 +2791,47 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                     }],
                 };
                 let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
-                store
-                    .put_node(manifest_hash, node_bytes)
-                    .await
-                    .map_err(|error| {
-                        exec_bridge_poison(
-                            PoisonKind::Internal,
-                            format!("{error:?}"),
-                            &demand_chain,
+                {
+                    let _manifest_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_manifest",
+                            value!({
+                                "display_name": ("store acquire manifest"),
+                                "manifest_hash": ((manifest_hash.to_string())),
+                                ..trace_args.clone(),
+                            }),
                         )
-                    })?;
-                publish_acquire_cache_entry(store, cache_key, manifest_hash)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                    });
+                    store
+                        .put_node(manifest_hash, node_bytes)
+                        .await
+                        .map_err(|error| {
+                            exec_bridge_poison(
+                                PoisonKind::Internal,
+                                format!("{error:?}"),
+                                &demand_chain,
+                            )
+                        })?;
+                }
+                {
+                    let _publish_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.publish_cache",
+                            value!({
+                                "display_name": ("publish acquire cache"),
+                                "manifest_hash": ((manifest_hash.to_string())),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    publish_acquire_cache_entry(store, cache_key, manifest_hash)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?;
+                }
                 Value::Blob(BlobValue::Store {
                     blob_ref,
                     executable: false,
@@ -2703,6 +2840,16 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         }
     };
 
+    let _hydrate_span = event_recorder.map(|recorder| {
+        EventSink::begin_span_with_args(
+            recorder,
+            "acquire.hydrate",
+            value!({
+                "display_name": ("hydrate acquire result"),
+                ..trace_args.clone(),
+            }),
+        )
+    });
     hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
 }
 
