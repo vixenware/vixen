@@ -7,21 +7,33 @@ use std::sync::Arc;
 
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
-    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
-    LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter, PartialAppExpr,
-    PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt,
-    StringPart, StructDecl as AstStructDecl, StructLiteralExpr, StructLiteralField, SyntaxKind,
-    TupleExpr, WhereExpr,
+    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, ImportExpr, InterpolatedStringExpr,
+    InvokeExpr, LineIndex, LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl,
+    Parameter, PartialAppExpr, PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr,
+    SourceFile, Stmt as AstStmt, StringPart, StructDecl as AstStructDecl, StructLiteralExpr,
+    StructLiteralField, SyntaxKind, TextRange, TupleExpr, WhereExpr, trimmed_range,
 };
 
 use crate::instr;
 
-#[derive(Default)]
 struct LowerCtx {
     next_closure_id: usize,
     next_temp_id: usize,
     namespace_methods: Vec<Arc<instr::FnDef>>,
     source_id: Arc<str>,
+    line_index: Arc<LineIndex>,
+}
+
+impl Default for LowerCtx {
+    fn default() -> Self {
+        Self {
+            next_closure_id: 0,
+            next_temp_id: 0,
+            namespace_methods: Vec::new(),
+            source_id: Arc::default(),
+            line_index: Arc::new(LineIndex::new("")),
+        }
+    }
 }
 
 impl LowerCtx {
@@ -40,7 +52,10 @@ impl LowerCtx {
     fn provenance(&self, node: &impl AstNode, label: impl Into<String>) -> instr::SourceProvenance {
         instr::SourceProvenance {
             source_id: Arc::clone(&self.source_id),
-            span: instr::SourceSpan::from_text_range(node.syntax().text_range()),
+            span: instr::SourceSpan::from_text_range(
+                trimmed_range(node.syntax()),
+                &self.line_index,
+            ),
             label: label.into(),
         }
     }
@@ -56,8 +71,10 @@ pub fn lower_source_file_with_source_id(
     source: &SourceFile,
     source_id: impl Into<Arc<str>>,
 ) -> instr::Module {
+    let source_text = source.syntax().text().to_string();
     let mut ctx = LowerCtx {
         source_id: source_id.into(),
+        line_index: Arc::new(LineIndex::new(&source_text)),
         ..LowerCtx::default()
     };
     let mut functions = Vec::new();
@@ -81,6 +98,7 @@ pub fn lower_source_file_with_source_id(
     functions.extend(ctx.namespace_methods);
 
     instr::Module {
+        source_id: Arc::clone(&ctx.source_id),
         functions,
         top_level: instr::Block { stmts: top_level },
     }
@@ -122,11 +140,29 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
         None => instr::Block { stmts: vec![] },
     };
 
+    // Narrow the provenance span to just the signature (fn name + params),
+    // excluding the body — so diagnostics highlight `fn build(a, b, c)` not
+    // the entire function.
+    let trimmed_start = trimmed_range(f.syntax()).start();
+    let sig_end = f
+        .syntax()
+        .children()
+        .find(|child| child.kind() == SyntaxKind::PARAMETER_CLAUSE)
+        .map(|clause| clause.text_range().end())
+        .or_else(|| f.name().map(|tok| tok.text_range().end()))
+        .unwrap_or_else(|| f.syntax().text_range().end());
+    let sig_range = TextRange::new(trimmed_start, sig_end);
+    let provenance = Some(instr::SourceProvenance {
+        source_id: Arc::clone(&ctx.source_id),
+        span: instr::SourceSpan::from_text_range(sig_range, &ctx.line_index),
+        label: format!("fn {name}"),
+    });
     Some(instr::FnDef {
         name: name.to_string(),
         params,
         keyword_params,
         body,
+        provenance,
     })
 }
 
@@ -168,6 +204,7 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
         AstStmt::FnDecl(f) => {
             let mut fn_ctx = LowerCtx {
                 source_id: Arc::clone(&ctx.source_id),
+                line_index: Arc::clone(&ctx.line_index),
                 ..LowerCtx::default()
             };
             let def = lower_fn_decl_with_ctx(f, &mut fn_ctx)?;
@@ -224,6 +261,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Literal(lit) => lower_literal(lit),
         AstExpr::InterpolatedString(string) => lower_interpolated_string(string, ctx),
         AstExpr::PathLiteral(path) => lower_path_literal(path, ctx),
+        AstExpr::Import(import) => lower_import(import, ctx),
         AstExpr::NameRef(name_ref) => {
             let name = name_ref.token()?.text().to_string();
             Some(instr::Expr::Var(name))
@@ -358,6 +396,13 @@ fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<inst
     let interpolated = expr.interpolated()?;
     let parts = lower_template_parts(interpolated.parts(), ctx)?;
     Some(instr::Expr::PathTemplate { parts, provenance })
+}
+
+fn lower_import(expr: &ImportExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    Some(instr::Expr::Import {
+        path: expr.path()?,
+        provenance: Some(ctx.provenance(expr, "import(..)")),
+    })
 }
 
 fn lower_template_parts(
@@ -592,6 +637,7 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
         | instr::Expr::LitString(_)
         | instr::Expr::StringTemplate { .. }
         | instr::Expr::PathTemplate { .. }
+        | instr::Expr::Import { .. }
         | instr::Expr::Unit => false,
     }
 }
@@ -1146,6 +1192,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
         },
     };
 
+    let provenance = Some(ctx.provenance(closure, format!("<closure#{closure_id}>")));
     Some(instr::Expr::Closure {
         closure_id,
         def: Arc::new(instr::FnDef {
@@ -1153,6 +1200,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
             params,
             keyword_params: Vec::new(),
             body,
+            provenance,
         }),
     })
 }

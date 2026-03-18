@@ -88,11 +88,7 @@ async fn download_component(
 
     send_progress_best_effort(
         progress,
-        StoreProgress {
-            message: format!("downloading {component_name}"),
-            current: Some(0),
-            total: None,
-        },
+        StoreProgress::message(format!("downloading {component_name}"), Some(0), None),
     )
     .await;
 
@@ -117,11 +113,11 @@ async fn download_component(
 
     send_progress_best_effort(
         progress,
-        StoreProgress {
-            message: format!("downloading {component_name}"),
-            current: Some(bytes_read),
-            total: Some(bytes_read),
-        },
+        StoreProgress::message(
+            format!("downloading {component_name}"),
+            Some(bytes_read),
+            Some(bytes_read),
+        ),
     )
     .await;
 
@@ -205,11 +201,11 @@ async fn download_and_extract_component(
                     let current = counter.load(Ordering::Relaxed);
                     send_progress_best_effort(
                         progress,
-                        StoreProgress {
-                            message: format!("downloading+extracting {component_name}"),
-                            current: Some(current),
-                            total: content_length,
-                        },
+                        StoreProgress::message(
+                            format!("downloading+extracting {component_name}"),
+                            Some(current),
+                            content_length,
+                        ),
                     )
                     .await;
                 }
@@ -251,11 +247,11 @@ async fn download_and_extract_component(
 
     send_progress_best_effort(
         progress,
-        StoreProgress {
-            message: format!("downloading+extracting {component_name}"),
-            current: Some(counter.load(std::sync::atomic::Ordering::Relaxed)),
-            total: content_length,
-        },
+        StoreProgress::message(
+            format!("downloading+extracting {component_name}"),
+            Some(counter.load(std::sync::atomic::Ordering::Relaxed)),
+            content_length,
+        ),
     )
     .await;
 
@@ -506,7 +502,16 @@ async fn build_merkle_tree(
             match &entry.kind {
                 DirEntryKind::SmallFile { size, .. } => total_size += size,
                 DirEntryKind::LargeFile { size, .. } => total_size += size,
-                DirEntryKind::Dir { total_size: ts, .. } => total_size += ts,
+                DirEntryKind::Dir { .. } => {
+                    let child_path = if dir_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{dir_path}/{}", entry.name)
+                    };
+                    if let Some(&(_, child_total)) = dir_hashes.get(&child_path) {
+                        total_size += child_total;
+                    }
+                }
                 DirEntryKind::Symlink { .. } => {}
             }
         }
@@ -533,10 +538,7 @@ async fn build_merkle_tree(
                 .or_default()
                 .push(DirEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: node_hash,
-                        total_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: node_hash },
                 });
         }
     }
@@ -1513,11 +1515,7 @@ impl StoreService {
 
         send_progress_best_effort(
             progress,
-            StoreProgress {
-                message: format!("extracting {component_name}"),
-                current: None,
-                total: None,
-            },
+            StoreProgress::message(format!("extracting {component_name}"), None, None),
         )
         .await;
 
@@ -1963,11 +1961,7 @@ impl StoreService {
 
         send_progress_best_effort(
             progress,
-            StoreProgress {
-                message: format!("downloading zig {}", spec.version),
-                current: None,
-                total: None,
-            },
+            StoreProgress::message(format!("downloading zig {}", spec.version), None, None),
         )
         .await;
 
@@ -1988,11 +1982,7 @@ impl StoreService {
 
         send_progress_best_effort(
             progress,
-            StoreProgress {
-                message: "storing zig toolchain".to_string(),
-                current: None,
-                total: None,
-            },
+            StoreProgress::message("storing zig toolchain", None, None),
         )
         .await;
 

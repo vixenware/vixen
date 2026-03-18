@@ -1,0 +1,72 @@
+let zlib = import("./zlib-lib");
+let libpng = import("./libpng-lib");
+let pnggen = import("./pnggen-app");
+
+fn render_png(class: ExecutorClass, exe) {
+  let static_name = @static.png;
+  let shared_name = @shared.png;
+
+  let static_blob =
+    exec([@(run/{exe.static.program}), @(out/{static_name})]) where {
+      executor: class,
+      mounts: %{ @run => exe.static.run_tree },
+      writable: [@out],
+      observer: (proc, vfs) => (
+        if proc.exit_code != 0 (
+          fail `process failed`
+        ) else (
+          vfs.file(@(out/{static_name})).blob()
+        )
+      ),
+    };
+
+  let shared_blob =
+    exec([@(run/{exe.shared.program}), @(out/{shared_name})]) where {
+      executor: class,
+      mounts: %{ @run => exe.shared.run_tree },
+      writable: [@out],
+      observer: (proc, vfs) => (
+        if proc.exit_code != 0 (
+          fail `process failed`
+        ) else (
+          vfs.file(@(out/{shared_name})).blob()
+        )
+      ),
+    };
+
+  Tree %{
+    @({static_name}) => static_blob,
+    @({shared_name}) => shared_blob,
+  }
+}
+
+fn build_for(workspace: Path, class: ExecutorClass) {
+  let z = zlib.build(workspace, class);
+  let p = libpng.build(workspace, class, z);
+  let app = pnggen.build(workspace, class, p, z);
+  render_png(class, app)
+}
+
+fn build_platform(workspace: Path, name: String) {
+  if name == "local" (
+    build_for(workspace, executor_class("default"))
+  ) else if name == "orb" (
+    build_for(workspace, executor_class("ssh:orb"))
+  ) else if name == "toast" (
+    build_for(workspace, executor_class("ssh:toast"))
+  ) else (
+    fail `unknown platform: ${name}`
+  )
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let selected =
+    if env.has("VX_PLATFORMS") (
+      env.get("VX_PLATFORMS").split(",")
+    ) else (
+      ["local", "orb", "toast"]
+    );
+  selected
+    .map((name) => Tree %{ @({name}) => build_platform(workspace, name) })
+    .merge()
+}

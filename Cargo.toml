@@ -33,6 +33,7 @@ vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
+vx-bootstrap = { path = "crates/vx-bootstrap" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
@@ -46,6 +47,7 @@ facet-json = { version = "0.44.1" }
 facet-toml = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-cargo-toml = { version = "0.44.0" }
+facet-value = { version = "0.44.1" }
 
 # cmdline parsing
 figue = { version = "2.0.0" }
@@ -140,7 +142,6 @@ fastrand = "2"
 
 # temp files
 tempfile = "3"
-async-tempfile = "0.7"
 
 # logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }

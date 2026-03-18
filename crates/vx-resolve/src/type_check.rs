@@ -11,7 +11,7 @@ use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FallibleExpr,
     FieldExpr, IfExpr, InvokeExpr, LetStmt, LiteralExpr, MapExpr, MatchExpr, NameRefExpr,
     PartialAppExpr, Pattern, PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr,
-    SyntaxKind, WhereExpr, WithExpr,
+    SyntaxKind, WhereExpr, WithExpr, trimmed_range,
 };
 use vx_types::{Capability, FnSig, InferVar, ParamDef, Ty};
 
@@ -308,7 +308,7 @@ impl<'a> ExprTyper<'a> {
                         last_ty = ty;
                     } else {
                         self.push_error(TypeError {
-                            range: expr.syntax().text_range(),
+                            range: trimmed_range(expr.syntax()),
                             kind: TypeErrorKind::UnusedExprStatement,
                         });
                         last_ty = Ty::Unit;
@@ -700,7 +700,7 @@ impl<'a> ExprTyper<'a> {
                 && !self.types_compatible(&arg_ty, param_ty)
             {
                 self.push_error(TypeError {
-                    range: arg_expr.syntax().text_range(),
+                    range: trimmed_range(arg_expr.syntax()),
                     kind: TypeErrorKind::ArgTypeMismatch {
                         param_name: name,
                         expected: param_ty.clone(),
@@ -851,13 +851,15 @@ impl<'a> ExprTyper<'a> {
                     }
                 }
 
-                self.push_error(TypeError {
-                    range: field_expr.syntax().text_range(),
-                    kind: TypeErrorKind::NoSuchMethod {
-                        receiver_ty: receiver_ty.clone(),
-                        method_name,
-                    },
-                });
+                if receiver_ty != Ty::Poison {
+                    self.push_error(TypeError {
+                        range: trimmed_range(field_expr.syntax()),
+                        kind: TypeErrorKind::NoSuchMethod {
+                            receiver_ty: receiver_ty.clone(),
+                            method_name,
+                        },
+                    });
+                }
 
                 self.infer_call_arg_exprs(call);
                 Ty::Poison
@@ -1303,7 +1305,7 @@ impl<'a> ExprTyper<'a> {
                     && !self.types_compatible(&arg_ty, &param.ty)
                 {
                     self.push_error(TypeError {
-                        range: arg_expr.syntax().text_range(),
+                        range: trimmed_range(arg_expr.syntax()),
                         kind: TypeErrorKind::ArgTypeMismatch {
                             param_name: param.name.clone(),
                             expected: param.ty.clone(),
@@ -1333,7 +1335,7 @@ impl<'a> ExprTyper<'a> {
                 && !self.types_compatible(&arg_ty, &param.ty)
             {
                 self.push_error(TypeError {
-                    range: arg_expr.syntax().text_range(),
+                    range: trimmed_range(arg_expr.syntax()),
                     kind: TypeErrorKind::ArgTypeMismatch {
                         param_name: param.name.clone(),
                         expected: param.ty.clone(),
@@ -1358,7 +1360,7 @@ impl<'a> ExprTyper<'a> {
                     && !self.types_compatible(&arg_ty, &param.ty)
                 {
                     self.push_error(TypeError {
-                        range: arg_expr.syntax().text_range(),
+                        range: trimmed_range(arg_expr.syntax()),
                         kind: TypeErrorKind::ArgTypeMismatch {
                             param_name: param.name.clone(),
                             expected: param.ty.clone(),
@@ -1767,7 +1769,7 @@ impl<'a> ExprTyper<'a> {
                         Ty::Array(lhs_inner.clone())
                     } else {
                         self.push_error(TypeError {
-                            range: bin.syntax().text_range(),
+                            range: trimmed_range(bin.syntax()),
                             kind: TypeErrorKind::BinaryOpMismatch {
                                 op: "++".to_string(),
                                 left: lhs_ty,
@@ -1778,7 +1780,7 @@ impl<'a> ExprTyper<'a> {
                     }
                 } else {
                     self.push_error(TypeError {
-                        range: bin.syntax().text_range(),
+                        range: trimmed_range(bin.syntax()),
                         kind: TypeErrorKind::BinaryOpMismatch {
                             op: "++".to_string(),
                             left: lhs_ty,
@@ -1831,7 +1833,7 @@ impl<'a> ExprTyper<'a> {
                     && !self.types_compatible(&lhs_ty, first_param)
                 {
                     self.push_error(TypeError {
-                        range: lhs.syntax().text_range(),
+                        range: trimmed_range(lhs.syntax()),
                         kind: TypeErrorKind::ArgTypeMismatch {
                             param_name: "_".to_string(),
                             expected: first_param.clone(),

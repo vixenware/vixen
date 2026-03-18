@@ -27,7 +27,9 @@ roam-types = { workspace = true }
 shm-primitives = { workspace = true }
 libc = { workspace = true }
 fastrand = { workspace = true }
+facet-json = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }
+vx-io = { path = "../vx-io" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }

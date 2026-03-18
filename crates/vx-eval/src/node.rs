@@ -67,6 +67,7 @@ pub enum NodeJob {
         then_branch: instr::Block,
         else_branch: instr::Block,
         bindings: Arc<HashMap<String, Value>>,
+        scope_module_id: Arc<str>,
         scope_identity: Arc<str>,
     },
     Fallible {
@@ -89,6 +90,7 @@ pub enum NodeJob {
     Field {
         receiver: Value,
         field: Arc<str>,
+        scope_module_id: Arc<str>,
     },
     Fail {
         message: Value,
@@ -175,7 +177,7 @@ pub enum Outcome {
 /// A waiter handle: when a node resolves, it sends the outcome through
 /// this channel to wake the waiting task.
 pub struct Waiter {
-    pub sender: crossbeam_channel::Sender<(NodeId, Outcome)>,
+    pub sender: tokio::sync::oneshot::Sender<(NodeId, Outcome)>,
 }
 
 // i[impl impl.persistent]

@@ -21,11 +21,11 @@ pub(crate) struct ProbeResult {
     pub in_df: bool,
     /// The VixenFS extension process is running.
     pub extension_running: bool,
-    /// Result of reading health.json via /bin/cat.
-    pub health: HealthProbe,
+    /// Result of reading status.json via /bin/cat.
+    pub status: StatusProbe,
 }
 
-pub(crate) enum HealthProbe {
+pub(crate) enum StatusProbe {
     /// Haven't attempted (e.g. nothing is mounted).
     NotAttempted,
     /// /bin/cat returned successfully, here's the raw JSON.
@@ -42,9 +42,9 @@ impl ProbeResult {
         !self.mkdir_ebusy && !self.in_df
     }
 
-    /// Something is mounted and healthy (health.json says connected: true).
+    /// Something is mounted and healthy (status.json says connected: true).
     pub fn is_healthy(&self) -> bool {
-        matches!(&self.health, HealthProbe::Ok(json) if json.contains("\"connected\":true") || json.contains("\"connected\": true"))
+        matches!(&self.status, StatusProbe::Ok(json) if json.contains("\"connected\":true") || json.contains("\"connected\": true"))
     }
 
     /// Something is mounted (EBUSY or in df) or extension is still running, but not healthy.
@@ -54,12 +54,12 @@ impl ProbeResult {
 }
 
 /// Probe the mount point. Runs safe probes first, then optionally the
-/// sacrificial /bin/cat for health.json.
+/// sacrificial /bin/cat for status.json.
 pub(crate) async fn probe(
     mount_path: &Utf8PathBuf,
     candidates: &[String],
     log: &mut Log,
-    read_health: bool,
+    read_status: bool,
 ) -> ProbeResult {
     tracing::debug!("probing mount point {mount_path}");
 
@@ -72,29 +72,29 @@ pub(crate) async fn probe(
     // 3. pgrep — is extension running?
     let extension_running = probe_pgrep(log).await;
 
-    // 4. health.json via /bin/cat (only if something looks mounted)
-    let health = if read_health && (mkdir_ebusy || in_df) {
-        probe_health(mount_path, log).await
+    // 4. status.json via /bin/cat (only if something looks mounted)
+    let status = if read_status && (mkdir_ebusy || in_df) {
+        probe_status(mount_path, log).await
     } else {
-        HealthProbe::NotAttempted
+        StatusProbe::NotAttempted
     };
 
     let result = ProbeResult {
         mkdir_ebusy,
         in_df,
         extension_running,
-        health,
+        status,
     };
 
     tracing::debug!(
         mkdir_ebusy = result.mkdir_ebusy,
         in_df = result.in_df,
         extension_running = result.extension_running,
-        health = match &result.health {
-            HealthProbe::NotAttempted => "not_attempted".to_string(),
-            HealthProbe::Ok(json) => format!("ok({json})"),
-            HealthProbe::Timeout => "timeout".to_string(),
-            HealthProbe::Failed(e) => format!("failed({e})"),
+        status = match &result.status {
+            StatusProbe::NotAttempted => "not_attempted".to_string(),
+            StatusProbe::Ok(json) => format!("ok({json})"),
+            StatusProbe::Timeout => "timeout".to_string(),
+            StatusProbe::Failed(e) => format!("failed({e})"),
         },
         "probe result"
     );
@@ -162,13 +162,13 @@ pub(crate) async fn probe_pgrep(log: &mut Log) -> bool {
     running
 }
 
-/// Read health.json via a sacrificial /bin/cat process with timeout.
-async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
-    let health_path = format!("{mount_path}/.vixenfs/health.json");
-    log.info(format!("reading {health_path} via /bin/cat"));
+/// Read status.json via a sacrificial /bin/cat process with timeout.
+async fn probe_status(mount_path: &Utf8PathBuf, log: &mut Log) -> StatusProbe {
+    let status_path = format!("{mount_path}/.vixenfs/status.json");
+    log.info(format!("reading {status_path} via /bin/cat"));
 
     let mut child = match Command::new("/bin/cat")
-        .arg(&health_path)
+        .arg(&status_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -176,7 +176,7 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
         Ok(child) => child,
         Err(e) => {
             log.fail(format!("/bin/cat: failed to spawn: {e}"));
-            return HealthProbe::Failed(e.to_string());
+            return StatusProbe::Failed(e.to_string());
         }
     };
 
@@ -186,33 +186,33 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
             let stderr = read_pipe(child.take_stderr()).await;
             if status.success() {
                 let json = String::from_utf8_lossy(&stdout).to_string();
-                log.ok(format!("health.json: {json}"));
-                HealthProbe::Ok(json)
+                log.ok(format!("status.json: {json}"));
+                StatusProbe::Ok(json)
             } else {
                 let msg = String::from_utf8_lossy(&stderr);
                 log.fail(format!(
-                    "health.json: cat failed (exit={status}): {}",
+                    "status.json: cat failed (exit={status}): {}",
                     msg.trim()
                 ));
-                HealthProbe::Failed(msg.trim().to_string())
+                StatusProbe::Failed(msg.trim().to_string())
             }
         }
         Ok(Err(e)) => {
-            log.fail(format!("health.json: cat error: {e}"));
-            HealthProbe::Failed(e.to_string())
+            log.fail(format!("status.json: cat error: {e}"));
+            StatusProbe::Failed(e.to_string())
         }
         Err(_) => {
             // Timed out — kill the sacrificial process
-            log.fail("health.json: /bin/cat timed out (mount is zombied), killing");
+            log.fail("status.json: /bin/cat timed out (mount is zombied), killing");
             let _ = child.kill();
-            HealthProbe::Timeout
+            StatusProbe::Timeout
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthProbe, ProbeResult};
+    use super::{ProbeResult, StatusProbe};
 
     #[test]
     fn extension_process_alone_is_a_clean_state() {
@@ -220,7 +220,7 @@ mod tests {
             mkdir_ebusy: false,
             in_df: false,
             extension_running: true,
-            health: HealthProbe::NotAttempted,
+            status: StatusProbe::NotAttempted,
         };
 
         assert!(result.is_clean());
@@ -233,7 +233,7 @@ mod tests {
             mkdir_ebusy: true,
             in_df: false,
             extension_running: true,
-            health: HealthProbe::Failed("nope".to_string()),
+            status: StatusProbe::Failed("nope".to_string()),
         };
 
         assert!(!result.is_clean());
@@ -246,7 +246,7 @@ mod tests {
             mkdir_ebusy: true,
             in_df: true,
             extension_running: true,
-            health: HealthProbe::Ok("{\"connected\":true}".to_string()),
+            status: StatusProbe::Ok("{\"connected\":true}".to_string()),
         };
 
         assert!(!result.is_broken_mount());

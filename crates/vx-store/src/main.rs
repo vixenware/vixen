@@ -21,7 +21,7 @@ use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata};
+use roam_types::{ConnectionSettings, Metadata, MetadataEntry, MetadataValue};
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
@@ -48,16 +48,25 @@ struct StoreVirtualAcceptor {
     boot_service: vx_io::boot::BootService<StoreService>,
 }
 
+const UPSTREAM_STORE_METADATA_KEY: &str = "vx-upstream-store";
+
+fn requests_upstream_store(metadata: &[MetadataEntry<'_>]) -> bool {
+    metadata.iter().any(|entry| {
+        entry.key == UPSTREAM_STORE_METADATA_KEY && matches!(entry.value, MetadataValue::U64(1))
+    })
+}
+
 impl ConnectionAcceptor for StoreVirtualAcceptor {
     fn accept(
         &self,
         _conn_id: roam_types::ConnectionId,
         peer_settings: &ConnectionSettings,
-        _metadata: &[roam_types::MetadataEntry],
+        metadata: &[roam_types::MetadataEntry],
     ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
         let Some(store) = self.boot_service.gate().service().cloned() else {
             return Err(vec![]);
         };
+        let wants_upstream = requests_upstream_store(metadata);
 
         let parity = peer_settings.parity.other();
         Ok(AcceptedConnection {
@@ -67,10 +76,16 @@ impl ConnectionAcceptor for StoreVirtualAcceptor {
             },
             metadata: vec![],
             setup: Box::new(move |handle| {
-                let dispatcher = StoreDispatcher::new(store);
+                let connection_store = store.clone();
+                let dispatcher = StoreDispatcher::new(connection_store.clone());
                 moire::task::spawn(
                     async move {
                         let mut driver = Driver::new(handle, dispatcher);
+                        if wants_upstream {
+                            connection_store.set_upstream(Arc::new(
+                                vx_store_proto::StoreClient::new(driver.caller()),
+                            ));
+                        }
                         driver.run().await;
                     }
                     .named("store_virtual_driver"),
@@ -212,7 +227,16 @@ impl StoreService {
                     "store/rust_component_tree_flights",
                     std::collections::HashMap::new(),
                 ),
+                present_chunks: moire::sync::SyncMutex::new(
+                    "store/present_chunks",
+                    std::collections::HashSet::new(),
+                ),
+                present_nodes: moire::sync::SyncMutex::new(
+                    "store/present_nodes",
+                    std::collections::HashSet::new(),
+                ),
             }),
+            upstream: Arc::new(moire::sync::SyncMutex::new("store/upstream", None)),
         }
     }
 }

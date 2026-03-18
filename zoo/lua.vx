@@ -73,7 +73,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       @(out/obj/{file}.o),
       @(src/{file}),
     ] where {
-      mounts: { @src: src_tree },
+      mounts: %{ @src => src_tree },
     }
   );
 
@@ -90,8 +90,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let lua_exe = link(Tree [compile @lua.c, liblua]);
 
-  Tree {
-    @bin/lua: lua_exe.file(@bin/lua).executable(),
-    @lib/liblua.a: liblua.file(@liblua.a),
+  Tree %{
+    @bin/lua => lua_exe.file(@bin/lua).executable(),
+    @lib/liblua.a => liblua.file(@liblua.a),
   }
 )

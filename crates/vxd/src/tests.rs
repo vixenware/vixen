@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine;
 use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
 use moire::sync::SyncMutex;
@@ -30,8 +31,8 @@ use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
-    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecRequest, MapValue, PathValue,
-    RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
+    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecPathValue, ExecRequest, MapValue,
+    PathValue, RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
     TransportValue, TreeValue, Value,
 };
 use vx_io::boot::{BootDispatcher, BootGate, GracefulShutdown};
@@ -39,9 +40,8 @@ use vx_io::net::Listener;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
-    DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner, RunnerClient,
-    RunnerDispatcher, RustCompileRequest, RustCompileResult,
+    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
+    RunnerClient, RunnerDispatcher,
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
@@ -112,6 +112,49 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
 
 #[cfg(unix)]
 #[test]
+fn local_bootstrap_source_filter_skips_macos_generated_artifacts() {
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/xcode/build/DerivedData/foo")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/dist/0.6.0/staging/Vixen.app")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("zoo/libpng-src/.git/objects/pack/pack-foo")
+    ));
+    assert!(crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("some/nested/target/debug/foo")
+    ));
+    assert!(!crate::should_skip_local_bootstrap_source_path(
+        Utf8Path::new("apps/mac/xcode/project.yml")
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_bootstrap_source_files_respect_gitignore() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let repo_root = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf8");
+    std::fs::write(repo_root.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+    std::fs::write(repo_root.join("kept.txt"), "kept").expect("write kept");
+    std::fs::write(repo_root.join("ignored.txt"), "ignored").expect("write ignored");
+
+    let (files, stats) =
+        crate::local_bootstrap_source_files(&repo_root, &BTreeMap::new()).expect("collect files");
+
+    assert_eq!(stats.hashed_count, 2);
+    assert_eq!(stats.reused_count, 0);
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".gitignore", "kept.txt"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
     assert_eq!(
         crate::ssh_bootstrap_paths("/home/amos", "ssh:orb"),
@@ -133,8 +176,17 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
 #[cfg(unix)]
 #[test]
 fn ssh_bootstrap_windows_paths_use_tcp_layout() {
+    let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
+    let remote_home = r"C:\Users\faste";
     assert_eq!(
-        crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
+        crate::ssh_bootstrap_windows_paths(
+            bootstrap_root,
+            remote_home,
+            "ssh:toast",
+            57164,
+            57165,
+            57166
+        ),
         crate::SshBootstrapWindowsPaths {
             bare_repo_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git"
                 .to_string(),
@@ -151,52 +203,148 @@ fn ssh_bootstrap_windows_paths_use_tcp_layout() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_git_push_url_uses_remote_repo_paths() {
-    let unix_url = crate::ssh_bootstrap_git_push_url(
-        "orb",
-        "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git",
-        &crate::SshBootstrapTargetPlatform::Unix,
-    );
+fn windows_bootstrap_root_prefers_cargo_home_drive() {
     assert_eq!(
-        unix_url,
-        "ssh://orb/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git"
-    );
-
-    let windows_url = crate::ssh_bootstrap_git_push_url(
-        "toast",
-        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
-        &crate::SshBootstrapTargetPlatform::Windows,
-    );
-    assert_eq!(
-        windows_url,
-        "ssh://toast/C:/Users/faste/.cache/vixen/ssh-bootstrap/ssh-toast/repo.git"
+        crate::windows_bootstrap_root(
+            r"C:\Users\faste",
+            Some(r"X:\cargo"),
+            Some(r"Y:\rustup"),
+            Some(r"Z:\tmp"),
+            Some(r"W:\temp"),
+        ),
+        r"X:\vixen\ssh-bootstrap"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
-    assert!(
-        crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
-            .contains("git -C \"$checkout_dir\" remote set-url origin \"$bare_repo_dir\"")
+fn windows_bootstrap_root_falls_back_to_home_cache() {
+    assert_eq!(
+        crate::windows_bootstrap_root(r"C:\Users\faste", None, Some(r"rustup"), Some(r"tmp"), None,),
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap"
     );
-    assert!(
-        crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
-            .contains("git -C \"$checkout_dir\" fetch origin \"refs/vixen-bootstrap/$commit\"")
-    );
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("tree-sitter-vixen"));
 }
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_windows_command_scrubs_local_tree_sitter_path() {
+fn ssh_bootstrap_remote_launch_script_exports_vx_home_for_runner() {
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("pkill -9 -f"));
+    assert!(
+        crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT
+            .contains("\"$checkout_dir/target/release/vx-store\" --root \"$store_root\"")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_bootstrap_target_triple_maps_supported_arches() {
+    assert_eq!(
+        crate::unix_bootstrap_target_triple("aarch64").expect("aarch64 target triple"),
+        "aarch64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        crate::unix_bootstrap_target_triple("x86_64").expect("x86_64 target triple"),
+        "x86_64-unknown-linux-gnu"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_bootstrap_target_triple_maps_supported_arches() {
+    assert_eq!(
+        crate::windows_bootstrap_target_triple("x86_64").expect("x86_64 target triple"),
+        "x86_64-pc-windows-msvc"
+    );
+    assert_eq!(
+        crate::windows_bootstrap_target_triple("AMD64").expect("AMD64 target triple"),
+        "x86_64-pc-windows-msvc"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_vx_bootstrap_stamp_path_uses_sidecar_file() {
+    let path = Utf8Path::new("/tmp/vx-bootstrap.exe");
+    assert_eq!(
+        crate::local_vx_bootstrap_stamp_path(path),
+        Utf8Path::new("/tmp/vx-bootstrap.exe.stamp")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_windows_command_announces_endpoints() {
+    let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
+    let remote_home = r"C:\Users\faste";
     let command = crate::ssh_bootstrap_windows_command(
-        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
-        "deadbeef",
-        &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo",
+        &crate::ssh_bootstrap_windows_paths(
+            bootstrap_root,
+            remote_home,
+            "ssh:toast",
+            57164,
+            57165,
+            57166,
+        ),
     );
-    assert!(command.contains("tree-sitter-vixen"));
+    assert!(command.contains("-EncodedCommand "));
+    let encoded = command
+        .split_once("-EncodedCommand ")
+        .map(|(_, encoded)| encoded)
+        .expect("encoded PowerShell command");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 decode");
+    let utf16 = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let script = String::from_utf16(&utf16).expect("utf16 decode");
+    assert!(script.contains("vx-bootstrap endpoints"));
+    assert!(script.contains("$runnerEndpoint"));
+    assert!(script.contains("target\\release\\vx-store.exe"));
+    assert!(script.contains("target\\release\\vx-runner.exe"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_windows_loader_command_reads_gzip_payload_and_execs_bootstrap() {
+    let command = crate::ssh_bootstrap_windows_loader_command(
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-bootstrap.exe",
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-bootstrap.exe.gz",
+    );
+    assert!(command.contains("-EncodedCommand "));
+    let encoded = command
+        .split_once("-EncodedCommand ")
+        .map(|(_, encoded)| encoded)
+        .expect("encoded PowerShell command");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 decode");
+    let utf16 = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let script = String::from_utf16(&utf16).expect("utf16 decode");
+    assert!(script.contains("$srcGz = 'X:\\vixen\\ssh-bootstrap\\ssh-toast\\vx-bootstrap.exe.gz'"));
+    assert!(script.contains("Move-Item -Force $srcGz $tmpGz"));
+    assert!(script.contains("vx-bootstrap-loader: decompressing bootstrap executable"));
+    assert!(script.contains("System.IO.Compression.GzipStream"));
+    assert!(script.contains("& $dest --stdio"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_control_master_not_ready_message_includes_log_detail() {
+    let message = crate::ssh_control_master_not_ready_message(
+        "toast",
+        Some("Connection timed out during banner exchange"),
+    );
+    assert_eq!(
+        message,
+        "ssh control master for toast did not become ready: Connection timed out during banner exchange"
+    );
 }
 
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
@@ -339,16 +487,20 @@ fn test_sanitize_id_component_replaces_non_identifier_chars() {
 #[test]
 fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
     let empty_module = vx_eval::TransportModule {
+        source_id: "/workspace/build.vx".to_string(),
         functions: Vec::new(),
         top_level: TransportBlock { stmts: Vec::new() },
+        loaded_modules: Vec::new(),
     };
     let empty_function = ShippedFunction {
+        module_id: "/workspace/build.vx".to_string(),
         code_identity: "observer".to_string(),
         def: TransportFnDef {
             name: "observer".to_string(),
             params: Vec::new(),
             keyword_params: Vec::new(),
             body: TransportBlock { stmts: Vec::new() },
+            provenance: None,
         },
         captures: Vec::new(),
     };
@@ -368,6 +520,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
             value: Value::Blob(BlobValue::from_string("int main(void) { return 0; }\n")),
         }],
         writable_roots: vec![PathValue::new("out")],
+        create_dirs: vec![PathValue::new("out/obj")],
         executor: vx_eval::ExecutorSelector::class("default"),
         demand_chain: DemandChain::new(),
         module: empty_module,
@@ -377,7 +530,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
 
     assert_eq!(
         summary,
-        "build.vx exec[class:default]: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out)"
+        "build.vx exec[class:default]: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out; create_dirs: out/obj)"
     );
 }
 
@@ -390,7 +543,7 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
     };
     let mounts = vec![vx_eval::ExecMount {
         path: PathValue::new("bin"),
-        value: Value::Tree(TreeValue::Inline(Arc::from([(
+        value: Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("tool"),
             Value::Discovered(vx_eval::DiscoveredValue {
                 value: Box::new(Value::Blob(blob)),
@@ -413,18 +566,69 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
 }
 
 #[test]
+fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
+    let host_mounts = vec![
+        vx_eval::ExecMount {
+            path: PathValue::new("src"),
+            value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src"))),
+        },
+        vx_eval::ExecMount {
+            path: PathValue::new("gen"),
+            value: Value::Tree(TreeValue::inline(Arc::from([(
+                Arc::from("pnglibconf.h"),
+                Value::ExecPath(ExecPathValue::InTree {
+                    tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src")),
+                    suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
+                }),
+            )]))),
+        },
+    ];
+    let same_mounts = host_mounts.clone();
+    let reordered_mounts = vec![host_mounts[1].clone(), host_mounts[0].clone()];
+    let different_mounts = vec![
+        vx_eval::ExecMount {
+            path: PathValue::new("src"),
+            value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other"))),
+        },
+        vx_eval::ExecMount {
+            path: PathValue::new("gen"),
+            value: Value::Tree(TreeValue::inline(Arc::from([(
+                Arc::from("pnglibconf.h"),
+                Value::ExecPath(ExecPathValue::InTree {
+                    tree: TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other")),
+                    suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
+                }),
+            )]))),
+        },
+    ];
+
+    let first = crate::service::exec_mounts_singleflight_key(&host_mounts).expect("key");
+    let second = crate::service::exec_mounts_singleflight_key(&same_mounts).expect("key");
+    let reordered = crate::service::exec_mounts_singleflight_key(&reordered_mounts).expect("key");
+    let different = crate::service::exec_mounts_singleflight_key(&different_mounts).expect("key");
+
+    assert_eq!(first, second);
+    assert_eq!(first, reordered);
+    assert_ne!(first, different);
+}
+
+#[test]
 fn build_vx_discover_summary_includes_executor_class() {
     let empty_module = vx_eval::TransportModule {
+        source_id: "/workspace/build.vx".to_string(),
         functions: Vec::new(),
         top_level: TransportBlock { stmts: Vec::new() },
+        loaded_modules: Vec::new(),
     };
     let probe = ShippedFunction {
+        module_id: "/workspace/build.vx".to_string(),
         code_identity: "probe".to_string(),
         def: TransportFnDef {
             name: "probe".to_string(),
             params: Vec::new(),
             keyword_params: Vec::new(),
             body: TransportBlock { stmts: Vec::new() },
+            provenance: None,
         },
         captures: Vec::new(),
     };
@@ -1415,7 +1619,7 @@ struct StoreTestEnv {
     _vx_home: TempDir,
     _binaries: TestServiceBinaries,
     _service: ServiceHandle,
-    client: StoreClient,
+    client: Arc<StoreClient>,
 }
 
 impl StoreTestEnv {
@@ -1445,7 +1649,7 @@ impl StoreTestEnv {
             _vx_home: vx_home,
             _binaries: binaries,
             _service: service,
-            client: StoreClient::new(virtual_handle),
+            client: Arc::new(StoreClient::new(virtual_handle)),
         }
     }
 }
@@ -1474,30 +1678,6 @@ impl Runner for FakeRunner {
         }
     }
 
-    async fn compile_rust(
-        &self,
-        _request: RustCompileRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> RustCompileResult {
-        panic!("fake runner compile_rust should not be used in daemon-only build.vx tests");
-    }
-
-    async fn compile_cc(
-        &self,
-        _request: CcCompileRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> CcCompileResult {
-        panic!("fake runner compile_cc should not be used in daemon-only build.vx tests");
-    }
-
-    async fn link_cc(
-        &self,
-        _request: CcLinkRequest,
-        _progress: roam::Tx<StoreProgress>,
-    ) -> CcLinkResult {
-        panic!("fake runner link_cc should not be used in daemon-only build.vx tests");
-    }
-
     async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
         match &self.behavior {
             FakeRunnerBehavior::PanicOnBoundaryUse => {
@@ -1510,7 +1690,6 @@ impl Runner for FakeRunner {
                 stderr: "fake runner was unexpectedly asked to run a build.vx exec request"
                     .to_string(),
                 duration_ms: 0,
-                output_manifest: None,
                 observer_value: None,
                 poison: None,
                 error_kind: None,
@@ -1703,10 +1882,9 @@ impl BuildServiceDaemonTestEnv {
                     SpawnTracker::default(),
                 )),
                 store: store_client,
-                exec: runner_client,
                 build_vx_executors,
                 store_handle: Arc::clone(&store_handle),
-                runner_handles: Arc::from([Arc::clone(&runner_handle)]),
+                activity_registry: crate::activity::ActivityRegistry::new(),
             },
         )
         .await;
@@ -1722,6 +1900,96 @@ impl BuildServiceDaemonTestEnv {
             service,
         }
     }
+}
+
+#[vx_test]
+async fn build_vx_local_executor_is_lazy_and_reused() {
+    let fake_runner = FakeRunnerHandle::new(FakeRunnerBehavior::PanicOnBoundaryUse).await;
+    let runner_handle = fake_runner.connect().await;
+    let runner_virtual = runner_handle
+        .boot_and_connect()
+        .await
+        .expect("failed to boot/connect fake runner");
+    let runner_client = Arc::new(RunnerClient::new(runner_virtual));
+    let syntheses = Arc::new(AtomicUsize::new(0));
+
+    let executors = crate::service::BuildVxExecutors::local_lazy({
+        let syntheses = Arc::clone(&syntheses);
+        let runner_client = Arc::clone(&runner_client);
+        move |_listener| {
+            let syntheses = Arc::clone(&syntheses);
+            let runner_client = Arc::clone(&runner_client);
+            Box::pin(async move {
+                syntheses.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::service::BuildVxExecutor::local(runner_client, None))
+            })
+        }
+    });
+
+    let selector = vx_eval::ExecutorSelector::class("default");
+    let runner_a = executors
+        .runner_for(&selector, None)
+        .await
+        .expect("default executor should synthesize");
+    let runner_b = executors
+        .runner_for(&selector, None)
+        .await
+        .expect("default executor should be reused");
+
+    assert_eq!(syntheses.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&runner_a, &runner_b));
+}
+
+#[vx_test]
+async fn build_vx_implicit_ssh_executor_does_not_synthesize_local_runner() {
+    let local_syntheses = Arc::new(AtomicUsize::new(0));
+    let ssh_syntheses = Arc::new(AtomicUsize::new(0));
+
+    let executors = crate::service::BuildVxExecutors::local_lazy({
+        let local_syntheses = Arc::clone(&local_syntheses);
+        move |_listener| {
+            let local_syntheses = Arc::clone(&local_syntheses);
+            Box::pin(async move {
+                local_syntheses.fetch_add(1, Ordering::SeqCst);
+                Err("local executor should stay lazy".to_string())
+            })
+        }
+    })
+    .with_ssh_bootstrap_factory({
+        let ssh_syntheses = Arc::clone(&ssh_syntheses);
+        move |class_label, _target, _listener| {
+            let ssh_syntheses = Arc::clone(&ssh_syntheses);
+            Box::pin(async move {
+                ssh_syntheses.fetch_add(1, Ordering::SeqCst);
+                let fake_runner =
+                    FakeRunnerHandle::new(FakeRunnerBehavior::PanicOnBoundaryUse).await;
+                let runner_handle = Arc::new(fake_runner.connect().await);
+                let runner_virtual = runner_handle
+                    .boot_and_connect()
+                    .await
+                    .expect("failed to boot/connect fake runner");
+                std::mem::forget(fake_runner);
+                Ok(crate::service::SshBootstrapExecutor {
+                    id: format!("ssh_bootstrap:{class_label}"),
+                    backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+                    runner: Arc::new(RunnerClient::new(runner_virtual)),
+                    store: None,
+                    store_supports_readthrough: false,
+                    runner_handle: Some(runner_handle),
+                    store_handle: None,
+                })
+            })
+        }
+    });
+
+    let selector = vx_eval::ExecutorSelector::class("ssh:toast");
+    executors
+        .runner_for(&selector, None)
+        .await
+        .expect("ssh executor should synthesize without local runner");
+
+    assert_eq!(local_syntheses.load(Ordering::SeqCst), 0);
+    assert_eq!(ssh_syntheses.load(Ordering::SeqCst), 1);
 }
 
 #[vx_test]
@@ -1851,8 +2119,8 @@ async fn build_vx_reports_unknown_executor_selectors() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => Blob("present")),
   }
 }
 "#,
@@ -1861,11 +2129,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should complete with a structured failure");
 
@@ -1918,8 +2182,8 @@ async fn build_vx_routes_configured_daemon_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => host.read("/tmp/tool")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => host.read("/tmp/tool")),
   }
 }
 "#,
@@ -1928,11 +2192,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -1987,6 +2247,7 @@ async fn build_vx_routes_implicit_ssh_executor_classes() {
                                     backend: vx_eval::ExecutorBackendKind::SshBootstrap,
                                     runner: Arc::new(RunnerClient::new(runner_virtual)),
                                     store: None,
+                                    store_supports_readthrough: false,
                                     runner_handle: Some(runner_handle),
                                     store_handle: None,
                                 })
@@ -2004,8 +2265,8 @@ async fn build_vx_routes_implicit_ssh_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("ssh:toast"), (host) => host.read("C:/Windows/win.ini")),
+  Tree %{
+    @tool.txt => discover(executor_class("ssh:toast"), (host) => host.read("C:/Windows/win.ini")),
   }
 }
 "#,
@@ -2014,11 +2275,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -2040,7 +2297,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_accepts_discovered_top_level_trees() {
     let discovered = Value::Discovered(vx_eval::DiscoveredValue {
-        value: Box::new(Value::Tree(TreeValue::Inline(Arc::from([(
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("tool.txt"),
             Value::Blob(BlobValue::from_string("present")),
         )])))),
@@ -2073,8 +2330,8 @@ async fn build_vx_accepts_discovered_top_level_trees() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  discover(executor_class("linux"), (host) => Tree {
-    @tool.txt: host.read("/tmp/tool"),
+  discover(executor_class("linux"), (host) => Tree %{
+    @tool.txt => host.read("/tmp/tool"),
   })
 }
 "#,
@@ -2083,11 +2340,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should succeed");
 
@@ -2126,8 +2379,8 @@ async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  Tree %{
+    @tool.txt => discover(executor_class("linux"), (host) => Blob("present")),
   }
 }
 "#,
@@ -2136,11 +2389,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
     let result = env
         .service
-        .do_build(BuildRequest {
-            project_path: workspace_root.to_owned(),
-            build_file_path: None,
-            release: false,
-        })
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
         .await
         .expect("build should complete with a structured failure");
 
@@ -2170,12 +2419,12 @@ async fn stabilize_reuses_resolve_output_until_witness_changes() {
         workspace.path().join("build.vx"),
         r#"
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree (
-  Tree({
-    @out.txt: stabilize(
+  Tree(%{
+    @out.txt => stabilize(
       () => Tree.from_path(workspace).file(@input.txt).utf8(),
       (value) => render(@template.txt) where {
-        bindings: {
-          VALUE: value,
+        bindings: %{
+          "VALUE" => value,
         },
       },
     ),
@@ -2187,11 +2436,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree
     fs::write(workspace.path().join("input.txt"), "world\n").expect("write input");
     fs::write(workspace.path().join("template.txt"), "hello {{VALUE}}").expect("write template");
 
-    let request = BuildRequest {
-        project_path: workspace_root.to_owned(),
-        build_file_path: None,
-        release: false,
-    };
+    let request = BuildRequest::new(workspace_root.to_owned());
 
     let first = env
         .service
@@ -2236,7 +2481,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree
 fn collect_tree_paths(value: &Value) -> Vec<String> {
     fn walk(value: &Value, prefix: &str, out: &mut Vec<String>) {
         match value {
-            Value::Tree(TreeValue::Inline(entries)) => {
+            Value::Tree(TreeValue::Inline { entries, .. }) => {
                 for (name, child) in entries.iter() {
                     let next = if prefix.is_empty() {
                         name.to_string()

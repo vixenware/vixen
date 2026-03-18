@@ -486,8 +486,10 @@ where
 
                 let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
 
+                let access_path = mount_path.clone();
                 let _ = result_tx.send(Ok(VfsStart::Mounted {
                     mount_path,
+                    access_path,
                     vfs_dead: vfs_dead_rx,
                     telemetry,
                 }));

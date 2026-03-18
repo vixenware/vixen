@@ -37,7 +37,10 @@ const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
 const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+pub(crate) async fn send_progress_best_effort(
+    progress: &roam::Tx<StoreProgress>,
+    update: StoreProgress,
+) {
     let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
     loop {
         match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
@@ -50,10 +53,25 @@ async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: S
     }
 }
 
+pub(crate) async fn send_progress_reliably(
+    progress: &roam::Tx<StoreProgress>,
+    update: StoreProgress,
+) -> Result<(), roam::TxError> {
+    let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
+    loop {
+        match progress.send(update.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(roam::TxError::Unbound) if Instant::now() < deadline => {
+                tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// What kind of action is being executed (affects default timeout).
 #[derive(Debug)]
 pub enum ActionKind {
-    RustCompile,
     CcCompile,
     CcLink,
 }
@@ -64,9 +82,7 @@ pub enum ActionKind {
 /// - `VX_LINK_TIMEOUT_SECS` overrides link timeouts
 pub fn action_timeout(kind: &ActionKind) -> Duration {
     match kind {
-        ActionKind::RustCompile | ActionKind::CcCompile => {
-            env_timeout("VX_ACTION_TIMEOUT_SECS", DEFAULT_COMPILE_TIMEOUT)
-        }
+        ActionKind::CcCompile => env_timeout("VX_ACTION_TIMEOUT_SECS", DEFAULT_COMPILE_TIMEOUT),
         ActionKind::CcLink => env_timeout("VX_LINK_TIMEOUT_SECS", DEFAULT_LINK_TIMEOUT),
     }
 }
@@ -85,6 +101,7 @@ pub struct CommandOutput {
     pub exit_status: ExitStatus,
     pub stdout: String,
     pub stderr: String,
+    #[allow(dead_code)]
     pub combined_output: String,
 }
 
@@ -119,7 +136,7 @@ pub async fn run_sandboxed_command(
     action_desc: &str,
     progress: roam::Tx<StoreProgress>,
     cancel: Option<tokio_util::sync::CancellationToken>,
-) -> Result<CommandOutput, CommandError> {
+) -> (roam::Tx<StoreProgress>, Result<CommandOutput, CommandError>) {
     let timeout = action_timeout(kind);
 
     // Pipe stdout and stderr so we can stream them
@@ -142,7 +159,10 @@ pub async fn run_sandboxed_command(
         });
     }
 
-    let mut child = cmd.spawn().map_err(CommandError::SpawnFailed)?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return (progress, Err(CommandError::SpawnFailed(error))),
+    };
 
     // Tell the reaper about this child's process group (pgid == pid from setpgid(0,0))
     #[cfg(target_os = "macos")]
@@ -226,33 +246,6 @@ pub async fn run_sandboxed_command(
         .named("sandbox_stderr"),
     );
 
-    // Progress tick task: every 250ms, send the latest line if it changed
-    let latest_for_tick = latest_line.clone();
-    let action_desc_owned = action_desc.to_string();
-    let tick_task = moire::task::spawn(
-        async move {
-            let mut last_sent = String::new();
-            let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
-            loop {
-                interval.tick().await;
-                let current = latest_for_tick.lock().clone();
-                if current != last_sent && !current.is_empty() {
-                    send_progress_best_effort(
-                        &progress,
-                        StoreProgress {
-                            message: format!("{action_desc_owned}: {current}"),
-                            current: None,
-                            total: None,
-                        },
-                    )
-                    .await;
-                    last_sent = current;
-                }
-            }
-        }
-        .named("sandbox_tick"),
-    );
-
     // Grab the PID before wait (child.id() returns None after exit)
     let pid = child.id();
 
@@ -263,26 +256,63 @@ pub async fn run_sandboxed_command(
         Cancelled,
     }
 
-    let outcome = if let Some(ref cancel_token) = cancel {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => Outcome::Cancelled,
-            result = tokio::time::timeout(timeout, child.wait()) => {
-                match result {
-                    Ok(r) => Outcome::Exited(r),
-                    Err(_) => Outcome::TimedOut,
+    let outcome = {
+        let latest_for_tick = latest_line.clone();
+        let action_desc_owned = action_desc.to_string();
+        let mut last_sent = String::new();
+        let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+        let child_wait = child.wait();
+        tokio::pin!(child_wait);
+
+        loop {
+            if let Some(ref cancel_token) = cancel {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => break Outcome::Cancelled,
+                    _ = &mut timeout_sleep => break Outcome::TimedOut,
+                    result = &mut child_wait => break Outcome::Exited(result),
+                    _ = interval.tick() => {
+                        let current = latest_for_tick.lock().clone();
+                        if current != last_sent && !current.is_empty() {
+                            send_progress_best_effort(
+                                &progress,
+                                StoreProgress::message(
+                                    format!("{action_desc_owned}: {current}"),
+                                    None,
+                                    None,
+                                ),
+                            )
+                            .await;
+                            last_sent = current;
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = &mut timeout_sleep => break Outcome::TimedOut,
+                    result = &mut child_wait => break Outcome::Exited(result),
+                    _ = interval.tick() => {
+                        let current = latest_for_tick.lock().clone();
+                        if current != last_sent && !current.is_empty() {
+                            send_progress_best_effort(
+                                &progress,
+                                StoreProgress::message(
+                                    format!("{action_desc_owned}: {current}"),
+                                    None,
+                                    None,
+                                ),
+                            )
+                            .await;
+                            last_sent = current;
+                        }
+                    }
                 }
             }
         }
-    } else {
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(r) => Outcome::Exited(r),
-            Err(_) => Outcome::TimedOut,
-        }
     };
-
-    // Stop the tick task
-    tick_task.abort();
 
     match outcome {
         Outcome::Exited(Ok(exit_status)) => {
@@ -296,12 +326,15 @@ pub async fn run_sandboxed_command(
             let stdout = stdout_output.lock().clone();
             let stderr = stderr_output.lock().clone();
             let combined = combined_output.lock().clone();
-            Ok(CommandOutput {
-                exit_status,
-                stdout,
-                stderr,
-                combined_output: combined,
-            })
+            (
+                progress,
+                Ok(CommandOutput {
+                    exit_status,
+                    stdout,
+                    stderr,
+                    combined_output: combined,
+                }),
+            )
         }
         Outcome::Exited(Err(io_err)) => {
             if let Some(pid) = pid {
@@ -309,7 +342,7 @@ pub async fn run_sandboxed_command(
             }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            Err(CommandError::SpawnFailed(io_err))
+            (progress, Err(CommandError::SpawnFailed(io_err)))
         }
         Outcome::TimedOut => {
             // Timeout — gracefully terminate the process group (SIGTERM → SIGKILL)
@@ -329,11 +362,14 @@ pub async fn run_sandboxed_command(
             let _ = stderr_task.await;
             let partial = combined_output.lock().clone();
 
-            Err(CommandError::TimedOut {
-                action_desc: action_desc.to_string(),
-                timeout,
-                partial_output: partial,
-            })
+            (
+                progress,
+                Err(CommandError::TimedOut {
+                    action_desc: action_desc.to_string(),
+                    timeout,
+                    partial_output: partial,
+                }),
+            )
         }
         Outcome::Cancelled => {
             // Cancellation — graceful shutdown: SIGTERM → grace period → SIGKILL
@@ -352,10 +388,13 @@ pub async fn run_sandboxed_command(
             let _ = stderr_task.await;
             let partial = combined_output.lock().clone();
 
-            Err(CommandError::Cancelled {
-                action_desc: action_desc.to_string(),
-                partial_output: partial,
-            })
+            (
+                progress,
+                Err(CommandError::Cancelled {
+                    action_desc: action_desc.to_string(),
+                    partial_output: partial,
+                }),
+            )
         }
     }
 }
@@ -504,7 +543,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     tracing::trace!(
         program,
         vfs_root = %action.mount_base,
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         profile_len = profile.len(),
         "sandboxed_command: wrapping with sandbox-exec"
     );
@@ -514,7 +553,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd.arg("-p").arg(&profile);
 
     // Pass both /tmp and /private/tmp variants since macOS may resolve either way
-    let write_dir = action.out_path.to_string();
+    let write_dir = action.write_path.to_string();
     let write_dir_alt = write_dir.replace("/tmp", "/private/tmp");
     let vfs_root = action.mount_base.to_string();
     let vfs_root_alt = vfs_root.replace("/tmp", "/private/tmp");
@@ -528,7 +567,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
 
     tracing::trace!(
         sandbox_exec = "/usr/bin/sandbox-exec",
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         vfs_root = %action.mount_base,
         program,
         "spawning sandboxed command"
@@ -542,7 +581,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     tracing::trace!(
         program,
         vfs_root = %action.mount_base,
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         "sandboxed_command: wrapping with landlock-exec"
     );
 
@@ -562,15 +601,15 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd.arg("--vfs-root")
         .arg(action.mount_base.as_str())
         .arg("--write-dir")
-        .arg(action.out_path.as_str())
+        .arg(action.write_path.as_str())
         .arg("--")
         .arg(program);
 
     tracing::trace!(
         landlock_exec = "landlock-exec",
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         vfs_root = %action.mount_base,
-        tmpdir = %action.out_path,
+        tmpdir = %action.write_path,
         program,
         "spawning sandboxed command"
     );
@@ -617,7 +656,7 @@ mod tests {
             prefix_id: "build-123".into(),
             mount_base: Utf8PathBuf::from("/tmp/vx/vfs"),
             prefix_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123"),
-            out_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
+            write_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
             allowed_host_exec_paths: vec![Utf8PathBuf::from("/tmp/tools/cc")],
         };
         let profile = build_seatbelt_profile(&action);
@@ -633,15 +672,15 @@ mod tests {
         cmd.arg("-c")
             .arg("printf 'stdout line\\n'; printf 'stderr line\\n' >&2");
 
-        let output = run_sandboxed_command(
+        let (_progress, output) = run_sandboxed_command(
             cmd,
             &ActionKind::CcCompile,
             "capture-test",
             Tx::<StoreProgress>::unbound(),
             None,
         )
-        .await
-        .expect("command should run");
+        .await;
+        let output = output.expect("command should run");
 
         assert_eq!(output.stdout, "stdout line\n");
         assert_eq!(output.stderr, "stderr line\n");

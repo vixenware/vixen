@@ -61,13 +61,15 @@ pub struct FsKitError {
     pub remediation: Vec<String>,
 }
 
-/// Health payload served by the extension at `/.vixenfs/health.json`.
+/// Status payload served by the extension at `/.vixenfs/status.json`.
 #[derive(Debug, facet::Facet)]
 #[facet(rename_all = "snake_case")]
-pub struct HealthPayload {
+pub struct StatusPayload {
     pub connected: bool,
     #[facet(default)]
     pub ever_connected: bool,
+    #[facet(default)]
+    pub app_group_path: Option<String>,
     #[facet(default)]
     pub connected_at: Option<String>,
     #[facet(default)]
@@ -150,4 +152,38 @@ async fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
         return canonical_parent.join(name);
     }
     mount_path.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatusPayload;
+
+    #[test]
+    fn status_payload_parses_app_group_path_when_present() {
+        let json = r#"{
+            "connected": true,
+            "app_group_path": "/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs"
+        }"#;
+
+        let payload = facet_json::from_str::<StatusPayload>(json).expect("valid status payload");
+
+        assert!(payload.connected);
+        assert_eq!(
+            payload.app_group_path.as_deref(),
+            Some("/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs")
+        );
+    }
+
+    #[test]
+    fn status_payload_defaults_app_group_path_when_missing() {
+        let json = r#"{
+            "connected": false,
+            "disconnected_at": "2026-03-14T08:45:00Z"
+        }"#;
+
+        let payload = facet_json::from_str::<StatusPayload>(json).expect("valid status payload");
+
+        assert!(!payload.connected);
+        assert_eq!(payload.app_group_path, None);
+    }
 }

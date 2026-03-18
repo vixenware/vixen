@@ -1,0 +1,24 @@
+[package]
+name = "vx-bootstrap"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+blake3 = { workspace = true }
+camino = { workspace = true }
+eyre = { workspace = true }
+facet = { workspace = true }
+facet-postcard = { workspace = true }
+flate2 = "1"
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

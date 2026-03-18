@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::{CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient};
+use crate::{
+    CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    chunking::put_nodes_if_missing,
+};
 
 /// A file to include in the directory tree.
 pub struct MerkleTreeFile {
@@ -78,6 +81,7 @@ pub async fn build_merkle_tree(
     });
 
     let mut dir_hashes: BTreeMap<String, (NodeHash, u64)> = BTreeMap::new();
+    let mut pending_nodes = Vec::with_capacity(dir_list.len());
 
     for dir_path in &dir_list {
         let entries = dir_entries.get_mut(dir_path).unwrap();
@@ -91,7 +95,16 @@ pub async fn build_merkle_tree(
             match &entry.kind {
                 DirEntryKind::SmallFile { size, .. } => total_size += size,
                 DirEntryKind::LargeFile { size, .. } => total_size += size,
-                DirEntryKind::Dir { total_size: ts, .. } => total_size += ts,
+                DirEntryKind::Dir { .. } => {
+                    let child_path = if dir_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{dir_path}/{}", entry.name)
+                    };
+                    if let Some(&(_, child_total)) = dir_hashes.get(&child_path) {
+                        total_size += child_total;
+                    }
+                }
                 DirEntryKind::Symlink { .. } => {}
             }
         }
@@ -102,9 +115,7 @@ pub async fn build_merkle_tree(
         });
 
         let (node_bytes, node_hash) = dir_node.to_bytes_and_hash();
-        cas.put_node(node_hash, node_bytes)
-            .await
-            .map_err(|e| format!("failed to store DirectoryNode for '{}': {e:?}", dir_path))?;
+        pending_nodes.push((node_hash, node_bytes));
 
         dir_hashes.insert(dir_path.clone(), (node_hash, total_size));
 
@@ -116,13 +127,14 @@ pub async fn build_merkle_tree(
                 .or_default()
                 .push(DirEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: node_hash,
-                        total_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: node_hash },
                 });
         }
     }
+
+    put_nodes_if_missing(cas, pending_nodes)
+        .await
+        .map_err(|e| format!("failed to store Merkle directory nodes: {e}"))?;
 
     dir_hashes
         .get("")

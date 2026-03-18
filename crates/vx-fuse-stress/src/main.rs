@@ -255,7 +255,7 @@ fn dump_linux_diagnostics(_vx_home: &Path, pids: &[(String, u32)]) {
 }
 
 #[cfg(target_os = "macos")]
-fn dump_macos_diagnostics(vx_home: &Path, pids: &[(String, u32)]) {
+fn dump_macos_diagnostics(_vx_home: &Path, pids: &[(String, u32)]) {
     // Sample stuck processes (non-blocking, 1 second sample)
     for (name, pid) in pids {
         eprintln!("\n--- {name} (PID {pid}) sample ---");
@@ -276,10 +276,10 @@ fn dump_macos_diagnostics(vx_home: &Path, pids: &[(String, u32)]) {
         }
     }
 
-    // Check for orphaned vixenfs-mount / VixenFS processes
+    // Check for orphaned VixenFS extension processes
     eprintln!("\n--- FSKit processes ---");
     let output = std::process::Command::new("pgrep")
-        .args(["-la", "(vixenfs-mount|VixenFS)"])
+        .args(["-la", "VixenFS"])
         .output();
     if let Ok(out) = output {
         let text = String::from_utf8_lossy(&out.stdout);
@@ -287,17 +287,6 @@ fn dump_macos_diagnostics(vx_home: &Path, pids: &[(String, u32)]) {
             eprintln!("  (none)");
         } else {
             for line in text.lines() {
-                eprintln!("  {line}");
-            }
-        }
-    }
-
-    // Print the vixenfs-mount log file if it exists
-    let log_file = vx_home.join("vixen").join("vixenfs-mount.log");
-    if log_file.exists() {
-        eprintln!("\n--- vixenfs-mount.log ---");
-        if let Ok(content) = std::fs::read_to_string(&log_file) {
-            for line in content.lines() {
                 eprintln!("  {line}");
             }
         }

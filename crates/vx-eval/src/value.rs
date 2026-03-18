@@ -5,10 +5,12 @@
 
 use std::fmt;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use facet::Facet;
-use vx_store_proto::{BlobRef, NodeHash};
+use vx_store_proto::{
+    BlobRef, CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, chunking::prepare_blob,
+};
 
 use crate::instr::FnDef;
 use crate::node::NodeId;
@@ -99,9 +101,14 @@ pub enum BlobValue {
 }
 
 /// Tree storage.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TreeValue {
-    Inline(Arc<[(Arc<str>, Value)]>),
+    Inline {
+        entries: Arc<[(Arc<str>, Value)]>,
+        /// Lazily computed merkle root. Only valid when all children are
+        /// content-addressed (no Pending, no FsDir leaves).
+        cached_hash: Arc<OnceLock<NodeHash>>,
+    },
     FsDir(PathValue),
     Store(NodeHash),
 }
@@ -172,6 +179,7 @@ pub struct StructValue {
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
     pub def: Arc<FnDef>,
+    pub module_id: Arc<str>,
     pub code_identity: Arc<str>,
     /// Captured bindings from the enclosing scope, kept in sorted order.
     pub captures: Arc<[(Arc<str>, Value)]>,
@@ -224,6 +232,8 @@ pub enum BuiltinMethod {
     ArrayFlatten { receiver: Box<Value> },
     ArrayMerge { receiver: Box<Value> },
     MapMapValues { receiver: Box<Value> },
+    MapHas { receiver: Box<Value> },
+    MapGet { receiver: Box<Value> },
     BlobToString { receiver: Box<Value> },
     BlobExecutable { receiver: Box<Value> },
     BlobUtf8 { receiver: Box<Value> },
@@ -368,6 +378,17 @@ impl Value {
             }
             Value::Builtin(builtin) => builtin.is_fully_resolved(),
             _ => true,
+        }
+    }
+
+    /// Returns a stable identity for memoization purposes.
+    /// Unlike `key()`, this returns `Some` for `Pending` values — a pending
+    /// node has a unique identity (the NodeId) even though its value isn't
+    /// resolved yet.
+    pub fn memo_key(&self) -> Option<String> {
+        match self {
+            Value::Pending(node_id) => Some(format!("pending:{}", node_id.0)),
+            other => other.key(),
         }
     }
 
@@ -553,9 +574,48 @@ impl BlobValue {
 }
 
 impl TreeValue {
+    /// Create a new inline tree value.
+    pub fn inline(entries: Arc<[(Arc<str>, Value)]>) -> Self {
+        TreeValue::Inline {
+            entries,
+            cached_hash: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Returns the entries if this is an inline tree.
+    pub fn entries(&self) -> Option<&Arc<[(Arc<str>, Value)]>> {
+        match self {
+            TreeValue::Inline { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Returns the NodeHash if known. For `Store` trees this is immediate.
+    /// For inline trees, attempts to compute the merkle root from children's
+    /// hashes — returns `None` if any child's hash is unknown (Pending,
+    /// FsDir, FsFile, inline blobs, etc.).
+    pub fn node_hash(&self) -> Option<NodeHash> {
+        match self {
+            TreeValue::Store(hash) => Some(*hash),
+            TreeValue::FsDir(_) => None,
+            TreeValue::Inline {
+                entries,
+                cached_hash,
+            } => {
+                if let Some(hash) = cached_hash.get() {
+                    return Some(*hash);
+                }
+                let hash = compute_inline_tree_hash(entries)?;
+                // Race is fine — all threads compute the same hash.
+                let _ = cached_hash.set(hash);
+                Some(hash)
+            }
+        }
+    }
+
     fn collect_pending(&self, deps: &mut Vec<NodeId>) {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 for (_, value) in entries.iter() {
                     value.collect_pending(deps);
                 }
@@ -566,7 +626,7 @@ impl TreeValue {
 
     pub fn is_fully_resolved(&self) -> bool {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 entries.iter().all(|(_, value)| value.is_fully_resolved())
             }
             TreeValue::FsDir(_) => true,
@@ -576,7 +636,7 @@ impl TreeValue {
 
     pub fn key(&self) -> Option<String> {
         match self {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 let parts = entries
                     .iter()
                     .map(|(name, value)| Some(format!("{name}:{}", value.key()?)))
@@ -643,6 +703,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
@@ -692,6 +754,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
@@ -780,6 +844,12 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
                 Some(format!("builtin:map.map_values({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapHas { receiver }) => {
+                Some(format!("builtin:map.has({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapGet { receiver }) => {
+                Some(format!("builtin:map.get({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
@@ -1061,10 +1131,30 @@ impl Eq for BlobValue {}
 impl PartialEq for TreeValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TreeValue::Inline(a), TreeValue::Inline(b)) => a == b,
+            (TreeValue::Inline { entries: a, .. }, TreeValue::Inline { entries: b, .. }) => a == b,
             (TreeValue::FsDir(a), TreeValue::FsDir(b)) => a == b,
             (TreeValue::Store(a), TreeValue::Store(b)) => a == b,
             _ => false,
+        }
+    }
+}
+
+impl fmt::Debug for TreeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TreeValue::Inline {
+                entries,
+                cached_hash,
+            } => {
+                let mut d = f.debug_struct("Inline");
+                d.field("entries", entries);
+                if let Some(hash) = cached_hash.get() {
+                    d.field("hash", hash);
+                }
+                d.finish()
+            }
+            TreeValue::FsDir(path) => f.debug_tuple("FsDir").field(path).finish(),
+            TreeValue::Store(hash) => f.debug_tuple("Store").field(hash).finish(),
         }
     }
 }
@@ -1122,6 +1212,14 @@ impl PartialEq for BuiltinMethod {
             | (
                 BuiltinMethod::MapMapValues { receiver: left },
                 BuiltinMethod::MapMapValues { receiver: right },
+            )
+            | (
+                BuiltinMethod::MapHas { receiver: left },
+                BuiltinMethod::MapHas { receiver: right },
+            )
+            | (
+                BuiltinMethod::MapGet { receiver: left },
+                BuiltinMethod::MapGet { receiver: right },
             )
             | (
                 BuiltinMethod::BlobToString { receiver: left },
@@ -1240,7 +1338,7 @@ impl fmt::Display for BlobValue {
 impl fmt::Display for TreeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TreeValue::Inline(entries) => write!(f, "<tree {} entries>", entries.len()),
+            TreeValue::Inline { entries, .. } => write!(f, "<tree {} entries>", entries.len()),
             TreeValue::FsDir(path) => write!(f, "<tree {}>", path.as_str()),
             TreeValue::Store(root) => write!(f, "<tree {root}>"),
         }
@@ -1310,6 +1408,12 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { .. }) => {
                 write!(f, "<bound map.map_values>")
+            }
+            BuiltinValue::Method(BuiltinMethod::MapHas { .. }) => {
+                write!(f, "<bound map.has>")
+            }
+            BuiltinValue::Method(BuiltinMethod::MapGet { .. }) => {
+                write!(f, "<bound map.get>")
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")
@@ -1442,6 +1546,50 @@ fn blob_ref_key(blob_ref: &BlobRef) -> String {
             content_hash,
             size,
         } => format!("blob:store:large:{blob_node}:{content_hash}:{size}"),
+    }
+}
+
+/// Try to compute the merkle root of an inline tree from its children's
+/// already-known hashes. Returns `None` if any child's hash is unknown.
+fn compute_inline_tree_hash(entries: &[(Arc<str>, Value)]) -> Option<NodeHash> {
+    let mut dir_entries = Vec::with_capacity(entries.len());
+    let mut sorted: Vec<_> = entries.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+
+    for (name, value) in sorted {
+        let kind = value_to_dir_entry_kind(value)?;
+        dir_entries.push(DirEntry {
+            name: name.to_string(),
+            kind,
+        });
+    }
+
+    let directory = CasNode::Directory(DirectoryNode {
+        entries: dir_entries,
+        total_size: 0,
+    });
+    let (_, hash) = directory.to_bytes_and_hash();
+    Some(hash)
+}
+
+/// Try to convert a Value into a DirEntryKind for merkle hashing.
+/// Returns `None` for values whose hash isn't known yet.
+fn value_to_dir_entry_kind(value: &Value) -> Option<DirEntryKind> {
+    match value {
+        Value::Tree(tree) => {
+            let hash = tree.node_hash()?;
+            Some(DirEntryKind::Dir { hash })
+        }
+        Value::Blob(BlobValue::Store {
+            blob_ref,
+            executable,
+        }) => Some(blob_ref.to_dir_entry_kind(*executable)),
+        Value::Blob(BlobValue::Inline { bytes, executable }) => {
+            let prepared = prepare_blob(bytes);
+            Some(prepared.to_blob_ref().to_dir_entry_kind(*executable))
+        }
+        // FsFile, Pending, etc. — hash not cheaply available
+        _ => None,
     }
 }
 

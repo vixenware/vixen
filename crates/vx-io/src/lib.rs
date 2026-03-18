@@ -1,7 +1,7 @@
 //! Common I/O utilities for vixen crates
 
-use async_tempfile::TempFile;
 use camino::{Utf8Path, Utf8PathBuf};
+use tokio::io::AsyncWriteExt;
 
 pub mod boot;
 pub mod git;
@@ -29,19 +29,39 @@ pub async fn atomic_write(
     contents: &[u8],
     executable: bool,
 ) -> Result<(), std::io::Error> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
     moire::fs::create_dir_all(parent_dir).await?;
 
-    // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = TempFile::new_in(parent_dir.as_std_path())
-        .await
-        .map_err(std::io::Error::other)?;
-
-    // Get the temporary path and write contents to it
-    let temp_path = temp_file.file_path();
-    moire::fs::write(&temp_path, contents).await?;
+    let temp_path = loop {
+        let temp_name = format!(
+            ".atomic-write-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        let candidate = parent_dir.join(temp_name);
+        let mut opts = moire::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        match opts.open(candidate.as_std_path()).await {
+            Ok(mut file) => {
+                file.write_all(contents).await?;
+                file.sync_all().await?;
+                drop(file);
+                break candidate;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
 
     // Set executable bit if requested.
     #[cfg(unix)]
@@ -54,7 +74,32 @@ pub async fn atomic_write(
 
     // Atomically move temp file to final path. rename() on the same filesystem is
     // atomic and overwrites any existing target, which is fine for our use case.
-    moire::fs::rename(temp_path.to_path_buf(), path.as_std_path()).await
+    match moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match moire::fs::read(path.as_std_path()).await {
+                Ok(existing) if existing == contents => {
+                    let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
+                    Ok(())
+                }
+                Ok(_) => {
+                    moire::fs::remove_file(path.as_std_path()).await?;
+                    moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await
+                }
+                Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+                    moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await
+                }
+                Err(read_error) => {
+                    let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
+                    Err(read_error)
+                }
+            }
+        }
+        Err(error) => {
+            let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
+            Err(error)
+        }
+    }
 }
 
 /// Create a unique scratch directory under the given base path.
@@ -82,4 +127,42 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     moire::fs::create_dir_all(&dir).await?;
 
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atomic_write;
+    use camino::Utf8PathBuf;
+
+    #[tokio::test]
+    async fn atomic_write_persists_bytes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(temp_dir.path().join("node.bin")).expect("utf8");
+        let contents = b"hello atomic write";
+
+        atomic_write(&path, contents, false)
+            .await
+            .expect("atomic_write");
+
+        let actual = moire::fs::read(path.as_std_path()).await.expect("read");
+        assert_eq!(actual, contents);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_repairs_corrupt_existing_bytes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(temp_dir.path().join("node.bin")).expect("utf8");
+
+        moire::fs::write(path.as_std_path(), b"\0\0\0\0")
+            .await
+            .expect("seed corrupt bytes");
+
+        let contents = b"hello atomic write";
+        atomic_write(&path, contents, false)
+            .await
+            .expect("atomic_write");
+
+        let actual = moire::fs::read(path.as_std_path()).await.expect("read");
+        assert_eq!(actual, contents);
+    }
 }

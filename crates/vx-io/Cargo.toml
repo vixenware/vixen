@@ -14,7 +14,6 @@ camino = { workspace = true }
 eyre = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
-async-tempfile = { workspace = true }
 tracing = { workspace = true }
 facet = { workspace = true }
 roam = { workspace = true }
@@ -23,6 +22,9 @@ roam-types = { workspace = true }
 roam-local = { workspace = true }
 roam-stream = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

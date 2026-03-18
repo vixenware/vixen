@@ -108,6 +108,7 @@ impl<'a> Lexer<'a> {
             Some('-') if self.starts_with("->") => self.bump_two(SyntaxKind::THIN_ARROW),
             Some('-') => self.bump_one(SyntaxKind::MINUS),
             Some('*') => self.bump_one(SyntaxKind::STAR),
+            Some('%') if self.starts_with("%{") => self.bump_two(SyntaxKind::PERCENT_L_CURLY),
             Some('%') => self.bump_one(SyntaxKind::PERCENT),
             Some('&') if self.starts_with("&&") => self.bump_two(SyntaxKind::AMP2),
             Some('|') if self.starts_with("|>") => self.bump_two(SyntaxKind::PIPE_GT),
@@ -164,6 +165,11 @@ impl<'a> Lexer<'a> {
         }
 
         match self.current_char() {
+            Some('%') if self.starts_with("%{") => {
+                self.pos += 2;
+                self.bump_template_brace_depth(1);
+                SyntaxKind::PERCENT_L_CURLY
+            }
             Some('{') => {
                 self.bump_char();
                 self.bump_template_brace_depth(1);

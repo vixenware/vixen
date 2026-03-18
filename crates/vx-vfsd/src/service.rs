@@ -2,6 +2,7 @@
 
 use crate::protocol::{VfsPrefixStateSummary, Vfsd};
 use crate::vfs::CasVfs;
+use camino::Utf8PathBuf;
 use std::collections::HashSet;
 use std::sync::Arc;
 use vx_store_proto::{
@@ -12,6 +13,7 @@ use vx_store_proto::{
 #[derive(Clone)]
 pub struct VfsdService {
     vfs: Arc<CasVfs>,
+    access_path: Utf8PathBuf,
     _retained_store_connection: Option<Arc<StoreConnection>>,
 }
 
@@ -26,20 +28,23 @@ impl vx_io::boot::GracefulShutdown for VfsdService {
 
 impl VfsdService {
     #[allow(dead_code)]
-    pub fn new(vfs: Arc<CasVfs>) -> Self {
+    pub fn new(vfs: Arc<CasVfs>, access_path: Utf8PathBuf) -> Self {
         Self {
             vfs,
+            access_path,
             _retained_store_connection: None,
         }
     }
 
     pub fn new_with_store_connection(
         vfs: Arc<CasVfs>,
+        access_path: Utf8PathBuf,
         root_caller: Arc<roam_core::DriverCaller>,
         session_handle: Arc<roam_core::SessionHandle>,
     ) -> Self {
         Self {
             vfs,
+            access_path,
             _retained_store_connection: Some(Arc::new(StoreConnection {
                 _root_caller: Arc::unwrap_or_clone(root_caller),
                 _session_handle: Arc::unwrap_or_clone(session_handle),
@@ -74,100 +79,6 @@ impl VfsdService {
         Ok(())
     }
 
-    /// Recursively walk a DirectoryNode tree and mount all entries into the VFS.
-    async fn mount_directory_node(
-        &self,
-        prefix_id: &str,
-        base_path: &str,
-        node_hash: NodeHash,
-    ) -> Result<(), String> {
-        let cas = &self.vfs.cas;
-
-        let mut stack: Vec<(String, NodeHash)> = vec![(base_path.to_string(), node_hash)];
-        let mut visited: HashSet<NodeHash> = HashSet::new();
-
-        while let Some((dir_path, dir_hash)) = stack.pop() {
-            if !visited.insert(dir_hash) {
-                return Err(format!(
-                    "detected DirectoryNode cycle while mounting: {}",
-                    dir_hash.to_hex()
-                ));
-            }
-
-            let node_data = cas
-                .get_node(dir_hash)
-                .await
-                .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
-                .clone()
-                .ok_or_else(|| format!("DirectoryNode {} not found in CAS", dir_hash.to_hex()))?;
-
-            let node = CasNode::from_bytes(&node_data)
-                .map_err(|e| format!("failed to deserialize DirectoryNode: {:?}", e))?;
-
-            let dir = match node {
-                CasNode::Directory(d) => d,
-                _ => {
-                    return Err("expected DirectoryNode, got different CasNode variant".to_string());
-                }
-            };
-
-            for entry in &dir.entries {
-                let entry_path = if dir_path.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{}/{}", dir_path, entry.name)
-                };
-
-                match &entry.kind {
-                    DirEntryKind::SmallFile {
-                        content_hash,
-                        size,
-                        executable,
-                    } => {
-                        self.vfs
-                            .add_file_to_prefix(
-                                prefix_id,
-                                &entry_path,
-                                content_hash.0,
-                                None,
-                                *size,
-                                *executable,
-                            )
-                            .await;
-                    }
-                    DirEntryKind::LargeFile {
-                        content_hash,
-                        blob_node,
-                        size,
-                        executable,
-                    } => {
-                        self.vfs
-                            .add_file_to_prefix(
-                                prefix_id,
-                                &entry_path,
-                                content_hash.0,
-                                Some(*blob_node),
-                                *size,
-                                *executable,
-                            )
-                            .await;
-                    }
-                    DirEntryKind::Dir { hash, .. } => {
-                        self.vfs.add_dir_to_prefix(prefix_id, &entry_path).await;
-                        stack.push((entry_path, *hash));
-                    }
-                    DirEntryKind::Symlink { .. } => {
-                        tracing::warn!(path = %entry_path, "skipping symlink (not yet supported)");
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl VfsdService {
     async fn mkdir(&self, path: String) -> Result<(), String> {
         tracing::debug!(%path, "mkdir");
 
@@ -209,9 +120,10 @@ impl VfsdService {
             "mounting DirectoryNode tree"
         );
 
-        // Recursively walk the DirectoryNode tree and mount all entries
-        self.mount_directory_node(&prefix_id, &rel_path, node_hash)
-            .await?;
+        self.vfs
+            .mount_tree_to_prefix(&prefix_id, &rel_path, node_hash)
+            .await
+            .ok_or_else(|| format!("failed to register mount {path}"))?;
 
         Ok(())
     }
@@ -330,6 +242,10 @@ impl VfsdService {
         Ok(())
     }
 
+    async fn access_path(&self) -> Result<String, String> {
+        Ok(self.access_path.as_str().to_string())
+    }
+
     async fn describe_prefix_state(
         &self,
         prefix_id: String,
@@ -361,6 +277,10 @@ impl Vfsd for VfsdService {
 
     async fn dump_state(&self, prefix_id: String) -> Result<(), String> {
         VfsdService::dump_state(self, prefix_id).await
+    }
+
+    async fn access_path(&self) -> Result<String, String> {
+        VfsdService::access_path(self).await
     }
 
     async fn describe_prefix_state(
@@ -447,10 +367,7 @@ impl VfsdService {
 
                     entries.push(CasDirEntry {
                         name: child_name.to_string(),
-                        kind: DirEntryKind::Dir {
-                            hash: child_hash,
-                            total_size: child_total,
-                        },
+                        kind: DirEntryKind::Dir { hash: child_hash },
                     });
                 }
                 ItemType::Symlink => {
@@ -487,6 +404,7 @@ mod tests {
     use vx_store_proto::{
         Blake3Hash, CasNode, ChunkHash, ContentHash, DirEntry as CasDirEntry, DirEntryKind,
         DirectoryNode, StoreClient,
+        chunking::{put_chunk_if_missing, put_node_if_missing},
     };
 
     use super::*;
@@ -534,7 +452,7 @@ mod tests {
                 None,
                 mount_path.path().to_string_lossy().into_owned().into(),
             ));
-            let service = VfsdService::new(vfs);
+            let service = VfsdService::new(vfs, Utf8PathBuf::from("/tmp/vx/vfs"));
 
             Self {
                 _store_root: store_root,
@@ -652,7 +570,7 @@ mod tests {
             total_size,
         });
         let (bytes, hash) = node.to_bytes_and_hash();
-        cas.put_node(hash, bytes)
+        put_node_if_missing(cas, hash, bytes)
             .await
             .expect("failed to store DirectoryNode");
         hash.0
@@ -660,7 +578,7 @@ mod tests {
 
     async fn store_small_file_tree(cas: &StoreClient, rel_path: &str, data: &[u8]) -> Blake3Hash {
         let content_hash = Blake3Hash::from_bytes(data);
-        cas.put_chunk(ChunkHash(content_hash), data.to_vec())
+        put_chunk_if_missing(cas, ChunkHash(content_hash), data.to_vec())
             .await
             .expect("failed to store file chunk");
 
@@ -689,7 +607,6 @@ mod tests {
                     name: component.to_string(),
                     kind: DirEntryKind::Dir {
                         hash: vx_store_proto::NodeHash(current_hash),
-                        total_size: data.len() as u64,
                     },
                 }],
                 data.len() as u64,
@@ -739,6 +656,24 @@ mod tests {
             .await
             .expect("mount failed");
 
+        let prefix_root = item_id_for(&env, "pfx-src", "").await;
+        let src_lookup = env.service.vfs.lookup(prefix_root, "src".to_string()).await;
+        assert_eq!(
+            src_lookup.error,
+            errno::OK,
+            "expected src lookup to succeed"
+        );
+        let file_lookup = env
+            .service
+            .vfs
+            .lookup(src_lookup.attrs.item_id, "lua.c".to_string())
+            .await;
+        assert_eq!(
+            file_lookup.error,
+            errno::OK,
+            "expected lua.c lookup to succeed"
+        );
+
         let summary = env
             .service
             .describe_prefix_state("pfx-src".to_string())
@@ -762,13 +697,54 @@ mod tests {
             "expected lua.c in src summary, got {:?}",
             summary.src_children
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mount_is_lazy_until_lookup_or_readdir() {
+        let env = TestEnv::new().await;
+        let root_hash = store_small_file_tree(&env.cas, "src/lua.c", b"int lua_main(void);").await;
+
+        env.service
+            .mount("/pfx-lazy".to_string(), root_hash)
+            .await
+            .expect("mount failed");
+
+        let prefix_root = item_id_for(&env, "pfx-lazy", "").await;
+        {
+            let state = env.service.vfs.state.lock();
+            assert!(
+                state.items.lookup_child(prefix_root, "src").is_none(),
+                "mount should not eagerly populate root children"
+            );
+        }
+
+        let root_listing = env.service.vfs.read_dir(prefix_root, 0, 0).await;
+        assert_eq!(root_listing.error, errno::OK);
         assert!(
-            summary
-                .src_path_mappings_sample
-                .contains(&"src/lua.c".to_string()),
-            "expected src/lua.c path mapping, got {:?}",
-            summary.src_path_mappings_sample
+            root_listing.entries.iter().any(|entry| entry.name == "src"),
+            "expected read_dir to materialize src, got {:?}",
+            root_listing.entries
         );
+
+        let src_lookup = env.service.vfs.lookup(prefix_root, "src".to_string()).await;
+        assert_eq!(src_lookup.error, errno::OK);
+        {
+            let state = env.service.vfs.state.lock();
+            assert!(
+                state
+                    .items
+                    .lookup_child(src_lookup.attrs.item_id, "lua.c")
+                    .is_none(),
+                "lookup of src should not eagerly populate lua.c"
+            );
+        }
+
+        let file_lookup = env
+            .service
+            .vfs
+            .lookup(src_lookup.attrs.item_id, "lua.c".to_string())
+            .await;
+        assert_eq!(file_lookup.error, errno::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -54,35 +54,9 @@ targets:
       - target: VixenFS
         embed: true
         codeSign: true
-      - target: vixenfs-mount
-        embed: false
       - package: Sparkle
         product: Sparkle
       - sdk: FSKit.framework
-    postBuildScripts:
-      - name: Embed vixenfs-mount
-        inputFiles:
-          - $(BUILT_PRODUCTS_DIR)/vixenfs-mount
-        outputFiles:
-          - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/vixenfs-mount
-        script: |
-          set -euo pipefail
-          HELPER_SRC="${BUILT_PRODUCTS_DIR}/vixenfs-mount"
-          HELPER_DST_DIR="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Helpers"
-          HELPER_DST="${HELPER_DST_DIR}/vixenfs-mount"
-
-          if [ ! -f "${HELPER_SRC}" ]; then
-            echo "vixenfs-mount binary not found at ${HELPER_SRC}"
-            exit 1
-          fi
-
-          mkdir -p "${HELPER_DST_DIR}"
-          ditto "${HELPER_SRC}" "${HELPER_DST}"
-          chmod +x "${HELPER_DST}"
-
-          if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "${HELPER_DST}"
-          fi
 
   VixenFS:
     type: extensionkit-extension
@@ -114,14 +88,4 @@ targets:
       - package: roam
         product: RoamRuntime
 
-  vixenfs-mount:
-    type: tool
-    platform: macOS
-    sources:
-      - path: VixenFSMount
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs.mount
-        PRODUCT_NAME: vixenfs-mount
-        CODE_SIGN_STYLE: Automatic
-        SKIP_INSTALL: true
+

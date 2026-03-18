@@ -12,9 +12,12 @@ pub struct VfsConfig {
 
 /// Successful VFS start outcomes.
 pub enum VfsStart {
-    /// VFS is mounted and ready at the given path.
+    /// VFS is mounted and ready. `mount_path` is the stable mount base;
+    /// `access_path` is the real filesystem entrypoint to probe and use for
+    /// direct file access.
     Mounted {
         mount_path: Utf8PathBuf,
+        access_path: Utf8PathBuf,
         /// Becomes `true` when the VFS session dies unexpectedly.
         vfs_dead: moire::sync::watch::Receiver<bool>,
         /// FUSE telemetry state for diagnostics (Linux only).
@@ -28,9 +31,14 @@ pub enum VfsStart {
 impl std::fmt::Debug for VfsStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Mounted { mount_path, .. } => f
+            Self::Mounted {
+                mount_path,
+                access_path,
+                ..
+            } => f
                 .debug_struct("Mounted")
                 .field("mount_path", mount_path)
+                .field("access_path", access_path)
                 .finish_non_exhaustive(),
             Self::Unsupported { platform } => f
                 .debug_struct("Unsupported")

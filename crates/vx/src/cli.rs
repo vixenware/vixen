@@ -36,6 +36,9 @@ pub(crate) enum CliCommand {
     /// Stop the daemon process
     Kill(KillArgs),
 
+    /// Show in-flight daemon activity
+    Ps,
+
     /// Stop the daemon and remove .vx/ directory
     Clean(CleanArgs),
 
@@ -60,6 +63,10 @@ pub(crate) struct BuildArgs {
     /// Build in release mode
     #[facet(args::named, args::short = 'r')]
     pub(crate) release: bool,
+
+    /// Pass an environment variable to the build (KEY=VALUE)
+    #[facet(args::named, args::short = 'e', default)]
+    pub(crate) env: Vec<String>,
 }
 
 /// Start daemons

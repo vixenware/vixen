@@ -19,8 +19,8 @@ fn toolchain(class: ExecutorClass) {
 
 fn compile_hello(class: ExecutorClass) {
   let tc = toolchain(class);
-  let source = Tree {
-    @hello.c: Blob(`
+  let source = Tree %{
+    @hello.c => Blob(`
 int answer(void) {
   return 42;
 }
@@ -35,16 +35,16 @@ int answer(void) {
     }
   ) where {
     executor: class,
-    mounts: {
-      @src: source,
+    mounts: %{
+      @src => source,
     },
     writable: if tc.os == "windows" { [@out] } else { [] },
     observer: (proc, vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
       ) else (
-        Tree {
-          @(artifacts/{tc.os}-{tc.arch}): vfs.subtree(@out),
+        Tree %{
+          @(artifacts/{tc.os}-{tc.arch}) => vfs.subtree(@out),
         }
       )
     ),
@@ -52,9 +52,9 @@ int answer(void) {
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @local: compile_hello(executor_class("default")),
-    @orb: compile_hello(executor_class("ssh:orb")),
-    @toast: compile_hello(executor_class("ssh:toast")),
+  Tree %{
+    @local => compile_hello(executor_class("default")),
+    @orb => compile_hello(executor_class("ssh:orb")),
+    @toast => compile_hello(executor_class("ssh:toast")),
   }
 }

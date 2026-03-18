@@ -146,14 +146,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       ..mode_args,
       ..flags,
     ] where {
-      mounts: { @probe.c: source },
+      mounts: %{ @probe.c => source },
       observer: (proc, _vfs) => proc.exit_code == 0,
     }
   );
 
   fn compile_objects(src: Tree, sources: Array[Path]) where {
-    generated: Map[Path, Blob] = {},
-    mounts: Map[Path, TreeEntry] = {},
+    generated: Map[Path, Blob] = %{},
+    mounts: Map[Path, TreeEntry] = %{},
     includes: Array[Path] = [],
     defines: Array[String] = [],
     flags: Array[String] = [],
@@ -171,7 +171,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           ..common_cflags,
           ..flags,
         ] where {
-          mounts: { @src: src, @gen: Tree(generated), ..mounts },
+          mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
         }
       )
       .merge()
@@ -183,7 +183,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   fn shared_library(name: Path, objects: Tree) where {
     link_flags: Array[ExecInput] = [],
-    mounts: Map[Path, TreeEntry] = {},
+    mounts: Map[Path, TreeEntry] = %{},
   } -> Tree (
     cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags] where {
       mounts,
@@ -213,11 +213,11 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let zlib_static = static_archive(@lib/libz.a, zlib_objects);
   let zlib_shared = shared_library(@lib/libz.so, zlib_objects);
 
-  let zlib_install = Tree {
-    @include/zlib.h: zlib_src.file @zlib.h,
-    @include/zconf.h: zlib_src.file @zconf.h,
-    @lib/libz.a: zlib_static.file @lib/libz.a,
-    @lib/libz.so: zlib_shared.file @lib/libz.so,
+  let zlib_install = Tree %{
+    @include/zlib.h => zlib_src.file @zlib.h,
+    @include/zconf.h => zlib_src.file @zconf.h,
+    @lib/libz.a => zlib_static.file @lib/libz.a,
+    @lib/libz.so => zlib_shared.file @lib/libz.so,
   };
 
   let libpng_src = acquire(libpng_url) where {
@@ -255,8 +255,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let libpng_objects =
     compile_objects(libpng_src, libpng_core_sources ++ png_arch_sources) where {
-      generated: { @pnglibconf.h: pnglibconf_h },
-      mounts: { @deps/zlib: zlib_install },
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
       defines: png_arch_defines,
     };
@@ -268,19 +268,19 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
         ..if has_ld_version_script (["-Wl,--version-script=@src/libpng.vers"]) else ([]),
         @deps/zlib/lib/libz.so,
       ],
-      mounts: { @deps/zlib: zlib_install },
+      mounts: %{ @deps/zlib => zlib_install },
     };
 
-  let libpng_install = Tree {
-    @include/png.h: libpng_src.file @png.h,
-    @include/pngconf.h: libpng_src.file @pngconf.h,
-    @include/pnglibconf.h: pnglibconf_h,
-    @lib/libpng16.a: libpng_static.file @lib/libpng16.a,
-    @lib/libpng16.so: libpng_shared.file @lib/libpng16.so,
+  let libpng_install = Tree %{
+    @include/png.h => libpng_src.file @png.h,
+    @include/pngconf.h => libpng_src.file @pngconf.h,
+    @include/pnglibconf.h => pnglibconf_h,
+    @lib/libpng16.a => libpng_static.file @lib/libpng16.a,
+    @lib/libpng16.so => libpng_shared.file @lib/libpng16.so,
   };
 
-  Tree {
-    @zlib: zlib_install,
-    @libpng: libpng_install,
+  Tree %{
+    @zlib => zlib_install,
+    @libpng => libpng_install,
   }
 )

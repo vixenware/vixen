@@ -1,14 +1,10 @@
 //! Process group reaper for macOS.
 //!
-//! Usage: vx-reaper --parent-pid <PID> --mount-path <PATH> [--log-file <PATH>]
+//! Usage: vx-reaper --parent-pid <PID> [--log-file <PATH>]
 //!
 //! Reads process group IDs from stdin (one per line) as vx-runner creates
 //! them. Polls parent PID liveness and also reacts to stdin EOF. When the
-//! parent exits:
-//!
-//! 1. SIGKILL all known child process groups
-//! 2. Brief sleep to let SIGKILL propagate
-//! 3. vx_fskit::teardown() to cleanly unmount the VFS
+//! parent exits, it SIGKILLs all known child process groups.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -42,10 +38,6 @@ struct Args {
     /// Parent PID to watch
     #[facet(args::named)]
     parent_pid: i32,
-
-    /// VFS mount path to tear down
-    #[facet(args::named)]
-    mount_path: String,
 
     /// Log file path (redirects stderr)
     #[facet(args::named)]
@@ -95,11 +87,7 @@ fn main() {
 
     let parent_pid = args.parent_pid as libc::pid_t;
 
-    log!(
-        "starting (parent-pid={}, mount-path={})",
-        parent_pid,
-        args.mount_path
-    );
+    log!("starting (parent-pid={})", parent_pid);
 
     // Check parent is still alive before we even start
     if unsafe { libc::kill(parent_pid, 0) } != 0 {
@@ -119,11 +107,11 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(async_main(parent_pid, args.mount_path));
+    rt.block_on(async_main(parent_pid));
 }
 
 #[cfg(target_os = "macos")]
-async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
+async fn async_main(parent_pid: libc::pid_t) {
     use tokio::io::AsyncBufReadExt;
 
     let mut pgroups = std::collections::HashSet::<libc::pid_t>::new();
@@ -169,21 +157,5 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
         }
     }
 
-    // Phase 2: brief sleep to let SIGKILL propagate
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Phase 3: teardown the VFS mount
-    let mount_path = camino::Utf8PathBuf::from(&mount_path);
-    log!("tearing down {mount_path}");
-    let result = vx_fskit::teardown(&mount_path).await;
-    for entry in &result.log {
-        log!("{}", entry.message);
-    }
-    if let Some(error) = &result.error {
-        log!("teardown failed: {}", error.summary);
-        for remediation in &error.remediation {
-            log!("  try: {remediation}");
-        }
-    }
     log!("done");
 }

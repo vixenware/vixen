@@ -27,7 +27,7 @@ pub const CACHE_KEY_SCHEMA_VERSION: u32 = 1;
 
 /// CAS protocol version.
 /// Bump this when making breaking changes to the CAS RPC interface.
-pub const STORE_PROTOCOL_VERSION: u32 = 3;
+pub const STORE_PROTOCOL_VERSION: u32 = 5;
 
 /// Versioned postcard node format version.
 /// Node bytes are `[version: u32 LE][postcard payload]`.
@@ -67,6 +67,9 @@ pub const MAX_CHUNKS_PER_BLOB: usize = 4096;
 
 /// Maximum number of chunk hashes per list_missing_chunks call.
 pub const MAX_MISSING_CHUNKS_BATCH: usize = 4096;
+
+/// Maximum number of node hashes per list_missing_nodes call.
+pub const MAX_MISSING_NODES_BATCH: usize = 4096;
 
 /// Maximum serialized node size in bytes (16 MB).
 /// Prevents OOM from huge directory nodes or adversarial payloads.
@@ -406,7 +409,7 @@ pub enum DirEntryKind {
         executable: bool,
     },
     /// Subdirectory. hash points to a child DirectoryNode in nodes/.
-    Dir { hash: NodeHash, total_size: u64 },
+    Dir { hash: NodeHash },
     /// Symbolic link. Target must be valid UTF-8 (same restriction as name).
     Symlink { target: String },
 }
@@ -429,6 +432,29 @@ pub enum BlobRef {
         content_hash: ContentHash,
         size: u64,
     },
+}
+
+impl BlobRef {
+    /// Convert to the corresponding `DirEntryKind` for embedding in a directory node.
+    pub fn to_dir_entry_kind(&self, executable: bool) -> DirEntryKind {
+        match self {
+            BlobRef::Small { chunk, size } => DirEntryKind::SmallFile {
+                content_hash: ContentHash(chunk.0),
+                size: *size,
+                executable,
+            },
+            BlobRef::Large {
+                blob_node,
+                content_hash,
+                size,
+            } => DirEntryKind::LargeFile {
+                blob_node: *blob_node,
+                content_hash: *content_hash,
+                size: *size,
+                executable,
+            },
+        }
+    }
 }
 
 // =============================================================================
@@ -601,6 +627,39 @@ impl fmt::Display for ServiceVersion {
 }
 
 /// Progress update streamed during long-running store operations (downloads, extraction).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+pub enum RemoteTracePhase {
+    Begin,
+    End,
+    Instant,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+pub enum RemoteTraceSpan {
+    RunnerPrepareVfs,
+    RunnerCommand,
+    RunnerObserver,
+    RunnerObserverInvoke,
+    RunnerObserverCommit,
+    RunnerObserverCommitTree,
+    RunnerObserverCommitStoreBlob,
+    RunnerObserverCommitStoreNode,
+    RunnerFlushOutputs,
+    RunnerStoreManifest,
+    RunnerCleanup,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct RemoteTraceEvent {
+    pub span: RemoteTraceSpan,
+    pub phase: RemoteTracePhase,
+    pub instance_id: u64,
+    pub label: String,
+}
+
+/// Progress update streamed during long-running store operations (downloads, extraction).
 #[derive(Debug, Clone, Facet)]
 pub struct StoreProgress {
     /// Human-readable phase description (e.g., "downloading rustc", "extracting rust-std")
@@ -609,6 +668,54 @@ pub struct StoreProgress {
     pub current: Option<u64>,
     /// Total bytes or items expected
     pub total: Option<u64>,
+    /// Optional structured trace event bridged back to the caller.
+    pub trace_event: Option<RemoteTraceEvent>,
+}
+
+impl StoreProgress {
+    pub fn message(message: impl Into<String>, current: Option<u64>, total: Option<u64>) -> Self {
+        Self {
+            message: message.into(),
+            current,
+            total,
+            trace_event: None,
+        }
+    }
+
+    pub fn trace(span: RemoteTraceSpan, phase: RemoteTracePhase) -> Self {
+        Self::trace_labeled_with_id(span, phase, 0, String::new())
+    }
+
+    pub fn trace_labeled(
+        span: RemoteTraceSpan,
+        phase: RemoteTracePhase,
+        label: impl Into<String>,
+    ) -> Self {
+        Self::trace_labeled_with_id(span, phase, 0, label)
+    }
+
+    pub fn trace_with_id(span: RemoteTraceSpan, phase: RemoteTracePhase, instance_id: u64) -> Self {
+        Self::trace_labeled_with_id(span, phase, instance_id, String::new())
+    }
+
+    pub fn trace_labeled_with_id(
+        span: RemoteTraceSpan,
+        phase: RemoteTracePhase,
+        instance_id: u64,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: String::new(),
+            current: None,
+            total: None,
+            trace_event: Some(RemoteTraceEvent {
+                span,
+                phase,
+                instance_id,
+                label: label.into(),
+            }),
+        }
+    }
 }
 
 // =============================================================================
@@ -670,6 +777,12 @@ pub trait Store {
 
     /// Check if a node exists.
     async fn has_node(&self, hash: NodeHash) -> bool;
+
+    /// Batch existence check: given a list of node hashes, return the subset
+    /// that the store does NOT have. Enables upload dedup for blob nodes,
+    /// directory nodes, manifests, and other node payloads.
+    /// Capped at MAX_MISSING_NODES_BATCH hashes per call.
+    async fn list_missing_nodes(&self, hashes: Vec<NodeHash>) -> Vec<NodeHash>;
 
     // =========================================================================
     // Cache key operations
@@ -1445,7 +1558,6 @@ mod tests {
                     name: "subdir".to_string(),
                     kind: DirEntryKind::Dir {
                         hash: NodeHash(Blake3Hash([30u8; 32])),
-                        total_size: 50_000,
                     },
                 },
             ],
@@ -1484,10 +1596,7 @@ mod tests {
         let parent = CasNode::Directory(DirectoryNode {
             entries: vec![DirEntry {
                 name: "src".to_string(),
-                kind: DirEntryKind::Dir {
-                    hash: child_hash,
-                    total_size: 123,
-                },
+                kind: DirEntryKind::Dir { hash: child_hash },
             }],
             total_size: 123,
         });
@@ -1497,12 +1606,11 @@ mod tests {
         let CasNode::Directory(dir) = decoded else {
             panic!("expected Directory node");
         };
-        let DirEntryKind::Dir { hash, total_size } = &dir.entries[0].kind else {
+        let DirEntryKind::Dir { hash } = &dir.entries[0].kind else {
             panic!("expected child directory entry");
         };
 
         assert_eq!(*hash, child_hash);
-        assert_eq!(*total_size, 123);
     }
 
     #[test]

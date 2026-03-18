@@ -1,0 +1,175 @@
+let rules = import("./c-rules");
+
+let libpng_core_sources = [
+  @png.c, @pngerror.c, @pngget.c, @pngmem.c, @pngpread.c,
+  @pngread.c, @pngrio.c, @pngrtran.c, @pngrutil.c, @pngset.c,
+  @pngtrans.c, @pngwio.c, @pngwrite.c, @pngwtran.c, @pngwutil.c,
+];
+
+fn build(workspace: Path, class: ExecutorClass, zlib) {
+  let tc = rules.discover_toolchain(class);
+  let src = Tree(workspace / @zoo/libpng-src);
+  let pnglibconf_h = src.file @scripts/pnglibconf.h.prebuilt;
+  let common_defines =
+    if tc.arch == "aarch64" (
+      ["PNG_ARM_NEON_OPT=0"]
+    ) else (
+      []
+    );
+  let shared_build_defines =
+    if tc.os == "windows" (
+      ["PNG_BUILD_DLL", ..zlib.shared.defines]
+    ) else (
+      []
+    );
+
+  let static_name =
+    if tc.os == "windows" (
+      @libpng16_static.lib
+    ) else (
+      @libpng16.a
+    );
+  let shared_binary_name =
+    if tc.os == "windows" (
+      @libpng16.dll
+    ) else if tc.os == "darwin" (
+      @libpng16.dylib
+    ) else (
+      @libpng16.so
+    );
+  let shared_link_name =
+    if tc.os == "windows" (
+      @libpng16.lib
+    ) else (
+      shared_binary_name
+    );
+  let static_objects =
+    rules.compile_objects(class, tc, src, libpng_core_sources) where {
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib.headers },
+      includes: [@gen, @src, @deps/zlib],
+      defines: [..common_defines, ..zlib.static.defines],
+    };
+  let shared_objects =
+    rules.compile_objects(class, tc, src, libpng_core_sources) where {
+      generated: %{ @pnglibconf.h => pnglibconf_h },
+      mounts: %{ @deps/zlib => zlib.headers },
+      includes: [@gen, @src, @deps/zlib],
+      defines: [..common_defines, ..shared_build_defines],
+    };
+
+  let static_build = rules.static_archive(class, tc, static_name, static_objects);
+
+  let cexec = partial exec where {
+    executor: class,
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        vfs.subtree(@out)
+      )
+    ),
+  };
+
+  let shared_build =
+    if tc.os == "windows" (
+      cexec [
+        tc.cc,
+        "/nologo",
+        "/LD",
+        `/Feout\\${shared_binary_name}`,
+        ..shared_objects,
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
+        "/link",
+        `/IMPLIB:out\\${shared_link_name}`,
+      ] where {
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
+        writable: [@out],
+      }
+    ) else if tc.os == "darwin" (
+      cexec [
+        tc.cc,
+        "-dynamiclib",
+        "-o",
+        @(out/{shared_binary_name}),
+        "-Wl,-install_name,@rpath/libpng16.dylib",
+        "-Wl,-rpath,@loader_path",
+        ..shared_objects,
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
+      ] where {
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
+        writable: [@out],
+      }
+    ) else (
+      cexec [
+        tc.cc,
+        "-shared",
+        "-o",
+        @(out/{shared_binary_name}),
+        "-Wl,-soname,libpng16.so",
+        "-Wl,-rpath,$ORIGIN",
+        ..shared_objects,
+        ..zlib.shared.link_inputs.map((path) => @(deps/zlib-link/{path})),
+      ] where {
+        mounts: %{ @deps/zlib-link => zlib.shared.link_tree },
+        writable: [@out],
+      }
+    );
+
+  let headers = Tree %{
+    @png.h => src.file @png.h,
+    @pngconf.h => src.file @pngconf.h,
+    @pnglibconf.h => pnglibconf_h,
+  };
+
+  let static_variant = rules.CLibraryVariant {
+    link_tree: Tree %{
+      @({static_name}) => static_build.file(static_name),
+    },
+    link_inputs: [static_name],
+    runtime_tree: Tree %{},
+    defines: [],
+  };
+  let shared_variant =
+    if tc.os == "windows" (
+      rules.CLibraryVariant {
+        link_tree: [
+          Tree %{
+            @({shared_link_name}) => shared_build.file(shared_link_name),
+          },
+          zlib.shared.link_tree,
+        ].merge(),
+        link_inputs: [shared_link_name, ..zlib.shared.link_inputs],
+        runtime_tree: [
+          Tree %{
+            @({shared_binary_name}) => shared_build.file(shared_binary_name),
+          },
+          zlib.shared.runtime_tree,
+        ].merge(),
+        defines: ["PNG_USE_DLL"],
+      }
+    ) else (
+      rules.CLibraryVariant {
+        link_tree: [
+          Tree %{
+            @({shared_link_name}) => shared_build.file(shared_binary_name),
+          },
+          zlib.shared.link_tree,
+        ].merge(),
+        link_inputs: [shared_link_name, ..zlib.shared.link_inputs],
+        runtime_tree: [
+          Tree %{
+            @({shared_binary_name}) => shared_build.file(shared_binary_name),
+          },
+          zlib.shared.runtime_tree,
+        ].merge(),
+        defines: [],
+      }
+    );
+
+  rules.CLibrary {
+    headers,
+    static: static_variant,
+    shared: shared_variant,
+  }
+}

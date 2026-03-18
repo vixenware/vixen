@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    chunking::put_node_if_missing,
 };
 use vx_vfsd::protocol::VfsPrefixStateSummary;
 
@@ -43,9 +44,13 @@ impl VfsdClient {
     }
 
     /// Add a directory to a prefix
-    pub async fn add_dir_to_prefix(&self, prefix_id: &str, rel_path: &str) {
+    pub async fn add_dir_to_prefix(&self, prefix_id: &str, rel_path: &str) -> Result<(), String> {
         let path = format!("/{}/{}", prefix_id, rel_path);
-        let _ = self.client.mkdir(path).await;
+        self.client
+            .mkdir(path)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Add a file to a prefix from CAS
@@ -80,10 +85,9 @@ impl VfsdClient {
             total_size: size,
         });
         let (leaf_bytes, leaf_hash) = leaf_node.to_bytes_and_hash();
-        self.cas
-            .put_node(leaf_hash, leaf_bytes)
+        put_node_if_missing(self.cas.as_ref(), leaf_hash, leaf_bytes)
             .await
-            .map_err(|e| format!("failed to store DirectoryNode for {}: {:?}", path, e))?;
+            .map_err(|e| format!("failed to store DirectoryNode for {}: {}", path, e))?;
 
         // Build parent directories from inside out (skip the filename)
         let mut current_hash = leaf_hash;
@@ -92,17 +96,14 @@ impl VfsdClient {
             let dir_node = CasNode::Directory(DirectoryNode {
                 entries: vec![DirEntry {
                     name: dir_name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: current_hash,
-                        total_size: current_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: current_hash },
                 }],
                 total_size: current_size,
             });
             let (dir_bytes, dir_hash) = dir_node.to_bytes_and_hash();
-            self.cas.put_node(dir_hash, dir_bytes).await.map_err(|e| {
-                format!("failed to store parent DirectoryNode for {}: {:?}", path, e)
-            })?;
+            put_node_if_missing(self.cas.as_ref(), dir_hash, dir_bytes)
+                .await
+                .map_err(|e| format!("failed to store parent DirectoryNode for {}: {}", path, e))?;
             current_hash = dir_hash;
         }
 
@@ -136,6 +137,13 @@ impl VfsdClient {
     pub async fn dump_state(&self, prefix_id: &str) -> Result<(), String> {
         self.client
             .dump_state(prefix_id.to_string())
+            .await
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    pub async fn access_path(&self) -> Result<String, String> {
+        self.client
+            .access_path()
             .await
             .map_err(|e| format!("{e:?}"))
     }

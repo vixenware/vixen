@@ -4,47 +4,131 @@
 //! state. Before they cross back over RPC, blobs and trees must be committed
 //! into CAS-backed runtime values.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures_util::future::try_join_all;
 use vx_eval::{
     BlobValue, DemandChain, DiscoveredValue, Engine, MapValue, PathValue, PoisonError, PoisonKind,
     StructValue, TransportPoisonError, TransportValue, TreeValue, Value, verify_host_obligations,
 };
 use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
-use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
-use vx_store_proto::{
-    BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+use vx_store_proto::chunking::{
+    PreparedBlob, list_missing_chunks, list_missing_nodes, prepare_blob, store_prepared_blob,
 };
+use vx_store_proto::{
+    BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash,
+    RemoteTracePhase, RemoteTraceSpan, StoreClient, StoreProgress,
+};
+
+use crate::sandbox::send_progress_reliably;
 
 type BoundaryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransportPoisonError>> + Send + 'a>>;
+
+static NEXT_REMOTE_TRACE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct PreparedBlobUpload {
+    prepared: PreparedBlob,
+    data: Vec<u8>,
+    label: String,
+}
+
+#[derive(Debug, Default)]
+struct TreeCommitPlan {
+    blobs: Vec<PreparedBlobUpload>,
+    nodes: Vec<(NodeHash, Vec<u8>, String)>,
+}
+
+impl TreeCommitPlan {
+    fn extend(&mut self, other: Self) {
+        self.blobs.extend(other.blobs);
+        self.nodes.extend(other.nodes);
+    }
+}
+
+async fn emit_remote_trace(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    phase: RemoteTracePhase,
+    instance_id: u64,
+    label: Option<&str>,
+) {
+    if let Some(progress) = progress {
+        let trace = match label {
+            Some(label) => StoreProgress::trace_labeled_with_id(span, phase, instance_id, label),
+            None => StoreProgress::trace_with_id(span, phase, instance_id),
+        };
+        let _ = send_progress_reliably(progress, trace).await;
+    }
+}
+
+async fn with_remote_trace<T>(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    future: impl Future<Output = Result<T, TransportPoisonError>>,
+) -> Result<T, TransportPoisonError> {
+    let instance_id = NEXT_REMOTE_TRACE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    emit_remote_trace(progress, span, RemoteTracePhase::Begin, instance_id, None).await;
+    let result = future.await;
+    emit_remote_trace(progress, span, RemoteTracePhase::End, instance_id, None).await;
+    result
+}
+
+async fn with_remote_trace_labeled<T>(
+    progress: Option<&roam::Tx<StoreProgress>>,
+    span: RemoteTraceSpan,
+    label: &str,
+    future: impl Future<Output = Result<T, TransportPoisonError>>,
+) -> Result<T, TransportPoisonError> {
+    let instance_id = NEXT_REMOTE_TRACE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+    emit_remote_trace(
+        progress,
+        span,
+        RemoteTracePhase::Begin,
+        instance_id,
+        Some(label),
+    )
+    .await;
+    let result = future.await;
+    emit_remote_trace(
+        progress,
+        span,
+        RemoteTracePhase::End,
+        instance_id,
+        Some(label),
+    )
+    .await;
+    result
+}
 
 // r[impl exec.observer.materialization]
 pub fn commit_value_to_transport<'a>(
     cas: &'a StoreClient,
     value: Value,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
-        let value = commit_value(cas, value).await?;
+        let value = commit_value(cas, value, progress).await?;
         TransportValue::try_from(&value).map_err(boundary_user_poison)
     })
 }
 
 // r[impl exec.observer.simple]
-pub fn evaluate_shipped_observer<'a>(
-    cas: &'a StoreClient,
+pub fn invoke_shipped_observer<'a>(
     eval: &'a RunEvalPayload,
     exit_code: i32,
     stdout: &'a str,
     stderr: &'a str,
     sandbox_root: &'a PathValue,
-) -> BoundaryFuture<'a, Option<TransportValue>> {
+) -> BoundaryFuture<'a, Option<Value>> {
     Box::pin(async move {
         let Some(observer) = &eval.observer else {
             return Ok(None);
@@ -58,9 +142,33 @@ pub fn evaluate_shipped_observer<'a>(
                 sandbox_tree_value(sandbox_root),
             ],
         )
+        .await
         .map_err(|error| TransportPoisonError::from(&error))?;
 
-        commit_value_to_transport(cas, observed).await.map(Some)
+        Ok(Some(observed))
+    })
+}
+
+// r[impl exec.observer.simple]
+#[cfg(test)]
+pub fn evaluate_shipped_observer<'a>(
+    cas: &'a StoreClient,
+    eval: &'a RunEvalPayload,
+    exit_code: i32,
+    stdout: &'a str,
+    stderr: &'a str,
+    sandbox_root: &'a PathValue,
+) -> BoundaryFuture<'a, Option<TransportValue>> {
+    Box::pin(async move {
+        let Some(observed) =
+            invoke_shipped_observer(eval, exit_code, stdout, stderr, sandbox_root).await?
+        else {
+            return Ok(None);
+        };
+
+        commit_value_to_transport(cas, observed, None)
+            .await
+            .map(Some)
     })
 }
 
@@ -76,8 +184,9 @@ pub fn evaluate_shipped_discover<'a>(
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
         let discovered = Engine::invoke_shipped_discover(&request.module, &request.probe)
+            .await
             .map_err(|error| TransportPoisonError::from(&error))?;
-        commit_value_to_transport(cas, discovered).await
+        commit_value_to_transport(cas, discovered, None).await
     })
 }
 
@@ -89,7 +198,11 @@ fn boundary_user_poison(message: impl Into<String>) -> TransportPoisonError {
     ))
 }
 
-fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
+fn commit_value<'a>(
+    cas: &'a StoreClient,
+    value: Value,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, Value> {
     Box::pin(async move {
         match value {
             Value::Pending(_) => Err(boundary_user_poison(
@@ -103,28 +216,40 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 "Host values cannot cross the executor boundary",
             )),
             Value::Discovered(discovered) => {
-                let value = commit_value(cas, *discovered.value).await?;
+                let value = commit_value(cas, *discovered.value, progress).await?;
                 Ok(Value::Discovered(DiscoveredValue {
                     value: Box::new(value),
                     obligations: discovered.obligations,
                 }))
             }
-            Value::Blob(blob) => Ok(Value::Blob(commit_blob(cas, blob).await?)),
+            Value::Blob(blob) => Ok(Value::Blob(
+                with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+                    commit_blob(cas, blob, progress),
+                )
+                .await?,
+            )),
             Value::Tree(tree) => {
-                let (root, _) = commit_tree(cas, tree).await?;
+                let (root, _) = with_remote_trace(
+                    progress,
+                    RemoteTraceSpan::RunnerObserverCommitTree,
+                    commit_tree(cas, tree, progress),
+                )
+                .await?;
                 Ok(Value::Tree(TreeValue::Store(root)))
             }
             Value::Tuple(values) => {
                 let mut committed = Vec::with_capacity(values.len());
                 for value in values.iter().cloned() {
-                    committed.push(commit_value(cas, value).await?);
+                    committed.push(commit_value(cas, value, progress).await?);
                 }
                 Ok(Value::Tuple(Arc::from(committed)))
             }
             Value::Array(values) => {
                 let mut committed = Vec::with_capacity(values.len());
                 for value in values.iter().cloned() {
-                    committed.push(commit_value(cas, value).await?);
+                    committed.push(commit_value(cas, value, progress).await?);
                 }
                 Ok(Value::Array(Arc::from(committed)))
             }
@@ -132,8 +257,8 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 let mut committed = Vec::with_capacity(map.entries.len());
                 for (key, value) in map.entries.iter() {
                     committed.push((
-                        commit_value(cas, key.clone()).await?,
-                        commit_value(cas, value.clone()).await?,
+                        commit_value(cas, key.clone(), progress).await?,
+                        commit_value(cas, value.clone(), progress).await?,
                     ));
                 }
                 Ok(Value::Map(MapValue {
@@ -143,7 +268,10 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
             Value::Struct(struct_value) => {
                 let mut fields = Vec::with_capacity(struct_value.fields.len());
                 for (name, value) in struct_value.fields.iter() {
-                    fields.push((name.clone(), commit_value(cas, value.clone()).await?));
+                    fields.push((
+                        name.clone(),
+                        commit_value(cas, value.clone(), progress).await?,
+                    ));
                 }
                 Ok(Value::Struct(StructValue {
                     type_name: struct_value.type_name,
@@ -176,17 +304,22 @@ fn sandbox_tree_value(sandbox_root: &PathValue) -> Value {
     Value::Tree(TreeValue::FsDir(sandbox_root.clone()))
 }
 
-fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, BlobValue> {
+fn commit_blob<'a>(
+    cas: &'a StoreClient,
+    blob: BlobValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, BlobValue> {
     Box::pin(async move {
         let (blob_ref, executable) = match blob {
-            BlobValue::Inline { bytes, executable } => {
-                (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
-            }
+            BlobValue::Inline { bytes, executable } => (
+                store_blob_bytes(cas, bytes.as_ref(), progress).await?,
+                executable,
+            ),
             BlobValue::FsFile { path, executable } => {
                 let bytes = fs::read(path.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", path.as_str()))
                 })?;
-                (store_blob_bytes(cas, &bytes).await?, executable)
+                (store_blob_bytes(cas, &bytes, progress).await?, executable)
             }
             BlobValue::Store {
                 blob_ref,
@@ -200,11 +333,15 @@ fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, 
     })
 }
 
-fn commit_tree<'a>(cas: &'a StoreClient, tree: TreeValue) -> BoundaryFuture<'a, (NodeHash, u64)> {
+fn commit_tree<'a>(
+    cas: &'a StoreClient,
+    tree: TreeValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
+) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
         match tree {
-            TreeValue::Inline(entries) => commit_inline_tree(cas, entries).await,
-            TreeValue::FsDir(path) => commit_fs_tree(cas, path).await,
+            TreeValue::Inline { entries, .. } => commit_inline_tree(cas, entries, progress).await,
+            TreeValue::FsDir(path) => commit_fs_tree(cas, path, progress).await,
             TreeValue::Store(root) => Ok((root, directory_total_size(cas, root).await?)),
         }
     })
@@ -213,7 +350,39 @@ fn commit_tree<'a>(cas: &'a StoreClient, tree: TreeValue) -> BoundaryFuture<'a, 
 fn commit_inline_tree<'a>(
     cas: &'a StoreClient,
     entries: Arc<[(Arc<str>, Value)]>,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
+    Box::pin(async move {
+        let (hash, total_size, plan) = prepare_inline_tree(cas, entries, String::new()).await?;
+        upload_tree_commit_plan(cas, plan, progress).await?;
+        Ok((hash, total_size))
+    })
+}
+
+fn prepare_tree<'a>(
+    cas: &'a StoreClient,
+    tree: TreeValue,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
+    Box::pin(async move {
+        match tree {
+            TreeValue::Inline { entries, .. } => {
+                prepare_inline_tree(cas, entries, display_path).await
+            }
+            TreeValue::FsDir(path) => prepare_fs_tree(cas, path, display_path).await,
+            TreeValue::Store(root) => {
+                let total_size = directory_total_size(cas, root).await?;
+                Ok((root, total_size, TreeCommitPlan::default()))
+            }
+        }
+    })
+}
+
+fn prepare_inline_tree<'a>(
+    cas: &'a StoreClient,
+    entries: Arc<[(Arc<str>, Value)]>,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
     Box::pin(async move {
         let mut names = BTreeSet::new();
         let mut sorted: Vec<(Arc<str>, Value)> = entries.iter().cloned().collect();
@@ -221,6 +390,7 @@ fn commit_inline_tree<'a>(
 
         let mut dir_entries = Vec::with_capacity(sorted.len());
         let mut total_size = 0u64;
+        let mut plan = TreeCommitPlan::default();
         for (name, value) in sorted {
             validate_tree_entry_name(name.as_ref()).map_err(boundary_user_poison)?;
             if !names.insert(name.to_string()) {
@@ -228,21 +398,39 @@ fn commit_inline_tree<'a>(
                     "duplicate tree entry '{name}'"
                 )));
             }
-            let (kind, size) = commit_tree_entry(cas, value).await?;
+            let entry_path = join_display_path(&display_path, &name);
+            let (kind, size, entry_plan) = prepare_tree_entry(cas, value, entry_path).await?;
             total_size += size;
+            plan.extend(entry_plan);
             dir_entries.push(DirEntry {
                 name: name.to_string(),
                 kind,
             });
         }
-        store_directory_node(cas, dir_entries, total_size).await
+        let (hash, bytes) = serialize_directory_node(dir_entries, total_size);
+        plan.nodes
+            .push((hash, bytes, display_path_label(&display_path)));
+        Ok((hash, total_size, plan))
     })
 }
 
 fn commit_fs_tree<'a>(
     cas: &'a StoreClient,
     root: PathValue,
+    progress: Option<&'a roam::Tx<StoreProgress>>,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
+    Box::pin(async move {
+        let (hash, total_size, plan) = prepare_fs_tree(cas, root, String::new()).await?;
+        upload_tree_commit_plan(cas, plan, progress).await?;
+        Ok((hash, total_size))
+    })
+}
+
+fn prepare_fs_tree<'a>(
+    cas: &'a StoreClient,
+    root: PathValue,
+    display_path: String,
+) -> BoundaryFuture<'a, (NodeHash, u64, TreeCommitPlan)> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(root.as_str()).map_err(|error| {
             boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
@@ -251,69 +439,58 @@ fn commit_fs_tree<'a>(
         while let Some(entry) = read_dir.next().transpose().map_err(|error| {
             boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
         })? {
-            names.push(entry.file_name().to_string_lossy().to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("._") {
+                continue;
+            }
+            names.push(name);
         }
         names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
         let mut dir_entries = Vec::with_capacity(names.len());
         let mut total_size = 0u64;
+        let mut plan = TreeCommitPlan::default();
         for name in names {
             validate_tree_entry_name(&name).map_err(boundary_user_poison)?;
             let child = root.join(&name);
             let metadata = fs::metadata(child.as_str()).map_err(|error| {
                 boundary_user_poison(format!("failed to stat {}: {error}", child.as_str()))
             })?;
-            let (kind, size) = if metadata.is_dir() {
-                let (hash, total_size) = commit_fs_tree(cas, child).await?;
-                (DirEntryKind::Dir { hash, total_size }, total_size)
+            let child_display_path = join_display_path(&display_path, &name);
+            let (kind, size, child_plan) = if metadata.is_dir() {
+                let (hash, child_total_size, child_plan) =
+                    prepare_fs_tree(cas, child, child_display_path).await?;
+                (DirEntryKind::Dir { hash }, child_total_size, child_plan)
             } else {
                 let bytes = fs::read(child.as_str()).map_err(|error| {
                     boundary_user_poison(format!("failed to read {}: {error}", child.as_str()))
                 })?;
-                let blob_ref = store_blob_bytes(cas, &bytes).await?;
                 let executable =
                     is_executable_path(child.as_str()).map_err(boundary_user_poison)?;
-                let size = blob_ref_size(&blob_ref);
-                (dir_entry_kind_from_blob_ref(&blob_ref, executable), size)
+                prepare_blob_entry(bytes, executable, child_display_path)
             };
             total_size += size;
+            plan.extend(child_plan);
             dir_entries.push(DirEntry { name, kind });
         }
-        store_directory_node(cas, dir_entries, total_size).await
+        let (hash, bytes) = serialize_directory_node(dir_entries, total_size);
+        plan.nodes
+            .push((hash, bytes, display_path_label(&display_path)));
+        Ok((hash, total_size, plan))
     })
 }
 
-fn commit_tree_entry<'a>(
+fn prepare_tree_entry<'a>(
     cas: &'a StoreClient,
     value: Value,
-) -> BoundaryFuture<'a, (DirEntryKind, u64)> {
+    display_path: String,
+) -> BoundaryFuture<'a, (DirEntryKind, u64, TreeCommitPlan)> {
     Box::pin(async move {
         match value {
-            Value::Blob(blob) => {
-                let (blob_ref, executable) = match blob {
-                    BlobValue::Inline { bytes, executable } => {
-                        (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
-                    }
-                    BlobValue::FsFile { path, executable } => {
-                        let bytes = fs::read(path.as_str()).map_err(|error| {
-                            boundary_user_poison(format!(
-                                "failed to read {}: {error}",
-                                path.as_str()
-                            ))
-                        })?;
-                        (store_blob_bytes(cas, &bytes).await?, executable)
-                    }
-                    BlobValue::Store {
-                        blob_ref,
-                        executable,
-                    } => (blob_ref, executable),
-                };
-                let size = blob_ref_size(&blob_ref);
-                Ok((dir_entry_kind_from_blob_ref(&blob_ref, executable), size))
-            }
+            Value::Blob(blob) => prepare_blob_value(blob, display_path),
             Value::Tree(tree) => {
-                let (hash, total_size) = commit_tree(cas, tree).await?;
-                Ok((DirEntryKind::Dir { hash, total_size }, total_size))
+                let (hash, total_size, plan) = prepare_tree(cas, tree, display_path).await?;
+                Ok((DirEntryKind::Dir { hash }, total_size, plan))
             }
             other => Err(boundary_user_poison(format!(
                 "tree entries must be Blob or Tree, got {}",
@@ -323,30 +500,218 @@ fn commit_tree_entry<'a>(
     })
 }
 
-async fn store_blob_bytes(
-    cas: &StoreClient,
-    bytes: &[u8],
-) -> Result<BlobRef, TransportPoisonError> {
-    let prepared = prepare_blob(bytes);
-    store_prepared_blob(cas, &prepared, bytes)
-        .await
-        .map_err(boundary_user_poison)
+fn prepare_blob_value(
+    blob: BlobValue,
+    display_path: String,
+) -> Result<(DirEntryKind, u64, TreeCommitPlan), TransportPoisonError> {
+    match blob {
+        BlobValue::Inline { bytes, executable } => {
+            let (blob_ref, blob_plan) =
+                prepare_blob_upload(bytes.as_ref().to_vec(), display_path.clone());
+            let size = blob_ref_size(&blob_ref);
+            Ok((
+                dir_entry_kind_from_blob_ref(&blob_ref, executable),
+                size,
+                TreeCommitPlan {
+                    blobs: vec![blob_plan],
+                    nodes: Vec::new(),
+                },
+            ))
+        }
+        BlobValue::FsFile { path, executable } => {
+            let bytes = fs::read(path.as_str()).map_err(|error| {
+                boundary_user_poison(format!("failed to read {}: {error}", path.as_str()))
+            })?;
+            let (blob_ref, blob_plan) = prepare_blob_upload(bytes, display_path.clone());
+            let size = blob_ref_size(&blob_ref);
+            Ok((
+                dir_entry_kind_from_blob_ref(&blob_ref, executable),
+                size,
+                TreeCommitPlan {
+                    blobs: vec![blob_plan],
+                    nodes: Vec::new(),
+                },
+            ))
+        }
+        BlobValue::Store {
+            blob_ref,
+            executable,
+        } => Ok((
+            dir_entry_kind_from_blob_ref(&blob_ref, executable),
+            blob_ref_size(&blob_ref),
+            TreeCommitPlan::default(),
+        )),
+    }
 }
 
-async fn store_directory_node(
-    cas: &StoreClient,
-    entries: Vec<DirEntry>,
-    total_size: u64,
-) -> Result<(NodeHash, u64), TransportPoisonError> {
+fn prepare_blob_entry(
+    bytes: Vec<u8>,
+    executable: bool,
+    display_path: String,
+) -> (DirEntryKind, u64, TreeCommitPlan) {
+    let (blob_ref, blob_plan) = prepare_blob_upload(bytes, display_path);
+    let size = blob_ref_size(&blob_ref);
+    (
+        dir_entry_kind_from_blob_ref(&blob_ref, executable),
+        size,
+        TreeCommitPlan {
+            blobs: vec![blob_plan],
+            nodes: Vec::new(),
+        },
+    )
+}
+
+fn prepare_blob_upload(data: Vec<u8>, label: String) -> (BlobRef, PreparedBlobUpload) {
+    let prepared = prepare_blob(&data);
+    let blob_ref = prepared.to_blob_ref();
+    (
+        blob_ref,
+        PreparedBlobUpload {
+            prepared,
+            data,
+            label,
+        },
+    )
+}
+
+fn join_display_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn display_path_label(path: &str) -> String {
+    if path.is_empty() {
+        ".".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn summarize_upload_label(kind: &str, labels: &[String]) -> String {
+    let mut unique = BTreeSet::new();
+    for label in labels {
+        unique.insert(label.as_str());
+    }
+    let labels = unique.into_iter().collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => kind.to_string(),
+        [only] => format!("{kind}({only})"),
+        [first, second] => format!("{kind}({first}, {second})"),
+        [first, second, ..] => format!("{kind}({first}, {second}, +{} more)", labels.len() - 2),
+    }
+}
+
+fn serialize_directory_node(entries: Vec<DirEntry>, total_size: u64) -> (NodeHash, Vec<u8>) {
     let directory = CasNode::Directory(DirectoryNode {
         entries,
         total_size,
     });
     let (bytes, hash) = directory.to_bytes_and_hash();
-    cas.put_node(hash, bytes)
+    (hash, bytes)
+}
+
+async fn upload_tree_commit_plan(
+    cas: &StoreClient,
+    plan: TreeCommitPlan,
+    progress: Option<&roam::Tx<StoreProgress>>,
+) -> Result<(), TransportPoisonError> {
+    let mut chunk_uploads = HashMap::new();
+    let mut node_uploads = HashMap::new();
+    let mut blob_labels = Vec::new();
+    let mut node_labels = Vec::new();
+
+    for blob in plan.blobs {
+        blob_labels.push(display_path_label(&blob.label));
+        for chunk in &blob.prepared.chunks {
+            chunk_uploads.entry(chunk.hash).or_insert_with(|| {
+                blob.data[chunk.offset..chunk.offset + chunk.size as usize].to_vec()
+            });
+        }
+        if let Some(blob_node) = blob.prepared.blob_node {
+            node_uploads
+                .entry(blob_node.node_hash)
+                .or_insert(blob_node.serialized_bytes);
+        }
+    }
+
+    for (hash, bytes, label) in plan.nodes {
+        node_labels.push(display_path_label(&label));
+        node_uploads.entry(hash).or_insert(bytes);
+    }
+
+    let chunk_hashes: Vec<_> = chunk_uploads.keys().copied().collect();
+    let node_hashes: Vec<_> = node_uploads.keys().copied().collect();
+
+    let (missing_chunks, missing_nodes) = tokio::try_join!(
+        async {
+            list_missing_chunks(cas, chunk_hashes)
+                .await
+                .map_err(boundary_user_poison)
+        },
+        async {
+            list_missing_nodes(cas, node_hashes)
+                .await
+                .map_err(boundary_user_poison)
+        },
+    )?;
+
+    let missing_chunks: HashSet<_> = missing_chunks.into_iter().collect();
+    let missing_nodes: HashSet<_> = missing_nodes.into_iter().collect();
+    let blob_trace_label = summarize_upload_label("store_blob", &blob_labels);
+    let node_trace_label = summarize_upload_label("store_node", &node_labels);
+
+    tokio::try_join!(
+        with_remote_trace_labeled(
+            progress,
+            RemoteTraceSpan::RunnerObserverCommitStoreBlob,
+            &blob_trace_label,
+            async {
+                let uploads = chunk_uploads
+                    .into_iter()
+                    .filter(|(hash, _)| missing_chunks.contains(hash))
+                    .map(|(hash, data)| async move {
+                        cas.put_chunk(hash, data)
+                            .await
+                            .map_err(|error| boundary_user_poison(format!("{error:?}")))
+                    });
+                try_join_all(uploads).await?;
+                Ok(())
+            }
+        ),
+        with_remote_trace_labeled(
+            progress,
+            RemoteTraceSpan::RunnerObserverCommitStoreNode,
+            &node_trace_label,
+            async {
+                let uploads = node_uploads
+                    .into_iter()
+                    .filter(|(hash, _)| missing_nodes.contains(hash))
+                    .map(|(hash, data)| async move {
+                        cas.put_node(hash, data)
+                            .await
+                            .map_err(|error| boundary_user_poison(format!("{error:?}")))
+                    });
+                try_join_all(uploads).await?;
+                Ok(())
+            }
+        ),
+    )?;
+
+    Ok(())
+}
+
+async fn store_blob_bytes(
+    cas: &StoreClient,
+    bytes: &[u8],
+    _progress: Option<&roam::Tx<StoreProgress>>,
+) -> Result<BlobRef, TransportPoisonError> {
+    let prepared = prepare_blob(bytes);
+    store_prepared_blob(cas, &prepared, bytes)
         .await
-        .map_err(|error| boundary_user_poison(format!("{error:?}")))?;
-    Ok((hash, total_size))
+        .map_err(boundary_user_poison)
 }
 
 async fn directory_total_size(
@@ -479,12 +844,12 @@ mod tests {
     #[tokio::test]
     async fn inline_trees_commit_to_store_backed_transport() {
         let env = StoreTestEnv::new().await;
-        let value = Value::Tree(TreeValue::Inline(Arc::from([(
+        let value = Value::Tree(TreeValue::inline(Arc::from([(
             Arc::from("hello.txt"),
             Value::Blob(BlobValue::from_string("hello")),
         )])));
 
-        let transport = commit_value_to_transport(&env.client, value)
+        let transport = commit_value_to_transport(&env.client, value, None)
             .await
             .expect("tree should commit");
 
@@ -534,9 +899,10 @@ mod tests {
     #[tokio::test]
     async fn bare_paths_do_not_cross_the_executor_boundary() {
         let env = StoreTestEnv::new().await;
-        let error = commit_value_to_transport(&env.client, Value::Path(PathValue::new("src")))
-            .await
-            .expect_err("path should be rejected");
+        let error =
+            commit_value_to_transport(&env.client, Value::Path(PathValue::new("src")), None)
+                .await
+                .expect_err("path should be rejected");
 
         assert!(error.message.contains("Path values cannot cross"));
     }
@@ -554,9 +920,9 @@ mod tests {
 
         let engine = shipped_function_engine(
             r#"fn observe(process: Process, tree: Tree) (
-                   Tree {
-                     @stdout.txt: process.stdout.collect().blob(),
-                     @output.txt: tree.file(@out/output.txt),
+                   Tree %{
+                     @stdout.txt => process.stdout.collect().blob(),
+                     @output.txt => tree.file(@out/output.txt),
                    }
                  )
 
@@ -566,7 +932,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -627,8 +999,8 @@ mod tests {
 
         let engine = shipped_function_engine(
             r#"fn observe(_process: Process, tree: Tree) (
-                   Tree {
-                     @lua: tree.file(@out/lua),
+                   Tree %{
+                     @lua => tree.file(@out/lua),
                    }
                  )
 
@@ -638,7 +1010,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -692,7 +1070,13 @@ mod tests {
             module: engine.transport_module(),
             observer: Some(
                 engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .ship_function(
+                        engine
+                            .call("make", vec![])
+                            .await
+                            .expect("make should evaluate"),
+                    )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -727,8 +1111,10 @@ mod tests {
                     .ship_function(
                         engine
                             .call("make", vec![Value::Bool(true)])
+                            .await
                             .expect("make should evaluate"),
                     )
+                    .await
                     .expect("observer should ship"),
             ),
             verification_obligations: Vec::new(),
@@ -787,7 +1173,13 @@ mod tests {
             executor: ExecutorSelector::class("default"),
             module: engine.transport_module(),
             probe: engine
-                .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                .ship_function(
+                    engine
+                        .call("make", vec![])
+                        .await
+                        .expect("make should evaluate"),
+                )
+                .await
                 .expect("probe should ship"),
         };
 
@@ -813,7 +1205,7 @@ mod tests {
         }
     }
 
-    fn shipped_function_engine(source: &str) -> Engine {
+    fn shipped_function_engine(source: &str) -> Arc<Engine> {
         let parse = vx_parser::parse(source);
         assert_eq!(parse.errors(), []);
         let root = SourceFile::cast_root(parse.syntax());

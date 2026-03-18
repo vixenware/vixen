@@ -85,3 +85,34 @@ async fn put_node_rejects_invalid_blob_structure() {
         "unexpected error for invalid blob node: {err:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_node_duplicate_short_circuits_validation() {
+    let env = StoreTestEnv::new().await;
+    let node = CasNode::Manifest(NodeManifest {
+        node_id: NodeId("duplicate-node".to_string()),
+        cache_key: Blake3Hash::from_bytes(b"duplicate-cache-key"),
+        produced_at: "2026-02-16T00:00:00Z".to_string(),
+        outputs: Vec::new(),
+    });
+    let (bytes, hash) = node.to_bytes_and_hash();
+
+    env.client
+        .put_node(hash, bytes.clone())
+        .await
+        .expect("initial put_node call failed");
+
+    let duplicate = b"definitely not a postcard node".to_vec();
+    env.client
+        .put_node(hash, duplicate)
+        .await
+        .expect("duplicate put_node should short-circuit");
+
+    let fetched = env
+        .client
+        .get_node(hash)
+        .await
+        .expect("get_node RPC failed")
+        .expect("node missing after duplicate put");
+    assert_eq!(fetched, bytes);
+}

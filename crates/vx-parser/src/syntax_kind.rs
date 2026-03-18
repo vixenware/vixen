@@ -88,6 +88,7 @@ syntax_kinds!(
     STAR,
     SLASH,
     PERCENT,
+    PERCENT_L_CURLY,
     AMP2,
     PIPE,
     PIPE_GT,

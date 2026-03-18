@@ -13,12 +13,16 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3 = { workspace = true }
 facet = { workspace = true }
+facet-json = { workspace = true }
+facet-value = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 vx-store-proto = { workspace = true }
 dashmap = "6"
 parking_lot = "0.12"
-crossbeam-channel = "0.5"
+prost = "0.13"
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
 indoc = "2"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

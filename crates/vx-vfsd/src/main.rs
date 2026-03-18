@@ -59,6 +59,15 @@ struct Canary {
 /// but NOT u64::MAX because FSItem.Identifier(rawValue:) returns nil for that value.
 const CANARY_ITEM_ID: ItemId = 0xFFFF_FFFF_FFFD_0001;
 const ROOT_ITEM_ID: ItemId = 1;
+const MACOS_GLOBAL_MOUNT_PATH: &str = "/tmp/vx/vfs";
+
+fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
+    if cfg!(target_os = "macos") {
+        Utf8PathBuf::from(MACOS_GLOBAL_MOUNT_PATH)
+    } else {
+        configured_mount.clone()
+    }
+}
 
 impl SharedVfs {
     fn new(inner: Arc<CasVfs>) -> Self {
@@ -276,8 +285,8 @@ struct Args {
     #[facet(args::named, default = "127.0.0.1:0")]
     listen: String,
 
-    /// FUSE mount point
-    #[facet(args::named)]
+    /// VFS mount point (defaults to stable global path)
+    #[facet(args::named, default = "/tmp/vx/vfs")]
     mount: Utf8PathBuf,
 
     /// vx-store RPC address
@@ -317,9 +326,18 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    let mount = effective_mount_path(&args.mount);
+    if cfg!(target_os = "macos") && mount != args.mount {
+        tracing::info!(
+            configured_mount = %args.mount,
+            mount = %mount,
+            "ignoring configured mount path on macOS; using stable global mount path",
+        );
+    }
+
     tracing::debug!(
         listen = %args.listen,
-        mount = %args.mount,
+        mount = %mount,
         store = %args.store,
         "starting vx-vfsd"
     );
@@ -345,7 +363,7 @@ async fn async_main() -> Result<()> {
     {
         let gate = Arc::clone(&gate);
         let store_addr = args.store.clone();
-        let mount = args.mount.clone();
+        let mount = mount.clone();
         moire::task::spawn(
             async move {
                 tracing::info!("Booting vx-vfsd");
@@ -452,7 +470,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
     let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, mount.clone()));
 
     // 3. Clean up, create mount dir, mount VFS, smoke test.
-    let mount_result: Result<()> = async {
+    let mount_result: Result<Utf8PathBuf> = async {
         platform::cleanup_stuck_mount(mount).await?;
 
         if platform::should_create_mount_dir(mount) {
@@ -473,22 +491,23 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         .await
         {
             Ok(VfsStart::Mounted {
+                access_path,
                 mount_path,
                 mut vfs_dead,
                 ..
             }) => {
-                tracing::debug!("VFS mounted at {mount_path}");
+                tracing::debug!("VFS mounted at {mount_path} (access path {access_path})");
 
                 // Smoke test: read the canary file through the real filesystem.
-                let canary_fs_path = mount_path.join(&canary.name);
-                tracing::debug!("Trying to read canary from {canary_fs_path}");
-
                 const MAX_ATTEMPTS: u32 = 10;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
                 let smoke_timeout = std::time::Duration::from_secs(5);
 
-                let mut smoke_err = None;
+                let mut smoke_err: Option<String> = None;
                 for attempt in 1..=MAX_ATTEMPTS {
+                    let canary_fs_path = access_path.join(&canary.name);
+                    tracing::debug!(attempt, "Trying to read canary from {canary_fs_path}");
+
                     let read_result = tokio::time::timeout(
                         smoke_timeout,
                         moire::fs::read(canary_fs_path.as_std_path()),
@@ -543,10 +562,13 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                     }
                     tracing::error!("VFS session died unexpectedly at {}", vfs_mount_path);
                     std::process::exit(1);
-                }.named("vfs_death_watcher"));
+                }
+                .named("vfs_death_watcher"));
+
+                Ok(access_path)
             }
             Ok(VfsStart::Unsupported { platform }) => {
-                return Err(format!("VFS not supported on platform {platform}").into());
+                Err(format!("VFS not supported on platform {platform}").into())
             }
             Err(error) => {
                 use owo_colors::OwoColorize;
@@ -568,14 +590,16 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                         }
                     }
                 }
-                return Err(msg.into());
+                Err(msg.into())
             }
         }
-        Ok(())
     }
     .await;
 
-    if let Err(error) = mount_result {
+    let access_path = if let Ok(access_path) = mount_result {
+        access_path
+    } else {
+        let error = mount_result.unwrap_err();
         use std::time::Instant;
         let before = Instant::now();
         let diagnostics = platform::collect_vfs_diagnostics(mount).await;
@@ -596,11 +620,27 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         }
 
         return Err(error);
-    }
+    };
 
     Ok(VfsdService::new_with_store_connection(
         vfs,
+        access_path,
         Arc::new(store_root_caller),
         Arc::new(store_session_handle),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+
+    #[test]
+    fn access_path_appends_canary_name() {
+        let access_path = Utf8PathBuf::from("/tmp/vx/vfs/00112233445566778899aabbccddeeff");
+
+        assert_eq!(
+            access_path.join(".vfs-smoke-test"),
+            Utf8PathBuf::from("/tmp/vx/vfs/00112233445566778899aabbccddeeff/.vfs-smoke-test")
+        );
+    }
 }

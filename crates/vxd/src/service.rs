@@ -7,20 +7,22 @@
 //! 4. Materializing outputs locally
 
 use crate::SpawnTracker;
+use crate::activity::{ActivityHandle, ActivityRegistry};
 use crate::build_failure;
 use crate::db::Database;
 use crate::error::{Result, VxdError};
-use crate::executor::Executor;
-use crate::inputs::*;
 use ::moire::sync::SyncMutex;
 use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
 use facet_postcard::{from_slice, to_vec};
+use facet_value::value;
+use futures_util::stream;
+use futures_util::{StreamExt, TryStreamExt};
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use sha2::{Digest as _, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::io::ErrorKind;
@@ -28,40 +30,42 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
 use vx_eval::{
-    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
-    DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, ExecutorBackendKind, ExecutorSelector, MapValue, Module as EvalModule, PathValue,
-    PoisonError, PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
-    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportBlob, TransportBuiltinValue,
-    TransportTree, TransportValue, TreeValue, Value, lower_source_file_with_source_id,
+    AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
+    DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, EventSink, ExecArgValue,
+    ExecMount, ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
+    ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
+    PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
+    StabilizeRequest as EvalStabilizeRequest, StoreHydrationRequest as EvalStoreHydrationRequest,
+    StructValue, TransportBlob, TransportBuiltinValue, TransportTree, TransportValue, TreeValue,
+    Value, current_trace_track_id, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
-use vx_report::{
-    BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
-    RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
-    RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
-};
+#[cfg(test)]
+use vx_report::{GraphTopology, RulePlan, RulePlanNodeKind};
+#[cfg(test)]
 use vx_rs::CrateGraph;
 use vx_runner_proto::{
-    DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunRequest,
-    RunTreeMount, RunnerClient,
+    DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
+    RunRequest, RunTreeMount, RunnerClient,
 };
-use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
+use vx_store_proto::chunking::{prepare_blob, put_node_if_missing, store_prepared_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind, DirectoryNode,
-    EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RustChannel,
-    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient, StoreProgress, TreeEntryKind,
-    TreeManifest,
+    EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RemoteTracePhase,
+    RemoteTraceSpan, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion, StoreClient,
+    StoreProgress, TreeEntryKind, TreeManifest,
 };
 use vxd_proto::{
-    ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
-    VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
+    ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, PsResult,
+    UnpublishResult, VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
 
 mod build_vx_render;
@@ -79,6 +83,21 @@ pub struct ToolchainInfo {
     pub manifest_date: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PreparedExecMounts {
+    tree_mounts: Vec<RunTreeMount>,
+    file_mounts: Vec<RunFileMount>,
+}
+
+type ExecMountPrepResult = std::result::Result<PreparedExecMounts, String>;
+type ExecMountPrepFuture = Arc<moire::sync::OnceCell<ExecMountPrepResult>>;
+type BuildVxFsTreeSnapshotResult = std::result::Result<(NodeHash, u64), String>;
+type BuildVxFsTreeSnapshotFuture = Arc<moire::sync::OnceCell<BuildVxFsTreeSnapshotResult>>;
+type SnapshotTreeFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(NodeHash, u64), String>> + Send + 'a>>;
+type SnapshotTreeEntryFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(DirEntryKind, u64), String>> + Send + 'a>>;
+
 /// Acquired toolchains (manifest references only)
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
@@ -91,15 +110,56 @@ pub(crate) struct BuildVxExecutor {
     backend: ExecutorBackendKind,
     runner: Option<Arc<RunnerClient>>,
     store: Option<Arc<StoreClient>>,
+    store_supports_readthrough: bool,
     unavailable_reason: Option<String>,
     _runner_handle: Option<Arc<ServiceHandle>>,
     _store_handle: Option<Arc<ServiceHandle>>,
+}
+
+impl BuildVxExecutor {
+    pub(crate) fn local(
+        runner: Arc<RunnerClient>,
+        runner_handle: Option<Arc<ServiceHandle>>,
+    ) -> Self {
+        Self {
+            id: "local".to_string(),
+            backend: ExecutorBackendKind::Local,
+            runner: Some(runner),
+            store: None,
+            store_supports_readthrough: false,
+            unavailable_reason: None,
+            _runner_handle: runner_handle,
+            _store_handle: None,
+        }
+    }
+
+    pub(crate) fn daemon(
+        id: impl Into<String>,
+        runner: Arc<RunnerClient>,
+        runner_handle: Option<Arc<ServiceHandle>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            backend: ExecutorBackendKind::Daemon,
+            runner: Some(runner),
+            store: None,
+            store_supports_readthrough: false,
+            unavailable_reason: None,
+            _runner_handle: runner_handle,
+            _store_handle: None,
+        }
+    }
+
+    pub(crate) fn attach_store(&mut self, store: Arc<StoreClient>) {
+        self.store = Some(store);
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct BuildVxExecutors {
     state: Arc<std::sync::Mutex<BuildVxExecutorsState>>,
     ssh_bootstrap_factory: Option<SshBootstrapFactory>,
+    local_factory: Option<LocalExecutorFactory>,
 }
 
 struct BuildVxExecutorsState {
@@ -112,6 +172,7 @@ pub(crate) struct SshBootstrapExecutor {
     pub(crate) backend: ExecutorBackendKind,
     pub(crate) runner: Arc<RunnerClient>,
     pub(crate) store: Option<Arc<StoreClient>>,
+    pub(crate) store_supports_readthrough: bool,
     pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
     pub(crate) store_handle: Option<Arc<ServiceHandle>>,
 }
@@ -123,6 +184,7 @@ impl SshBootstrapExecutor {
             backend: self.backend,
             runner: Some(self.runner),
             store: self.store,
+            store_supports_readthrough: self.store_supports_readthrough,
             unavailable_reason: None,
             _runner_handle: self.runner_handle,
             _store_handle: self.store_handle,
@@ -147,6 +209,15 @@ type SshBootstrapFactory = Arc<
         + Sync,
 >;
 
+type LocalExecutorFactory = Arc<
+    dyn Fn(
+            Option<Arc<ProgressListenerClient>>,
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<BuildVxExecutor, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 fn implicit_ssh_class_target(class_label: &str) -> Option<&str> {
     class_label
         .strip_prefix("ssh:")
@@ -154,6 +225,7 @@ fn implicit_ssh_class_target(class_label: &str) -> Option<&str> {
 }
 
 impl BuildVxExecutors {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn local_default(store: Arc<StoreClient>, runner: Arc<RunnerClient>) -> Self {
         let executor_id = "local".to_string();
         let executor = BuildVxExecutor {
@@ -161,6 +233,7 @@ impl BuildVxExecutors {
             backend: ExecutorBackendKind::Local,
             runner: Some(runner),
             store: Some(store),
+            store_supports_readthrough: false,
             unavailable_reason: None,
             _runner_handle: None,
             _store_handle: None,
@@ -171,6 +244,26 @@ impl BuildVxExecutors {
                 class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
             })),
             ssh_bootstrap_factory: None,
+            local_factory: None,
+        }
+    }
+
+    pub(crate) fn local_lazy(
+        factory: impl Fn(
+            Option<Arc<ProgressListenerClient>>,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<BuildVxExecutor, String>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(BuildVxExecutorsState {
+                executors: HashMap::new(),
+                class_aliases: HashMap::from([("default".to_string(), "local".to_string())]),
+            })),
+            ssh_bootstrap_factory: None,
+            local_factory: Some(Arc::new(factory)),
         }
     }
 
@@ -190,13 +283,16 @@ impl BuildVxExecutors {
         self
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_alias(
         &mut self,
         class_label: impl Into<String>,
         executor_id: &str,
     ) -> std::result::Result<(), String> {
         let mut state = self.state.lock().expect("build_vx_executors poisoned");
-        if !state.executors.contains_key(executor_id) {
+        if !(state.executors.contains_key(executor_id)
+            || executor_id == "local" && self.local_factory.is_some())
+        {
             return Err(format!(
                 "cannot alias build.vx executor class to unknown executor {executor_id}"
             ));
@@ -207,6 +303,7 @@ impl BuildVxExecutors {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_runner(
         &mut self,
         class_label: impl Into<String>,
@@ -217,6 +314,7 @@ impl BuildVxExecutors {
         self.register_class_runner_with_store(class_label, executor_id, backend, runner, None);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_runner_with_store(
         &mut self,
         class_label: impl Into<String>,
@@ -232,6 +330,7 @@ impl BuildVxExecutors {
                 backend,
                 runner: Some(runner),
                 store,
+                store_supports_readthrough: false,
                 unavailable_reason: None,
                 _runner_handle: None,
                 _store_handle: None,
@@ -267,6 +366,7 @@ impl BuildVxExecutors {
                 backend,
                 runner: None,
                 store: None,
+                store_supports_readthrough: false,
                 unavailable_reason: Some(unavailable_reason.into()),
                 _runner_handle: None,
                 _store_handle: None,
@@ -318,6 +418,29 @@ impl BuildVxExecutors {
             }
         }
 
+        let is_pending_local_class = if selector.backend == ExecutorBackendKind::Class {
+            let state = self.state.lock().expect("build_vx_executors poisoned");
+            state
+                .class_aliases
+                .get(&selector.id)
+                .is_some_and(|executor_id| executor_id == "local")
+        } else {
+            false
+        };
+
+        if ((selector.backend == ExecutorBackendKind::Local && selector.id == "local")
+            || is_pending_local_class)
+            && let Some(factory) = &self.local_factory
+        {
+            let synthesized = factory(progress_listener).await?;
+            let mut state = self.state.lock().expect("build_vx_executors poisoned");
+            state
+                .executors
+                .entry("local".to_string())
+                .or_insert_with(|| synthesized);
+            return Ok(());
+        }
+
         if selector.backend != ExecutorBackendKind::Class {
             return Err(format!(
                 "build.vx executor {}:{} is not configured",
@@ -353,7 +476,7 @@ impl BuildVxExecutors {
         Ok(())
     }
 
-    async fn runner_for(
+    pub(crate) async fn runner_for(
         &self,
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
@@ -372,7 +495,7 @@ impl BuildVxExecutors {
         }))
     }
 
-    async fn store_for(
+    pub(crate) async fn store_for(
         &self,
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
@@ -381,6 +504,17 @@ impl BuildVxExecutors {
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
         Ok(executor.store.clone())
+    }
+
+    pub(crate) async fn store_supports_readthrough(
+        &self,
+        selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
+    ) -> std::result::Result<bool, String> {
+        self.ensure_executor(selector, progress_listener).await?;
+        let state = self.state.lock().expect("build_vx_executors poisoned");
+        let executor = self.resolve_executor_locked(&state, selector)?;
+        Ok(executor.store_supports_readthrough)
     }
 }
 
@@ -396,7 +530,6 @@ async fn mirror_chunk(
     {
         return Ok(());
     }
-
     let data = source
         .get_chunk(hash)
         .await
@@ -456,14 +589,12 @@ fn mirror_node<'a>(
 ) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>> {
     Box::pin(async move {
         if dest
-            .get_node(hash)
+            .has_node(hash)
             .await
             .map_err(|error| format!("{error:?}"))?
-            .is_some()
         {
             return Ok(());
         }
-
         let bytes = source
             .get_node(hash)
             .await
@@ -688,6 +819,7 @@ fn mirror_shipped_function_store_refs<'a>(
             ));
         }
         Ok(ShippedFunction {
+            module_id: function.module_id,
             code_identity: function.code_identity,
             def: function.def,
             captures,
@@ -700,10 +832,8 @@ fn mirror_shipped_function_store_refs<'a>(
 #[derive(Clone)]
 pub struct VxdService {
     store: Arc<StoreClient>,
-    exec: Arc<RunnerClient>,
     build_vx_executors: Arc<BuildVxExecutors>,
     _store_handle: Arc<ServiceHandle>,
-    _runner_handles: Arc<[Arc<ServiceHandle>]>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -729,6 +859,12 @@ pub struct VxdService {
     /// Spawn tracker for child services
     spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
+    /// Shared daemon-side activity registry used by `vx ps`
+    activity_registry: ActivityRegistry,
+
+    /// In-flight deduplication for identical exec root mount preparation.
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
 
@@ -744,56 +880,133 @@ pub struct VxdService {
 pub(crate) struct VxdServiceDeps {
     pub(crate) spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
     pub(crate) store: Arc<StoreClient>,
-    pub(crate) exec: Arc<RunnerClient>,
     pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
-    pub(crate) runner_handles: Arc<[Arc<ServiceHandle>]>,
+    pub(crate) activity_registry: ActivityRegistry,
 }
 
-fn rule_plan_bridge_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_BRIDGE")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+pub(crate) fn exec_mounts_singleflight_key(mounts: &[ExecMount]) -> Option<String> {
+    let mut hasher = blake3::Hasher::new();
+    // Sort mounts by path for deterministic key.
+    let mut sorted: Vec<_> = mounts.iter().collect();
+    sorted.sort_by(|a, b| a.path.as_str().as_bytes().cmp(b.path.as_str().as_bytes()));
+    for mount in sorted {
+        hasher.update(mount.path.as_str().as_bytes());
+        hasher.update(b"\x00");
+        hash_mount_value(&mut hasher, &mount.value)?;
+    }
+    Some(hasher.finalize().to_hex().to_string())
 }
 
-fn rule_plan_exec_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_EXEC")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+fn hash_mount_value(hasher: &mut blake3::Hasher, value: &Value) -> Option<()> {
+    match value {
+        Value::Discovered(discovered) => hash_mount_value(hasher, discovered.value.as_ref()),
+        Value::ExecPath(path) => hash_exec_path_value(hasher, path),
+        Value::Blob(blob) => hash_blob_value(hasher, blob),
+        Value::Tree(tree) => hash_tree_value(hasher, tree),
+        other => {
+            hasher.update(b"v:");
+            hasher.update(other.key()?.as_bytes());
+            Some(())
+        }
+    }
 }
 
-fn vx_rules_file() -> Option<camino::Utf8PathBuf> {
-    std::env::var("VX_RULES_FILE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(camino::Utf8PathBuf::from)
+fn hash_exec_path_value(hasher: &mut blake3::Hasher, path: &ExecPathValue) -> Option<()> {
+    match path {
+        ExecPathValue::InTree { tree, suffix } => {
+            hasher.update(b"execpath:tree:");
+            hash_tree_value(hasher, tree)?;
+            hasher.update(suffix.as_str().as_bytes());
+            Some(())
+        }
+        ExecPathValue::InBlob { blob, leaf } => {
+            hasher.update(b"execpath:blob:");
+            hash_blob_value(hasher, blob)?;
+            hasher.update(leaf.as_str().as_bytes());
+            Some(())
+        }
+    }
 }
 
-fn rule_plan_parity_strict_enabled() -> bool {
-    std::env::var("VX_RULE_PLAN_PARITY_STRICT")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+fn hash_blob_value(hasher: &mut blake3::Hasher, blob: &BlobValue) -> Option<()> {
+    match blob {
+        BlobValue::Inline { bytes, executable } => {
+            hasher.update(b"blob:inline:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            hasher.update(blake3::hash(bytes).as_bytes());
+            Some(())
+        }
+        BlobValue::Store {
+            blob_ref,
+            executable,
+        } => {
+            hasher.update(b"blob:store:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            match blob_ref {
+                BlobRef::Small { chunk, size } => {
+                    hasher.update(&chunk.0.0);
+                    hasher.update(&size.to_le_bytes());
+                }
+                BlobRef::Large {
+                    blob_node,
+                    content_hash,
+                    size,
+                } => {
+                    hasher.update(&blob_node.0.0);
+                    hasher.update(&content_hash.0.0);
+                    hasher.update(&size.to_le_bytes());
+                }
+            }
+            Some(())
+        }
+        BlobValue::FsFile { path, executable } => {
+            hasher.update(b"blob:fs:");
+            hasher.update(if *executable { b"x:" } else { b"-:" });
+            hasher.update(path.as_str().as_bytes());
+            Some(())
+        }
+    }
 }
 
+fn hash_tree_value(hasher: &mut blake3::Hasher, tree: &TreeValue) -> Option<()> {
+    // Fast path: if the merkle root is known, just feed it into the hasher.
+    if let Some(hash) = tree.node_hash() {
+        hasher.update(b"tree:");
+        hasher.update(&hash.0.0);
+        return Some(());
+    }
+    match tree {
+        TreeValue::Inline { entries, .. } => {
+            hasher.update(b"tree:inline:");
+            let mut sorted: Vec<_> = entries.iter().collect();
+            sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            for (name, value) in sorted {
+                hasher.update(name.as_bytes());
+                hasher.update(b"\x00");
+                hash_mount_value(hasher, value)?;
+            }
+            Some(())
+        }
+        TreeValue::FsDir(path) => {
+            hasher.update(b"tree:fsdir:");
+            hasher.update(path.as_str().as_bytes());
+            Some(())
+        }
+        TreeValue::Store(root) => {
+            hasher.update(b"tree:store:");
+            hasher.update(&root.0.0);
+            Some(())
+        }
+    }
+}
+
+#[cfg(test)]
 fn parity_focus_node_id(node_id: &str) -> bool {
     node_id.starts_with("compile-") || node_id.starts_with("acquire-registry:")
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RulePlanParityDiff {
     pub legacy_focus_count: usize,
@@ -802,24 +1015,16 @@ pub(crate) struct RulePlanParityDiff {
     pub extra_in_rule_plan: Vec<String>,
 }
 
-impl RulePlanParityDiff {
-    fn has_drift(&self) -> bool {
-        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
-    }
-}
-
+#[cfg(test)]
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RulePlanParityEdgeDiff {
     pub missing_in_rule_plan: Vec<String>,
     pub extra_in_rule_plan: Vec<String>,
 }
 
-impl RulePlanParityEdgeDiff {
-    fn has_drift(&self) -> bool {
-        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
-    }
-}
-
+#[cfg(test)]
+#[cfg(test)]
 pub(crate) fn compare_rule_plan_parity(
     legacy_topology: &GraphTopology,
     rule_plan_topology: &GraphTopology,
@@ -854,6 +1059,7 @@ pub(crate) fn compare_rule_plan_parity(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compare_rule_plan_edge_parity(
     legacy_topology: &GraphTopology,
     rule_plan_topology: &GraphTopology,
@@ -1006,12 +1212,12 @@ pub(crate) fn selected_crates_from_rule_plan(
                 selected.insert(*only);
             }
             _ => {
-                matches.sort_by_key(|id| id.short_hex());
+                matches.sort_by_key(|id: &CrateId| id.short_hex());
                 return Err(VxdError::InvalidManifest(format!(
                     "RulePlan selected crate '{crate_name}' type '{crate_type}' but it matched multiple crate IDs: {}",
                     matches
                         .into_iter()
-                        .map(|id| id.short_hex())
+                        .map(|id: CrateId| id.short_hex())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )));
@@ -1053,6 +1259,7 @@ pub(crate) fn transitive_closure_crates(
     closure
 }
 
+#[cfg(test)]
 pub(crate) fn sanitize_id_component(input: &str) -> String {
     input
         .chars()
@@ -1066,6 +1273,7 @@ pub(crate) fn sanitize_id_component(input: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn legacy_compile_node_id(crate_name: &str, crate_type: &str) -> String {
     format!("compile-{crate_type}:{crate_name}")
 }
@@ -1275,6 +1483,7 @@ fn exec_arg_to_run_arg(arg: &ExecArgValue) -> RunArg {
     }
 }
 
+#[cfg(test)]
 fn join_exec_mount_path(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -1303,28 +1512,72 @@ fn exec_blob_kind_from_blob_ref(blob_ref: &BlobRef, executable: bool) -> DirEntr
     }
 }
 
-async fn store_exec_blob(
+fn blob_ref_size(blob_ref: &BlobRef) -> u64 {
+    match blob_ref {
+        BlobRef::Small { size, .. } | BlobRef::Large { size, .. } => *size,
+    }
+}
+
+fn validate_tree_entry_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(format!("invalid tree entry name '{name}'"));
+    }
+    Ok(())
+}
+
+fn mount_prep_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(8)
+        .saturating_mul(2)
+        .clamp(4, 64)
+}
+
+async fn store_directory_node(
+    store: &StoreClient,
+    entries: Vec<DirEntry>,
+    total_size: u64,
+) -> std::result::Result<(NodeHash, u64), String> {
+    let directory = CasNode::Directory(DirectoryNode {
+        entries,
+        total_size,
+    });
+    let (bytes, hash) = directory.to_bytes_and_hash();
+    put_node_if_missing(store, hash, bytes).await?;
+    Ok((hash, total_size))
+}
+
+async fn store_exec_blob_ref(
     store: &StoreClient,
     blob: &BlobValue,
-) -> std::result::Result<DirEntryKind, String> {
+) -> std::result::Result<(BlobRef, bool), String> {
     match blob {
         BlobValue::Inline { bytes, executable } => {
             let prepared = prepare_blob(bytes.as_ref());
             let blob_ref = store_prepared_blob(store, &prepared, bytes.as_ref()).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
+            Ok((blob_ref, *executable))
         }
         BlobValue::Store {
             blob_ref,
             executable,
-        } => Ok(exec_blob_kind_from_blob_ref(blob_ref, *executable)),
+        } => Ok((blob_ref.clone(), *executable)),
         BlobValue::FsFile { path, executable } => {
             let bytes = fs::read(path.as_str())
                 .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
             let prepared = prepare_blob(&bytes);
             let blob_ref = store_prepared_blob(store, &prepared, &bytes).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
+            Ok((blob_ref, *executable))
         }
     }
+}
+
+#[cfg(test)]
+async fn store_exec_blob(
+    store: &StoreClient,
+    blob: &BlobValue,
+) -> std::result::Result<DirEntryKind, String> {
+    let (blob_ref, executable) = store_exec_blob_ref(store, blob).await?;
+    Ok(exec_blob_kind_from_blob_ref(&blob_ref, executable))
 }
 
 #[cfg(unix)]
@@ -1339,9 +1592,312 @@ fn host_path_is_executable(_path: &PathValue) -> std::result::Result<bool, Strin
     Ok(false)
 }
 
+async fn snapshot_exec_fs_tree_cached(
+    store: &StoreClient,
+    cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    path: &PathValue,
+) -> BuildVxFsTreeSnapshotResult {
+    let key = path.as_str().to_string();
+    let (cell, inserted) = {
+        let mut cache = cache.lock();
+        match cache.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let cell = Arc::new(moire::sync::OnceCell::new("build_vx_fs_tree_snapshot"));
+                entry.insert(cell.clone());
+                (cell, true)
+            }
+        }
+    };
+
+    let result = cell
+        .get_or_init(|| snapshot_exec_fs_tree_uncached(store, path.clone()))
+        .await
+        .clone();
+
+    if result.is_err() || !inserted {
+        let mut cache = cache.lock();
+        if result.is_err() {
+            cache.remove(&key);
+        }
+    }
+
+    result
+}
+
+fn snapshot_exec_inline_tree<'a>(
+    store: &'a StoreClient,
+    cache: &'a Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    entries: &'a Arc<[(Arc<str>, Value)]>,
+) -> SnapshotTreeFuture<'a> {
+    Box::pin(async move {
+        let mut sorted = entries.iter().cloned().collect::<Vec<_>>();
+        sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+        let mut seen_names = HashSet::with_capacity(sorted.len());
+        for (name, _) in &sorted {
+            validate_tree_entry_name(name.as_ref())?;
+            if !seen_names.insert(name.to_string()) {
+                return Err(format!("duplicate tree entry '{name}'"));
+            }
+        }
+        let parallelism = mount_prep_parallelism();
+        let mut prepared_entries: Vec<(String, DirEntryKind, u64)> = stream::iter(sorted)
+            .map(|(name, value)| async move {
+                let (kind, size) = snapshot_exec_tree_entry(store, cache, value).await?;
+                Ok::<_, String>((name.to_string(), kind, size))
+            })
+            .buffer_unordered(parallelism)
+            .try_collect()
+            .await?;
+        prepared_entries
+            .sort_by(|(left, _, _), (right, _, _)| left.as_bytes().cmp(right.as_bytes()));
+
+        let total_size = prepared_entries.iter().map(|(_, _, size)| *size).sum();
+        let dir_entries = prepared_entries
+            .into_iter()
+            .map(|(name, kind, _)| DirEntry { name, kind })
+            .collect();
+        store_directory_node(store, dir_entries, total_size).await
+    })
+}
+
+fn snapshot_exec_fs_tree_uncached<'a>(
+    store: &'a StoreClient,
+    root: PathValue,
+) -> SnapshotTreeFuture<'a> {
+    Box::pin(async move {
+        let mut read_dir = fs::read_dir(root.as_str())
+            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?;
+        let mut names = Vec::new();
+        while let Some(entry) = read_dir
+            .next()
+            .transpose()
+            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?
+        {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let parallelism = mount_prep_parallelism();
+        let mut prepared_entries: Vec<(String, DirEntryKind, u64)> = stream::iter(names)
+            .map(|name| {
+                let root = root.clone();
+                async move {
+                    validate_tree_entry_name(&name)?;
+                    let child = root.join(&name);
+                    let metadata = fs::metadata(child.as_str())
+                        .map_err(|error| format!("failed to stat {}: {error}", child.as_str()))?;
+                    let (kind, size) = if metadata.is_dir() {
+                        let (hash, total_size) =
+                            snapshot_exec_fs_tree_uncached(store, child).await?;
+                        (DirEntryKind::Dir { hash }, total_size)
+                    } else {
+                        let executable = host_path_is_executable(&child)?;
+                        let (blob_ref, executable) = store_exec_blob_ref(
+                            store,
+                            &BlobValue::FsFile {
+                                path: child,
+                                executable,
+                            },
+                        )
+                        .await?;
+                        let size = blob_ref_size(&blob_ref);
+                        (exec_blob_kind_from_blob_ref(&blob_ref, executable), size)
+                    };
+                    Ok::<_, String>((name, kind, size))
+                }
+            })
+            .buffer_unordered(parallelism)
+            .try_collect()
+            .await?;
+        prepared_entries
+            .sort_by(|(left, _, _), (right, _, _)| left.as_bytes().cmp(right.as_bytes()));
+
+        let total_size = prepared_entries.iter().map(|(_, _, size)| *size).sum();
+        let dir_entries = prepared_entries
+            .into_iter()
+            .map(|(name, kind, _)| DirEntry { name, kind })
+            .collect();
+        store_directory_node(store, dir_entries, total_size).await
+    })
+}
+
+fn snapshot_exec_tree_entry<'a>(
+    store: &'a StoreClient,
+    cache: &'a Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    value: Value,
+) -> SnapshotTreeEntryFuture<'a> {
+    Box::pin(async move {
+        match value {
+            Value::Discovered(discovered) => {
+                snapshot_exec_tree_entry(store, cache, *discovered.value).await
+            }
+            Value::Blob(blob) => {
+                let (blob_ref, executable) = store_exec_blob_ref(store, &blob).await?;
+                let size = blob_ref_size(&blob_ref);
+                Ok((exec_blob_kind_from_blob_ref(&blob_ref, executable), size))
+            }
+            Value::Tree(tree) => {
+                let (hash, total_size) = snapshot_exec_tree(store, cache, &tree).await?;
+                Ok((DirEntryKind::Dir { hash }, total_size))
+            }
+            other => Err(format!(
+                "tree entries must be Blob or Tree, got {}",
+                other.type_name()
+            )),
+        }
+    })
+}
+
+async fn snapshot_exec_tree(
+    store: &StoreClient,
+    cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    tree: &TreeValue,
+) -> std::result::Result<(NodeHash, u64), String> {
+    match tree {
+        TreeValue::Inline { entries, .. } => snapshot_exec_inline_tree(store, cache, entries).await,
+        TreeValue::FsDir(path) => snapshot_exec_fs_tree_cached(store, cache, path).await,
+        TreeValue::Store(root) => {
+            let directory = load_store_directory(store, *root)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok((*root, directory.total_size))
+        }
+    }
+}
+
+async fn snapshot_exec_blob_mount(
+    store: &StoreClient,
+    path: &str,
+    blob: &BlobValue,
+) -> std::result::Result<RunFileMount, String> {
+    let (blob_ref, executable) = store_exec_blob_ref(store, blob).await?;
+    let filename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("input")
+        .to_string();
+    let manifest = NodeManifest {
+        node_id: NodeId(format!("exec-input:{}", path.replace(['\\', '/'], "_"))),
+        cache_key: Blake3Hash([0; 32]),
+        produced_at: String::new(),
+        outputs: vec![OutputEntry {
+            logical: "blob".to_string(),
+            filename,
+            blob: output_blob_ref_from_blob_ref(&blob_ref),
+            executable,
+        }],
+    };
+    let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
+    put_node_if_missing(store, manifest_hash, node_bytes).await?;
+    Ok(RunFileMount {
+        path: path.to_string(),
+        manifest: manifest_hash.0,
+        logical: "blob".to_string(),
+    })
+}
+
+async fn prepare_exec_mounts_with_progress(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
+) -> ExecMountPrepResult {
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: preparing {} structural exec mounts",
+                executor_summary,
+                mounts.len()
+            ),
+        )
+        .await;
+    }
+
+    enum PreparedMount {
+        Tree(RunTreeMount),
+        File(RunFileMount),
+    }
+
+    let parallelism = mount_prep_parallelism();
+    let mount_inputs: Vec<_> = mounts.iter().cloned().enumerate().collect();
+    let prepared_mounts: Vec<(usize, PreparedMount)> = stream::iter(mount_inputs)
+        .map(|(index, mount)| async move {
+            let value = match &mount.value {
+                Value::Discovered(discovered) => discovered.value.as_ref(),
+                other => other,
+            };
+            let prepared = match value {
+                Value::Tree(tree) => {
+                    let (root, _) = snapshot_exec_tree(store, fs_tree_snapshot_cache, tree).await?;
+                    PreparedMount::Tree(RunTreeMount {
+                        mount: mount.path.as_str().to_string(),
+                        manifest: root.0,
+                    })
+                }
+                Value::Blob(blob) => PreparedMount::File(
+                    snapshot_exec_blob_mount(store, mount.path.as_str(), blob).await?,
+                ),
+                other => {
+                    return Err(format!(
+                        "exec mount values must be Blob or Tree, got {}",
+                        other.type_name()
+                    ));
+                }
+            };
+            Ok::<_, String>((index, prepared))
+        })
+        .buffer_unordered(parallelism)
+        .try_collect()
+        .await?;
+
+    let mut prepared = PreparedExecMounts::default();
+    let mut prepared_mounts = prepared_mounts;
+    prepared_mounts.sort_by_key(|(index, _)| *index);
+    for (_, mount) in prepared_mounts {
+        match mount {
+            PreparedMount::Tree(tree_mount) => prepared.tree_mounts.push(tree_mount),
+            PreparedMount::File(file_mount) => prepared.file_mounts.push(file_mount),
+        }
+    }
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: prepared {} tree mounts and {} file mounts",
+                executor_summary,
+                prepared.tree_mounts.len(),
+                prepared.file_mounts.len()
+            ),
+        )
+        .await;
+    }
+
+    Ok(prepared)
+}
+
+#[cfg(test)]
 pub(crate) async fn store_exec_mounts(
     store: &StoreClient,
     mounts: &[ExecMount],
+) -> std::result::Result<Option<NodeHash>, String> {
+    let no_listener = None;
+    store_exec_mounts_with_progress(store, mounts, &no_listener, None, None).await
+}
+
+#[cfg(test)]
+async fn store_exec_mounts_with_progress(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
 ) -> std::result::Result<Option<NodeHash>, String> {
     enum PendingMount {
         Value(String, Value),
@@ -1354,8 +1910,24 @@ pub(crate) async fn store_exec_mounts(
         .map(|mount| PendingMount::Value(mount.path.as_str().to_string(), mount.value.clone()))
         .collect::<Vec<_>>();
     let mut files = Vec::new();
+    let mut processed_items = 0usize;
+    let mut last_progress_emit = 0usize;
+
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: exec root mount expanding {} top-level mounts",
+                executor_summary,
+                mounts.len()
+            ),
+        )
+        .await;
+    }
 
     while let Some(item) = pending.pop() {
+        processed_items += 1;
         match item {
             PendingMount::Value(path, value) => match value {
                 Value::Discovered(discovered) => {
@@ -1365,7 +1937,7 @@ pub(crate) async fn store_exec_mounts(
                     path,
                     kind: store_exec_blob(store, &blob).await?,
                 }),
-                Value::Tree(TreeValue::Inline(entries)) => {
+                Value::Tree(TreeValue::Inline { entries, .. }) => {
                     let mut entries = entries.iter().cloned().collect::<Vec<_>>();
                     entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
                     for (name, value) in entries.into_iter().rev() {
@@ -1468,15 +2040,135 @@ pub(crate) async fn store_exec_mounts(
                 }
             }
         }
+
+        if processed_items.saturating_sub(last_progress_emit) >= 128 {
+            if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+                emit_build_vx_progress_activity(
+                    progress_listener,
+                    activity,
+                    format!(
+                        "build.vx executor {}: exec root mount expanded {} items into {} files",
+                        executor_summary,
+                        processed_items,
+                        files.len()
+                    ),
+                )
+                .await;
+            }
+            last_progress_emit = processed_items;
+        }
     }
 
     if files.is_empty() {
         return Ok(None);
     }
 
+    if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
+        emit_build_vx_progress_activity(
+            progress_listener,
+            activity,
+            format!(
+                "build.vx executor {}: building synthetic exec root tree from {} files",
+                executor_summary,
+                files.len()
+            ),
+        )
+        .await;
+    }
+
     crate::cas_tree::build_merkle_tree(store, files)
         .await
         .map(|(root, _)| Some(root))
+}
+
+async fn store_exec_mounts_deduped(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+    fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
+    executor_summary: Option<&str>,
+    inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    event_recorder: Option<&vx_eval::EventRecorder>,
+) -> ExecMountPrepResult {
+    let Some(key) = exec_mounts_singleflight_key(mounts) else {
+        return prepare_exec_mounts_with_progress(
+            store,
+            mounts,
+            fs_tree_snapshot_cache,
+            progress_listener,
+            activity,
+            executor_summary,
+        )
+        .await;
+    };
+
+    let (cell, inserted) = {
+        let mut inflight = inflight.lock();
+        match inflight.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let cell = Arc::new(moire::sync::OnceCell::new("build_vx_exec_mount_prep"));
+                entry.insert(cell.clone());
+                (cell, true)
+            }
+        }
+    };
+
+    let track_id = current_trace_track_id();
+    let result = if inserted {
+        cell.get_or_init(|| {
+            let compute_span = event_recorder.map(|recorder| {
+                recorder.begin_detached_span(track_id, "exec.mounts.prepare.compute")
+            });
+            async move {
+                let result = prepare_exec_mounts_with_progress(
+                    store,
+                    mounts,
+                    fs_tree_snapshot_cache,
+                    progress_listener,
+                    activity,
+                    executor_summary,
+                )
+                .await;
+                drop(compute_span);
+                result
+            }
+        })
+        .await
+        .clone()
+    } else {
+        let wait_span = event_recorder
+            .map(|recorder| recorder.begin_detached_span(track_id, "exec.mounts.prepare.wait"));
+        let result = cell
+            .get_or_init(|| {
+                prepare_exec_mounts_with_progress(
+                    store,
+                    mounts,
+                    fs_tree_snapshot_cache,
+                    progress_listener,
+                    activity,
+                    executor_summary,
+                )
+            })
+            .await
+            .clone();
+        drop(wait_span);
+        result
+    };
+
+    if result.is_err() || inserted {
+        let mut inflight = inflight.lock();
+        if result.is_err()
+            || inflight
+                .get(&key)
+                .is_some_and(|existing| Arc::ptr_eq(existing, &cell))
+        {
+            inflight.remove(&key);
+        }
+    }
+
+    result
 }
 
 #[derive(Clone, Copy)]
@@ -1608,6 +2300,20 @@ fn output_blob_ref_from_blob_ref(blob_ref: &BlobRef) -> OutputBlobRef {
             size: *size,
         },
     }
+}
+
+async fn mirror_prepared_exec_mounts(
+    source: &StoreClient,
+    dest: &StoreClient,
+    prepared: &PreparedExecMounts,
+) -> std::result::Result<PreparedExecMounts, String> {
+    for mount in &prepared.tree_mounts {
+        mirror_node(source, dest, NodeHash(mount.manifest)).await?;
+    }
+    for mount in &prepared.file_mounts {
+        mirror_node(source, dest, NodeHash(mount.manifest)).await?;
+    }
+    Ok(prepared.clone())
 }
 
 fn blob_ref_from_output_blob_ref(blob_ref: &OutputBlobRef) -> BlobRef {
@@ -1783,7 +2489,14 @@ async fn store_acquired_tree_manifest(
                 DirEntryKind::SmallFile { size, .. } | DirEntryKind::LargeFile { size, .. } => {
                     *size
                 }
-                DirEntryKind::Dir { total_size, .. } => *total_size,
+                DirEntryKind::Dir { .. } => {
+                    let child_path = if dir_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{dir_path}/{}", entry.name)
+                    };
+                    dir_hashes.get(&child_path).map(|&(_, s)| s).unwrap_or(0)
+                }
                 DirEntryKind::Symlink { .. } => 0,
             }
         });
@@ -1809,10 +2522,7 @@ async fn store_acquired_tree_manifest(
                 .or_default()
                 .push(DirEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: node_hash,
-                        total_size,
-                    },
+                    kind: DirEntryKind::Dir { hash: node_hash },
                 });
         }
     }
@@ -1869,10 +2579,17 @@ async fn publish_acquire_cache_entry(
 }
 
 pub(crate) async fn run_build_vx_acquire_via_store(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     request: EvalAcquireRequest,
+    event_recorder: Option<&vx_eval::EventRecorder>,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let trace_args = value!({
+        "display_name": ("acquire(..)"),
+        "url": ((request.url.clone())),
+        "digest": ((request.digest.clone())),
+        "extract": ((request.extract.clone().unwrap_or_default())),
+    });
     let digest = AcquireDigest::parse(&request.digest)
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let extract_format = request
@@ -1888,9 +2605,35 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         extract_format.map(AcquireArchiveFormat::cache_key_tag),
     );
 
-    let acquired = if let Some(cached) = store.lookup(cache_key).await.map_err(|error| {
-        exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
-    })? {
+    let cached = {
+        let _lookup_span = event_recorder.map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "acquire.lookup",
+                value!({
+                    "display_name": ("acquire lookup"),
+                    "cache_key": ((cache_key.to_hex().to_string())),
+                    ..trace_args.clone(),
+                }),
+            )
+        });
+        store.lookup(cache_key).await.map_err(|error| {
+            exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+        })?
+    };
+
+    let acquired = if let Some(cached) = cached {
+        let _cached_span = event_recorder.map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "acquire.load_cached",
+                value!({
+                    "display_name": ("load cached acquire"),
+                    "manifest_hash": ((cached.to_string())),
+                    ..trace_args.clone(),
+                }),
+            )
+        });
         match extract_format {
             Some(_) => Value::Tree(TreeValue::Store(cached)),
             None => load_acquired_blob_from_manifest(store, cached)
@@ -1900,61 +2643,141 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 })?,
         }
     } else {
-        let bytes = vx_http::get_bytes(&request.url).await.map_err(|error| {
-            exec_bridge_poison(
-                PoisonKind::UserFail,
-                format!("failed to acquire {}: {error}", request.url),
-                &demand_chain,
-            )
-        })?;
-        digest
-            .verify(&bytes)
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let bytes = {
+            let _download_span = event_recorder.map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "acquire.download",
+                    value!({
+                        "display_name": ("download acquire payload"),
+                        ..trace_args.clone(),
+                    }),
+                )
+            });
+            vx_http::get_bytes(&request.url).await.map_err(|error| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("failed to acquire {}: {error}", request.url),
+                    &demand_chain,
+                )
+            })?
+        };
+        {
+            let _verify_span = event_recorder.map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "acquire.verify",
+                    value!({
+                        "display_name": ("verify acquire digest"),
+                        "bytes": ((bytes.len() as u64)),
+                        ..trace_args.clone(),
+                    }),
+                )
+            });
+            digest.verify(&bytes).map_err(|message| {
+                exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+            })?;
+        }
 
         match extract_format {
             Some(format) => {
                 let files = Arc::new(SyncMutex::new("vxd/acquire_file_info", HashMap::new()));
                 let files_for_extract = Arc::clone(&files);
-                let tree = vx_tarball::extract_to_tree(
-                    std::io::Cursor::new(bytes),
-                    format.compression(),
-                    0,
-                    async move |data: Vec<u8>| {
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                        let prepared = prepare_blob(&data);
-                        let blob_ref = store_prepared_blob(store, &prepared, &data).await?;
-                        files_for_extract.lock().insert(content_hash.0, blob_ref);
-                        Ok(content_hash.0)
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    exec_bridge_poison(
-                        PoisonKind::UserFail,
-                        format!("failed to extract {}: {error}", request.url),
-                        &demand_chain,
+                let store_for_extract = Arc::clone(store);
+                let tree = {
+                    let _extract_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.extract",
+                            value!({
+                                "display_name": ("extract acquire archive"),
+                                "compression": ((format.compression().as_str().to_string())),
+                                "bytes": ((bytes.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    vx_tarball::extract_to_tree(
+                        std::io::Cursor::new(bytes),
+                        format.compression(),
+                        0,
+                        async move |data: Vec<u8>| {
+                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                            let prepared = prepare_blob(&data);
+                            let blob_ref =
+                                store_prepared_blob(&store_for_extract, &prepared, &data).await?;
+                            files_for_extract.lock().insert(content_hash.0, blob_ref);
+                            Ok(content_hash.0)
+                        },
                     )
-                })?;
+                    .await
+                    .map_err(|error| {
+                        exec_bridge_poison(
+                            PoisonKind::UserFail,
+                            format!("failed to extract {}: {error}", request.url),
+                            &demand_chain,
+                        )
+                    })?
+                };
                 let files = files.lock().clone();
-                let (root, _) = store_acquired_tree_manifest(store, &tree, &files)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
-                publish_acquire_cache_entry(store, cache_key, root)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                let (root, _) = {
+                    let _manifest_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_tree",
+                            value!({
+                                "display_name": ("store acquire tree"),
+                                "files": ((files.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    store_acquired_tree_manifest(store, &tree, &files)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?
+                };
+                {
+                    let _publish_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.publish_cache",
+                            value!({
+                                "display_name": ("publish acquire cache"),
+                                "root": ((root.to_string())),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    publish_acquire_cache_entry(store, cache_key, root)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?;
+                }
                 Value::Tree(TreeValue::Store(root))
             }
             None => {
                 let prepared = prepare_blob(&bytes);
-                let blob_ref = store_prepared_blob(store, &prepared, &bytes)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                let blob_ref = {
+                    let _store_blob_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_blob",
+                            value!({
+                                "display_name": ("store acquire blob"),
+                                "bytes": ((bytes.len() as u64)),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    store_prepared_blob(store, &prepared, &bytes)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?
+                };
 
                 let manifest = NodeManifest {
                     node_id: NodeId("acquire:blob".to_string()),
@@ -1968,21 +2791,47 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                     }],
                 };
                 let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
-                store
-                    .put_node(manifest_hash, node_bytes)
-                    .await
-                    .map_err(|error| {
-                        exec_bridge_poison(
-                            PoisonKind::Internal,
-                            format!("{error:?}"),
-                            &demand_chain,
+                {
+                    let _manifest_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.store_manifest",
+                            value!({
+                                "display_name": ("store acquire manifest"),
+                                "manifest_hash": ((manifest_hash.to_string())),
+                                ..trace_args.clone(),
+                            }),
                         )
-                    })?;
-                publish_acquire_cache_entry(store, cache_key, manifest_hash)
-                    .await
-                    .map_err(|message| {
-                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                    })?;
+                    });
+                    store
+                        .put_node(manifest_hash, node_bytes)
+                        .await
+                        .map_err(|error| {
+                            exec_bridge_poison(
+                                PoisonKind::Internal,
+                                format!("{error:?}"),
+                                &demand_chain,
+                            )
+                        })?;
+                }
+                {
+                    let _publish_span = event_recorder.map(|recorder| {
+                        EventSink::begin_span_with_args(
+                            recorder,
+                            "acquire.publish_cache",
+                            value!({
+                                "display_name": ("publish acquire cache"),
+                                "manifest_hash": ((manifest_hash.to_string())),
+                                ..trace_args.clone(),
+                            }),
+                        )
+                    });
+                    publish_acquire_cache_entry(store, cache_key, manifest_hash)
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                        })?;
+                }
                 Value::Blob(BlobValue::Store {
                     blob_ref,
                     executable: false,
@@ -1991,32 +2840,113 @@ pub(crate) async fn run_build_vx_acquire_via_store(
         }
     };
 
-    hydrate_exec_value_from_store(store, acquired, &demand_chain).await
+    let _hydrate_span = event_recorder.map(|recorder| {
+        EventSink::begin_span_with_args(
+            recorder,
+            "acquire.hydrate",
+            value!({
+                "display_name": ("hydrate acquire result"),
+                ..trace_args.clone(),
+            }),
+        )
+    });
+    hydrate_exec_value_from_store(Arc::clone(store), acquired, demand_chain).await
+}
+
+fn remote_trace_span_name(span: RemoteTraceSpan) -> &'static str {
+    match span {
+        RemoteTraceSpan::RunnerPrepareVfs => "exec.runner.prepare_vfs",
+        RemoteTraceSpan::RunnerCommand => "exec.runner.command",
+        RemoteTraceSpan::RunnerObserver => "exec.runner.observer",
+        RemoteTraceSpan::RunnerObserverInvoke => "exec.runner.observer.invoke",
+        RemoteTraceSpan::RunnerObserverCommit => "exec.runner.observer.commit",
+        RemoteTraceSpan::RunnerObserverCommitTree => "exec.runner.observer.commit_tree",
+        RemoteTraceSpan::RunnerObserverCommitStoreBlob => "exec.runner.observer.store_blob",
+        RemoteTraceSpan::RunnerObserverCommitStoreNode => "exec.runner.observer.store_node",
+        RemoteTraceSpan::RunnerFlushOutputs => "exec.runner.flush_outputs",
+        RemoteTraceSpan::RunnerStoreManifest => "exec.runner.store_manifest",
+        RemoteTraceSpan::RunnerCleanup => "exec.runner.cleanup",
+    }
+}
+
+fn exec_argv_strings(args: &[ExecArgValue]) -> Vec<String> {
+    args.iter().map(|arg| arg.as_str().to_string()).collect()
+}
+
+fn format_exec_command(argv: &[String]) -> String {
+    argv.join(" ")
 }
 
 async fn run_build_vx_exec_via_runner(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     executors: &BuildVxExecutors,
+    activity_registry: &ActivityRegistry,
+    exec_mount_prep_inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
+    exec_fs_tree_snapshot_cache: &Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    event_recorder: Option<vx_eval::EventRecorder>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let executor_summary = describe_executor_selector(&request.executor);
-    emit_build_vx_progress_message(
+    let command_argv = exec_argv_strings(&request.args);
+    let command = format_exec_command(&command_argv);
+    let command_preview = summarize_items(&command_argv, 12);
+    let _exec_span = event_recorder.as_ref().map(|recorder| {
+        EventSink::begin_span_with_args(
+            recorder,
+            "exec.runtime",
+            value!({
+                "display_name": ((format!("exec {command_preview}"))),
+                "executor": ((executor_summary.clone())),
+                "command": ((command.clone())),
+                "command_preview": ((command_preview.clone())),
+                "mount_count": ((request.mounts.len() as u64)),
+                "writable_root_count": ((request.writable_roots.len() as u64)),
+                "create_dir_count": ((request.create_dirs.len() as u64))
+            }),
+        )
+    });
+    let activity = start_build_vx_activity(
+        activity_registry,
+        "exec",
+        &request.executor,
+        summarize_build_vx_exec_request(&request),
+    );
+    let exec_started = Instant::now();
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
-    let exec = executors
-        .runner_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    let exec_store = executors
-        .store_for(&request.executor, progress_listener.clone())
-        .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    emit_build_vx_progress_message(
+    let (exec, exec_store, store_supports_readthrough) = {
+        let _resolve_executor_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.resolve_executor",
+                value!({
+                    "executor": ((executor_summary.clone()))
+                }),
+            )
+        });
+        let exec = executors
+            .runner_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let exec_store = executors
+            .store_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        let store_supports_readthrough = executors
+            .store_supports_readthrough(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        (exec, exec_store, store_supports_readthrough)
+    };
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("build.vx executor {} ready", executor_summary),
     )
     .await;
@@ -2029,38 +2959,116 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
-    let root_mount = store_exec_mounts(store, &request.mounts)
+    let mount_prep_started = Instant::now();
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: preparing exec mounts",
+            executor_summary
+        ),
+    )
+    .await;
+    let prepared_mounts = {
+        let _mount_prep_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.mounts.prepare",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "mount_count": ((request.mounts.len() as u64))
+                }),
+            )
+        });
+        store_exec_mounts_deduped(
+            store,
+            &request.mounts,
+            exec_fs_tree_snapshot_cache,
+            &progress_listener,
+            Some(&activity),
+            Some(&executor_summary),
+            exec_mount_prep_inflight,
+            event_recorder.as_ref(),
+        )
         .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
     tracing::info!(
         executor = %describe_executor_selector(&request.executor),
-        root_mount = ?root_mount.map(|hash| hash.0),
-        cross_store = !std::ptr::eq(target_store, store),
-        "build.vx exec prepared root mount"
+        tree_mount_count = prepared_mounts.tree_mounts.len(),
+        file_mount_count = prepared_mounts.file_mounts.len(),
+        cross_store = !std::ptr::eq(target_store, &**store),
+        store_supports_readthrough,
+        "build.vx exec prepared mounts"
     );
-    if !std::ptr::eq(target_store, store)
-        && let Some(root) = root_mount
-    {
-        mirror_node(store, target_store, root)
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    }
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: exec mounts ready ({})",
+            executor_summary,
+            format_progress_elapsed(mount_prep_started.elapsed())
+        ),
+    )
+    .await;
+    let prepared_mounts = if !std::ptr::eq(target_store, &**store) && !store_supports_readthrough {
+        let mirror_started = Instant::now();
+        emit_build_vx_progress_activity(
+            &progress_listener,
+            &activity,
+            format!(
+                "build.vx executor {}: mirroring exec mounts",
+                executor_summary
+            ),
+        )
+        .await;
+        let mirrored_mounts = {
+            let _mirror_span = event_recorder.as_ref().map(|recorder| {
+                EventSink::begin_span_with_args(
+                    recorder,
+                    "exec.mounts.mirror",
+                    value!({
+                        "executor": ((executor_summary.clone())),
+                        "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
+                        "file_mount_count": ((prepared_mounts.file_mounts.len() as u64))
+                    }),
+                )
+            });
+            mirror_prepared_exec_mounts(store, target_store, &prepared_mounts)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+                })?
+        };
+        emit_build_vx_progress_activity(
+            &progress_listener,
+            &activity,
+            format!(
+                "build.vx executor {}: mirrored exec mounts ({})",
+                executor_summary,
+                format_progress_elapsed(mirror_started.elapsed())
+            ),
+        )
+        .await;
+        mirrored_mounts
+    } else {
+        prepared_mounts
+    };
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: prepared exec inputs ({})",
+            executor_summary,
+            format_progress_elapsed(exec_started.elapsed())
+        ),
+    )
+    .await;
     let (progress, mut progress_rx) = roam::channel::<StoreProgress>();
     let progress_listener_for_exec = progress_listener.clone();
     let executor_summary_for_progress = executor_summary.clone();
-    let progress_handle = moire::task::spawn(
-        async move {
-            while let Ok(Some(update)) = progress_rx.recv().await {
-                let message = format!(
-                    "build.vx executor {}: {}",
-                    executor_summary_for_progress, update.message
-                );
-                emit_build_vx_progress_message(&progress_listener_for_exec, message).await;
-            }
-        }
-        .named("build_vx_exec_progress_fwd"),
-    );
-    let observer = if std::ptr::eq(target_store, store) {
+    let activity_for_progress = activity.clone();
+    let observer = if std::ptr::eq(target_store, &**store) || store_supports_readthrough {
         request.observer
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.observer)
@@ -2068,49 +3076,173 @@ async fn run_build_vx_exec_via_runner(
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
 
-    let result = exec
-        .run(
-            RunRequest {
-                executor: request.executor.clone(),
-                toolchain_manifest: Blake3Hash([0; 32]),
-                program_rel: String::new(),
-                program: Some(exec_arg_to_run_arg(&program)),
-                args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
-                tree_mounts: root_mount
-                    .into_iter()
-                    .map(|root| RunTreeMount {
-                        mount: String::new(),
-                        manifest: root.0,
-                    })
-                    .collect(),
-                file_mounts: Vec::new(),
-                outputs: Vec::new(),
-                writable_roots: request
-                    .writable_roots
-                    .iter()
-                    .map(|path| path.as_str().to_string())
-                    .collect(),
-                cwd: None,
-                env: request
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
-                    .collect(),
-                clear_env: false,
-                eval: Some(RunEvalPayload {
-                    module: request.module,
-                    observer: Some(observer),
-                    verification_obligations: request.verification_obligations,
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!("build.vx executor {}: calling runner.run", executor_summary),
+    )
+    .await;
+    let result = {
+        let _runner_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.runner.run",
+                value!({
+                    "display_name": ((format!("run {command_preview}"))),
+                    "executor": ((executor_summary.clone())),
+                    "command": ((command.clone())),
+                    "command_preview": ((command_preview.clone())),
+                    "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
+                    "file_mount_count": ((prepared_mounts.file_mounts.len() as u64)),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store))),
+                    "store_supports_readthrough": ((store_supports_readthrough))
                 }),
-                macos_commandlinetools_version: None,
-            },
-            progress,
-        )
-        .await
-        .map_err(|error| {
+            )
+        });
+        let runner_track_id = current_trace_track_id();
+        let event_recorder_for_progress = event_recorder.clone();
+        let progress_handle = moire::task::spawn(
+            async move {
+                let store_blob_track = event_recorder_for_progress.as_ref().map(|recorder| {
+                    recorder.acquire_detached_track_with_descriptor(
+                        "exec.runner.observer.store_blob".to_string(),
+                        (runner_track_id as i64) * 10 + 1,
+                        Some(runner_track_id),
+                        None,
+                        Some(1),
+                        Some(
+                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                                as i32,
+                        ),
+                    )
+                });
+                let store_node_track = event_recorder_for_progress.as_ref().map(|recorder| {
+                    recorder.acquire_detached_track_with_descriptor(
+                        "exec.runner.observer.store_node".to_string(),
+                        (runner_track_id as i64) * 10 + 2,
+                        Some(runner_track_id),
+                        None,
+                        Some(2),
+                        Some(
+                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                                as i32,
+                        ),
+                    )
+                });
+                let mut remote_trace_spans =
+                    HashMap::<(RemoteTraceSpan, u64), vx_eval::events::DetachedRecorderSpan>::new();
+                while let Ok(Some(update)) = progress_rx.recv().await {
+                    if let Some(trace_event) = update.trace_event.as_ref()
+                        && let Some(recorder) = event_recorder_for_progress.as_ref()
+                    {
+                        let trace_track_id = match trace_event.span {
+                            RemoteTraceSpan::RunnerObserverCommitStoreBlob => store_blob_track
+                                .as_ref()
+                                .map_or(runner_track_id, |track| track.id()),
+                            RemoteTraceSpan::RunnerObserverCommitStoreNode => store_node_track
+                                .as_ref()
+                                .map_or(runner_track_id, |track| track.id()),
+                            _ => runner_track_id,
+                        };
+                        match trace_event.phase {
+                            RemoteTracePhase::Begin => {
+                                let span_name = remote_trace_span_name(trace_event.span);
+                                let span = if trace_event.label.is_empty() {
+                                    recorder.begin_detached_span(trace_track_id, span_name)
+                                } else {
+                                    recorder.begin_detached_span_with_args(
+                                        trace_track_id,
+                                        span_name,
+                                        value!({
+                                            "display_name": ((trace_event.label.clone()))
+                                        }),
+                                    )
+                                };
+                                remote_trace_spans
+                                    .insert((trace_event.span, trace_event.instance_id), span);
+                            }
+                            RemoteTracePhase::End => {
+                                remote_trace_spans
+                                    .remove(&(trace_event.span, trace_event.instance_id));
+                            }
+                            RemoteTracePhase::Instant => {
+                                recorder.instant_on_track(
+                                    trace_track_id,
+                                    remote_trace_span_name(trace_event.span),
+                                );
+                            }
+                        }
+                    }
+
+                    if !update.message.is_empty() {
+                        let message = format!(
+                            "build.vx executor {}: {}",
+                            executor_summary_for_progress, update.message
+                        );
+                        emit_build_vx_remote_progress_activity(
+                            &progress_listener_for_exec,
+                            &activity_for_progress,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+                drop(store_blob_track);
+                drop(store_node_track);
+                drop(remote_trace_spans);
+            }
+            .named("build_vx_exec_progress_fwd"),
+        );
+        let run_result = exec
+            .run(
+                RunRequest {
+                    executor: request.executor.clone(),
+                    program: exec_arg_to_run_arg(&program),
+                    args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
+                    tree_mounts: prepared_mounts.tree_mounts,
+                    file_mounts: prepared_mounts.file_mounts,
+                    writable_roots: request
+                        .writable_roots
+                        .iter()
+                        .map(|path| path.as_str().to_string())
+                        .collect(),
+                    create_dirs: request
+                        .create_dirs
+                        .iter()
+                        .map(|path| path.as_str().to_string())
+                        .collect(),
+                    cwd: None,
+                    env: request
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
+                        .collect(),
+                    clear_env: false,
+                    eval: Some(RunEvalPayload {
+                        module: request.module,
+                        observer: Some(observer),
+                        verification_obligations: request.verification_obligations,
+                    }),
+                    macos_commandlinetools_version: None,
+                },
+                progress,
+            )
+            .await;
+        let _ = progress_handle.await;
+        run_result.map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
-        })?;
-    let _ = progress_handle.await;
+        })?
+    };
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: exec returned ({})",
+            executor_summary,
+            format_progress_elapsed(exec_started.elapsed())
+        ),
+    )
+    .await;
     tracing::info!(
         executor = %executor_summary,
         success = result.success,
@@ -2147,37 +3279,75 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
-    tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
-    let observer_value = if std::ptr::eq(target_store, store) {
-        observer_value
-    } else {
-        mirror_transport_value_store_refs(target_store, store, observer_value)
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    let observer_bridge_started = Instant::now();
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: bridging observer value",
+            executor_summary
+        ),
+    )
+    .await;
+    let observer_value = {
+        let _observer_bridge_span = event_recorder.as_ref().map(|recorder| {
+            EventSink::begin_span_with_args(
+                recorder,
+                "exec.observer.bridge",
+                value!({
+                    "executor": ((executor_summary.clone())),
+                    "cross_store": ((!std::ptr::eq(target_store, &**store)))
+                }),
+            )
+        });
+        tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
+        if std::ptr::eq(target_store, &**store) {
+            observer_value
+        } else {
+            mirror_transport_value_store_refs(target_store, store, observer_value)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+                })?
+        }
     };
     tracing::info!(executor = %executor_summary, "build.vx exec finished observer-value bridge");
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: observer value ready ({})",
+            executor_summary,
+            format_progress_elapsed(observer_bridge_started.elapsed())
+        ),
+    )
+    .await;
     let value = Value::try_from(observer_value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
-    tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
-    let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
-    tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
     Ok(value)
 }
 
 async fn run_build_vx_discover_via_runner(
-    store: &StoreClient,
+    store: &Arc<StoreClient>,
     executors: &BuildVxExecutors,
+    activity_registry: &ActivityRegistry,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
-    emit_build_vx_progress_message(
+    let discover_started = Instant::now();
+    let executor_summary = describe_executor_selector(&request.executor);
+    let activity = start_build_vx_activity(
+        activity_registry,
+        "discover",
+        &request.executor,
+        summarize_build_vx_discover_request(&request),
+    );
+    emit_build_vx_progress_activity(
         &progress_listener,
-        format!(
-            "resolving build.vx executor {}",
-            describe_executor_selector(&request.executor)
-        ),
+        &activity,
+        format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
     let exec = executors
@@ -2188,16 +3358,18 @@ async fn run_build_vx_discover_via_runner(
         .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    emit_build_vx_progress_message(
+    let store_supports_readthrough = executors
+        .store_supports_readthrough(&request.executor, progress_listener.clone())
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    emit_build_vx_progress_activity(
         &progress_listener,
-        format!(
-            "build.vx executor {} ready",
-            describe_executor_selector(&request.executor)
-        ),
+        &activity,
+        format!("build.vx executor {} ready", executor_summary),
     )
     .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
-    let probe = if std::ptr::eq(target_store, store) {
+    let probe = if std::ptr::eq(target_store, &**store) || store_supports_readthrough {
         request.probe
     } else {
         mirror_shipped_function_store_refs(store, target_store, request.probe)
@@ -2214,12 +3386,22 @@ async fn run_build_vx_discover_via_runner(
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: discover returned ({})",
+            executor_summary,
+            format_progress_elapsed(discover_started.elapsed())
+        ),
+    )
+    .await;
 
     if let Some(poison) = result.poison {
         return Err(PoisonError::from(poison));
     }
 
-    let value = if std::ptr::eq(target_store, store) {
+    let value = if std::ptr::eq(target_store, &**store) {
         result.value.ok_or_else(|| {
             exec_bridge_poison(
                 PoisonKind::UserFail,
@@ -2245,7 +3427,29 @@ async fn run_build_vx_discover_via_runner(
     let value = Value::try_from(value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
-    hydrate_exec_value_from_store(store, value, &demand_chain).await
+    let hydration_started = Instant::now();
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: hydrating discovery result",
+            executor_summary
+        ),
+    )
+    .await;
+    let value =
+        hydrate_exec_value_from_store(Arc::clone(store), value, demand_chain.clone()).await?;
+    emit_build_vx_progress_activity(
+        &progress_listener,
+        &activity,
+        format!(
+            "build.vx executor {}: discovery hydration finished ({})",
+            executor_summary,
+            format_progress_elapsed(hydration_started.elapsed())
+        ),
+    )
+    .await;
+    Ok(value)
 }
 
 fn exec_bridge_poison(
@@ -2284,14 +3488,20 @@ pub(crate) fn summarize_build_vx_exec_request(request: &ExecRequest) -> String {
         .iter()
         .map(|path| path.as_str().to_string())
         .collect::<Vec<_>>();
+    let create_dirs = request
+        .create_dirs
+        .iter()
+        .map(|path| path.as_str().to_string())
+        .collect::<Vec<_>>();
 
     format!(
-        "build.vx exec[{}:{}]: {} (mounts: {}; writable: {})",
+        "build.vx exec[{}:{}]: {} (mounts: {}; writable: {}; create_dirs: {})",
         request.executor.backend.as_tag(),
         request.executor.id,
         summarize_items(&argv, 10),
         summarize_items(&mounts, 6),
         summarize_items(&writable_roots, 6),
+        summarize_items(&create_dirs, 6),
     )
 }
 
@@ -2328,29 +3538,30 @@ pub(crate) fn summarize_build_vx_stabilize_request(request: &EvalStabilizeReques
     )
 }
 
+pub(crate) fn summarize_build_vx_import_request(request: &EvalImportRequest) -> String {
+    format!(
+        "build.vx import: path={} from={}",
+        request.path, request.from_source_id
+    )
+}
+
 #[derive(Clone)]
 struct BuildVxRuntime {
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
+    activity_registry: ActivityRegistry,
+    exec_mount_prep_inflight: Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    exec_fs_tree_snapshot_cache: Arc<SyncMutex<HashMap<String, BuildVxFsTreeSnapshotFuture>>>,
+    module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
+    module_stack: Arc<SyncMutex<HashSet<Utf8PathBuf>>>,
+    event_recorder: Option<vx_eval::EventRecorder>,
 }
 
-fn block_on_runtime<T>(runtime: &Handle, future: impl Future<Output = T>) -> T {
-    if Handle::try_current().is_ok() {
-        block_in_place(|| runtime.block_on(future))
-    } else {
-        runtime.block_on(future)
-    }
-}
-
-fn emit_build_vx_boundary_log(
-    runtime: &Handle,
-    listener: &Option<Arc<ProgressListenerClient>>,
-    message: &str,
-) {
+async fn emit_build_vx_boundary_log(listener: &Option<Arc<ProgressListenerClient>>, message: &str) {
     if let Some(listener) = listener {
-        let _ = block_on_runtime(runtime, listener.log_message(message.to_string()));
+        let _ = listener.log_message(message.to_string()).await;
     }
 }
 
@@ -2363,6 +3574,47 @@ async fn emit_build_vx_progress_message(
         && let Err(error) = listener.log_message(message).await
     {
         tracing::warn!("failed to emit build.vx progress message: {error:?}");
+    }
+}
+
+fn start_build_vx_activity(
+    registry: &ActivityRegistry,
+    kind: &str,
+    executor: &ExecutorSelector,
+    label: impl Into<String>,
+) -> ActivityHandle {
+    registry.start(
+        kind,
+        label.into(),
+        Some(describe_executor_selector(executor)),
+    )
+}
+
+async fn emit_build_vx_progress_activity(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    activity: &ActivityHandle,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    activity.update(message.clone());
+    emit_build_vx_progress_message(listener, message).await;
+}
+
+async fn emit_build_vx_remote_progress_activity(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    activity: &ActivityHandle,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    activity.update_remote(message.clone());
+    emit_build_vx_progress_message(listener, message).await;
+}
+
+fn format_progress_elapsed(elapsed: std::time::Duration) -> String {
+    if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
     }
 }
 
@@ -2413,102 +3665,122 @@ async fn load_stabilized_value_from_manifest(
 }
 
 impl BuildVxRuntime {
-    fn build_engine(&self, module: &EvalModule) -> Engine {
-        let runtime = Handle::current();
-        let hydration_store = Arc::clone(&self.store);
-        let hydration_runtime = runtime.clone();
-        let acquire_runtime_state = self.clone();
-        let acquire_runtime = runtime.clone();
-        let render_runtime_state = self.clone();
-        let render_runtime = runtime.clone();
-        let stabilize_runtime_state = self.clone();
-        let stabilize_runtime = runtime.clone();
-        let exec_store = Arc::clone(&self.store);
-        let exec_executors = Arc::clone(&self.executors);
-        let exec_runtime = runtime.clone();
-        let discover_store = Arc::clone(&self.store);
-        let discover_executors = Arc::clone(&self.executors);
-        let discover_runtime = runtime;
-        let progress_listener = self.progress_listener.clone();
-        let acquire_listener = progress_listener.clone();
-        let render_listener = progress_listener.clone();
-        let stabilize_listener = progress_listener.clone();
-        let exec_listener = progress_listener.clone();
-        let discover_listener = progress_listener;
+    fn build_engine(&self, module: &EvalModule) -> Arc<Engine> {
+        let engine = Engine::from_module(module).with_runtime(Arc::new(self.clone()));
+        if let Some(recorder) = &self.event_recorder {
+            engine.with_event_sink(Arc::new(recorder.clone()))
+        } else {
+            engine
+        }
+    }
 
-        Engine::from_module(module)
-            .with_store_hydration_handler(Arc::new(move |request| {
-                let store = Arc::clone(&hydration_store);
-                let runtime = hydration_runtime.clone();
-                block_on_runtime(
-                    &runtime,
-                    hydrate_exec_value_from_store(&store, request.value, &request.demand_chain),
+    async fn emit_boundary_log(&self, message: &str) {
+        emit_build_vx_boundary_log(&self.progress_listener, message).await;
+    }
+
+    async fn load_imported_module(
+        &self,
+        request: EvalImportRequest,
+    ) -> std::result::Result<EvalModule, PoisonError> {
+        let module_path = self.resolve_import_path(&request)?;
+        if let Some(module) = self.module_cache.lock().get(&module_path).cloned() {
+            return Ok(module);
+        }
+
+        {
+            let mut stack = self.module_stack.lock();
+            if !stack.insert(module_path.clone()) {
+                return Err(exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("cyclic import detected while loading {}", module_path),
+                    &request.demand_chain,
+                ));
+            }
+        }
+
+        let outcome = async {
+            let source = fs::read_to_string(&module_path).map_err(|error| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!("failed to read imported module {}: {error}", module_path),
+                    &request.demand_chain,
                 )
-            }))
-            .with_acquire_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_acquire_request(&request);
-                let runtime = acquire_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &acquire_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_acquire_via_store(&acquire_runtime_state.store, request),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_render_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_render_request(&request);
-                let runtime = render_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &render_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_render_via_store(
-                        &render_runtime_state.store,
-                        &render_runtime_state.workspace_root,
-                        request,
+            })?;
+
+            let parse = vx_parser::parse(&source);
+            if !parse.errors().is_empty() {
+                let joined = parse
+                    .errors()
+                    .iter()
+                    .map(|error| format!("{error:?}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!(
+                        "syntax error in imported module {}: {}",
+                        module_path, joined
                     ),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_stabilize_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_stabilize_request(&request);
-                let runtime = stabilize_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &stabilize_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    stabilize_runtime_state.run_stabilize_via_store(request),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_exec_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_exec_request(&request);
-                let runtime = exec_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_exec_via_runner(
-                        &exec_store,
-                        &exec_executors,
-                        exec_listener.clone(),
-                        request,
+                    &request.demand_chain,
+                ));
+            }
+
+            let root = SourceFile::cast_root(parse.syntax());
+            Ok(lower_source_file_with_source_id(
+                &root,
+                module_path.as_str().to_string(),
+            ))
+        }
+        .await;
+
+        self.module_stack.lock().remove(&module_path);
+
+        let module = outcome?;
+        self.module_cache
+            .lock()
+            .insert(module_path.clone(), module.clone());
+        Ok(module)
+    }
+
+    fn resolve_import_path(
+        &self,
+        request: &EvalImportRequest,
+    ) -> std::result::Result<Utf8PathBuf, PoisonError> {
+        let from_source = Utf8Path::new(&request.from_source_id);
+        let from_dir = from_source.parent().ok_or_else(|| {
+            exec_bridge_poison(
+                PoisonKind::UserFail,
+                format!(
+                    "cannot resolve import {} from source {}",
+                    request.path, request.from_source_id
+                ),
+                &request.demand_chain,
+            )
+        })?;
+
+        let requested = Utf8Path::new(&request.path);
+        let candidates = if requested.extension().is_some() {
+            vec![from_dir.join(requested)]
+        } else {
+            vec![
+                from_dir.join(requested),
+                from_dir.join(format!("{}.vx", request.path)),
+            ]
+        };
+
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    format!(
+                        "import {} from {} did not resolve to a file",
+                        request.path, request.from_source_id
                     ),
+                    &request.demand_chain,
                 )
-                .map_err(|error| error.with_context(summary))
-            }))
-            .with_discover_handler(Arc::new(move |request| {
-                let summary = summarize_build_vx_discover_request(&request);
-                let runtime = discover_runtime.clone();
-                emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
-                block_on_runtime(
-                    &runtime,
-                    run_build_vx_discover_via_runner(
-                        &discover_store,
-                        &discover_executors,
-                        discover_listener.clone(),
-                        request,
-                    ),
-                )
-                .map_err(|error| error.with_context(summary))
-            }))
+            })
     }
 
     async fn run_stabilize_via_store(
@@ -2551,7 +3823,9 @@ impl BuildVxRuntime {
 
         let module: EvalModule = request.module.clone().into();
         let engine = self.build_engine(&module);
-        let value = engine.call_shipped(&request.resolve, vec![request.witness])?;
+        let value = engine
+            .call_shipped(&request.resolve, vec![request.witness])
+            .await?;
         let transport = TransportValue::try_from(&value).map_err(|message| {
             exec_bridge_poison(
                 PoisonKind::TypeError,
@@ -2595,21 +3869,135 @@ impl BuildVxRuntime {
     }
 }
 
-fn hydrate_exec_value_from_store<'a>(
-    store: &'a StoreClient,
+impl BuildRuntime for BuildVxRuntime {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn has_exec(&self) -> bool {
+        true
+    }
+
+    fn has_discover(&self) -> bool {
+        true
+    }
+
+    fn store_hydration(
+        &self,
+        request: EvalStoreHydrationRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        let value = request.value;
+        let demand_chain = request.demand_chain;
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { hydrate_exec_value_from_store(store, value, demand_chain).await })
+    }
+
+    fn acquire(
+        &self,
+        request: EvalAcquireRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_acquire_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_acquire_via_store(&self.store, request)
+                .await
+                .map_err(|error| error.with_context(summary))
+        })
+    }
+
+    fn import_module(
+        &self,
+        request: EvalImportRequest,
+    ) -> BoxFuture<'_, std::result::Result<EvalModule, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_import_request(&request);
+            self.emit_boundary_log(&summary).await;
+            self.load_imported_module(request)
+                .await
+                .map_err(|error| error.with_context(summary))
+        })
+    }
+
+    fn render(
+        &self,
+        request: EvalRenderRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_render_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_render_via_store(&self.store, &self.workspace_root, request)
+                .await
+                .map_err(|error| error.with_context(summary))
+        })
+    }
+
+    fn stabilize(
+        &self,
+        request: EvalStabilizeRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_stabilize_request(&request);
+            self.emit_boundary_log(&summary).await;
+            self.run_stabilize_via_store(request)
+                .await
+                .map_err(|error| error.with_context(summary))
+        })
+    }
+
+    fn exec(&self, request: ExecRequest) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_exec_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_exec_via_runner(
+                &self.store,
+                &self.executors,
+                &self.activity_registry,
+                &self.exec_mount_prep_inflight,
+                &self.exec_fs_tree_snapshot_cache,
+                self.progress_listener.clone(),
+                self.event_recorder.clone(),
+                request,
+            )
+            .await
+            .map_err(|error| error.with_context(summary))
+        })
+    }
+
+    fn discover(
+        &self,
+        request: EvalDiscoverRequest,
+    ) -> BoxFuture<'_, std::result::Result<Value, PoisonError>> {
+        Box::pin(async move {
+            let summary = summarize_build_vx_discover_request(&request);
+            self.emit_boundary_log(&summary).await;
+            run_build_vx_discover_via_runner(
+                &self.store,
+                &self.executors,
+                &self.activity_registry,
+                self.progress_listener.clone(),
+                request,
+            )
+            .await
+            .map_err(|error| error.with_context(summary))
+        })
+    }
+}
+
+fn hydrate_exec_value_from_store(
+    store: Arc<StoreClient>,
     value: Value,
-    demand_chain: &'a DemandChain,
-) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + 'a>> {
+    demand_chain: DemandChain,
+) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + Send>> {
     Box::pin(async move {
         match value {
             Value::Blob(BlobValue::Store {
                 blob_ref,
                 executable,
             }) => {
-                let bytes = fetch_store_blob_bytes(store, &blob_ref)
+                let bytes = fetch_store_blob_bytes(&store, &blob_ref)
                     .await
                     .map_err(|error| {
-                        exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                        exec_bridge_poison(PoisonKind::Internal, error.to_string(), &demand_chain)
                     })?;
                 Ok(Value::Blob(BlobValue::Inline {
                     bytes: Arc::from(bytes),
@@ -2617,8 +4005,8 @@ fn hydrate_exec_value_from_store<'a>(
                 }))
             }
             Value::Tree(TreeValue::Store(root)) => {
-                let directory = load_store_directory(store, root).await.map_err(|error| {
-                    exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                let directory = load_store_directory(&store, root).await.map_err(|error| {
+                    exec_bridge_poison(PoisonKind::Internal, error.to_string(), &demand_chain)
                 })?;
                 let mut entries = Vec::with_capacity(directory.entries.len());
                 for entry in directory.entries {
@@ -2633,12 +4021,12 @@ fn hydrate_exec_value_from_store<'a>(
                                 size,
                             };
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Blob(BlobValue::Store {
                                     blob_ref,
                                     executable,
                                 }),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
@@ -2654,20 +4042,20 @@ fn hydrate_exec_value_from_store<'a>(
                                 size,
                             };
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Blob(BlobValue::Store {
                                     blob_ref,
                                     executable,
                                 }),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
                         DirEntryKind::Dir { hash, .. } => {
                             hydrate_exec_value_from_store(
-                                store,
+                                Arc::clone(&store),
                                 Value::Tree(TreeValue::Store(hash)),
-                                demand_chain,
+                                demand_chain.clone(),
                             )
                             .await?
                         }
@@ -2677,17 +4065,21 @@ fn hydrate_exec_value_from_store<'a>(
                                 format!(
                                     "store-backed symlink values are not supported in the build.vx evaluator bridge yet (target: {target})"
                                 ),
-                                demand_chain,
+                                &demand_chain,
                             ));
                         }
                     };
                     entries.push((Arc::from(entry.name), value));
                 }
-                Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+                Ok(Value::Tree(TreeValue::inline(Arc::from(entries))))
             }
             Value::Discovered(discovered) => {
-                let inner =
-                    hydrate_exec_value_from_store(store, *discovered.value, demand_chain).await?;
+                let inner = hydrate_exec_value_from_store(
+                    Arc::clone(&store),
+                    *discovered.value,
+                    demand_chain,
+                )
+                .await?;
                 Ok(Value::Discovered(DiscoveredValue {
                     value: Box::new(inner),
                     obligations: discovered.obligations,
@@ -2697,7 +4089,12 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     hydrated.push(
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     );
                 }
                 Ok(Value::Tuple(Arc::from(hydrated)))
@@ -2706,7 +4103,12 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
                     hydrated.push(
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     );
                 }
                 Ok(Value::Array(Arc::from(hydrated)))
@@ -2715,8 +4117,18 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut entries = Vec::with_capacity(map.entries.len());
                 for (key, value) in map.entries.iter() {
                     entries.push((
-                        hydrate_exec_value_from_store(store, key.clone(), demand_chain).await?,
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            key.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     ));
                 }
                 Ok(Value::Map(MapValue {
@@ -2728,7 +4140,12 @@ fn hydrate_exec_value_from_store<'a>(
                 for (name, value) in struct_value.fields.iter() {
                     fields.push((
                         name.clone(),
-                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(
+                            Arc::clone(&store),
+                            value.clone(),
+                            demand_chain.clone(),
+                        )
+                        .await?,
                     ));
                 }
                 Ok(Value::Struct(StructValue {
@@ -2739,200 +4156,6 @@ fn hydrate_exec_value_from_store<'a>(
             other => Ok(other),
         }
     })
-}
-
-fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
-    let source_id = RulePlanSourceId::from("rust_planner".to_string());
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut facts = Vec::new();
-
-    let base_provenance = |rule: &str, line: u32| RulePlanProvenance {
-        rule_id: RuleId::from(rule.to_string()),
-        source_id: source_id.clone(),
-        span: RulePlanSpan {
-            line,
-            column: 1,
-            end_line: line,
-            end_column: 1,
-        },
-        comment: None,
-        metadata: std::collections::BTreeMap::new(),
-    };
-
-    let group_id = RulePlanNodeId::from("n_group_build".to_string());
-    nodes.push(RulePlanNode {
-        id: group_id.clone(),
-        kind: RulePlanNodeKind::Group,
-        label: "build".to_string(),
-        provenance: base_provenance("rule.group.build", 1),
-    });
-
-    let fact_node_id = RulePlanNodeId::from("n_fact_workspace_changed".to_string());
-    nodes.push(RulePlanNode {
-        id: fact_node_id.clone(),
-        kind: RulePlanNodeKind::Fact,
-        label: "workspace_changed".to_string(),
-        provenance: base_provenance("rule.fact.workspace_changed", 2),
-    });
-    facts.push(RulePlanFact {
-        id: RulePlanFactId::from("f_workspace_changed".to_string()),
-        node_id: fact_node_id.clone(),
-        value: RulePlanValue::from("true".to_string()),
-        provenance: base_provenance("rule.fact.workspace_changed", 3),
-    });
-
-    let mut crate_nodes = graph.nodes.values().collect::<Vec<_>>();
-    crate_nodes.sort_by(|a, b| {
-        a.crate_name
-            .cmp(&b.crate_name)
-            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-    });
-
-    let mut artifact_by_crate_id = std::collections::HashMap::new();
-    let mut action_by_crate_id = std::collections::HashMap::new();
-    let mut registry_artifact_by_name_version = std::collections::HashMap::new();
-
-    let mut registry_crates = graph.iter_registry_crates().collect::<Vec<_>>();
-    registry_crates.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.version.cmp(&b.version))
-            .then_with(|| a.checksum.cmp(&b.checksum))
-    });
-    for (idx, registry) in registry_crates.iter().enumerate() {
-        let key = format!(
-            "{}_{}",
-            sanitize_id_component(&registry.name),
-            sanitize_id_component(&registry.version)
-        );
-        let node_id = RulePlanNodeId::from(format!("n_registry_artifact_{key}"));
-        let registry_action_node_id =
-            format!("acquire-registry:{}:{}", registry.name, registry.version);
-        let mut provenance = base_provenance("rule.registry.artifact", 6 + idx as u32);
-        provenance.metadata.insert(
-            "legacy_node_id".to_string(),
-            registry_action_node_id.clone(),
-        );
-        provenance
-            .metadata
-            .insert("registry_name".to_string(), registry.name.clone());
-        provenance
-            .metadata
-            .insert("registry_version".to_string(), registry.version.clone());
-        provenance
-            .metadata
-            .insert("registry_checksum".to_string(), registry.checksum.clone());
-        nodes.push(RulePlanNode {
-            id: node_id.clone(),
-            kind: RulePlanNodeKind::Artifact,
-            label: registry_action_node_id,
-            provenance,
-        });
-        registry_artifact_by_name_version
-            .insert((registry.name.clone(), registry.version.clone()), node_id);
-    }
-
-    for (idx, crate_node) in crate_nodes.iter().enumerate() {
-        let key = format!(
-            "{}_{}_{}",
-            sanitize_id_component(&crate_node.crate_name),
-            crate_node.crate_type.as_str(),
-            sanitize_id_component(&crate_node.id.to_string())
-        );
-        let action_id = RulePlanNodeId::from(format!("n_action_{key}"));
-        let artifact_id = RulePlanNodeId::from(format!("n_artifact_{key}"));
-        let legacy_node_id =
-            legacy_compile_node_id(&crate_node.crate_name, crate_node.crate_type.as_str());
-        let mut action_provenance = base_provenance("rule.rust.compile", 10 + idx as u32);
-        action_provenance
-            .metadata
-            .insert("legacy_node_id".to_string(), legacy_node_id.clone());
-        action_provenance
-            .metadata
-            .insert("crate_name".to_string(), crate_node.crate_name.clone());
-        action_provenance.metadata.insert(
-            "crate_type".to_string(),
-            crate_node.crate_type.as_str().to_string(),
-        );
-
-        nodes.push(RulePlanNode {
-            id: action_id.clone(),
-            kind: RulePlanNodeKind::Action,
-            label: legacy_node_id,
-            provenance: action_provenance,
-        });
-        nodes.push(RulePlanNode {
-            id: artifact_id.clone(),
-            kind: RulePlanNodeKind::Artifact,
-            label: format!("artifact:{}", crate_node.crate_name),
-            provenance: base_provenance("rule.rust.artifact", 30 + idx as u32),
-        });
-
-        edges.push(RulePlanEdge {
-            from: group_id.clone(),
-            to: action_id.clone(),
-            kind: RulePlanEdgeKind::Always,
-            provenance: base_provenance("rule.group.depends-on-action", 50 + idx as u32),
-        });
-        edges.push(RulePlanEdge {
-            from: fact_node_id.clone(),
-            to: action_id.clone(),
-            kind: RulePlanEdgeKind::IfChanged,
-            provenance: base_provenance("rule.fact.triggers-action", 70 + idx as u32),
-        });
-        edges.push(RulePlanEdge {
-            from: action_id.clone(),
-            to: artifact_id.clone(),
-            kind: RulePlanEdgeKind::IfWritten,
-            provenance: base_provenance("rule.action.writes-artifact", 90 + idx as u32),
-        });
-
-        artifact_by_crate_id.insert(crate_node.id, artifact_id);
-        action_by_crate_id.insert(crate_node.id, action_id);
-    }
-
-    for (idx, crate_node) in crate_nodes.iter().enumerate() {
-        if let Some(action_id) = action_by_crate_id.get(&crate_node.id) {
-            for dep in &crate_node.deps {
-                if let Some(dep_artifact_id) = artifact_by_crate_id.get(&dep.crate_id) {
-                    edges.push(RulePlanEdge {
-                        from: dep_artifact_id.clone(),
-                        to: action_id.clone(),
-                        kind: RulePlanEdgeKind::IfChanged,
-                        provenance: base_provenance(
-                            "rule.dep-artifact.triggers-action",
-                            120 + idx as u32,
-                        ),
-                    });
-                }
-            }
-
-            if let vx_rs::crate_graph::CrateSource::Registry { name, version, .. } =
-                &crate_node.source
-                && let Some(registry_artifact_id) =
-                    registry_artifact_by_name_version.get(&(name.clone(), version.clone()))
-            {
-                edges.push(RulePlanEdge {
-                    from: registry_artifact_id.clone(),
-                    to: action_id.clone(),
-                    kind: RulePlanEdgeKind::IfChanged,
-                    provenance: base_provenance("rule.registry.triggers-action", 140 + idx as u32),
-                });
-            }
-        }
-    }
-
-    RulePlan {
-        sources: vec![RulePlanSource {
-            id: source_id,
-            path: Utf8PathBuf::from("planner/rust-static.edn"),
-        }],
-        nodes,
-        edges,
-        facts,
-    }
 }
 
 impl VxdService {
@@ -2974,10 +4197,9 @@ impl VxdService {
         let VxdServiceDeps {
             spawn_tracker,
             store,
-            exec,
             build_vx_executors,
             store_handle,
-            runner_handles,
+            activity_registry,
         } = deps;
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -3030,10 +4252,8 @@ impl VxdService {
 
         Self {
             store,
-            exec,
             build_vx_executors: Arc::new(build_vx_executors),
             _store_handle: store_handle,
-            _runner_handles: runner_handles,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
@@ -3045,6 +4265,11 @@ impl VxdService {
                 AcquiredToolchains { rust: None },
             )),
             spawn_tracker,
+            activity_registry,
+            exec_mount_prep_inflight: Arc::new(SyncMutex::new(
+                "vxd/exec_mount_prep_inflight",
+                HashMap::new(),
+            )),
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
             active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
@@ -3056,10 +4281,8 @@ impl VxdService {
     pub fn new_session(&self) -> Self {
         Self {
             store: self.store.clone(),
-            exec: self.exec.clone(),
             build_vx_executors: self.build_vx_executors.clone(),
             _store_handle: self._store_handle.clone(),
-            _runner_handles: self._runner_handles.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
             db: Arc::new(Database::new()),
@@ -3068,6 +4291,8 @@ impl VxdService {
             wal_writer: self.wal_writer.clone(),
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
+            activity_registry: self.activity_registry.clone(),
+            exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
             // Per-connection state: fresh for each session
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
@@ -3267,28 +4492,52 @@ impl VxdService {
                     return Ok(build_failure_result(failure, 1));
                 }
 
-                let root = SourceFile::cast_root(parse.syntax());
-                let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
+                let module = {
+                    let root = SourceFile::cast_root(parse.syntax());
+                    lower_source_file_with_source_id(&root, build_vx_path.to_string())
+                };
+                let event_recorder = std::env::var("VX_TRACE")
+                    .ok()
+                    .map(|_| vx_eval::EventRecorder::new());
                 let build_runtime = BuildVxRuntime {
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
+                    activity_registry: self.activity_registry.clone(),
+                    exec_mount_prep_inflight: self.exec_mount_prep_inflight.clone(),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
+                    exec_fs_tree_snapshot_cache: Arc::new(SyncMutex::new(
+                        "build_vx_fs_tree_snapshot_cache",
+                        HashMap::new(),
+                    )),
+                    module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
+                    module_stack: Arc::new(SyncMutex::new("build_vx_module_stack", HashSet::new())),
+                    event_recorder: event_recorder.clone(),
                 };
                 let engine = build_runtime.build_engine(&module);
                 let output = engine
                     .call_entry(
                         "build",
                         request.project_path.as_str(),
-                        Vec::new(),
-                        Default::default(),
+                        request.args.clone(),
+                        request.env.iter().cloned().collect(),
                     )
+                    .await
                     .map_err(|error| {
                         build_failure_result(
                             build_failure::from_poison_error(&request.project_path, &error),
                             1,
                         )
                     });
+
+                if let Some(recorder) = &event_recorder {
+                    let trace_path = request.project_path.join(".vx/trace.pftrace");
+                    if let Err(error) = recorder.write_perfetto_trace(trace_path.as_std_path()) {
+                        tracing::warn!(%error, path = %trace_path, "failed to write perfetto trace");
+                    } else {
+                        tracing::info!(path = %trace_path, "wrote perfetto trace");
+                    }
+                }
 
                 let output = match output {
                     Ok(output) => output,
@@ -3375,7 +4624,7 @@ impl VxdService {
         })?;
 
         match tree {
-            TreeValue::Inline(entries) => {
+            TreeValue::Inline { entries, .. } => {
                 for (name, value) in entries.iter() {
                     self.materialize_build_vx_value(&output_root.join(name.as_ref()), value)?;
                 }
@@ -3403,7 +4652,7 @@ impl VxdService {
                     message: error.to_string(),
                 })?;
                 match tree {
-                    TreeValue::Inline(entries) => {
+                    TreeValue::Inline { entries, .. } => {
                         for (name, value) in entries.iter() {
                             self.materialize_build_vx_value(&path.join(name.as_ref()), value)?;
                         }
@@ -3512,316 +4761,10 @@ impl VxdService {
         Ok(())
     }
 
-    /// Build from vx.styx manifest (C, Rust, or mixed projects)
-    async fn build_from_vx_styx(
-        &self,
-        _request: BuildRequest,
-        vx_styx_path: camino::Utf8PathBuf,
-    ) -> Result<BuildResult> {
-        use vx_project::{Language, VxManifest};
-
-        // Parse vx.styx
-        let manifest = VxManifest::from_path(&vx_styx_path)
-            .map_err(|e| VxdError::InvalidManifest(format!("Failed to parse vx.styx: {}", e)))?;
-
-        manifest
-            .validate()
-            .map_err(|e| VxdError::InvalidManifest(format!("Invalid vx.styx: {}", e)))?;
-
-        // Determine project language
-        let language = manifest.project.language().ok_or_else(|| {
-            VxdError::InvalidManifest(format!("Unknown language: {}", manifest.project.lang))
-        })?;
-
-        match language {
-            Language::C => {
-                info!(
-                    project = %manifest.project.name,
-                    bins = manifest.bins.len(),
-                    "C project detected"
-                );
-
-                // Get target triple from request or use default
-                let rust_target_triple = self.exec_host_triple.clone();
-
-                // Convert Rust target triple to Zig target format
-                let target_triple = rust_target_triple
-                    .replace("apple-darwin", "macos")
-                    .replace("unknown-linux-gnu", "linux-gnu")
-                    .replace("pc-windows-msvc", "windows");
-                let profile = if _request.release { "release" } else { "debug" };
-
-                // Ingest source tree to CAS
-                // For C projects, we need to collect all source files and ingest them
-                let project_dir = vx_styx_path.parent().unwrap();
-
-                // Collect all .c and .h files (simple approach for MVP)
-                // Ingest each file as a chunk and build a Merkle directory tree
-                let mut tree_files = Vec::new();
-
-                for bin in &manifest.bins {
-                    let source_path = project_dir.join(&bin.sources);
-                    if source_path.exists() {
-                        let contents = ::moire::fs::read(&source_path).await.map_err(|e| {
-                            VxdError::FileRead {
-                                path: source_path.clone(),
-                                message: e.to_string(),
-                            }
-                        })?;
-
-                        let size = contents.len() as u64;
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&contents));
-                        let chunk_hash = ChunkHash(content_hash.0);
-
-                        // Store as chunk
-                        self.store
-                            .put_chunk(chunk_hash, contents)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
-
-                        tree_files.push(crate::cas_tree::TreeFile {
-                            path: bin.sources.clone(),
-                            kind: DirEntryKind::SmallFile {
-                                content_hash,
-                                size,
-                                executable: false,
-                            },
-                        });
-                    }
-                }
-
-                // Build recursive Merkle directory tree
-                let (node_hash, _total_size) =
-                    crate::cas_tree::build_merkle_tree(&self.store, tree_files)
-                        .await
-                        .map_err(VxdError::CasRpc)?;
-
-                let source_manifest = node_hash.0;
-
-                info!(
-                    source_manifest = %source_manifest,
-                    "Source tree ingested"
-                );
-
-                // Create action graph for C project
-                use crate::action_graph::{Action, ActionGraph};
-                let mut graph = ActionGraph::new();
-
-                // Add AcquireZigToolchain action (root node)
-                let zig_version = "0.15.2".to_string();
-                let zig_node = graph.add_action(Action::AcquireZigToolchain {
-                    version: zig_version.clone(),
-                });
-
-                // Process each binary target
-                for bin in &manifest.bins {
-                    // Parse source files (simple glob for now - just one file)
-                    let sources = vec![bin.sources.clone()];
-
-                    // Add run actions for each source file -> produces logical "object"
-                    let mut object_nodes = Vec::new();
-                    for source in &sources {
-                        let output =
-                            format!(".vx/obj/{}.o", source.replace('/', "_").replace(".c", ""));
-                        let object_filename = output
-                            .rsplit_once('/')
-                            .map(|(_, f)| f.to_string())
-                            .unwrap_or_else(|| output.clone());
-                        let out_rel = format!("out/{object_filename}");
-
-                        let mut args = vec![
-                            vx_runner_proto::RunArg::literal("cc"),
-                            vx_runner_proto::RunArg::literal("-c"),
-                            vx_runner_proto::RunArg::path(format!("src/{source}")),
-                            vx_runner_proto::RunArg::literal("-o"),
-                            vx_runner_proto::RunArg::path(out_rel.clone()),
-                            vx_runner_proto::RunArg::literal("-target"),
-                            vx_runner_proto::RunArg::literal(target_triple.clone()),
-                        ];
-
-                        if profile == "release" {
-                            args.push(vx_runner_proto::RunArg::literal("-O3"));
-                        } else {
-                            args.push(vx_runner_proto::RunArg::literal("-O0"));
-                            args.push(vx_runner_proto::RunArg::literal("-g"));
-                        }
-
-                        let compile_node = graph.add_action(Action::Run {
-                            label: format!("cc {source}"),
-                            kind: crate::action_graph::RunKind::Generic,
-                            toolchain: crate::action_graph::RunToolchain::Zig,
-                            program_rel: "zig".to_string(),
-                            args,
-                            env: vec![],
-                            cwd: None,
-                            clear_env: true,
-                            tree_mounts: vec![vx_runner_proto::RunTreeMount {
-                                mount: "src".to_string(),
-                                manifest: source_manifest,
-                            }],
-                            dep_tree_mounts: vec![],
-                            file_mounts: vec![],
-                            dep_file_mounts: vec![],
-                            collect_file_mounts: vec![],
-                            outputs: vec![vx_runner_proto::RunOutput {
-                                logical: "object".to_string(),
-                                path: out_rel,
-                                executable: false,
-                            }],
-                            writable_roots: vec!["out".to_string()],
-                            materialize: vec![],
-                        });
-
-                        // Depends on Zig toolchain
-                        graph.add_edge(zig_node, compile_node);
-                        object_nodes.push(compile_node);
-                    }
-
-                    // Add run action to link -> produces logical "binary"
-                    let binary_output = format!("bin/{}", bin.name);
-                    let binary_filename = binary_output
-                        .rsplit_once('/')
-                        .map(|(_, f)| f.to_string())
-                        .unwrap_or_else(|| binary_output.clone());
-                    let out_rel = format!("out/{binary_filename}");
-
-                    let mut args = vec![
-                        vx_runner_proto::RunArg::literal("cc"),
-                        vx_runner_proto::RunArg::literal("-target"),
-                        vx_runner_proto::RunArg::literal(target_triple.clone()),
-                    ];
-                    for (idx, _) in sources.iter().enumerate() {
-                        args.push(vx_runner_proto::RunArg::path(format!("obj/{idx:04}.o")));
-                    }
-                    args.push(vx_runner_proto::RunArg::literal("-o"));
-                    args.push(vx_runner_proto::RunArg::path(out_rel.clone()));
-
-                    let link_node = graph.add_action(Action::Run {
-                        label: format!("link {}", bin.name),
-                        kind: crate::action_graph::RunKind::Generic,
-                        toolchain: crate::action_graph::RunToolchain::Zig,
-                        program_rel: "zig".to_string(),
-                        args,
-                        env: vec![],
-                        cwd: None,
-                        clear_env: true,
-                        tree_mounts: vec![],
-                        dep_tree_mounts: vec![],
-                        file_mounts: vec![],
-                        dep_file_mounts: vec![],
-                        collect_file_mounts: vec![crate::action_graph::RunCollectInput {
-                            logical: "object".to_string(),
-                            path_prefix: "obj/".to_string(),
-                            path_suffix: ".o".to_string(),
-                            pad_width: 4,
-                        }],
-                        outputs: vec![vx_runner_proto::RunOutput {
-                            logical: "binary".to_string(),
-                            path: out_rel,
-                            executable: true,
-                        }],
-                        writable_roots: vec!["out".to_string()],
-                        materialize: vec![crate::action_graph::RunMaterialize {
-                            logical: "binary".to_string(),
-                            workspace_rel_path: binary_output.clone(),
-                        }],
-                    });
-
-                    // Depends on all object files and Zig toolchain
-                    graph.add_edge(zig_node, link_node);
-                    for obj_node in object_nodes {
-                        graph.add_edge(obj_node, link_node);
-                    }
-                }
-
-                // Dump graph for debugging
-                graph.dump_graph();
-
-                // Set total number of actions for progress tracking
-                let total_actions = graph.node_count();
-                self.report_set_total(total_actions as u64).await;
-
-                // Execute action graph
-                let max_concurrency = std::thread::available_parallelism()
-                    .map(|n| n.get() * 2)
-                    .unwrap_or(16);
-
-                let progress_listener = self.progress_listener.lock().clone();
-                let session_id = self.session_id().await;
-
-                let mut executor = crate::executor::Executor::new(
-                    graph,
-                    progress_listener,
-                    self.store.clone(),
-                    self.exec.clone(),
-                    self.db.clone(),
-                    project_dir.to_path_buf(),
-                    target_triple.clone(),
-                    profile.to_string(),
-                    session_id,
-                    max_concurrency,
-                );
-
-                // Register the executor's cancel token so signal handlers can cancel this build
-                *self.active_build_cancel.lock() = Some(executor.cancel_token());
-
-                let build_start = std::time::Instant::now();
-                let exec_result = executor.execute().await;
-                let duration = build_start.elapsed();
-
-                // Clear the cancel token now that the build is done
-                *self.active_build_cancel.lock() = None;
-                exec_result?;
-
-                // Get execution statistics
-                let exec_stats = executor.get_stats();
-
-                info!(
-                    duration_ms = duration.as_millis(),
-                    cache_hits = exec_stats.cache_hits,
-                    rebuilt = exec_stats.rebuilt,
-                    "C build completed successfully"
-                );
-
-                Ok(BuildResult {
-                    success: true,
-                    message: format!("Built {} C binary targets", manifest.bins.len()),
-                    cached: exec_stats.cache_hits == total_actions,
-                    duration_ms: duration.as_millis() as u64,
-                    output_path: exec_stats.bin_output,
-                    error: None,
-                    failure: None,
-                    total_actions,
-                    cache_hits: exec_stats.cache_hits,
-                    rebuilt: exec_stats.rebuilt,
-                    cancelled: exec_stats.cancelled,
-                })
-            }
-            Language::Rust => {
-                // TODO: Convert vx.styx Rust project to Cargo.toml path
-                // For now, fail with helpful message
-                Err(VxdError::InvalidManifest(
-                    "Rust projects via vx.styx not yet supported - use Cargo.toml for now"
-                        .to_string(),
-                ))
-            }
-        }
-    }
-
     /// Build a project.
     pub async fn do_build(&self, request: BuildRequest) -> Result<BuildResult> {
         let project_path = &request.project_path;
         let total_start = std::time::Instant::now();
-
-        let target_triple = self.exec_host_triple.clone();
-
-        // Check for vx.styx first (unified project manifest)
-        let vx_styx_path = project_path.join("vx.styx");
-        if vx_styx_path.exists() {
-            info!("Found vx.styx, using unified project manifest");
-            return self.build_from_vx_styx(request, vx_styx_path).await;
-        }
 
         let build_vx_path = request
             .build_file_path
@@ -3840,498 +4783,9 @@ impl VxdService {
                 build_vx_path
             )));
         }
-
-        let cargo_manifest_path = project_path.join("Cargo.toml");
-        if !cargo_manifest_path.exists() {
-            return Err(VxdError::InvalidManifest(
-                "expected vx.styx or Cargo.toml at the project root".to_string(),
-            ));
-        }
-
-        // r[impl eval.entry.cargo-compat]
-        // Fall back to Cargo.toml (Rust-only projects) only when no build.vx exists.
-        // Build the crate graph with lockfile support
-        let graph = CrateGraph::build_with_lockfile(project_path)
-            .map_err(|e| VxdError::CrateGraph(format!("{e:?}")))?;
-
-        let profile = if request.release { "release" } else { "debug" };
-
-        info!(
-            workspace_root = %graph.workspace_root,
-            path_crate_count = graph.nodes.len(),
-            registry_crate_count = graph.iter_registry_crates().count(),
-            "resolved crate graph, building action graph"
-        );
-
-        let mut rule_plan_plan: Option<RulePlan> = None;
-        let mut rule_plan_topology: Option<vx_report::GraphTopology> = None;
-        if rule_plan_bridge_enabled() {
-            info!(
-                "VX_RULE_PLAN_BRIDGE is enabled; validating/lowering RulePlan and using RulePlan topology in report"
-            );
-            let plan = if let Some(rules_file) = vx_rules_file() {
-                let rules_path = if rules_file.is_absolute() {
-                    rules_file
-                } else {
-                    graph.workspace_root.join(rules_file)
-                };
-                let source_rel = rules_path
-                    .strip_prefix(&graph.workspace_root)
-                    .ok()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| rules_path.clone());
-
-                info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
-                let contents = ::moire::fs::read_to_string(&rules_path)
-                    .await
-                    .map_err(|e| VxdError::FileRead {
-                        path: rules_path.clone(),
-                        message: e.to_string(),
-                    })?;
-
-                let source_id =
-                    vx_plan::RulePlanSourceId::from(format!("vx:{}", source_rel.as_str()));
-                let source = vx_plan::RulePlanSource {
-                    id: source_id.clone(),
-                    path: source_rel.clone(),
-                };
-
-                let program = vx_plan::vx_lang::parse_vx_program(
-                    rules_path.as_path(),
-                    source_id.clone(),
-                    &contents,
-                )
-                .map_err(|e| {
-                    VxdError::InvalidManifest(format!("failed to parse {}: {}", source_rel, e))
-                })?;
-
-                struct VxdRulesHost<'a> {
-                    inner: vx_plan::runtime::RulePlanHost,
-                    crate_graph: &'a CrateGraph,
-                }
-
-                impl<'a> VxdRulesHost<'a> {
-                    fn into_inner(self) -> vx_plan::runtime::RulePlanHost {
-                        self.inner
-                    }
-                }
-
-                impl<'a> vx_plan::runtime::PlannerHost for VxdRulesHost<'a> {
-                    fn register_builtin(
-                        &mut self,
-                        builtin: vx_plan::runtime::PlannerBuiltin,
-                    ) -> std::result::Result<(), String> {
-                        self.inner.register_builtin(builtin)
-                    }
-
-                    fn invoke_builtin(
-                        &mut self,
-                        builtin: vx_plan::runtime::PlannerBuiltinId,
-                        args: vx_plan::runtime::PlannerBuiltinArgs,
-                        site: &vx_plan::runtime::PlannerCallSite,
-                    ) -> std::result::Result<vx_plan::runtime::PlannerValue, String>
-                    {
-                        use vx_plan::runtime::{PlannerBuiltinArgs, PlannerBuiltinId};
-
-                        match (builtin, args) {
-                            (
-                                PlannerBuiltinId::RustCrateGraph,
-                                PlannerBuiltinArgs::RustCrateGraph,
-                            ) => Ok(crate_graph_to_planner_value(self.crate_graph)),
-                            (builtin, args) => self.inner.invoke_builtin(builtin, args, site),
-                        }
-                    }
-                }
-
-                fn crate_graph_to_planner_value(
-                    crate_graph: &CrateGraph,
-                ) -> vx_plan::runtime::PlannerValue {
-                    use vx_plan::runtime::PlannerValue;
-
-                    let mut crates = crate_graph.nodes.values().collect::<Vec<_>>();
-                    crates.sort_by(|a, b| {
-                        a.crate_name
-                            .cmp(&b.crate_name)
-                            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
-                            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-                    });
-
-                    let crates_value = crates
-                        .into_iter()
-                        .map(|node| {
-                            let deps = {
-                                let mut deps = node
-                                    .deps
-                                    .iter()
-                                    .map(|d| d.crate_id.to_string())
-                                    .collect::<Vec<_>>();
-                                deps.sort();
-                                deps.into_iter()
-                                    .map(PlannerValue::String)
-                                    .collect::<Vec<_>>()
-                            };
-
-                            let mut source = std::collections::BTreeMap::new();
-                            match &node.source {
-                                vx_rs::crate_graph::CrateSource::Path { workspace_rel } => {
-                                    source.insert(
-                                        "kind".to_string(),
-                                        PlannerValue::Keyword("path".to_string()),
-                                    );
-                                    source.insert(
-                                        "workspace_rel".to_string(),
-                                        PlannerValue::String(workspace_rel.to_string()),
-                                    );
-                                }
-                                vx_rs::crate_graph::CrateSource::Registry {
-                                    name,
-                                    version,
-                                    checksum,
-                                } => {
-                                    source.insert(
-                                        "kind".to_string(),
-                                        PlannerValue::Keyword("registry".to_string()),
-                                    );
-                                    source.insert(
-                                        "name".to_string(),
-                                        PlannerValue::String(name.clone()),
-                                    );
-                                    source.insert(
-                                        "version".to_string(),
-                                        PlannerValue::String(version.clone()),
-                                    );
-                                    source.insert(
-                                        "checksum".to_string(),
-                                        PlannerValue::String(checksum.clone()),
-                                    );
-                                }
-                            }
-
-                            let mut m = std::collections::BTreeMap::new();
-                            m.insert("id".to_string(), PlannerValue::String(node.id.to_string()));
-                            m.insert(
-                                "name".to_string(),
-                                PlannerValue::String(node.crate_name.clone()),
-                            );
-                            m.insert(
-                                "type".to_string(),
-                                PlannerValue::String(node.crate_type.as_str().to_string()),
-                            );
-                            m.insert("deps".to_string(), PlannerValue::Vector(deps));
-                            m.insert("source".to_string(), PlannerValue::Map(source));
-                            PlannerValue::Map(m)
-                        })
-                        .collect::<Vec<_>>();
-
-                    let topo = crate_graph
-                        .topo_order
-                        .iter()
-                        .map(|id| PlannerValue::String(id.to_string()))
-                        .collect::<Vec<_>>();
-
-                    let mut out = std::collections::BTreeMap::new();
-                    out.insert(
-                        "workspace_root".to_string(),
-                        PlannerValue::String(crate_graph.workspace_root.to_string()),
-                    );
-                    out.insert(
-                        "root".to_string(),
-                        PlannerValue::String(crate_graph.root_crate.to_string()),
-                    );
-                    out.insert("topo".to_string(), PlannerValue::Vector(topo));
-                    out.insert("crates".to_string(), PlannerValue::Vector(crates_value));
-
-                    PlannerValue::Map(out)
-                }
-
-                let mut inner = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
-                inner.set_env_profile(profile.to_string());
-                inner.set_env_target_triple(target_triple.to_string());
-
-                let host = VxdRulesHost {
-                    inner,
-                    crate_graph: &graph,
-                };
-
-                let mut runtime = vx_plan::runtime::PlannerRuntime::new(
-                    host,
-                    vx_plan::runtime::PlannerPolicy::deterministic(),
-                    vx_plan::runtime::planner_builtins_with_rust(),
-                )
-                .map_err(VxdError::InvalidManifest)?;
-
-                runtime.evaluate_program(&program).map_err(|e| {
-                    VxdError::InvalidManifest(format!("VX rules runtime error: {e}"))
-                })?;
-                let host = runtime.into_host().into_inner();
-                let plan = host.into_plan();
-                plan.validate()
-                    .map_err(|e| VxdError::InvalidManifest(e.to_string()))?;
-                plan
-            } else {
-                build_rule_plan_from_crate_graph(&graph)
-            };
-            rule_plan_plan = Some(plan.clone());
-            let lowered = crate::action_graph::ActionGraph::from_rule_plan(&plan)
-                .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?;
-            rule_plan_topology = Some(lowered.to_topology());
-        }
-
-        use crate::action_graph::ActionGraph;
-        // Execution remains on the real Rust action graph while RulePlan evolves.
-        // This keeps behavior stable while letting us move planner semantics forward.
-        let placeholder_hash = Blake3Hash([0u8; 32]);
-        let toolchain = RustToolchain::new(
-            &*self.db,
-            placeholder_hash,
-            placeholder_hash,
-            target_triple.clone(),
-            target_triple.clone(),
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        RustToolchainManifest::set(&*self.db, placeholder_hash)
-            .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        let session_id = self.session_id().await;
-        let build_key = BuildConfig::compute_key(
-            profile,
-            &target_triple,
-            graph.workspace_root.as_ref(),
-            &session_id,
-        );
-        let config = BuildConfig::new(
-            &*self.db,
-            build_key,
-            profile.to_string(),
-            target_triple.clone(),
-            graph.workspace_root.to_string(),
-            session_id,
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        use vx_store_proto::RustChannel;
-        let action_graph = if rule_plan_exec_enabled() {
-            if !rule_plan_bridge_enabled() {
-                return Err(VxdError::InvalidManifest(
-                    "VX_RULE_PLAN_EXEC requires VX_RULE_PLAN_BRIDGE=1".to_string(),
-                ));
-            }
-            let Some(plan) = rule_plan_plan.as_ref() else {
-                return Err(VxdError::InvalidManifest(
-                    "VX_RULE_PLAN_EXEC is enabled but RulePlan was not produced".to_string(),
-                ));
-            };
-            info!(
-                nodes = plan.nodes.len(),
-                edges = plan.edges.len(),
-                "RulePlan execution enabled; executing ActionGraph lowered from RulePlan"
-            );
-            ActionGraph::from_rule_plan_executable(
-                plan,
-                &graph,
-                RustChannel::Stable,
-                target_triple.clone(),
-                toolchain,
-                config,
-                &self.db,
-            )
-            .map_err(|e| {
-                VxdError::InvalidManifest(format!("RulePlan executable lowering failed: {e}"))
-            })?
-        } else {
-            ActionGraph::from_crate_graph(
-                &graph,
-                RustChannel::Stable,
-                target_triple.clone(),
-                toolchain,
-                config,
-                &self.db,
-            )?
-        };
-
-        // In exec mode, the executed graph is the topology we want to report.
-        if rule_plan_exec_enabled() {
-            rule_plan_topology = Some(action_graph.to_topology());
-        }
-
-        // Parity harness compares the legacy crate-graph planner to RulePlan topology. Once we are
-        // executing RulePlan directly, parity is no longer meaningful (and will drift by design).
-        let legacy_topology = action_graph.to_topology();
-        if !rule_plan_exec_enabled()
-            && let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref()
-        {
-            let parity = compare_rule_plan_parity(&legacy_topology, rule_plan_topology_ref);
-            if parity.has_drift() {
-                let max_examples = 5;
-                warn!(
-                    missing = ?parity
-                        .missing_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    extra = ?parity
-                        .extra_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    legacy_focus_count = parity.legacy_focus_count,
-                    rule_plan_focus_count = parity.rule_plan_focus_count,
-                    "RulePlan parity drift detected for compile/registry nodes"
-                );
-                if rule_plan_parity_strict_enabled() {
-                    return Err(VxdError::InvalidManifest(
-                            "RulePlan parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                                .to_string(),
-                        ));
-                }
-            } else {
-                info!(
-                    focus_node_count = parity.legacy_focus_count,
-                    "RulePlan parity check passed for compile/registry nodes"
-                );
-            }
-
-            let edge_parity =
-                compare_rule_plan_edge_parity(&legacy_topology, rule_plan_topology_ref);
-            if edge_parity.has_drift() {
-                let max_examples = 5;
-                warn!(
-                    missing = ?edge_parity
-                        .missing_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    extra = ?edge_parity
-                        .extra_in_rule_plan
-                        .iter()
-                        .take(max_examples)
-                        .collect::<Vec<_>>(),
-                    "RulePlan edge parity drift detected for compile/registry node dependencies"
-                );
-                if rule_plan_parity_strict_enabled() {
-                    return Err(VxdError::InvalidManifest(
-                            "RulePlan edge parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                                .to_string(),
-                        ));
-                }
-            } else {
-                info!("RulePlan edge parity check passed for compile/registry node dependencies");
-            }
-        }
-
-        // Dump graph for debugging
-        action_graph.dump_graph();
-
-        // Set total number of actions for progress tracking
-        // Total = 1 toolchain + N registry crates + M compilations
-        let total_actions = action_graph.node_count();
-        self.report_set_total(total_actions as u64).await;
-
-        let max_concurrency = std::thread::available_parallelism()
-            .map(|n| n.get() * 2)
-            .unwrap_or(16);
-        tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
-
-        // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
-        let progress_listener = self.progress_listener.lock().clone();
-        let session_id = self.session_id().await;
-
-        let mut executor = Executor::new(
-            action_graph,
-            progress_listener,
-            self.store.clone(),
-            self.exec.clone(),
-            self.db.clone(),
-            graph.workspace_root.clone(),
-            target_triple.clone(),
-            profile.to_string(),
-            session_id,
-            max_concurrency,
-        );
-
-        // Register the executor's cancel token so signal handlers can cancel this build
-        *self.active_build_cancel.lock() = Some(executor.cancel_token());
-
-        tracing::debug!("calling executor.execute()");
-        let exec_result = executor.execute().await;
-        tracing::debug!("executor.execute() completed");
-
-        // Clear the cancel token now that the build is done
-        *self.active_build_cancel.lock() = None;
-        exec_result?;
-
-        // Append changes to WAL after build (incremental persistence)
-        // Take the writer out of the mutex so we don't hold the guard across await
-        let wal_writer = self.wal_writer.lock().take();
-        if let Some(mut wal) = wal_writer {
-            match self.db.append_to_wal(&mut wal).await {
-                Ok(count) if count > 0 => {
-                    info!(path = %self.picante_wal, entries = count, "appended changes to WAL");
-                    if let Err(e) = wal.flush() {
-                        warn!(path = %self.picante_wal, error = %e, "failed to flush WAL");
-                    }
-                }
-                Ok(_) => {
-                    debug!("no WAL changes to persist");
-                }
-                Err(e) => {
-                    warn!(path = %self.picante_wal, error = %e, "failed to append to WAL");
-                }
-            }
-            // Put it back
-            *self.wal_writer.lock() = Some(wal);
-        }
-
-        // Get execution statistics
-        let mut exec_stats = executor.get_stats();
-        if let Some(rule_plan_graph) = rule_plan_topology {
-            exec_stats.graph_topology = Some(rule_plan_graph);
-        }
-        let duration = total_start.elapsed();
-
-        // Create and save build report
-        let mut report = BuildReport::new(
-            graph.workspace_root.to_string(),
-            profile.to_string(),
-            target_triple.clone(),
-        );
-
-        // Add node reports from execution
-        for node_report in exec_stats.node_reports.iter() {
-            report.add_node(node_report.clone());
-        }
-
-        // Add graph topology
-        report.graph = exec_stats.graph_topology;
-
-        // Finalize the report
-        report.finalize(true, None);
-
-        // Save the report to the project's .vx/runs/ directory
-        let report_store = ReportStore::new(&graph.workspace_root);
-        if let Err(e) = report_store.save(&report).await {
-            warn!(error = %e, "failed to save build report");
-        } else {
-            debug!(run_id = %report.run_id, "saved build report");
-        }
-
-        Ok(BuildResult {
-            success: true,
-            message: format!(
-                "Build completed: {} rebuilt, {} cached",
-                exec_stats.rebuilt, exec_stats.cache_hits
-            ),
-            cached: exec_stats.rebuilt == 0 && exec_stats.cache_hits > 0,
-            duration_ms: duration.as_millis() as u64,
-            output_path: exec_stats.bin_output,
-            error: None,
-            failure: None,
-            total_actions,
-            cache_hits: exec_stats.cache_hits,
-            rebuilt: exec_stats.rebuilt,
-            cancelled: exec_stats.cancelled,
-        })
+        Err(VxdError::InvalidManifest(
+            "expected build.vx at the project root".to_string(),
+        ))
     }
 }
 
@@ -4398,6 +4852,12 @@ impl VxdRpc for VxdService {
         }
 
         UnpublishResult { removed, not_found }
+    }
+
+    async fn ps(&self) -> PsResult {
+        PsResult {
+            entries: self.activity_registry.snapshot(),
+        }
     }
 
     async fn version(&self) -> ServiceVersion {

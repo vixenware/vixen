@@ -9,14 +9,11 @@
 //! - Ingest outputs to CAS
 //! - Return output manifest hashes
 
-pub(crate) mod error;
 pub(crate) mod eval_boundary;
 pub(crate) mod sandbox;
 pub(crate) mod service;
 pub(crate) mod service_vfs;
 pub(crate) mod vfsd_client;
-
-use error::{Result as RunnerResult, RunnerError};
 
 use camino::Utf8PathBuf;
 use eyre::Result;
@@ -27,13 +24,12 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
-use std::collections::HashMap;
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerDispatcher;
-use vx_store_proto::{Blake3Hash, StoreClient};
+use vx_store_proto::StoreClient;
 
 use crate::vfsd_client::VfsdClient as VfsClient;
 
@@ -78,13 +74,14 @@ impl ConnectionAcceptor for RunnerVirtualAcceptor {
 }
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
-    // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
-    let vx_home = Utf8PathBuf::from(
-        std::env::var("VX_HOME")
-            .expect("VX_HOME not set — vx-runner must be launched by `vx` or with VX_HOME set"),
-    );
-
-    vx_home.join("vfs")
+    if cfg!(target_os = "macos") {
+        // Global long-lived VixenFS mount path. vx-vfsd owns mount lifecycle.
+        Utf8PathBuf::from("/tmp/vx/vfs")
+    } else if let Ok(vx_home) = std::env::var("VX_HOME") {
+        Utf8PathBuf::from(vx_home).join("vfs")
+    } else {
+        Utf8PathBuf::from("/tmp/vx/vfs")
+    }
 }
 
 /// vx-runner - Worker daemon
@@ -238,7 +235,6 @@ async fn boot_runner(
 
     let store_endpoint = Endpoint::parse(store_addr)?;
     let vfsd_endpoint = Endpoint::parse(vfsd_addr)?;
-    let mount_path = runner_mount_base();
 
     let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
         .caller_name("vx-runner")
@@ -247,10 +243,10 @@ async fn boot_runner(
     let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone())
         .caller_name("vx-runner")
         .args(&[
-            "--mount",
-            mount_path.as_str(),
             "--store",
             &store_endpoint.display(),
+            "--mount",
+            runner_mount_base().as_str(),
         ])
         .log_path(vx_home.join("vfsd.log"))
         .env("VX_HOME", vx_home.as_str());
@@ -280,10 +276,21 @@ async fn boot_runner(
     let store = Arc::new(StoreClient::new(store_virtual));
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
     let vfs = VfsClient::new(vfsd_protocol, Arc::clone(&store));
+    let vfs_access_path = Utf8PathBuf::from(
+        vfs.access_path()
+            .await
+            .map_err(|e| eyre::eyre!("failed to get VFS access path from vx-vfsd: {e}"))?,
+    );
 
-    let exec = RunnerService::new(store, Arc::new(vfs), store_handle, vfsd_handle);
+    let exec = RunnerService::new(
+        store,
+        Arc::new(vfs),
+        vfs_access_path.clone(),
+        store_handle,
+        vfsd_handle,
+    );
 
-    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
+    tracing::info!("VFS provided by vx-vfsd at {}", vfs_access_path);
 
     Ok(exec)
 }
@@ -296,18 +303,12 @@ pub struct RunnerServiceInner {
     /// VFS client for hermetic action execution (via vx-vfsd RPC)
     pub(crate) vfs: Arc<VfsClient>,
 
+    /// Real filesystem access path for the mounted VFS session.
+    pub(crate) vfs_access_path: Utf8PathBuf,
+
     /// Retain the upstream root handles for the lifetime of the runner service.
     _store_handle: ServiceHandle,
     _vfsd_handle: ServiceHandle,
-
-    /// Single-flight deduplication for toolchain prefix creation.
-    /// Concurrent requests for the same toolchain coalesce into one operation.
-    /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
-    /// toolchain manifest won't fix itself without a new runner session.
-    #[allow(clippy::type_complexity)]
-    toolchain_flights: moire::sync::SyncMutex<
-        HashMap<Blake3Hash, Arc<moire::sync::OnceCell<Result<String, String>>>>,
-    >,
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -335,6 +336,7 @@ impl RunnerService {
     pub fn new(
         cas: Arc<StoreClient>,
         vfs: Arc<VfsClient>,
+        vfs_access_path: Utf8PathBuf,
         store_handle: ServiceHandle,
         vfsd_handle: ServiceHandle,
     ) -> Self {
@@ -342,12 +344,9 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
+                vfs_access_path,
                 _store_handle: store_handle,
                 _vfsd_handle: vfsd_handle,
-                toolchain_flights: moire::sync::SyncMutex::new(
-                    "runner/toolchain_flights",
-                    HashMap::new(),
-                ),
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }
@@ -392,250 +391,6 @@ impl RunnerService {
         panic!("Failed to generate unique prefix ID after 3 attempts");
     }
 
-    /// Ensure a toolchain prefix exists in the VFS.
-    ///
-    /// Toolchain prefixes are stable — keyed by `toolchain_manifest_hash` — and
-    /// persist for the lifetime of the runner. This means the macOS FS cache stays
-    /// warm across compilations that use the same toolchain.
-    ///
-    /// Returns the prefix ID (e.g., "tc-ab3f...").
-    ///
-    /// Layout under the prefix:
-    /// ```text
-    /// tc-{short_hex}/
-    ///   bin/rustc          (from rustc component)
-    ///   sysroot/lib/...    (from rust-std component)
-    ///   zig                (from zig-exe component)
-    ///   lib/...            (from zig-lib component)
-    /// ```
-    pub(crate) async fn ensure_toolchain_prefix(
-        &self,
-        toolchain_manifest_hash: Blake3Hash,
-    ) -> RunnerResult<String> {
-        // Single-flight: concurrent callers for the same toolchain coalesce into one.
-        let cell = {
-            let mut flights = self.toolchain_flights.lock();
-            flights
-                .entry(toolchain_manifest_hash)
-                .or_insert_with(|| Arc::new(moire::sync::OnceCell::new("toolchain_prefix_flight")))
-                .clone()
-        };
-        let result = cell
-            .get_or_init(|| async {
-                self.populate_toolchain_prefix(toolchain_manifest_hash)
-                    .await
-                    .map_err(|e| format!("{e:?}"))
-            })
-            .await;
-        match result {
-            Ok(prefix_id) => Ok(prefix_id.clone()),
-            Err(msg) => Err(RunnerError::CasFetch(msg.clone())),
-        }
-    }
-
-    async fn populate_toolchain_prefix(
-        &self,
-        toolchain_manifest_hash: Blake3Hash,
-    ) -> RunnerResult<String> {
-        let prefix_id = format!("tc-{}", toolchain_manifest_hash.short_hex());
-
-        tracing::debug!(
-            prefix_id = %prefix_id,
-            toolchain_manifest = %toolchain_manifest_hash,
-            "creating new toolchain prefix"
-        );
-
-        // Get the toolchain manifest from CAS
-        let toolchain_manifest = self
-            .cas
-            .get_toolchain_manifest(vx_store_proto::NodeHash(toolchain_manifest_hash))
-            .await?
-            .ok_or(RunnerError::ToolchainManifestNotFound(
-                toolchain_manifest_hash,
-            ))?;
-
-        tracing::debug!(
-            component_count = toolchain_manifest.components.len(),
-            "loaded toolchain manifest"
-        );
-
-        // Create the prefix
-        self.vfs.create_prefix(prefix_id.clone()).await;
-
-        // Add each component's tree to the VFS prefix
-        for component in &toolchain_manifest.components {
-            tracing::debug!(
-                component_name = %component.name,
-                tree_root = %component.tree_root,
-                "mounting component tree in VFS"
-            );
-
-            // Determine mount path prefix for this component
-            // Files go directly under the prefix root — no "toolchain/" nesting.
-            // The prefix itself IS the toolchain.
-            let mount_path = if component.name == "rustc" {
-                ""
-            } else if component.name == "rust-std" {
-                "sysroot"
-            } else if matches!(component.name.as_str(), "zig-exe" | "zig-lib") {
-                ""
-            } else {
-                &component.name
-            };
-
-            // Mount the entire component tree at once
-            self.vfs
-                .mount_tree(&prefix_id, mount_path, component.tree_root.0)
-                .await
-                .map_err(|e| {
-                    RunnerError::VfsMount(format!(
-                        "failed to mount toolchain component {}: {}",
-                        component.name, e
-                    ))
-                })?;
-        }
-
-        tracing::info!(
-            prefix_id = %prefix_id,
-            toolchain_manifest = %toolchain_manifest_hash,
-            "toolchain prefix created"
-        );
-
-        // Verify the toolchain is actually visible at the VFS mount point.
-        // FSKit mounts can be flaky; catch the problem early with a clear error.
-        let has_rustc = toolchain_manifest
-            .components
-            .iter()
-            .any(|c| c.name == "rustc");
-        if has_rustc {
-            let rustc_bin = format!("bin/rustc{}", std::env::consts::EXE_SUFFIX);
-            let rustc_vfs_path = runner_mount_base().join(&prefix_id).join(&rustc_bin);
-            if !rustc_vfs_path.as_std_path().exists() {
-                let mount_base = runner_mount_base();
-                let mount_exists = mount_base.as_std_path().exists();
-                let prefix_exists = mount_base.join(&prefix_id).as_std_path().exists();
-                let bin_exists = mount_base
-                    .join(&prefix_id)
-                    .join("bin")
-                    .as_std_path()
-                    .exists();
-                tracing::error!(
-                    %rustc_vfs_path,
-                    %mount_base,
-                    mount_exists,
-                    prefix_exists,
-                    bin_exists,
-                    "toolchain mounted but bin/rustc not visible at VFS path"
-                );
-                return Err(RunnerError::VfsMount(format!(
-                    "toolchain prefix {} created but bin/rustc not found at {} \
-                     (mount_base exists={}, prefix exists={}, bin/ exists={})",
-                    prefix_id, rustc_vfs_path, mount_exists, prefix_exists, bin_exists,
-                )));
-            }
-        }
-
-        Ok(prefix_id)
-    }
-
-    /// Add a source tree to an action prefix
-    pub(crate) async fn add_source_tree_to_prefix(
-        &self,
-        action: &crate::service_vfs::ActionContext,
-        source_manifest_hash: Blake3Hash,
-    ) -> RunnerResult<()> {
-        tracing::debug!(
-            source_manifest = %source_manifest_hash,
-            "mounting source tree in VFS"
-        );
-
-        // Mount the entire source tree at src/
-        // source_manifest_hash is a NodeHash of a DirectoryNode
-        self.vfs
-            .mount_tree(
-                &action.prefix_id,
-                crate::service_vfs::ActionContext::SOURCES_DIR,
-                source_manifest_hash,
-            )
-            .await
-            .map_err(|e| RunnerError::VfsMount(format!("failed to mount source tree: {}", e)))?;
-
-        Ok(())
-    }
-
-    /// Add a dependency artifact to an action prefix
-    pub(crate) async fn add_dep_to_prefix(
-        &self,
-        action: &crate::service_vfs::ActionContext,
-        extern_name: &str,
-        manifest_hash: Blake3Hash,
-    ) -> RunnerResult<()> {
-        // Get the dependency manifest from CAS (stored as CasNode::Manifest)
-        let node_data = self
-            .cas
-            .get_node(vx_store_proto::NodeHash(manifest_hash))
-            .await?
-            .ok_or(RunnerError::DependencyManifestNotFound(manifest_hash))?;
-
-        let manifest = match vx_store_proto::CasNode::from_bytes(&node_data) {
-            Ok(vx_store_proto::CasNode::Manifest(m)) => m,
-            Ok(_) => {
-                return Err(RunnerError::CasFetch(format!(
-                    "node {} is not a Manifest",
-                    manifest_hash
-                )));
-            }
-            Err(e) => {
-                return Err(RunnerError::CasFetch(format!(
-                    "failed to deserialize manifest {}: {}",
-                    manifest_hash, e
-                )));
-            }
-        };
-
-        // Find the rlib output
-        let rlib = manifest
-            .outputs
-            .iter()
-            .find(|o| o.logical == "rlib")
-            .ok_or_else(|| {
-                RunnerError::CasFetch(format!("no rlib in manifest for {}", extern_name))
-            })?;
-
-        // Extract blob hash and size from OutputBlobRef
-        let (blob_hash, blob_size) = match &rlib.blob {
-            vx_store_proto::OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
-            vx_store_proto::OutputBlobRef::Large {
-                content_hash, size, ..
-            } => (content_hash.0, *size),
-        };
-
-        let path = format!("deps/lib{}.rlib", extern_name);
-        self.vfs
-            .add_file_to_prefix(&action.prefix_id, &path, blob_hash, blob_size, false)
-            .await
-            .map_err(|e| {
-                RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e))
-            })?;
-
-        Ok(())
-    }
-
-    /// Create the output directory in a prefix
-    pub(crate) async fn create_output_dir_in_prefix(&self, prefix_id: &str) {
-        self.vfs.add_dir_to_prefix(prefix_id, "out").await;
-    }
-
-    /// Flush all written files in a prefix to CAS
-    ///
-    /// Returns a map of relative paths (e.g., "out/libfoo.rlib") to CAS hashes.
-    pub(crate) async fn flush_prefix_outputs(
-        &self,
-        prefix_id: &str,
-    ) -> HashMap<String, (Blake3Hash, u64)> {
-        self.vfs.flush_prefix_to_cas(prefix_id).await
-    }
-
     /// Clean up an action prefix
     pub(crate) async fn remove_action_prefix(&self, prefix_id: &str) {
         self.vfs.remove_prefix(prefix_id).await;
@@ -665,8 +420,7 @@ pub(crate) fn register_child_pgroup(pgid: u32) {
 /// Spawns vx-reaper which watches our PID via kqueue. vx-runner writes
 /// child process group IDs to the reaper's stdin as it spawns them.
 /// If vx-runner dies for any reason (including SIGKILL), the reaper
-/// kills all known child process groups, preventing orphaned compiler
-/// subprocesses from getting stuck on a dead FSKit mount.
+/// kills all known child process groups to avoid orphaned compilers.
 #[cfg(target_os = "macos")]
 fn spawn_reaper() {
     use std::process::Command;
@@ -684,18 +438,16 @@ fn spawn_reaper() {
         return;
     };
 
-    let mount_path = runner_mount_base();
-    let log_file = mount_path
+    let mount_base = runner_mount_base();
+    let log_file = mount_base
         .as_std_path()
         .parent()
-        .unwrap_or(mount_path.as_std_path())
+        .unwrap_or(mount_base.as_std_path())
         .join("vx-reaper.log");
 
     match Command::new(&reaper_path)
         .arg("--parent-pid")
         .arg(my_pid.to_string())
-        .arg("--mount-path")
-        .arg(mount_path.as_str())
         .arg("--log-file")
         .arg(&log_file)
         .stdin(std::process::Stdio::piped())
@@ -754,6 +506,18 @@ fn detect_msvc_environment() {
             eprintln!(
                 "vx-runner: could not detect MSVC toolchain — link.exe may not be found by rustc"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_mount_base;
+
+    #[test]
+    fn runner_mount_base_is_stable_global_path() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(runner_mount_base().as_str(), "/tmp/vx/vfs");
         }
     }
 }

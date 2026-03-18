@@ -1,0 +1,222 @@
+let rules = import("./c-rules");
+
+let pnggen_source = Tree %{
+  @pnggen.c => Blob(`
+#include <png.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static void write_pattern(const char *path) {
+  const int width = 256;
+  const int height = 256;
+  FILE *fp = fopen(path, "wb");
+  if (!fp) {
+    fprintf(stderr, "failed to open output\\n");
+    exit(1);
+  }
+
+  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+  if (!png) {
+    fprintf(stderr, "failed to create write struct\\n");
+    exit(1);
+  }
+
+  png_infop info = png_create_info_struct(png);
+  if (!info) {
+    fprintf(stderr, "failed to create info struct\\n");
+    exit(1);
+  }
+
+  if (setjmp(png_jmpbuf(png))) {
+    fprintf(stderr, "libpng write failed\\n");
+    exit(1);
+  }
+
+  png_init_io(png, fp);
+  png_set_IHDR(
+    png,
+    info,
+    width,
+    height,
+    8,
+    PNG_COLOR_TYPE_RGB,
+    PNG_INTERLACE_NONE,
+    PNG_COMPRESSION_TYPE_DEFAULT,
+    PNG_FILTER_TYPE_DEFAULT
+  );
+  png_write_info(png, info);
+
+  uint8_t row[256 * 3];
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      row[x * 3 + 0] = (uint8_t)x;
+      row[x * 3 + 1] = (uint8_t)y;
+      row[x * 3 + 2] = (uint8_t)((x ^ y) & 0xff);
+    }
+    png_write_row(png, row);
+  }
+
+  png_write_end(png, NULL);
+  png_destroy_write_struct(&png, &info);
+  fclose(fp);
+}
+
+int main(int argc, char **argv) {
+  const char *out = argc > 1 ? argv[1] : "pattern.png";
+  write_pattern(out);
+  return 0;
+}
+`),
+};
+
+fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
+  let tc = rules.discover_toolchain(class);
+  let static_program_name =
+    if tc.os == "windows" (
+      @pnggen-static.exe
+    ) else (
+      @pnggen-static
+    );
+  let shared_program_name =
+    if tc.os == "windows" (
+      @pnggen-shared.exe
+    ) else (
+      @pnggen-shared
+    );
+  let cexec = partial exec where {
+    executor: class,
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        vfs.subtree(@out)
+      )
+    ),
+  };
+
+  let static_build =
+    if tc.os == "windows" (
+      cexec [
+        tc.cc,
+        "/nologo",
+        `/Feout\\${static_program_name}`,
+        @src/pnggen.c,
+        "/I", @deps/libpng,
+        "/I", @deps/zlib,
+        ..libpng.static.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
+      ] where {
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.static.link_tree,
+          @deps/zlib-link => zlib.static.link_tree,
+        },
+        writable: [@out],
+      }
+    ) else (
+      cexec [
+        tc.cc,
+        "-o",
+        @(out/{static_program_name}),
+        @src/pnggen.c,
+        "-I", @deps/libpng,
+        "-I", @deps/zlib,
+        ..libpng.static.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        ..zlib.static.link_inputs.map((path) => @(deps/zlib-link/{path})),
+        "-lm",
+      ] where {
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.static.link_tree,
+          @deps/zlib-link => zlib.static.link_tree,
+        },
+        writable: [@out],
+      }
+    );
+
+  let shared_build =
+    if tc.os == "windows" (
+      cexec [
+        tc.cc,
+        "/nologo",
+        `/Feout\\${shared_program_name}`,
+        @src/pnggen.c,
+        "/I", @deps/libpng,
+        "/I", @deps/zlib,
+        ..libpng.shared.defines.map((define) => `/D${define}`),
+        ..zlib.shared.defines.map((define) => `/D${define}`),
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
+      ] where {
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
+        },
+        writable: [@out],
+      }
+    ) else if tc.os == "darwin" (
+      cexec [
+        tc.cc,
+        "-o",
+        @(out/{shared_program_name}),
+        @src/pnggen.c,
+        "-I", @deps/libpng,
+        "-I", @deps/zlib,
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        "-Wl,-rpath,@loader_path",
+        "-lm",
+      ] where {
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
+        },
+        writable: [@out],
+      }
+    ) else (
+      cexec [
+        tc.cc,
+        "-o",
+        @(out/{shared_program_name}),
+        @src/pnggen.c,
+        "-I", @deps/libpng,
+        "-I", @deps/zlib,
+        ..libpng.shared.link_inputs.map((path) => @(deps/libpng-link/{path})),
+        "-Wl,-rpath,$ORIGIN",
+        "-lm",
+      ] where {
+        mounts: %{
+          @src => pnggen_source,
+          @deps/libpng => libpng.headers,
+          @deps/zlib => zlib.headers,
+          @deps/libpng-link => libpng.shared.link_tree,
+        },
+        writable: [@out],
+      }
+    );
+
+  rules.CExecutable {
+    static: rules.CExecutableVariant {
+      program: static_program_name,
+      run_tree: Tree %{
+        @({static_program_name}) => static_build.file(static_program_name).executable(),
+      },
+    },
+    shared: rules.CExecutableVariant {
+      program: shared_program_name,
+      run_tree: [
+        Tree %{
+          @({shared_program_name}) => shared_build.file(shared_program_name).executable(),
+        },
+        libpng.shared.runtime_tree,
+      ].merge(),
+    },
+  }
+}

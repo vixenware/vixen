@@ -20,7 +20,7 @@ use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
 use vx_tracing::init_cli_stderr;
-use vxd_proto::{BuildRequest, VxdClient};
+use vxd_proto::{BuildRequest, PsResult, VxdClient};
 
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
@@ -77,6 +77,7 @@ async fn async_main() {
         CliCommand::Start(args) => cx.cmd_start(args).await,
         CliCommand::Ping => cx.cmd_ping().await,
         CliCommand::Kill(args) => cx.cmd_kill(args).await,
+        CliCommand::Ps => cx.cmd_ps().await,
         CliCommand::Clean(args) => cx.cmd_clean(args).await,
         CliCommand::Doctor(_args) => cx.cmd_doctor().await,
         CliCommand::Debug(args) => cx.cmd_debug(args).await,
@@ -422,11 +423,23 @@ impl CliContext {
                 .map_err(|e| eyre!("set_session RPC failed: {e:?}"))?;
         }
 
-        let request = BuildRequest {
-            project_path: cwd.clone(),
-            build_file_path,
-            release: args.release,
-        };
+        let mut build_env = Vec::new();
+        for entry in &args.env {
+            if let Some((key, value)) = entry.split_once('=') {
+                build_env.push((key.to_string(), value.to_string()));
+            } else {
+                let value = std::env::var(entry)
+                    .map_err(|_| eyre!("--env {entry}: not set in environment"))?;
+                build_env.push((entry.clone(), value));
+            }
+        }
+
+        let mut request = BuildRequest::new(cwd.clone())
+            .release(args.release)
+            .env(build_env);
+        if let Some(path) = build_file_path {
+            request = request.build_file_path(path);
+        }
 
         // Race the build against Ctrl-C. When the user hits Ctrl-C, we shut down
         // the TUI cleanly and exit. The daemon detects the dropped connection and
@@ -599,6 +612,17 @@ impl CliContext {
             .await
             .map_err(|e| eyre!("version RPC failed: {e:?}"))?;
         println!("{version}");
+        Ok(())
+    }
+
+    async fn cmd_ps(&mut self) -> Result<()> {
+        self.strat = self.strat.clone().connect_only();
+        let daemon = self.ensure_vxd().await?;
+        let snapshot = daemon
+            .ps()
+            .await
+            .map_err(|e| eyre!("ps RPC failed: {e:?}"))?;
+        print_ps(snapshot);
         Ok(())
     }
 
@@ -801,6 +825,51 @@ impl CliContext {
             eyre::bail!("`moire` exited with status: {status}");
         }
         Ok(())
+    }
+}
+
+fn print_ps(snapshot: PsResult) {
+    if snapshot.entries.is_empty() {
+        println!("no in-flight activity");
+        return;
+    }
+
+    for entry in snapshot.entries {
+        let executor = entry.executor.unwrap_or_else(|| "-".to_string());
+        let last_message = entry.last_message.unwrap_or_else(|| "-".to_string());
+        println!(
+            "[{}] {} {} age={} idle={} {}",
+            entry.id,
+            entry.kind,
+            executor,
+            format_duration_ms(entry.age_ms),
+            format_duration_ms(entry.idle_ms),
+            entry.label
+        );
+        println!("    last: {last_message}");
+        match (entry.remote_idle_ms, entry.last_remote_message) {
+            (Some(remote_idle_ms), Some(last_remote_message)) => {
+                println!(
+                    "    remote: {} ago: {}",
+                    format_duration_ms(remote_idle_ms),
+                    last_remote_message
+                );
+            }
+            _ => {
+                println!(
+                    "    remote: none yet ({})",
+                    format_duration_ms(entry.age_ms)
+                );
+            }
+        }
+    }
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
     }
 }
 

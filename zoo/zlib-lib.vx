@@ -1,0 +1,151 @@
+let rules = import("./c-rules");
+
+let zlib_sources = [
+  @adler32.c, @compress.c, @crc32.c, @deflate.c,
+  @gzclose.c, @gzlib.c, @gzread.c, @gzwrite.c,
+  @inflate.c, @infback.c, @inftrees.c, @inffast.c,
+  @trees.c, @uncompr.c, @zutil.c,
+];
+
+fn build(workspace: Path, class: ExecutorClass) {
+  let tc = rules.discover_toolchain(class);
+  let src = Tree(workspace / @zoo/zlib-src);
+  let shared_build_defines =
+    if tc.os == "windows" (
+      ["ZLIB_DLL"]
+    ) else (
+      []
+    );
+  let common_defines =
+    if tc.os == "windows" (
+      []
+    ) else (
+      ["Z_HAVE_UNISTD_H"]
+    );
+
+  let static_name =
+    if tc.os == "windows" (
+      @zlib.lib
+    ) else (
+      @libz.a
+    );
+  let shared_binary_name =
+    if tc.os == "windows" (
+      @zlib1.dll
+    ) else if tc.os == "darwin" (
+      @libz.dylib
+    ) else (
+      @libz.so
+    );
+  let shared_link_name =
+    if tc.os == "windows" (
+      @zlibwapi.lib
+    ) else (
+      shared_binary_name
+    );
+
+  let static_objects =
+    rules.compile_objects(class, tc, src, zlib_sources) where {
+      includes: [@src],
+      defines: common_defines,
+    };
+  let shared_objects =
+    rules.compile_objects(class, tc, src, zlib_sources) where {
+      includes: [@src],
+      defines: [..common_defines, ..shared_build_defines],
+    };
+
+  let static_build = rules.static_archive(class, tc, static_name, static_objects);
+
+  let cexec = partial exec where {
+    executor: class,
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        vfs.subtree(@out)
+      )
+    ),
+  };
+
+  let shared_build =
+    if tc.os == "windows" (
+      cexec [
+        tc.cc,
+        "/nologo",
+        "/LD",
+        `/Feout\\${shared_binary_name}`,
+        ..shared_objects,
+        "/link",
+        `/IMPLIB:out\\${shared_link_name}`,
+      ] where {
+        writable: [@out],
+      }
+    ) else if tc.os == "darwin" (
+      cexec [
+        tc.cc,
+        "-dynamiclib",
+        "-o",
+        @(out/{shared_binary_name}),
+        "-Wl,-install_name,@rpath/libz.dylib",
+        ..shared_objects,
+      ] where {
+        writable: [@out],
+      }
+    ) else (
+      cexec [
+        tc.cc,
+        "-shared",
+        "-o",
+        @(out/{shared_binary_name}),
+        "-Wl,-soname,libz.so",
+        ..shared_objects,
+      ] where {
+        writable: [@out],
+      }
+    );
+
+  let headers = Tree %{
+    @zlib.h => src.file @zlib.h,
+    @zconf.h => src.file @zconf.h,
+  };
+
+  let static_variant = rules.CLibraryVariant {
+    link_tree: Tree %{
+      @({static_name}) => static_build.file(static_name),
+    },
+    link_inputs: [static_name],
+    runtime_tree: Tree %{},
+    defines: [],
+  };
+  let shared_variant =
+    if tc.os == "windows" (
+      rules.CLibraryVariant {
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_link_name),
+        },
+        link_inputs: [shared_link_name],
+        runtime_tree: Tree %{
+          @({shared_binary_name}) => shared_build.file(shared_binary_name),
+        },
+        defines: ["ZLIB_DLL"],
+      }
+    ) else (
+      rules.CLibraryVariant {
+        link_tree: Tree %{
+          @({shared_link_name}) => shared_build.file(shared_binary_name),
+        },
+        link_inputs: [shared_link_name],
+        runtime_tree: Tree %{
+          @({shared_binary_name}) => shared_build.file(shared_binary_name),
+        },
+        defines: [],
+      }
+    );
+
+  rules.CLibrary {
+    headers,
+    static: static_variant,
+    shared: shared_variant,
+  }
+}

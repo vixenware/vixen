@@ -4,9 +4,12 @@
 //! blobs and store them without reimplementing FastCDC or BlobNode
 //! assembly.
 
+use std::collections::HashSet;
+
 use crate::{
     Blake3Hash, BlobNode, BlobRef, CDC_AVG_CHUNK, CDC_MAX_CHUNK, CDC_MIN_CHUNK, CDC_PARAMS_ID,
-    CasNode, ChunkEntry, ChunkHash, ContentHash, NodeHash, StoreClient,
+    CasNode, ChunkEntry, ChunkHash, ContentHash, MAX_MISSING_CHUNKS_BATCH, MAX_MISSING_NODES_BATCH,
+    NodeHash, StoreClient,
 };
 
 /// Information about a single chunk produced by CDC.
@@ -30,6 +33,24 @@ pub struct PreparedBlob {
     /// If the file is multi-chunk (> CDC_MAX_CHUNK), the serialized BlobNode
     /// ready to pass to `put_node`. None for single-chunk files.
     pub blob_node: Option<SerializedBlobNode>,
+}
+
+impl PreparedBlob {
+    /// Convert to a `BlobRef` (without storing anything).
+    pub fn to_blob_ref(&self) -> BlobRef {
+        if let Some(blob_node) = &self.blob_node {
+            BlobRef::Large {
+                blob_node: blob_node.node_hash,
+                content_hash: self.content_hash,
+                size: self.chunks.iter().map(|c| c.size as u64).sum(),
+            }
+        } else {
+            BlobRef::Small {
+                chunk: self.chunks[0].hash,
+                size: self.chunks[0].size as u64,
+            }
+        }
+    }
 }
 
 /// A serialized BlobNode ready for storage.
@@ -120,7 +141,22 @@ pub async fn store_prepared_blob(
     prepared: &PreparedBlob,
     data: &[u8],
 ) -> Result<BlobRef, String> {
+    let mut seen_hashes = HashSet::with_capacity(prepared.chunks.len());
+    let mut unique_hashes = Vec::with_capacity(prepared.chunks.len());
     for chunk in &prepared.chunks {
+        if seen_hashes.insert(chunk.hash) {
+            unique_hashes.push(chunk.hash);
+        }
+    }
+
+    let missing_hashes = list_missing_chunks(store, unique_hashes).await?;
+    let missing_hashes: HashSet<_> = missing_hashes.into_iter().collect();
+
+    let mut uploaded_hashes = HashSet::with_capacity(missing_hashes.len());
+    for chunk in &prepared.chunks {
+        if !missing_hashes.contains(&chunk.hash) || !uploaded_hashes.insert(chunk.hash) {
+            continue;
+        }
         let chunk_data = &data[chunk.offset..chunk.offset + chunk.size as usize];
         store
             .put_chunk(chunk.hash, chunk_data.to_vec())
@@ -129,10 +165,12 @@ pub async fn store_prepared_blob(
     }
 
     if let Some(blob_node) = &prepared.blob_node {
-        store
-            .put_node(blob_node.node_hash, blob_node.serialized_bytes.clone())
-            .await
-            .map_err(|error| format!("{error:?}"))?;
+        put_node_if_missing(
+            store,
+            blob_node.node_hash,
+            blob_node.serialized_bytes.clone(),
+        )
+        .await?;
 
         Ok(BlobRef::Large {
             blob_node: blob_node.node_hash,
@@ -146,6 +184,91 @@ pub async fn store_prepared_blob(
             size: data.len() as u64,
         })
     }
+}
+
+pub async fn list_missing_chunks(
+    store: &StoreClient,
+    hashes: Vec<ChunkHash>,
+) -> Result<Vec<ChunkHash>, String> {
+    let mut missing = Vec::new();
+    for batch in hashes.chunks(MAX_MISSING_CHUNKS_BATCH) {
+        let batch_missing = store
+            .list_missing_chunks(batch.to_vec())
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        missing.extend(batch_missing);
+    }
+    Ok(missing)
+}
+
+pub async fn put_chunk_if_missing(
+    store: &StoreClient,
+    hash: ChunkHash,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    if store
+        .has_chunk(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+    {
+        return Ok(());
+    }
+
+    store
+        .put_chunk(hash, data)
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+pub async fn put_node_if_missing(
+    store: &StoreClient,
+    hash: NodeHash,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let missing = list_missing_nodes(store, vec![hash]).await?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    store
+        .put_node(hash, data)
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+pub async fn list_missing_nodes(
+    store: &StoreClient,
+    hashes: Vec<NodeHash>,
+) -> Result<Vec<NodeHash>, String> {
+    let mut missing = Vec::new();
+    for batch in hashes.chunks(MAX_MISSING_NODES_BATCH) {
+        let batch_missing = store
+            .list_missing_nodes(batch.to_vec())
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        missing.extend(batch_missing);
+    }
+    Ok(missing)
+}
+
+pub async fn put_nodes_if_missing(
+    store: &StoreClient,
+    nodes: Vec<(NodeHash, Vec<u8>)>,
+) -> Result<(), String> {
+    let missing = list_missing_nodes(store, nodes.iter().map(|(hash, _)| *hash).collect()).await?;
+    let missing: HashSet<_> = missing.into_iter().collect();
+
+    for (hash, data) in nodes {
+        if !missing.contains(&hash) {
+            continue;
+        }
+        store
+            .put_node(hash, data)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

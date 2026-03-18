@@ -1,0 +1,40 @@
+fn toolchain(class: ExecutorClass) {
+  discover(class, (host) => host.which("cl.exe"))
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let class = executor_class("ssh:toast");
+  let cl = toolchain(class);
+  let source = Tree %{
+    @hello.c => Blob(`
+int main(void) {
+  return 0;
+}
+`),
+  };
+
+  let objects =
+    exec [
+      cl,
+      "/nologo",
+      "/c",
+      @src/hello.c,
+      "/Foout\\obj\\hello.obj",
+    ] where {
+      executor: class,
+      mounts: %{ @src => source },
+      writable: [@out],
+      create_dirs: [@out/obj],
+      observer: (proc, vfs) => (
+        if proc.exit_code != 0 (
+          fail `process failed`
+        ) else (
+          vfs.subtree(@out)
+        )
+      ),
+    };
+
+  Tree %{
+    @toast => objects,
+  }
+}

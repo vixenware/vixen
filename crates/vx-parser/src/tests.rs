@@ -344,9 +344,9 @@ fn partial_symbol_literals_and_uppercase_where_keys_parse() {
         r#"
 fn demo(exec: Fn(Array[String]) -> Tree) -> Tree (
   let tools = [:cc, :ar];
-  let common = {
-    TARGET: "linux-x86_64",
-    PNG_DEBUG: false,
+  let common = %{
+    TARGET => "linux-x86_64",
+    PNG_DEBUG => false,
   };
   let bound = partial exec where common;
   bound ["cc"]
@@ -479,7 +479,7 @@ fn build(
   name: String,
   path: String
 ) -> String {
-  exec_fn(args, defaults) where { ..defaults, mounts: { @bin/lua: blob } };
+  exec_fn(args, defaults) where { ..defaults, mounts: %{ @bin/lua => blob } };
   blob.utf8();
   stream.next()?;
   items.map($.utf8());
@@ -626,7 +626,7 @@ fn upper_ident_can_take_map_payload_by_juxtaposition() {
     let parse = parse(
         r#"
 fn build(exe: Blob) {
-  Tree { @bin/lua: exe }
+  Tree %{ @bin/lua => exe }
 }
 "#,
     );
@@ -660,7 +660,7 @@ fn record_and_map_literals_have_distinct_ast_nodes() {
         r#"
 fn demo(verifier: Verifier, value: U64) {
   { verifier, observer: make_observer() };
-  { @bin/lua: value, 80: value };
+  %{ @bin/lua => value, 80 => value };
 }
 "#,
     );
@@ -734,7 +734,7 @@ fn build(name: String) {
 fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
-  exec_fn(args)  where  { mounts: { @bin/lua: process.stdout() } };
+  exec_fn(args)  where  { mounts: %{ @bin/lua => process.stdout() } };
   process . stdout().trim()
 }
 "#;
@@ -743,7 +743,7 @@ fn build(process: Process, args: Array[String], defaults: Config) {
     let formatted = crate::format(parsed.tree().syntax());
 
     assert!(formatted.contains("exec_fn(args) where"));
-    assert!(formatted.contains("@bin/lua: process.stdout()"));
+    assert!(formatted.contains("@bin/lua => process.stdout()"));
     assert!(formatted.contains("process.stdout().trim()"));
 }
 
@@ -901,7 +901,7 @@ fn build(flag: Bool) -> U64 {
 fn semantic_tokens_classify_functions_keywords_and_properties() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) -> String {
-  exec(args) where { mounts: { @bin/lua: process.stdout() } }
+  exec(args) where { mounts: %{ @bin/lua => process.stdout() } }
 }
 "#;
 
@@ -932,4 +932,99 @@ fn assert_symbol(symbol: &DocumentSymbol, name: &str, kind: SymbolKind) {
 
 fn assert_has_breadcrumb(crumbs: &[Breadcrumb], kind: SyntaxKind) {
     assert!(crumbs.iter().any(|crumb| crumb.kind == kind));
+}
+
+#[test]
+fn percent_brace_map_literal_parses() {
+    let parse = parse(
+        r#"
+fn demo(x: U64) {
+  %{ "hello" => x, 42 => x + 1 }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let map = match body.statements().next().expect("map statement") {
+        Stmt::Expr(Expr::Map(node)) => node,
+        stmt => panic!("expected map expr, got {stmt:?}"),
+    };
+    let entries = map.entries().collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(entries[0].key(), Some(Expr::Literal(_))));
+    assert!(matches!(entries[0].value(), Some(Expr::NameRef(_))));
+    assert!(matches!(entries[1].key(), Some(Expr::Literal(_))));
+    assert!(matches!(entries[1].value(), Some(Expr::Binary(_))));
+}
+
+#[test]
+fn empty_percent_brace_map_parses() {
+    let parse = parse(
+        r#"
+fn demo() {
+  %{}
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::MAP_EXPR));
+}
+
+#[test]
+fn variable_key_in_map_is_unambiguous() {
+    let parse = parse(
+        r#"
+fn demo(key: String, value: U64) {
+  %{ key => value }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let map = match body.statements().next().expect("map statement") {
+        Stmt::Expr(Expr::Map(node)) => node,
+        stmt => panic!("expected map expr, got {stmt:?}"),
+    };
+    let entries = map.entries().collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(entries[0].key(), Some(Expr::NameRef(_))));
+    assert!(matches!(entries[0].value(), Some(Expr::NameRef(_))));
+}
+
+#[test]
+fn upper_ident_brace_is_always_struct_literal() {
+    let parse = parse(
+        r#"
+fn demo() {
+  Foo { bar: 42 }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::STRUCT_LITERAL_EXPR));
+    assert!(!kinds.contains(&SyntaxKind::CALL_EXPR));
 }

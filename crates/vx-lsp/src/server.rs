@@ -5,7 +5,7 @@ use rowan::TextRange;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind};
+use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, trimmed_range};
 use vx_resolve::{ImportGraph, NameResolution, SourceFileRef, SourceId, SourceSpan};
 
 pub struct VxLanguageServer {
@@ -723,7 +723,7 @@ impl LanguageServer for VxLanguageServer {
                             kind: MarkupKind::Markdown,
                             value: markdown,
                         }),
-                        range: Some(state.to_lsp_range(expr.syntax().text_range())),
+                        range: Some(state.to_lsp_range(trimmed_range(expr.syntax()))),
                     });
                 }
                 node = n.parent();

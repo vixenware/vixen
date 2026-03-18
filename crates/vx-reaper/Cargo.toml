@@ -15,10 +15,8 @@ jiff = { workspace = true }
 libc = { workspace = true }
 tokio = { workspace = true }
 moire = { workspace = true }
-camino = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
-vx-fskit = { path = "../vx-fskit" }
 
 [lints]
 workspace = true

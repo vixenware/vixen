@@ -183,6 +183,26 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
     }
 }
 
+struct ConnectionHealthSnapshot: Codable {
+    let connected: Bool
+    let everConnected: Bool
+    let appGroupPath: String?
+    let connectedAt: String?
+    let disconnectedAt: String?
+    let uptimeSeconds: Double?
+    let disconnectReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case connected
+        case everConnected = "ever_connected"
+        case appGroupPath = "app_group_path"
+        case connectedAt = "connected_at"
+        case disconnectedAt = "disconnected_at"
+        case uptimeSeconds = "uptime_seconds"
+        case disconnectReason = "disconnect_reason"
+    }
+}
+
 actor ConnectionHealth {
     static let shared = ConnectionHealth()
 
@@ -206,44 +226,52 @@ actor ConnectionHealth {
         disconnectReason = reason
     }
 
-    func toJSON() -> Data {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    func snapshot() -> ConnectionHealthSnapshot {
+        let connectedAtString = connectedAt.map { Self.iso8601Formatter.string(from: $0) }
+        let disconnectedAtString = disconnectedAt.map { Self.iso8601Formatter.string(from: $0) }
 
-        var json = "{\n"
-        json += "  \"connected\": \(currentlyConnected),\n"
-        json += "  \"ever_connected\": \(everConnected),\n"
-
-        if let t = connectedAt {
-            json += "  \"connected_at\": \"\(iso.string(from: t))\",\n"
-        } else {
-            json += "  \"connected_at\": null,\n"
-        }
-
-        if let t = disconnectedAt {
-            json += "  \"disconnected_at\": \"\(iso.string(from: t))\",\n"
-        } else {
-            json += "  \"disconnected_at\": null,\n"
-        }
-
+        let uptimeSeconds: Double?
         if currentlyConnected, let start = connectedAt {
-            let seconds = Date().timeIntervalSince(start)
-            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+            uptimeSeconds = Date().timeIntervalSince(start)
         } else if let start = connectedAt, let end = disconnectedAt {
-            let seconds = end.timeIntervalSince(start)
-            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+            uptimeSeconds = end.timeIntervalSince(start)
         } else {
-            json += "  \"uptime_seconds\": null,\n"
+            uptimeSeconds = nil
         }
 
-        if let reason = disconnectReason {
-            json += "  \"disconnect_reason\": \"\(reason)\"\n"
-        } else {
-            json += "  \"disconnect_reason\": null\n"
-        }
+        return ConnectionHealthSnapshot(
+            connected: currentlyConnected,
+            everConnected: everConnected,
+            appGroupPath: resolveAppGroupPath(),
+            connectedAt: connectedAtString,
+            disconnectedAt: disconnectedAtString,
+            uptimeSeconds: uptimeSeconds,
+            disconnectReason: disconnectReason
+        )
+    }
 
-        json += "}\n"
-        return Data(json.utf8)
+    func toJSON() -> Data {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            var data = try encoder.encode(snapshot())
+            data.append(0x0A)
+            return data
+        } catch {
+            return Data("{}\n".utf8)
+        }
+    }
+
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private func resolveAppGroupPath() -> String? {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: VixenFSConstants.appGroupIdentifier
+        )?.path
     }
 }
 
@@ -251,35 +279,95 @@ actor ConnectionHealth {
 actor VfsConnection {
     static let shared = VfsConnection()
 
-    private var client: VfsClient?
-    private var driverTask: Task<Void, Never>?
+    private struct PeerConnection {
+        var client: VfsClient?
+        var driverTask: Task<Void, Never>?
+        var terminalError: NSError?
+    }
+
+    private var peers: [String: PeerConnection] = [:]
     private var disconnectRequested = false
     private var debugEnabled = false
-    private var terminalConnectionError: NSError?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
+    private var sessionDeathObservers: [UUID: @Sendable (String) -> Void] = [:]
 
     func connect(url: URL) async throws {
-        if client != nil {
-            log.info("Already connected")
-            return
-        }
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
         guard let mountOptions = parseMountOptions(from: url) else {
             throw POSIXError(.EINVAL)
         }
-        let sid = mountOptions.sid
+
         debugEnabled = mountOptions.debug
+        disconnectRequested = false
+
         await SwiftmoireClient.shared.configure(
             dashboardAddr: mountOptions.moireDashboard,
             debugFrames: mountOptions.debug
         )
-        if debugEnabled {
-            log.notice("mount debug enabled for sid=\(sid, privacy: .public)")
-        }
-        log.info("Connecting over SHM sid=\(sid, privacy: .public)")
 
+        if debugEnabled {
+            log.notice("mount debug enabled")
+        }
+
+        log.info("Connected to \(url.absoluteString)")
+        await LifecycleTrace.shared.mark(
+            log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
+    }
+
+    func disconnect() async {
+        await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
+        disconnectRequested = true
+        debugEnabled = false
+        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
+
+        for (sid, peer) in peers {
+            peer.driverTask?.cancel()
+            notifySessionDeath(sid: sid)
+        }
+        peers.removeAll()
+        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
+    }
+
+    func getClient(for sid: String? = nil) async throws -> VfsClient {
+        guard let targetSid = sid else {
+            throw POSIXError(.ENOTCONN)
+        }
+
+        if let existing = peers[targetSid], let client = existing.client {
+            return client
+        }
+
+        if let existing = peers[targetSid], let terminalError = existing.terminalError {
+            log.notice(
+                "Refusing SHM reconnect for terminal sid=\(targetSid, privacy: .public): \(terminalError.localizedDescription, privacy: .public)"
+            )
+            throw terminalError
+        }
+
+        log.info("Connecting over SHM sid=\(targetSid, privacy: .public)")
+        let client = try await establishClient(for: targetSid)
+        await ConnectionHealth.shared.recordConnected()
+        return client
+    }
+
+    func observeSessionDeath(id: UUID, _ observer: @escaping @Sendable (String) -> Void) {
+        sessionDeathObservers[id] = observer
+    }
+
+    func removeSessionDeathObserver(_ id: UUID) {
+        sessionDeathObservers.removeValue(forKey: id)
+    }
+
+    func liveSessionIDs() -> [String] {
+        peers
+            .filter { _, peer in peer.client != nil }
+            .map { sid, _ in sid }
+            .sorted()
+    }
+
+    private func establishClient(for sid: String) async throws -> VfsClient {
         let ticket = try await requestTicket(sid: sid)
         debugLog("bootstrap control socket established sid=\(sid)")
         log.info(
@@ -303,70 +391,67 @@ actor VfsConnection {
             dispatcher: NoopDispatcher()
         )
 
-        disconnectRequested = false
-        terminalConnectionError = nil
         let logger = log
-        driverTask = Task { [weak self] in
+        let driverTask = Task { [weak self] in
             do {
                 try await driver.run()
                 logger.error("Roam driver exited cleanly — server is gone")
                 NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
-                await self?.handleDriverExit(reason: "driver_exit_clean")
+                await self?.handleDriverExit(sid: sid, reason: "driver_exit_clean")
             } catch {
                 logger.error(
                     "Roam driver exited with error: \(String(describing: error), privacy: .public)")
                 NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
                 await self?.handleDriverExit(
-                    reason: "driver_exit_error:\(String(describing: error))")
+                    sid: sid,
+                    reason: "driver_exit_error:\(String(describing: error))"
+                )
             }
         }
-        client = VfsClient(connection: handle, timeout: 28.0)
-        await ConnectionHealth.shared.recordConnected()
-        log.info("Connected to \(url.absoluteString)")
-        await LifecycleTrace.shared.mark(
-            log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
+
+        peers[sid] = PeerConnection(
+            client: VfsClient(connection: handle, timeout: 28.0),
+            driverTask: driverTask,
+            terminalError: nil
+        )
+        return peers[sid]!.client!
     }
 
-    func disconnect() async {
-        await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
-        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
-        disconnectRequested = true
-        terminalConnectionError = nil
-        debugEnabled = false
-        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
-        driverTask?.cancel()
-        driverTask = nil
-        client = nil
-    }
+    private func handleDriverExit(sid: String, reason: String) async {
+        var peer = peers[sid] ?? PeerConnection(client: nil, driverTask: nil, terminalError: nil)
+        peer.client = nil
+        peer.driverTask = nil
 
-    func getClient() throws -> VfsClient {
-        guard let client = client else {
-            if let terminalConnectionError {
-                throw terminalConnectionError
-            }
-            throw POSIXError(.ENOTCONN)
-        }
-        return client
-    }
-
-    private func handleDriverExit(reason: String) async {
         if disconnectRequested {
-            log.info("VFS connection closed during normal unload")
+            log.info("VFS connection closed during normal unload sid=\(sid, privacy: .public)")
             NSLog("VixenFS: SHM connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
+            peers.removeValue(forKey: sid)
         } else {
-            terminalConnectionError = NSError(
+            peer.terminalError = NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(POSIXError.ECONNRESET.rawValue),
                 userInfo: [NSLocalizedDescriptionKey: reason]
             )
-            await ConnectionHealth.shared.recordDisconnected(reason: reason)
-            log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
+            peers[sid] = peer
+            log.error(
+                "Connection to VFS server lost for sid=\(sid, privacy: .public); waiting for FSKit to unload/deactivate"
+            )
             NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
-        client = nil
-        driverTask = nil
+
+        if peers.values.allSatisfy({ $0.client == nil }) {
+            await ConnectionHealth.shared.recordDisconnected(reason: reason)
+        }
+
+        notifySessionDeath(sid: sid)
+    }
+
+    private func notifySessionDeath(sid: String) {
+        for observer in sessionDeathObservers.values {
+            observer(sid)
+        }
     }
 
     private func requestTicket(sid: String) async throws -> ShmBootstrapTicket {
@@ -462,7 +547,6 @@ actor VfsConnection {
     }
 
     private struct MountOptions {
-        let sid: String
         let debug: Bool
         let moireDashboard: String?
     }
@@ -470,41 +554,22 @@ actor VfsConnection {
     private func parseMountOptions(from url: URL) -> MountOptions? {
         guard
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-            let items = components.queryItems,
-            let sid = items.first(where: { $0.name == "sid" })?.value,
-            isValidSid(sid)
+            components.scheme == "vixen",
+            components.host == "session"
         else {
             return nil
         }
+        let items = components.queryItems ?? []
+
+        // Hard cut: sid=... bootstrap URLs are no longer accepted.
+        if items.contains(where: { $0.name == "sid" }) {
+            return nil
+        }
+
         let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
         let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
         let moireDashboard = items.first(where: { $0.name == "moire_dashboard" })?.value
-        return MountOptions(sid: sid, debug: debug, moireDashboard: moireDashboard)
-    }
-
-    private func isValidSid(_ sid: String) -> Bool {
-        if sid.count == 32 {
-            return sid.unicodeScalars.allSatisfy {
-                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
-            }
-        }
-        if sid.count == 36 {
-            let chars = Array(sid)
-            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
-            for i in 0..<chars.count {
-                if hyphenPositions.contains(i) {
-                    if chars[i] != "-" {
-                        return false
-                    }
-                    continue
-                }
-                if !chars[i].isHexDigit {
-                    return false
-                }
-            }
-            return true
-        }
-        return false
+        return MountOptions(debug: debug, moireDashboard: moireDashboard)
     }
 
     private func debugLog(_ message: String) {
@@ -684,7 +749,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
     // MARK: - URL Resource Handling
 
     /// Extract the vixen:// URL from an FSGenericURLResource.
-    /// Expected URL format: vixen://session?sid=<sid>
+    /// Expected URL format: vixen://session[?debug=1][&moire_dashboard=...]
     private func extractVixenURL(from resource: FSResource) -> URL? {
         guard let urlResource = resource as? FSGenericURLResource else {
             return nil

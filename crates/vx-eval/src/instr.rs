@@ -7,19 +7,40 @@
 
 use std::sync::Arc;
 
-use vx_parser::TextRange;
+use vx_parser::{LineIndex, TextRange};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSpan {
     pub start: u32,
     pub end: u32,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 impl SourceSpan {
-    pub fn from_text_range(range: TextRange) -> Self {
+    pub fn from_text_range(range: TextRange, line_index: &LineIndex) -> Self {
+        let start_position = line_index.position(range.start());
+        let end_position = line_index.position(range.end());
         Self {
             start: u32::from(range.start()),
             end: u32::from(range.end()),
+            start_line: start_position.line + 1,
+            start_column: start_position.col + 1,
+            end_line: end_position.line + 1,
+            end_column: end_position.col + 1,
+        }
+    }
+
+    pub fn from_offsets(start: u32, end: u32) -> Self {
+        Self {
+            start,
+            end,
+            start_line: 0,
+            start_column: 0,
+            end_line: 0,
+            end_column: 0,
         }
     }
 }
@@ -34,6 +55,7 @@ pub struct SourceProvenance {
 /// A lowered module — all top-level declarations from a source file.
 #[derive(Debug, Clone)]
 pub struct Module {
+    pub source_id: Arc<str>,
     pub functions: Vec<Arc<FnDef>>,
     pub top_level: Block,
 }
@@ -45,6 +67,8 @@ pub struct FnDef {
     pub params: Vec<Param>,
     pub keyword_params: Vec<KeywordParam>,
     pub body: Block,
+    /// Where this function was defined in the source.
+    pub provenance: Option<SourceProvenance>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +165,11 @@ pub enum Expr {
     /// Path literal, possibly interpolated
     PathTemplate {
         parts: Vec<TemplatePart>,
+        provenance: Option<SourceProvenance>,
+    },
+    /// Module import expression: `import("./path")`
+    Import {
+        path: String,
         provenance: Option<SourceProvenance>,
     },
     /// Unit `()`

@@ -14,8 +14,21 @@ use crate::value::{
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct TransportModule {
+    pub source_id: String,
     pub functions: Vec<TransportFnDef>,
     pub top_level: TransportBlock,
+    pub loaded_modules: Vec<TransportModule>,
+}
+
+impl TransportModule {
+    pub fn root_only(&self) -> Self {
+        Self {
+            source_id: self.source_id.clone(),
+            functions: self.functions.clone(),
+            top_level: self.top_level.clone(),
+            loaded_modules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -24,6 +37,7 @@ pub struct TransportFnDef {
     pub params: Vec<TransportParam>,
     pub keyword_params: Vec<TransportKeywordParam>,
     pub body: TransportBlock,
+    pub provenance: Option<TransportSourceProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -41,6 +55,10 @@ pub struct TransportKeywordParam {
 pub struct TransportSourceSpan {
     pub start: u32,
     pub end: u32,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -126,6 +144,10 @@ pub enum TransportExpr {
     },
     PathTemplate {
         parts: Vec<TransportTemplatePart>,
+        provenance: Option<TransportSourceProvenance>,
+    },
+    Import {
+        path: String,
         provenance: Option<TransportSourceProvenance>,
     },
     Unit,
@@ -214,6 +236,7 @@ pub enum TransportUnaryOp {
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct ShippedFunction {
+    pub module_id: String,
     pub code_identity: String,
     pub def: TransportFnDef,
     pub captures: Vec<(String, TransportValue)>,
@@ -327,12 +350,14 @@ pub enum TransportBuiltinValue {
 impl From<&instr::Module> for TransportModule {
     fn from(module: &instr::Module) -> Self {
         Self {
+            source_id: module.source_id.to_string(),
             functions: module
                 .functions
                 .iter()
                 .map(|function| TransportFnDef::from(function.as_ref()))
                 .collect(),
             top_level: TransportBlock::from(&module.top_level),
+            loaded_modules: Vec::new(),
         }
     }
 }
@@ -340,6 +365,7 @@ impl From<&instr::Module> for TransportModule {
 impl From<TransportModule> for instr::Module {
     fn from(module: TransportModule) -> Self {
         Self {
+            source_id: Arc::from(module.source_id),
             functions: module
                 .functions
                 .into_iter()
@@ -361,6 +387,7 @@ impl From<&instr::FnDef> for TransportFnDef {
                 .map(TransportKeywordParam::from)
                 .collect(),
             body: TransportBlock::from(&def.body),
+            provenance: def.provenance.as_ref().map(TransportSourceProvenance::from),
         }
     }
 }
@@ -372,6 +399,7 @@ impl From<TransportFnDef> for instr::FnDef {
             params: def.params.into_iter().map(Into::into).collect(),
             keyword_params: def.keyword_params.into_iter().map(Into::into).collect(),
             body: def.body.into(),
+            provenance: def.provenance.map(Into::into),
         }
     }
 }
@@ -407,6 +435,10 @@ impl From<&instr::SourceSpan> for TransportSourceSpan {
         Self {
             start: span.start,
             end: span.end,
+            start_line: span.start_line,
+            start_column: span.start_column,
+            end_line: span.end_line,
+            end_column: span.end_column,
         }
     }
 }
@@ -416,6 +448,10 @@ impl From<TransportSourceSpan> for instr::SourceSpan {
         Self {
             start: span.start,
             end: span.end,
+            start_line: span.start_line,
+            start_column: span.start_column,
+            end_line: span.end_line,
+            end_column: span.end_column,
         }
     }
 }
@@ -618,6 +654,10 @@ impl From<&instr::Expr> for TransportExpr {
                 parts: parts.iter().map(TransportTemplatePart::from).collect(),
                 provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
+            instr::Expr::Import { path, provenance } => Self::Import {
+                path: path.clone(),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
+            },
             instr::Expr::Unit => Self::Unit,
             instr::Expr::Var(name) => Self::Var(name.clone()),
             instr::Expr::Binary {
@@ -753,6 +793,10 @@ impl From<TransportExpr> for instr::Expr {
             },
             TransportExpr::PathTemplate { parts, provenance } => Self::PathTemplate {
                 parts: parts.into_iter().map(Into::into).collect(),
+                provenance: provenance.map(Into::into),
+            },
+            TransportExpr::Import { path, provenance } => Self::Import {
+                path,
                 provenance: provenance.map(Into::into),
             },
             TransportExpr::Unit => Self::Unit,
@@ -936,6 +980,7 @@ impl TryFrom<&FunctionValue> for ShippedFunction {
             .map(|(name, value)| Ok((name.to_string(), TransportValue::try_from(value)?)))
             .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
+            module_id: function.module_id.to_string(),
             code_identity: function.code_identity.to_string(),
             def: TransportFnDef::from(function.def.as_ref()),
             captures,
@@ -957,6 +1002,7 @@ impl ShippedFunction {
             .collect::<Result<Vec<_>, String>>()?;
         Ok(FunctionValue {
             def: Arc::new(self.def.clone().into()),
+            module_id: Arc::from(self.module_id.as_str()),
             code_identity: Arc::from(self.code_identity.as_str()),
             captures: Arc::from(captures),
         })
@@ -1143,7 +1189,7 @@ impl TryFrom<&TreeValue> for TransportTree {
 
     fn try_from(tree: &TreeValue) -> Result<Self, Self::Error> {
         match tree {
-            TreeValue::Inline(entries) => Ok(Self::Inline(
+            TreeValue::Inline { entries, .. } => Ok(Self::Inline(
                 entries
                     .iter()
                     .map(|(name, value)| Ok((name.to_string(), TransportValue::try_from(value)?)))
@@ -1163,7 +1209,7 @@ impl TryFrom<TransportTree> for TreeValue {
 
     fn try_from(tree: TransportTree) -> Result<Self, Self::Error> {
         match tree {
-            TransportTree::Inline(entries) => Ok(Self::Inline(Arc::from(
+            TransportTree::Inline(entries) => Ok(TreeValue::inline(Arc::from(
                 entries
                     .into_iter()
                     .map(|(name, value)| Ok((Arc::<str>::from(name), Value::try_from(value)?)))
@@ -1326,6 +1372,8 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { .. })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { .. })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { .. })
+            | BuiltinValue::Method(BuiltinMethod::MapHas { .. })
+            | BuiltinValue::Method(BuiltinMethod::MapGet { .. })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. })
             | BuiltinValue::Method(BuiltinMethod::HostOs { .. })
             | BuiltinValue::Method(BuiltinMethod::HostArch { .. })

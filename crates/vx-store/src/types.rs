@@ -3,7 +3,8 @@ use std::sync::Arc;
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
 use vx_store_proto::{
-    BlobRef, EnsureRustToolchainComponentResult, RustComponent, ToolchainSpecKey,
+    BlobRef, ChunkHash, EnsureRustToolchainComponentResult, NodeHash, RustComponent, StoreClient,
+    ToolchainSpecKey,
 };
 
 use crate::{
@@ -21,6 +22,8 @@ type RustComponentFlightMap =
 pub(crate) struct StoreService {
     /// Inner state
     pub(crate) inner: Arc<StoreServiceInner>,
+    /// Optional trusted upstream store for read-through on misses.
+    pub(crate) upstream: Arc<SyncMutex<Option<Arc<StoreClient>>>>,
 }
 
 impl vx_io::boot::GracefulShutdown for StoreService {
@@ -63,4 +66,20 @@ pub(crate) struct StoreServiceInner {
 
     /// In-flight Rust component extractions by (spec_key, component)
     pub(crate) rust_component_tree_flights: SyncMutex<RustComponentFlightMap>,
+
+    /// Positive CAS presence cache for chunks known to exist in this store.
+    pub(crate) present_chunks: SyncMutex<std::collections::HashSet<ChunkHash>>,
+
+    /// Positive CAS presence cache for nodes known to exist in this store.
+    pub(crate) present_nodes: SyncMutex<std::collections::HashSet<NodeHash>>,
+}
+
+impl StoreService {
+    pub(crate) fn set_upstream(&self, upstream: Arc<StoreClient>) {
+        *self.upstream.lock() = Some(upstream);
+    }
+
+    pub(crate) fn upstream(&self) -> Option<Arc<StoreClient>> {
+        self.upstream.lock().clone()
+    }
 }

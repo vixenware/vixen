@@ -87,7 +87,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
         `/Foout\\${file}.obj`,
         @(src/{file}),
       ] where {
-        mounts: { @src: src_tree },
+        mounts: %{ @src => src_tree },
         writable: [@out],
       }
     ) else (
@@ -99,7 +99,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
         @(out/obj/{file}.o),
         @(src/{file}),
       ] where {
-        mounts: { @src: src_tree },
+        mounts: %{ @src => src_tree },
       }
     )
   );
@@ -133,16 +133,16 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
 
   let installed_bin =
     if tc.os == "windows" (
-      Tree { @lua.exe: lua_exe.file(@lua.exe).executable() }
+      Tree %{ @lua.exe => lua_exe.file(@lua.exe).executable() }
     ) else (
-      Tree { @lua: lua_exe.file(@lua).executable() }
+      Tree %{ @lua => lua_exe.file(@lua).executable() }
     );
 
   let installed_lib =
     if tc.os == "windows" (
-      Tree { @liblua.lib: liblua.file(@liblua.lib) }
+      Tree %{ @liblua.lib => liblua.file(@liblua.lib) }
     ) else (
-      Tree { @liblua.a: liblua.file(@liblua.a) }
+      Tree %{ @liblua.a => liblua.file(@liblua.a) }
     );
 
   let version_blob =
@@ -154,7 +154,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
       )
     ) where {
       executor: class,
-      mounts: { @bin: installed_bin },
+      mounts: %{ @bin => installed_bin },
       observer: (proc, _vfs) => (
         if proc.exit_code != 0 (
           fail `process failed`
@@ -164,17 +164,17 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
       ),
     };
 
-  Tree {
-    @(artifacts/{tc.os}-{tc.arch}/bin): installed_bin,
-    @(artifacts/{tc.os}-{tc.arch}/lib): installed_lib,
-    @(artifacts/{tc.os}-{tc.arch}/version.txt): version_blob,
+  Tree %{
+    @(artifacts/{tc.os}-{tc.arch}/bin) => installed_bin,
+    @(artifacts/{tc.os}-{tc.arch}/lib) => installed_lib,
+    @(artifacts/{tc.os}-{tc.arch}/version.txt) => version_blob,
   }
 }
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-  Tree {
-    @local: build_lua(workspace, executor_class("default")),
-    @orb: build_lua(workspace, executor_class("ssh:orb")),
-    @toast: build_lua(workspace, executor_class("ssh:toast")),
+  Tree %{
+    @local => build_lua(workspace, executor_class("default")),
+    @orb => build_lua(workspace, executor_class("ssh:orb")),
+    @toast => build_lua(workspace, executor_class("ssh:toast")),
   }
 }

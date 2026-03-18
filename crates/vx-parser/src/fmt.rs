@@ -1052,7 +1052,72 @@ impl Formatter {
     }
 
     fn fmt_map_expr(&mut self, node: &SyntaxNode) {
-        self.fmt_brace_literal(node);
+        let field_count = node.children().count();
+        if field_count <= 1 {
+            self.fmt_map_inline(node);
+        } else {
+            self.fmt_map_multiline(node);
+        }
+    }
+
+    fn fmt_map_inline(&mut self, node: &SyntaxNode) {
+        self.write("%{");
+        let mut needs_space = false;
+        for child in node.children_with_tokens() {
+            match &child {
+                NodeOrToken::Token(t) => match t.kind() {
+                    SyntaxKind::PERCENT_L_CURLY | SyntaxKind::R_CURLY | SyntaxKind::WHITESPACE => {}
+                    SyntaxKind::COMMA => {
+                        self.write(",");
+                        needs_space = true;
+                    }
+                    _ => {
+                        if needs_space {
+                            self.space();
+                            needs_space = false;
+                        }
+                        self.write(t.text());
+                    }
+                },
+                NodeOrToken::Node(n) => {
+                    self.space();
+                    self.fmt_inline(n);
+                    needs_space = false;
+                }
+            }
+        }
+        self.space();
+        self.write("}");
+    }
+
+    fn fmt_map_multiline(&mut self, node: &SyntaxNode) {
+        self.write("%{");
+        self.inc_indent();
+
+        for child in node.children_with_tokens() {
+            match &child {
+                NodeOrToken::Token(t) => match t.kind() {
+                    SyntaxKind::PERCENT_L_CURLY
+                    | SyntaxKind::R_CURLY
+                    | SyntaxKind::WHITESPACE
+                    | SyntaxKind::COMMA => {}
+                    SyntaxKind::LINE_COMMENT | SyntaxKind::DOC_COMMENT => {
+                        self.newline();
+                        self.write(t.text().trim_end());
+                    }
+                    _ => self.write(t.text()),
+                },
+                NodeOrToken::Node(n) => {
+                    self.newline();
+                    self.fmt_inline(n);
+                    self.write(",");
+                }
+            }
+        }
+
+        self.dec_indent();
+        self.newline();
+        self.write("}");
     }
 
     fn fmt_bracket_list(&mut self, node: &SyntaxNode) {
