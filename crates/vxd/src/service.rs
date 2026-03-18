@@ -192,6 +192,23 @@ type SnapshotTreeFuture<'a> =
 type SnapshotTreeEntryFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(DirEntryKind, u64), String>> + Send + 'a>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostRelation {
+    SameHost,
+    CrossHost,
+    Unknown,
+}
+
+impl HostRelation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SameHost => "same_host",
+            Self::CrossHost => "cross_host",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Acquired toolchains (manifest references only)
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
@@ -202,6 +219,7 @@ pub struct AcquiredToolchains {
 pub(crate) struct BuildVxExecutor {
     id: String,
     backend: ExecutorBackendKind,
+    host_relation: HostRelation,
     runner: Option<Arc<RunnerClient>>,
     store: Option<Arc<StoreClient>>,
     store_supports_readthrough: bool,
@@ -218,6 +236,7 @@ impl BuildVxExecutor {
         Self {
             id: "local".to_string(),
             backend: ExecutorBackendKind::Local,
+            host_relation: HostRelation::SameHost,
             runner: Some(runner),
             store: None,
             store_supports_readthrough: false,
@@ -235,6 +254,7 @@ impl BuildVxExecutor {
         Self {
             id: id.into(),
             backend: ExecutorBackendKind::Daemon,
+            host_relation: HostRelation::Unknown,
             runner: Some(runner),
             store: None,
             store_supports_readthrough: false,
@@ -276,6 +296,7 @@ impl SshBootstrapExecutor {
         BuildVxExecutor {
             id: self.id,
             backend: self.backend,
+            host_relation: HostRelation::CrossHost,
             runner: Some(self.runner),
             store: self.store,
             store_supports_readthrough: self.store_supports_readthrough,
@@ -325,6 +346,7 @@ impl BuildVxExecutors {
         let executor = BuildVxExecutor {
             id: executor_id.clone(),
             backend: ExecutorBackendKind::Local,
+            host_relation: HostRelation::SameHost,
             runner: Some(runner),
             store: Some(store),
             store_supports_readthrough: false,
@@ -422,6 +444,7 @@ impl BuildVxExecutors {
             BuildVxExecutor {
                 id: executor_id.into(),
                 backend,
+                host_relation: HostRelation::Unknown,
                 runner: Some(runner),
                 store,
                 store_supports_readthrough: false,
@@ -458,6 +481,7 @@ impl BuildVxExecutors {
             BuildVxExecutor {
                 id: executor_id.clone(),
                 backend,
+                host_relation: HostRelation::Unknown,
                 runner: None,
                 store: None,
                 store_supports_readthrough: false,
@@ -609,6 +633,17 @@ impl BuildVxExecutors {
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
         Ok(executor.store_supports_readthrough)
+    }
+
+    pub(crate) async fn host_relation_for(
+        &self,
+        selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
+    ) -> std::result::Result<HostRelation, String> {
+        self.ensure_executor(selector, progress_listener).await?;
+        let state = self.state.lock().expect("build_vx_executors poisoned");
+        let executor = self.resolve_executor_locked(&state, selector)?;
+        Ok(executor.host_relation)
     }
 }
 
@@ -1898,15 +1933,17 @@ async fn prepare_exec_mounts_with_progress(
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
+    host_relation: HostRelation,
 ) -> ExecMountPrepResult {
     if let (Some(activity), Some(executor_summary)) = (activity, executor_summary) {
         emit_build_vx_progress_activity(
             progress_listener,
             activity,
             format!(
-                "build.vx executor {}: preparing {} structural exec mounts",
+                "build.vx executor {}: preparing {} structural exec mounts ({})",
                 executor_summary,
-                mounts.len()
+                mounts.len(),
+                host_relation.as_str()
             ),
         )
         .await;
@@ -1964,10 +2001,11 @@ async fn prepare_exec_mounts_with_progress(
             progress_listener,
             activity,
             format!(
-                "build.vx executor {}: prepared {} tree mounts and {} file mounts",
+                "build.vx executor {}: prepared {} tree mounts and {} file mounts ({})",
                 executor_summary,
                 prepared.tree_mounts.len(),
-                prepared.file_mounts.len()
+                prepared.file_mounts.len(),
+                host_relation.as_str()
             ),
         )
         .await;
@@ -2182,6 +2220,7 @@ async fn store_exec_mounts_deduped(
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     activity: Option<&ActivityHandle>,
     executor_summary: Option<&str>,
+    host_relation: HostRelation,
     inflight: &Arc<SyncMutex<HashMap<String, ExecMountPrepFuture>>>,
     event_recorder: Option<&vx_eval::EventRecorder>,
 ) -> ExecMountPrepResult {
@@ -2193,6 +2232,7 @@ async fn store_exec_mounts_deduped(
             progress_listener,
             activity,
             executor_summary,
+            host_relation,
         )
         .await;
     };
@@ -2223,6 +2263,7 @@ async fn store_exec_mounts_deduped(
                     progress_listener,
                     activity,
                     executor_summary,
+                    host_relation,
                 )
                 .await;
                 drop(compute_span);
@@ -2243,6 +2284,7 @@ async fn store_exec_mounts_deduped(
                     progress_listener,
                     activity,
                     executor_summary,
+                    host_relation,
                 )
             })
             .await
@@ -3040,7 +3082,7 @@ async fn run_build_vx_exec_via_runner(
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
-    let (exec, exec_store, store_supports_readthrough) = {
+    let (exec, exec_store, store_supports_readthrough, host_relation) = {
         let _resolve_executor_span = event_recorder.as_ref().map(|recorder| {
             EventSink::begin_span_with_args(
                 recorder,
@@ -3062,7 +3104,11 @@ async fn run_build_vx_exec_via_runner(
             .store_supports_readthrough(&request.executor, progress_listener.clone())
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-        (exec, exec_store, store_supports_readthrough)
+        let host_relation = executors
+            .host_relation_for(&request.executor, progress_listener.clone())
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+        (exec, exec_store, store_supports_readthrough, host_relation)
     };
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -3096,7 +3142,8 @@ async fn run_build_vx_exec_via_runner(
                 "exec.mounts.prepare",
                 value!({
                     "executor": ((executor_summary.clone())),
-                    "mount_count": ((request.mounts.len() as u64))
+                    "mount_count": ((request.mounts.len() as u64)),
+                    "host_relation": ((host_relation.as_str()))
                 }),
             )
         });
@@ -3107,6 +3154,7 @@ async fn run_build_vx_exec_via_runner(
             &progress_listener,
             Some(&activity),
             Some(&executor_summary),
+            host_relation,
             exec_mount_prep_inflight,
             event_recorder.as_ref(),
         )
@@ -3118,6 +3166,7 @@ async fn run_build_vx_exec_via_runner(
         tree_mount_count = prepared_mounts.tree_mounts.len(),
         file_mount_count = prepared_mounts.file_mounts.len(),
         cross_store = !std::ptr::eq(target_store, &**store),
+        host_relation = %host_relation.as_str(),
         store_supports_readthrough,
         "build.vx exec prepared mounts"
     );
