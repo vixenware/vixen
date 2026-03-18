@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use blake3::hash as blake3_hash;
 use indoc::indoc;
@@ -15,8 +15,11 @@ use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt, tri
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::events::EventRecorder;
-use crate::exec::{AcquireRequest, ExecArgValue, ImportRequest, RenderRequest, StabilizeRequest};
-use crate::instr::{Block, FnDef};
+use crate::exec::{
+    AcquireRequest, BoxFuture, BuildRuntime, DiscoverRequest, ExecArgValue, ExecRequest,
+    ImportRequest, RenderRequest, StabilizeRequest, StoreHydrationRequest,
+};
+use crate::instr::{Block, FnDef, Module};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
 use crate::poison::{PoisonError, PoisonKind};
@@ -5148,6 +5151,308 @@ async fn keyword_record_spreads_are_merged_concurrently() {
     assert_eq!(
         value,
         Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_if_spreads_handle_pending_memoized_conditions() {
+    let engine = engine(
+        r#"fn probe(source: Bool) -> Bool (source)
+           fn main(a: Bool, b: Bool, c: Bool) {
+             [
+               ..if probe(a) ([1]) else ([]),
+               ..if !probe(b) ([2]) else ([]),
+               ..if probe(c) ([3]) else ([]),
+             ]
+           }"#,
+    );
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, Value::Bool(true)),
+                engine.sleep_value(200, Value::Bool(false)),
+                engine.sleep_value(200, Value::Bool(true)),
+            ],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2), Value::U64(3)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_if_spreads_handle_pending_exec_conditions() {
+    let base = engine(
+        r#"fn cc_probe(source: Blob) -> Bool {
+             exec(["cc"]) where {
+               mounts: %{ @probe.c => source },
+               observer: (proc, _vfs) => proc.exit_code == 0,
+             }
+           }
+
+           fn main() {
+             let a = cc_probe(Blob("probe-a"));
+             let b = cc_probe(Blob("probe-b"));
+             let c = cc_probe(Blob("probe-c"));
+             [
+               ..if a ([1]) else ([]),
+               ..if !b ([2]) else ([]),
+               ..if c ([3]) else ([]),
+             ]
+           }"#,
+    );
+    let engine = base.with_exec_handler(Arc::new(move |request| {
+        let source = request
+            .mounts
+            .iter()
+            .find(|mount| mount.path.as_str() == "probe.c")
+            .map(|mount| mount.value.clone())
+            .expect("probe mount");
+        let Value::Blob(BlobValue::Inline { bytes, .. }) = source else {
+            panic!("expected inline blob mount");
+        };
+        let value = match std::str::from_utf8(bytes.as_ref()).expect("utf8 probe source") {
+            "probe-a" => Value::Bool(true),
+            "probe-b" => Value::Bool(false),
+            "probe-c" => Value::Bool(true),
+            other => panic!("unexpected probe source {other}"),
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(value)
+    }));
+
+    let start = Instant::now();
+    let value = engine.call("main", vec![]).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2), Value::U64(3)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_if_spreads_handle_libpng_style_exec_probes() {
+    let base = engine(
+        r#"
+        struct Tool {
+          path: String,
+          hash: Blob,
+        }
+
+        namespace Tool {
+          fn to_string(self) -> String self.path;
+        }
+
+        fn main() {
+          let cc = Tool { path: "cc", hash: Blob("fake-hash") };
+
+          let cexec = partial exec where {
+            observer: (proc, _vfs) => proc.exit_code == 0,
+          };
+
+          fn cc_probe(source: Blob) where {
+            flags: Array[String] = [],
+            link: Bool = false,
+          } -> Bool (
+            let mode_args =
+              if link (
+                ["-o", @out/probe]
+              ) else (
+                ["-c", "-o", @out/probe.o]
+              );
+
+            cexec [
+              cc,
+              "-x", "c",
+              @probe.c,
+              ..mode_args,
+              ..flags,
+            ] where {
+              mounts: %{ @probe.c => source },
+            }
+          );
+
+          let a = cc_probe(Blob("probe-a"));
+          let b = cc_probe(Blob("probe-b"));
+          let c = cc_probe(Blob("probe-c"));
+          [
+            ..if a ([1]) else ([]),
+            ..if !b ([2]) else ([]),
+            ..if c ([3]) else ([]),
+          ]
+        }"#,
+    );
+    let engine = base.with_exec_handler(Arc::new(move |request| {
+        let source = request
+            .mounts
+            .iter()
+            .find(|mount| mount.path.as_str() == "probe.c")
+            .map(|mount| mount.value.clone())
+            .expect("probe mount");
+        let Value::Blob(BlobValue::Inline { bytes, .. }) = source else {
+            panic!("expected inline blob mount");
+        };
+        let value = match std::str::from_utf8(bytes.as_ref()).expect("utf8 probe source") {
+            "probe-a" => Value::Bool(true),
+            "probe-b" => Value::Bool(false),
+            "probe-c" => Value::Bool(true),
+            other => panic!("unexpected probe source {other}"),
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(value)
+    }));
+
+    let start = Instant::now();
+    let value = engine.call("main", vec![]).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2), Value::U64(3)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_if_spreads_handle_libpng_style_async_exec_probes() {
+    #[derive(Default)]
+    struct AsyncExecRuntime;
+
+    impl BuildRuntime for AsyncExecRuntime {
+        fn store_hydration(
+            &self,
+            _request: StoreHydrationRequest,
+        ) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async { panic!("store_hydration should not be called") })
+        }
+
+        fn acquire(&self, _request: AcquireRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async { panic!("acquire should not be called") })
+        }
+
+        fn import_module(
+            &self,
+            _request: ImportRequest,
+        ) -> BoxFuture<'_, Result<Module, PoisonError>> {
+            Box::pin(async { panic!("import_module should not be called") })
+        }
+
+        fn render(&self, _request: RenderRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async { panic!("render should not be called") })
+        }
+
+        fn stabilize(
+            &self,
+            _request: StabilizeRequest,
+        ) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async { panic!("stabilize should not be called") })
+        }
+
+        fn exec(&self, request: ExecRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async move {
+                let source = request
+                    .mounts
+                    .iter()
+                    .find(|mount| mount.path.as_str() == "probe.c")
+                    .map(|mount| mount.value.clone())
+                    .expect("probe mount");
+                let Value::Blob(BlobValue::Inline { bytes, .. }) = source else {
+                    panic!("expected inline blob mount");
+                };
+                let value = match std::str::from_utf8(bytes.as_ref()).expect("utf8 probe source") {
+                    "probe-a" => Value::Bool(true),
+                    "probe-b" => Value::Bool(false),
+                    "probe-c" => Value::Bool(true),
+                    other => panic!("unexpected probe source {other}"),
+                };
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(value)
+            })
+        }
+
+        fn discover(&self, _request: DiscoverRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
+            Box::pin(async { panic!("discover should not be called") })
+        }
+
+        fn has_exec(&self) -> bool {
+            true
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    let engine = engine(
+        r#"
+        struct Tool {
+          path: String,
+          hash: Blob,
+        }
+
+        namespace Tool {
+          fn to_string(self) -> String self.path;
+        }
+
+        fn main() {
+          let cc = Tool { path: "cc", hash: Blob("fake-hash") };
+
+          let cexec = partial exec where {
+            observer: (proc, _vfs) => proc.exit_code == 0,
+          };
+
+          fn cc_probe(source: Blob) where {
+            flags: Array[String] = [],
+            link: Bool = false,
+          } -> Bool (
+            let mode_args =
+              if link (
+                ["-o", @out/probe]
+              ) else (
+                ["-c", "-o", @out/probe.o]
+              );
+
+            cexec [
+              cc,
+              "-x", "c",
+              @probe.c,
+              ..mode_args,
+              ..flags,
+            ] where {
+              mounts: %{ @probe.c => source },
+            }
+          );
+
+          let a = cc_probe(Blob("probe-a"));
+          let b = cc_probe(Blob("probe-b"));
+          let c = cc_probe(Blob("probe-c"));
+          [
+            ..if a ([1]) else ([]),
+            ..if !b ([2]) else ([]),
+            ..if c ([3]) else ([]),
+          ]
+        }"#,
+    )
+    .with_runtime(Arc::new(AsyncExecRuntime));
+
+    let start = Instant::now();
+    let value = engine.call("main", vec![]).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2), Value::U64(3)]))
     );
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }

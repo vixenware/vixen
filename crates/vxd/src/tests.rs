@@ -1941,6 +1941,44 @@ async fn build_vx_local_executor_is_lazy_and_reused() {
 }
 
 #[vx_test]
+async fn build_vx_local_executor_singleflights_concurrent_boot() {
+    let fake_runner = FakeRunnerHandle::new(FakeRunnerBehavior::PanicOnBoundaryUse).await;
+    let runner_handle = fake_runner.connect().await;
+    let runner_virtual = runner_handle
+        .boot_and_connect()
+        .await
+        .expect("failed to boot/connect fake runner");
+    let runner_client = Arc::new(RunnerClient::new(runner_virtual));
+    let syntheses = Arc::new(AtomicUsize::new(0));
+
+    let executors = crate::service::BuildVxExecutors::local_lazy({
+        let syntheses = Arc::clone(&syntheses);
+        let runner_client = Arc::clone(&runner_client);
+        move |_listener| {
+            let syntheses = Arc::clone(&syntheses);
+            let runner_client = Arc::clone(&runner_client);
+            Box::pin(async move {
+                syntheses.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(crate::service::BuildVxExecutor::local(runner_client, None))
+            })
+        }
+    });
+
+    let selector = vx_eval::ExecutorSelector::class("default");
+    let (runner_a, runner_b) = tokio::join!(
+        executors.runner_for(&selector, None),
+        executors.runner_for(&selector, None)
+    );
+
+    let runner_a = runner_a.expect("first default executor request should succeed");
+    let runner_b = runner_b.expect("second default executor request should succeed");
+
+    assert_eq!(syntheses.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&runner_a, &runner_b));
+}
+
+#[vx_test]
 async fn build_vx_implicit_ssh_executor_does_not_synthesize_local_runner() {
     let local_syntheses = Arc::new(AtomicUsize::new(0));
     let ssh_syntheses = Arc::new(AtomicUsize::new(0));

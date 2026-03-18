@@ -187,6 +187,8 @@ type ExecMountPrepResult = std::result::Result<PreparedExecMounts, String>;
 type ExecMountPrepFuture = Arc<moire::sync::OnceCell<ExecMountPrepResult>>;
 type BuildVxFsTreeSnapshotResult = std::result::Result<(NodeHash, u64), String>;
 type BuildVxFsTreeSnapshotFuture = Arc<moire::sync::OnceCell<BuildVxFsTreeSnapshotResult>>;
+type BuildVxExecutorEnsureResult = std::result::Result<(), String>;
+type BuildVxExecutorEnsureFuture = Arc<moire::sync::OnceCell<BuildVxExecutorEnsureResult>>;
 type SnapshotTreeFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(NodeHash, u64), String>> + Send + 'a>>;
 type SnapshotTreeEntryFuture<'a> =
@@ -274,6 +276,7 @@ pub(crate) struct BuildVxExecutors {
     state: Arc<std::sync::Mutex<BuildVxExecutorsState>>,
     ssh_bootstrap_factory: Option<SshBootstrapFactory>,
     local_factory: Option<LocalExecutorFactory>,
+    ensure_inflight: Arc<SyncMutex<HashMap<String, BuildVxExecutorEnsureFuture>>>,
 }
 
 struct BuildVxExecutorsState {
@@ -289,6 +292,14 @@ pub(crate) struct SshBootstrapExecutor {
     pub(crate) store_supports_readthrough: bool,
     pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
     pub(crate) store_handle: Option<Arc<ServiceHandle>>,
+}
+
+#[derive(Clone)]
+struct ResolvedBuildVxExecutor {
+    runner: Arc<RunnerClient>,
+    store: Option<Arc<StoreClient>>,
+    store_supports_readthrough: bool,
+    host_relation: HostRelation,
 }
 
 impl SshBootstrapExecutor {
@@ -361,6 +372,10 @@ impl BuildVxExecutors {
             })),
             ssh_bootstrap_factory: None,
             local_factory: None,
+            ensure_inflight: Arc::new(SyncMutex::new(
+                "vxd/build_vx_executor_ensure_inflight",
+                HashMap::new(),
+            )),
         }
     }
 
@@ -380,6 +395,10 @@ impl BuildVxExecutors {
             })),
             ssh_bootstrap_factory: None,
             local_factory: Some(Arc::new(factory)),
+            ensure_inflight: Arc::new(SyncMutex::new(
+                "vxd/build_vx_executor_ensure_inflight",
+                HashMap::new(),
+            )),
         }
     }
 
@@ -529,6 +548,12 @@ impl BuildVxExecutors {
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
     ) -> std::result::Result<(), String> {
+        #[derive(Clone)]
+        enum PendingExecutorBootstrap {
+            Local,
+            ImplicitSsh { class_label: String, target: String },
+        }
+
         {
             let state = self.state.lock().expect("build_vx_executors poisoned");
             if self.resolve_executor_locked(&state, selector).is_ok() {
@@ -546,52 +571,131 @@ impl BuildVxExecutors {
             false
         };
 
-        if ((selector.backend == ExecutorBackendKind::Local && selector.id == "local")
-            || is_pending_local_class)
-            && let Some(factory) = &self.local_factory
+        let pending = if (selector.backend == ExecutorBackendKind::Local && selector.id == "local")
+            || is_pending_local_class
         {
-            let synthesized = factory(progress_listener).await?;
-            let mut state = self.state.lock().expect("build_vx_executors poisoned");
-            state
-                .executors
-                .entry("local".to_string())
-                .or_insert_with(|| synthesized);
-            return Ok(());
+            if self.local_factory.is_none() {
+                return Err(format!(
+                    "build.vx executor {}:{} is not configured",
+                    selector.backend.as_tag(),
+                    selector.id
+                ));
+            }
+            PendingExecutorBootstrap::Local
+        } else {
+            if selector.backend != ExecutorBackendKind::Class {
+                return Err(format!(
+                    "build.vx executor {}:{} is not configured",
+                    selector.backend.as_tag(),
+                    selector.id
+                ));
+            }
+
+            let Some(target) = implicit_ssh_class_target(&selector.id) else {
+                return Err(format!(
+                    "build.vx executor {}:{} is not configured",
+                    selector.backend.as_tag(),
+                    selector.id
+                ));
+            };
+            if self.ssh_bootstrap_factory.is_none() {
+                return Err(format!(
+                    "build.vx executor class:{} is not available on this host",
+                    selector.id
+                ));
+            }
+            PendingExecutorBootstrap::ImplicitSsh {
+                class_label: selector.id.clone(),
+                target: target.to_string(),
+            }
+        };
+
+        let key = match &pending {
+            PendingExecutorBootstrap::Local => "local".to_string(),
+            PendingExecutorBootstrap::ImplicitSsh { class_label, .. } => {
+                format!("class:{class_label}")
+            }
+        };
+
+        let (cell, inserted) = {
+            let mut inflight = self.ensure_inflight.lock();
+            match inflight.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let cell = Arc::new(moire::sync::OnceCell::new("build_vx_executor_ensure"));
+                    entry.insert(cell.clone());
+                    (cell, true)
+                }
+            }
+        };
+
+        let state = Arc::clone(&self.state);
+        let local_factory = self.local_factory.clone();
+        let ssh_bootstrap_factory = self.ssh_bootstrap_factory.clone();
+        let selector = selector.clone();
+        let result = cell
+            .get_or_init(|| async move {
+                match pending {
+                    PendingExecutorBootstrap::Local => {
+                        let factory = local_factory.ok_or_else(|| {
+                            format!(
+                                "build.vx executor {}:{} is not configured",
+                                selector.backend.as_tag(),
+                                selector.id
+                            )
+                        })?;
+                        let synthesized = factory(progress_listener).await?;
+                        let mut state = state.lock().expect("build_vx_executors poisoned");
+                        state
+                            .executors
+                            .entry("local".to_string())
+                            .or_insert_with(|| synthesized);
+                        Ok(())
+                    }
+                    PendingExecutorBootstrap::ImplicitSsh {
+                        class_label,
+                        target,
+                    } => {
+                        let factory = ssh_bootstrap_factory.ok_or_else(|| {
+                            format!(
+                                "build.vx executor class:{} is not available on this host",
+                                class_label
+                            )
+                        })?;
+                        let synthesized =
+                            factory(class_label.clone(), target, progress_listener).await?;
+                        let mut state = state.lock().expect("build_vx_executors poisoned");
+                        if state
+                            .class_aliases
+                            .get(&class_label)
+                            .and_then(|executor_id| state.executors.get(executor_id))
+                            .is_none()
+                        {
+                            let executor_id = synthesized.id.clone();
+                            state
+                                .executors
+                                .insert(executor_id.clone(), synthesized.into_build_vx_executor());
+                            state.class_aliases.insert(class_label, executor_id);
+                        }
+                        Ok(())
+                    }
+                }
+            })
+            .await
+            .clone();
+
+        if result.is_err() || inserted {
+            let mut inflight = self.ensure_inflight.lock();
+            if result.is_err()
+                || inflight
+                    .get(&key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &cell))
+            {
+                inflight.remove(&key);
+            }
         }
 
-        if selector.backend != ExecutorBackendKind::Class {
-            return Err(format!(
-                "build.vx executor {}:{} is not configured",
-                selector.backend.as_tag(),
-                selector.id
-            ));
-        }
-
-        let Some(target) = implicit_ssh_class_target(&selector.id) else {
-            return Err(format!(
-                "build.vx executor {}:{} is not configured",
-                selector.backend.as_tag(),
-                selector.id
-            ));
-        };
-        let Some(factory) = &self.ssh_bootstrap_factory else {
-            return Err(format!(
-                "build.vx executor class:{} is not available on this host",
-                selector.id
-            ));
-        };
-        let class_label = selector.id.clone();
-        let synthesized =
-            factory(class_label.clone(), target.to_string(), progress_listener).await?;
-        let mut state = self.state.lock().expect("build_vx_executors poisoned");
-        if self.resolve_executor_locked(&state, selector).is_err() {
-            let executor_id = synthesized.id.clone();
-            state
-                .executors
-                .insert(executor_id.clone(), synthesized.into_build_vx_executor());
-            state.class_aliases.insert(class_label, executor_id);
-        }
-        Ok(())
+        result
     }
 
     pub(crate) async fn runner_for(
@@ -635,15 +739,28 @@ impl BuildVxExecutors {
         Ok(executor.store_supports_readthrough)
     }
 
-    pub(crate) async fn host_relation_for(
+    async fn resolved_executor_for(
         &self,
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
-    ) -> std::result::Result<HostRelation, String> {
+    ) -> std::result::Result<ResolvedBuildVxExecutor, String> {
         self.ensure_executor(selector, progress_listener).await?;
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
-        Ok(executor.host_relation)
+        let Some(runner) = &executor.runner else {
+            return Err(executor.unavailable_reason.clone().unwrap_or_else(|| {
+                format!(
+                    "build.vx executor {} is configured without a runner connection",
+                    executor.id
+                )
+            }));
+        };
+        Ok(ResolvedBuildVxExecutor {
+            runner: Arc::clone(runner),
+            store: executor.store.clone(),
+            store_supports_readthrough: executor.store_supports_readthrough,
+            host_relation: executor.host_relation,
+        })
     }
 }
 
@@ -3092,23 +3209,16 @@ async fn run_build_vx_exec_via_runner(
                 }),
             )
         });
-        let exec = executors
-            .runner_for(&request.executor, progress_listener.clone())
+        let resolved = executors
+            .resolved_executor_for(&request.executor, progress_listener.clone())
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-        let exec_store = executors
-            .store_for(&request.executor, progress_listener.clone())
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-        let store_supports_readthrough = executors
-            .store_supports_readthrough(&request.executor, progress_listener.clone())
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-        let host_relation = executors
-            .host_relation_for(&request.executor, progress_listener.clone())
-            .await
-            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-        (exec, exec_store, store_supports_readthrough, host_relation)
+        (
+            resolved.runner,
+            resolved.store,
+            resolved.store_supports_readthrough,
+            resolved.host_relation,
+        )
     };
     emit_build_vx_progress_activity(
         &progress_listener,
