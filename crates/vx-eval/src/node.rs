@@ -105,6 +105,16 @@ pub enum NodeJob {
 }
 
 impl NodeJob {
+    pub fn should_preforce_inputs(&self) -> bool {
+        !matches!(
+            self,
+            NodeJob::Fallible { .. }
+                | NodeJob::Call { .. }
+                | NodeJob::Invoke { .. }
+                | NodeJob::Field { .. }
+        )
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn pending_deps(&self) -> Vec<NodeId> {
         let mut deps = Vec::new();

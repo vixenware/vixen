@@ -1677,16 +1677,24 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let pending_deps = node.job.pending_deps();
+                let pending_deps = if node.job.should_preforce_inputs() {
+                    node.job.pending_deps()
+                } else {
+                    Vec::new()
+                };
                 if !pending_deps.is_empty() {
                     let _span = self.begin_node_phase_span("node.inputs", &node);
                     let pending_values = pending_deps
                         .into_iter()
                         .map(Value::Pending)
                         .collect::<Vec<_>>();
-                    let _ = self
+                    if let Err(error) = self
                         .with_prefixed_demand_chain(chain, node_id, self.force_many(pending_values))
-                        .await?;
+                        .await
+                    {
+                        node.poison(error.clone());
+                        return Err(error);
+                    }
                 }
                 let _span = self.begin_node_phase_span("node.execute", &node);
                 let result = self

@@ -3314,12 +3314,14 @@ async fn unused_pending_arg_is_not_forced() {
 }
 
 #[tokio::test]
+// r[verify eval.forcing.boundary]
 // r[verify eval.pending]
-async fn field_access_does_not_force_other_fields() {
-    let engine = engine("fn get_x(pair: Pair) { pair.x }");
+async fn non_memoized_calls_do_not_force_unused_pending_subgraphs() {
+    let engine = engine("fn first(pair: Pair) { pair.x }");
+
     let value = engine
         .call(
-            "get_x",
+            "first",
             vec![Value::Struct(StructValue {
                 type_name: Arc::from("Pair"),
                 fields: Arc::from([
@@ -3332,6 +3334,52 @@ async fn field_access_does_not_force_other_fields() {
         .unwrap();
 
     assert_eq!(value, Value::U64(7));
+}
+
+#[tokio::test]
+// r[verify eval.forcing.boundary]
+// r[verify eval.pending]
+async fn fallible_does_not_preforce_lazy_calls() {
+    let engine =
+        engine("fn first(x: U64, y: U64) { x }\nfn maybe(x: U64, y: U64) { first(x, y)? }");
+    let pending = engine.poison_value("unused");
+
+    let value = engine
+        .call("maybe", vec![Value::U64(1), pending])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("Some"),
+            fields: Arc::from([(Arc::from("value"), Value::U64(1))]),
+        })
+    );
+}
+
+#[tokio::test]
+// r[verify eval.pending]
+async fn field_access_does_not_force_other_fields() {
+    let engine = engine("fn get_x(pair: Pair) { pair.x }");
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "get_x",
+            vec![Value::Struct(StructValue {
+                type_name: Arc::from("Pair"),
+                fields: Arc::from([
+                    (Arc::from("x"), Value::U64(7)),
+                    (Arc::from("y"), engine.sleep_value(200, Value::U64(99))),
+                ]),
+            })],
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(value, Value::U64(7));
+    assert!(elapsed.as_millis() < 100, "elapsed = {elapsed:?}");
 }
 
 #[tokio::test]
@@ -5080,7 +5128,7 @@ async fn force_fully_uses_scheduler_for_pending_call_nodes() {
     let engine = engine(
         "struct Item { wait: U64, value: U64 }
          fn project(item: Item) {
-           item.wait;
+           let _wait = force(item.wait);
            item.value
          }
          fn main(items: Array) { items.map(project) }",
