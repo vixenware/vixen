@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -321,16 +321,25 @@ impl EventRecorder {
     pub fn write_perfetto_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
         let mut events = self.inner.events.lock().unwrap().clone();
         events.sort_by_key(|event| (event.timestamp_us, event.sequence));
+        let metadata_by_track = self.inner.track_metadata.lock().unwrap().clone();
         let mut packets = Vec::new();
         packets.push(process_descriptor_packet());
+        let mut cleared_sequences = HashSet::new();
         for track_id in track_ids(&events) {
+            let metadata = metadata_by_track
+                .get(&track_id)
+                .cloned()
+                .unwrap_or_default();
+            let sequence_id = track_sequence_id(track_id, &metadata_by_track);
             packets.push(track_descriptor_packet(
                 track_id,
-                self.inner.track_metadata(track_id),
+                metadata,
+                sequence_id,
+                cleared_sequences.insert(sequence_id),
             ));
         }
         for event in &events {
-            packets.push(event_packet(event));
+            packets.push(event_packet(event, &metadata_by_track));
         }
 
         let trace = Trace { packet: packets };
@@ -520,7 +529,12 @@ fn process_descriptor_packet() -> TracePacket {
     }
 }
 
-fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacket {
+fn track_descriptor_packet(
+    track_id: u64,
+    metadata: TrackMetadata,
+    sequence_id: u32,
+    clears_incremental_state: bool,
+) -> TracePacket {
     let parent_track_id = metadata.parent_track_id;
     let track_name = metadata.name.unwrap_or_else(|| {
         if track_id == 0 {
@@ -530,12 +544,11 @@ fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacke
         }
     });
     TracePacket {
-        sequence_flags: Some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as u32),
-        first_packet_on_sequence: Some(true),
+        sequence_flags: clears_incremental_state
+            .then_some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as u32),
+        first_packet_on_sequence: clears_incremental_state.then_some(true),
         optional_trusted_packet_sequence_id: Some(
-            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
-                track_sequence_id(track_id),
-            ),
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(sequence_id),
         ),
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(track_uuid(track_id)),
@@ -557,7 +570,10 @@ fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacke
     }
 }
 
-fn event_packet(event: &RecordedEvent) -> TracePacket {
+fn event_packet(
+    event: &RecordedEvent,
+    metadata_by_track: &HashMap<u64, TrackMetadata>,
+) -> TracePacket {
     let (name, phase, args) = match event.phase {
         EventPhase::Begin => (
             Some(trace_display_name(event.name, event.args.as_ref()).into_owned()),
@@ -580,7 +596,7 @@ fn event_packet(event: &RecordedEvent) -> TracePacket {
         timestamp: Some(us_to_ns(event.timestamp_us)),
         optional_trusted_packet_sequence_id: Some(
             trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
-                track_sequence_id(event.track_id),
+                track_sequence_id(event.track_id, metadata_by_track),
             ),
         ),
         data: Some(trace_packet::Data::TrackEvent(TrackEvent {
@@ -664,8 +680,20 @@ fn track_uuid(track_id: u64) -> u64 {
     1_000 + track_id
 }
 
-fn track_sequence_id(track_id: u64) -> u32 {
-    u32::try_from(track_id.saturating_add(2)).unwrap_or(u32::MAX)
+fn root_track_id(track_id: u64, metadata_by_track: &HashMap<u64, TrackMetadata>) -> u64 {
+    let mut current = track_id;
+    while let Some(parent_track_id) = metadata_by_track
+        .get(&current)
+        .and_then(|metadata| metadata.parent_track_id)
+    {
+        current = parent_track_id;
+    }
+    current
+}
+
+fn track_sequence_id(track_id: u64, metadata_by_track: &HashMap<u64, TrackMetadata>) -> u32 {
+    let root_track_id = root_track_id(track_id, metadata_by_track);
+    u32::try_from(root_track_id.saturating_add(2)).unwrap_or(u32::MAX)
 }
 
 fn track_tid(track_id: u64) -> i32 {
