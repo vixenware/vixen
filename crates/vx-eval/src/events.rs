@@ -16,8 +16,8 @@ use std::time::Instant;
 use prost::Message;
 
 use crate::perfetto_proto_generated::{
-    BuiltinClock, DebugAnnotation, ProcessDescriptor, ThreadDescriptor, Trace, TracePacket,
-    TrackDescriptor, TrackEvent, debug_annotation, trace_packet, track_descriptor, track_event,
+    DebugAnnotation, ProcessDescriptor, ThreadDescriptor, Trace, TracePacket, TrackDescriptor,
+    TrackEvent, debug_annotation, trace_packet, track_descriptor, track_event,
 };
 
 pub type EventArgs = facet_value::Value;
@@ -500,6 +500,11 @@ fn trace_display_name<'a>(fallback: &'a str, args: Option<&'a EventArgs>) -> Cow
 
 fn process_descriptor_packet() -> TracePacket {
     TracePacket {
+        sequence_flags: Some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as u32),
+        first_packet_on_sequence: Some(true),
+        optional_trusted_packet_sequence_id: Some(
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
+        ),
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(process_uuid()),
             process: Some(ProcessDescriptor {
@@ -525,6 +530,9 @@ fn track_descriptor_packet(track_id: u64, metadata: TrackMetadata) -> TracePacke
         }
     });
     TracePacket {
+        optional_trusted_packet_sequence_id: Some(
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
+        ),
         data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
             uuid: Some(track_uuid(track_id)),
             parent_uuid: Some(
@@ -571,7 +579,9 @@ fn event_packet(event: &RecordedEvent) -> TracePacket {
     };
     TracePacket {
         timestamp: Some(us_to_ns(event.timestamp_us)),
-        timestamp_clock_id: Some(BuiltinClock::Monotonic as u32),
+        optional_trusted_packet_sequence_id: Some(
+            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1),
+        ),
         data: Some(trace_packet::Data::TrackEvent(TrackEvent {
             r#type: Some(phase as i32),
             track_uuid: Some(track_uuid(event.track_id)),
