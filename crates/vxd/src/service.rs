@@ -32,6 +32,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 use tokio::io::{AsyncRead, ReadBuf};
@@ -2483,6 +2484,8 @@ async fn store_acquired_tree_manifest(
     store: &StoreClient,
     tree: &TreeManifest,
     files: &HashMap<Blake3Hash, BlobRef>,
+    event_recorder: Option<&vx_eval::EventRecorder>,
+    store_node_track_id: Option<u64>,
 ) -> std::result::Result<(NodeHash, u64), String> {
     let root_prefix = acquire_archive_root_prefix(tree);
     let mut dir_entries: BTreeMap<String, Vec<DirEntry>> = BTreeMap::new();
@@ -2579,6 +2582,21 @@ async fn store_acquired_tree_manifest(
             total_size,
         });
         let (node_bytes, node_hash) = node.to_bytes_and_hash();
+        let dir_display = if dir_path.is_empty() {
+            ".".to_string()
+        } else {
+            dir_path.clone()
+        };
+        let _store_node_span = match (event_recorder, store_node_track_id) {
+            (Some(recorder), Some(track_id)) => Some(recorder.begin_detached_span_with_args(
+                track_id,
+                "acquire.store_node",
+                value!({
+                    "display_name": ((format!("store_node({dir_display})")))
+                }),
+            )),
+            _ => None,
+        };
         store
             .put_node(node_hash, node_bytes)
             .await
@@ -2706,8 +2724,8 @@ pub(crate) async fn run_build_vx_acquire_via_store(
             let _download_span = event_recorder.map(|recorder| {
                 EventSink::begin_span_with_args(
                     recorder,
-                    "acquire.download",
-                    acquire_trace_args(&request, "download acquire payload"),
+                    "acquire.open_http",
+                    acquire_trace_args(&request, "open acquire response"),
                 )
             });
             vx_http::get(&request.url).await.map_err(|error| {
@@ -2734,10 +2752,49 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 .map(|result| result.map_err(std::io::Error::other)),
         );
         let mut reader = Box::pin(AcquireDigestVerifyingReader::new(body_reader, digest));
+        let acquire_track_id = current_trace_track_id();
+        let event_recorder_owned = event_recorder.cloned();
+        let acquire_blob_tracks = event_recorder_owned.as_ref().map(|recorder| {
+            (0..4)
+                .map(|index| {
+                    recorder.acquire_detached_track_with_descriptor(
+                        format!("acquire.store_blob[{index}]"),
+                        (acquire_track_id as i64) * 10 + index as i64 + 1,
+                        Some(acquire_track_id),
+                        None,
+                        Some(index + 1),
+                        Some(
+                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                                as i32,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let acquire_blob_track_ids = acquire_blob_tracks
+            .as_ref()
+            .map(|tracks| Arc::new(tracks.iter().map(|track| track.id()).collect::<Vec<_>>()));
+        let next_acquire_blob_track = Arc::new(AtomicUsize::new(0));
+        let acquire_store_node_track = event_recorder_owned.as_ref().map(|recorder| {
+            recorder.acquire_detached_track_with_descriptor(
+                "acquire.store_node".to_string(),
+                (acquire_track_id as i64) * 10 + 10,
+                Some(acquire_track_id),
+                None,
+                Some(10),
+                Some(
+                    vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                        as i32,
+                ),
+            )
+        });
 
         match extract_format {
             Some(format) => {
                 let store_for_extract = Arc::clone(store);
+                let event_recorder_for_extract = event_recorder_owned.clone();
+                let acquire_blob_track_ids = acquire_blob_track_ids.clone();
+                let next_acquire_blob_track = Arc::clone(&next_acquire_blob_track);
                 let (tree, extracted_files) = {
                     let _extract_span = event_recorder.map(|recorder| {
                         EventSink::begin_span_with_args(
@@ -2750,9 +2807,30 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         &mut reader,
                         format.compression(),
                         0,
-                        move |mut entry_reader, _executable: bool| {
+                        move |path, mut entry_reader, _executable: bool| {
                             let store_for_extract = Arc::clone(&store_for_extract);
+                            let event_recorder_for_extract = event_recorder_for_extract.clone();
+                            let acquire_blob_track_ids = acquire_blob_track_ids.clone();
+                            let next_acquire_blob_track = Arc::clone(&next_acquire_blob_track);
                             Box::pin(async move {
+                                let _store_blob_span = match (
+                                    event_recorder_for_extract.as_ref(),
+                                    acquire_blob_track_ids.as_ref(),
+                                ) {
+                                    (Some(recorder), Some(track_ids)) if !track_ids.is_empty() => {
+                                        let slot = next_acquire_blob_track
+                                            .fetch_add(1, Ordering::Relaxed)
+                                            % track_ids.len();
+                                        Some(recorder.begin_detached_span_with_args(
+                                            track_ids[slot],
+                                            "acquire.store_blob",
+                                            value!({
+                                                "display_name": ((format!("store_blob({path})")))
+                                            }),
+                                        ))
+                                    }
+                                    _ => None,
+                                };
                                 let streamed =
                                     store_blob_stream(&store_for_extract, entry_reader.as_mut())
                                         .await?;
@@ -2794,11 +2872,17 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                             acquire_trace_args(&request, "store acquire tree"),
                         )
                     });
-                    store_acquired_tree_manifest(store, &tree, &files)
-                        .await
-                        .map_err(|message| {
-                            exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
-                        })?
+                    store_acquired_tree_manifest(
+                        store,
+                        &tree,
+                        &files,
+                        event_recorder_owned.as_ref(),
+                        acquire_store_node_track.as_ref().map(|track| track.id()),
+                    )
+                    .await
+                    .map_err(|message| {
+                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                    })?
                 };
                 {
                     let _publish_span = event_recorder.map(|recorder| {

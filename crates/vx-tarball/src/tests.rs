@@ -42,7 +42,7 @@ async fn extract_to_tree_runs_file_callbacks_concurrently() {
         extract_to_tree(std::io::Cursor::new(archive), Compression::Gzip, 1, {
             let active = Arc::clone(&active);
             let max_active = Arc::clone(&max_active);
-            move |mut reader, _executable| {
+            move |_path, mut reader, _executable| {
                 let active = Arc::clone(&active);
                 let max_active = Arc::clone(&max_active);
                 Box::pin(async move {

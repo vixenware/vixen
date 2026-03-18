@@ -149,7 +149,7 @@ async fn download_and_extract_component<F>(
     store_blob: F,
 ) -> Result<vx_store_proto::TreeManifest, vx_toolchain::ToolchainError>
 where
-    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+    F: Fn(String, OwnedFileReader, bool) -> FileStreamCallbackFuture,
 {
     use http_body_util::BodyExt;
     use std::sync::Arc;
@@ -929,7 +929,7 @@ impl StoreService {
                         Compression::Xz,
                         2,
                         progress,
-                        move |mut reader: OwnedFileReader, _executable: bool| {
+                        move |_path, mut reader: OwnedFileReader, _executable: bool| {
                             let rustc_info = rustc_info.clone();
                             let this1 = this1.clone();
                             Box::pin(async move {
@@ -974,7 +974,7 @@ impl StoreService {
                         Compression::Xz,
                         2,
                         progress,
-                        move |mut reader: OwnedFileReader, _executable: bool| {
+                        move |_path, mut reader: OwnedFileReader, _executable: bool| {
                             let std_info = std_info.clone();
                             let this2 = this2.clone();
                             Box::pin(async move {
@@ -1582,7 +1582,7 @@ impl StoreService {
             std::io::Cursor::new(tarball),
             Compression::Xz,
             strip_components,
-            move |mut reader: OwnedFileReader, _executable: bool| {
+            move |_path, mut reader: OwnedFileReader, _executable: bool| {
                 let file_info_clone = file_info_clone.clone();
                 let this = this.clone();
                 Box::pin(async move {

@@ -237,7 +237,7 @@ pub async fn extract_to_tree<R, F>(
 ) -> Result<(TreeManifest, Vec<(String, ExtractedFile, bool)>), TarballError>
 where
     R: AsyncRead + Unpin + Send,
-    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+    F: Fn(String, OwnedFileReader, bool) -> FileStreamCallbackFuture,
 {
     match compression {
         Compression::Xz => {
@@ -262,7 +262,7 @@ async fn extract_tar_to_tree<R, F>(
 ) -> Result<(TreeManifest, Vec<(String, ExtractedFile, bool)>), TarballError>
 where
     R: AsyncRead + Unpin + Send,
-    F: Fn(OwnedFileReader, bool) -> FileStreamCallbackFuture,
+    F: Fn(String, OwnedFileReader, bool) -> FileStreamCallbackFuture,
 {
     let mut manifest = TreeManifest::new();
     let mut extracted_files = Vec::new();
@@ -344,7 +344,7 @@ where
                 .unwrap_or(false);
             let (mut writer, reader) = tokio::io::duplex(256 * 1024);
             let path_for_task = path_str.clone();
-            let callback = store_blob(Box::new(reader), executable);
+            let callback = store_blob(path_for_task.clone(), Box::new(reader), executable);
 
             pending_files.push(tokio::spawn(async move {
                 let extracted = callback.await.map_err(TarballError::BlobStore)?;
