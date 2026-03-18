@@ -1935,11 +1935,8 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             "vx-runner".to_string(),
             "landlock-exec".to_string(),
         ],
-        scrub_files: vec![
-            "crates/vx/Cargo.toml".to_string(),
-            "crates/vxd/Cargo.toml".to_string(),
-        ],
-        scrub_line_contains: vec!["tree-sitter-vixen = ".to_string()],
+        scrub_files: vec![],
+        scrub_line_contains: vec![],
     };
     let package_count = request.build_packages.len();
     let checkout_dir = trace
@@ -2280,11 +2277,8 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
             "vx-runner".to_string(),
             "landlock-exec".to_string(),
         ],
-        scrub_files: vec![
-            "crates/vx/Cargo.toml".to_string(),
-            "crates/vxd/Cargo.toml".to_string(),
-        ],
-        scrub_line_contains: vec!["tree-sitter-vixen = ".to_string()],
+        scrub_files: vec![],
+        scrub_line_contains: vec![],
     };
     let package_count = request.build_packages.len();
     let checkout_dir = trace

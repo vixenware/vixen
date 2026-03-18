@@ -40,7 +40,7 @@ unicode-width = { workspace = true }
 arborium = { workspace = true }
 arborium-highlight = { workspace = true }
 arborium-theme = { workspace = true }
-tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }
+tree-sitter-vixen = { git = "https://github.com/bearcove/tree-sitter-vixen", rev = "9fe14bea91399543282035090086fec8a868fb6c" }
 
 [features]
 default = []

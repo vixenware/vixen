@@ -3538,6 +3538,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-vixen"
 version = "0.1.0"
+source = "git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c#9fe14bea91399543282035090086fec8a868fb6c"
 dependencies = [
  "cc",
  "tree-sitter-language",
