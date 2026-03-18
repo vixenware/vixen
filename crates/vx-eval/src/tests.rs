@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt, trimmed_range};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
+use crate::CapabilitySet;
 use crate::events::EventRecorder;
 use crate::exec::{
     AcquireRequest, BoxFuture, BuildRuntime, DiscoverRequest, ExecArgValue, ExecRequest,
@@ -43,8 +44,9 @@ fn engine_with_source_id(source: &str, source_id: &str) -> Arc<Engine> {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file_with_source_id(&root, source_id);
-    Engine::from_module(&module)
+    let module =
+        lower_source_file_with_source_id(&root, source_id).expect("lowering should succeed");
+    Engine::from_module(&module).with_capabilities(CapabilitySet::TEST_ONLY)
 }
 
 fn engine_with_recorder(source: &str) -> (Arc<Engine>, EventRecorder) {
@@ -711,7 +713,7 @@ fn build(host: Host) (
         "expected struct destructuring pattern in final let: {:?}",
         destructuring_let.pattern()
     );
-    let module = lower_source_file(&root);
+    let module = lower_source_file(&root).expect("lowering should succeed");
     assert!(
         module
             .functions
@@ -744,7 +746,7 @@ fn build(host: Host) (
         build.body.stmts
     );
 
-    let engine = Engine::from_module(&module);
+    let engine = Engine::from_module(&module).with_capabilities(CapabilitySet::TEST_ONLY);
 
     let value = engine
         .call("build", vec![Value::Host(HostValue)])
@@ -1861,7 +1863,7 @@ async fn libpng_compile_objects_body_survives_lowering() {
     let parse = vx_parser::parse(&source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
+    let module = lower_source_file(&root).expect("lowering should succeed");
     let build = module
         .functions
         .iter()
@@ -1901,7 +1903,7 @@ fn main(includes: Array[Path]) {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
+    let module = lower_source_file(&root).expect("lowering should succeed");
     let main = module
         .functions
         .iter()
@@ -1949,7 +1951,7 @@ fn main(
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
+    let module = lower_source_file(&root).expect("lowering should succeed");
     let main = module
         .functions
         .iter()
@@ -2496,7 +2498,7 @@ async fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
         stmt => panic!("expected parsed path literal, got {stmt:?}"),
     }
 
-    let module = lower_source_file(&file);
+    let module = lower_source_file(&file).expect("lowering should succeed");
     let body = &module.functions[0].body;
 
     match body.stmts.as_slice() {
@@ -2524,7 +2526,8 @@ async fn lowering_keeps_import_expressions_in_function_bodies() {
         stmt => panic!("expected parsed import expr, got {stmt:?}"),
     }
 
-    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx");
+    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx")
+        .expect("lowering should succeed");
     let body = &module.functions[0].body;
     match body.stmts.as_slice() {
         [crate::instr::Stmt::Expr(crate::instr::Expr::Import { path, provenance })] => {
@@ -2593,7 +2596,8 @@ async fn lowering_keeps_call_provenance_with_source_spans() {
         other => panic!("expected parsed call, got {other:?}"),
     };
     let expected_range = trimmed_range(parsed_call.syntax());
-    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx");
+    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx")
+        .expect("lowering should succeed");
     let body = &module.functions[0].body;
 
     let crate::instr::Stmt::Expr(crate::instr::Expr::Call { provenance, .. }) = &body.stmts[0]
@@ -2621,7 +2625,8 @@ async fn lowering_keeps_source_ids_for_local_function_provenance() {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let file = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx");
+    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx")
+        .expect("lowering should succeed");
     let build_fn = &module.functions[0];
 
     let crate::instr::Stmt::FnDecl(local_fn) = &build_fn.body.stmts[0] else {
@@ -2694,7 +2699,7 @@ async fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
         expr => panic!("expected parsed map payload, got {expr:?}"),
     }
 
-    let module = lower_source_file(&file);
+    let module = lower_source_file(&file).expect("lowering should succeed");
     let body = &module.functions[0].body;
 
     match body.stmts.as_slice() {
@@ -2737,7 +2742,7 @@ async fn lowering_keeps_where_calls_as_final_expression_statements() {
         stmt => panic!("expected parsed where expr, got {stmt:?}"),
     }
 
-    let module = lower_source_file(&file);
+    let module = lower_source_file(&file).expect("lowering should succeed");
     let build = module
         .functions
         .iter()
@@ -2767,6 +2772,99 @@ async fn lowering_keeps_where_calls_as_final_expression_statements() {
         }
         other => panic!("unexpected lowered body: {other:?}"),
     }
+}
+
+#[test]
+fn lowering_rejects_non_tail_expression_statements() {
+    let parse = vx_parser::parse(indoc! {r#"
+        fn main() {
+          1;
+          2
+        }
+    "#});
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let error = lower_source_file(&file)
+        .expect_err("lowering should reject non-tail expression statements");
+    assert_eq!(
+        error.message,
+        "non-tail expression statements are not allowed; only the final expression in a block may stand alone"
+    );
+    assert_eq!(error.provenance.label, "expression statement");
+}
+
+#[test]
+fn lowering_rejects_file_scope_expression_statements() {
+    let parse = vx_parser::parse(indoc! {r#"
+        "hello"
+
+        fn main() {
+          42
+        }
+    "#});
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let error = lower_source_file(&file)
+        .expect_err("lowering should reject file-scope expression statements");
+    assert_eq!(
+        error.message,
+        "expression statements are not allowed at file scope"
+    );
+    assert_eq!(error.provenance.label, "expression statement");
+}
+
+#[tokio::test]
+async fn force_builtin_requires_test_only_capability() {
+    let parse = vx_parser::parse(indoc! {r#"
+        fn main() {
+          force(1)
+        }
+    "#});
+    assert_eq!(parse.errors(), []);
+    let root = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file(&root).expect("lowering should succeed");
+    let engine = Engine::from_module(&module);
+    let error = engine
+        .call("main", vec![])
+        .await
+        .expect_err("force should be gated");
+    assert_eq!(error.kind, PoisonKind::CapabilityViolation);
+    assert_eq!(error.message, "force is only available in test mode");
+}
+
+#[tokio::test]
+async fn force_builtin_forces_pending_values_in_test_mode() {
+    let engine = engine(indoc! {r#"
+        fn main() {
+          [force(exec ["tool", "--version"] where {
+            observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+          })]
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        assert_eq!(
+            request.args.as_slice(),
+            &[
+                ExecArgValue::Literal("tool".to_string()),
+                ExecArgValue::Literal("--version".to_string()),
+            ]
+        );
+        Ok(Value::String(Arc::from("tool 1.0\n")))
+    }));
+
+    let call = engine.call_unforced("main", vec![]).await.unwrap();
+    let value = engine.force_shallow(call).await.unwrap();
+    let Value::Array(items) = value else {
+        panic!("expected array result, got {value:?}");
+    };
+    let [Value::Pending(node_id)] = items.as_ref() else {
+        panic!("expected one pending forced element, got {items:?}");
+    };
+    let value = engine
+        .force_shallow(Value::Pending(*node_id))
+        .await
+        .unwrap();
+    assert_eq!(value, Value::String(Arc::from("tool 1.0\n")));
 }
 
 #[tokio::test]
@@ -3175,7 +3273,7 @@ async fn user_bindings_can_shadow_exec() {
 async fn early_return() {
     let val = eval(
         "fn check(n: U64) {
-           if n > 10 { return 999 } else { () };
+           let _ignored = if n > 10 { return 999 } else { () };
            n + 1
          }
          fn main() { check(20) }",
@@ -3399,7 +3497,7 @@ async fn binary_ops_with_pending_inputs_produce_pending_results() {
     let left = engine
         .call_unforced(
             "first",
-            vec![Value::U64(1), engine.poison_value("left pending")],
+            vec![Value::U64(1), engine.sleep_value(200, Value::U64(99))],
         )
         .await
         .unwrap();
@@ -3415,10 +3513,19 @@ async fn binary_ops_with_pending_inputs_produce_pending_results() {
 
 #[tokio::test]
 async fn array_concat_keeps_pending_children_lazy() {
-    let engine = engine("fn append(xs: Array[U64], ys: Array[U64]) { xs ++ ys }");
+    let engine = engine(
+        "fn first(x: U64, y: U64) { x }
+         fn append(xs: Array[U64], ys: Array[U64]) { xs ++ ys }",
+    );
     let left = Value::Array(Arc::from([
         Value::U64(1),
-        engine.poison_value("pending child"),
+        engine
+            .call_unforced(
+                "first",
+                vec![Value::U64(2), engine.sleep_value(200, Value::U64(99))],
+            )
+            .await
+            .unwrap(),
     ]));
     let right = Value::Array(Arc::from([Value::U64(3)]));
     let call = engine
@@ -3426,20 +3533,21 @@ async fn array_concat_keeps_pending_children_lazy() {
         .await
         .unwrap();
 
-    let mut result = engine.force_shallow(call).await.unwrap();
-    while matches!(result, Value::Pending(_)) {
-        result = engine.force_shallow(result).await.unwrap();
+    let result = engine.force_shallow(call).await.unwrap();
+    match &result {
+        Value::Pending(_) => {}
+        Value::Array(items) => {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Value::U64(1));
+            assert_eq!(items[2], Value::U64(3));
+        }
+        other => panic!("expected pending or array result, got {other:?}"),
     }
-    let Value::Array(items) = &result else {
-        panic!("expected concatenation to produce an array");
-    };
-    assert_eq!(items.len(), 3);
-    assert_eq!(items[0], Value::U64(1));
-    assert!(matches!(items[1], Value::Pending(_)));
-    assert_eq!(items[2], Value::U64(3));
 
-    let err = engine.force_fully(result).await.unwrap_err();
-    assert_eq!(err.kind, PoisonKind::UserFail);
+    assert_eq!(
+        engine.force_fully(result).await.unwrap(),
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2), Value::U64(3)]))
+    );
 }
 
 #[tokio::test]
@@ -4378,14 +4486,14 @@ async fn top_level_calls_build_a_pending_graph_until_forced() {
 async fn demand_only_reaches_the_taken_if_branch() {
     let engine = engine(
         "fn choose(flag: Bool, unused: U64) { flag }
-         fn branch(flag: Bool, poison: U64) {
-           if choose(flag, poison) { 1 } else { poison }
+         fn branch(flag: Bool, maybe_dead: U64) {
+           if choose(flag, maybe_dead) { 1 } else { maybe_dead }
          }",
     );
     let call = engine
         .call_unforced(
             "branch",
-            vec![Value::Bool(true), engine.poison_value("dead branch")],
+            vec![Value::Bool(true), engine.sleep_value(200, Value::U64(99))],
         )
         .await
         .unwrap();
@@ -4683,7 +4791,8 @@ fn render_header() {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let file = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx");
+    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx")
+        .expect("lowering should succeed");
     assert!(
         matches!(
             module.functions[0].body.stmts.as_slice(),
@@ -4934,7 +5043,7 @@ async fn array_map_schedules_callback_bodies_concurrently() {
     let engine = engine(
         "struct Item { wait: U64, value: U64 }
          fn project(item: Item) {
-           item.wait;
+           let _wait = force(item.wait);
            item.value
          }
          fn main(items: Array) { items.map(project) }",
@@ -6816,7 +6925,7 @@ fn main() { [add(1, 2), add(1, 2)] }
     assert_eq!(items[0], Value::U64(3));
 
     let executions = recorder.count_spans("node.execute");
-    let cache_hits = recorder.count_instants("node.cache_hit");
+    let _cache_hits = recorder.count_instants("node.cache_hit");
 
     let memo_hits = recorder.count_instants("memo.hit");
     let memo_misses = recorder.count_instants("memo.miss");

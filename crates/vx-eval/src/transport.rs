@@ -299,6 +299,7 @@ pub enum TransportBuiltinValue {
     RenderFunction,
     ExecFunction,
     DiscoverFunction,
+    ForceFunction,
     ExecutorClassFunction,
     StructConstructor {
         type_name: String,
@@ -1297,6 +1298,7 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Function(BuiltinFunction::Render) => Ok(Self::RenderFunction),
             BuiltinValue::Function(BuiltinFunction::Exec) => Ok(Self::ExecFunction),
             BuiltinValue::Function(BuiltinFunction::Discover) => Ok(Self::DiscoverFunction),
+            BuiltinValue::Function(BuiltinFunction::Force) => Ok(Self::ForceFunction),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 Ok(Self::ExecutorClassFunction)
             }
@@ -1403,6 +1405,7 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::DiscoverFunction => {
                 Ok(Self::Function(BuiltinFunction::Discover))
             }
+            TransportBuiltinValue::ForceFunction => Ok(Self::Function(BuiltinFunction::Force)),
             TransportBuiltinValue::ExecutorClassFunction => {
                 Ok(Self::Function(BuiltinFunction::ExecutorClass))
             }

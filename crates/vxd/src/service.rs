@@ -4005,10 +4005,18 @@ impl BuildVxRuntime {
             }
 
             let root = SourceFile::cast_root(parse.syntax());
-            Ok(lower_source_file_with_source_id(
-                &root,
-                module_path.as_str().to_string(),
-            ))
+            lower_source_file_with_source_id(&root, module_path.as_str().to_string()).map_err(
+                |error| {
+                    exec_bridge_poison(
+                        PoisonKind::UserFail,
+                        format!(
+                            "language error in imported module {}: {}",
+                            module_path, error.message
+                        ),
+                        &request.demand_chain,
+                    )
+                },
+            )
         }
         .await;
 
@@ -4773,7 +4781,14 @@ impl VxdService {
 
                 let module = {
                     let root = SourceFile::cast_root(parse.syntax());
-                    lower_source_file_with_source_id(&root, build_vx_path.to_string())
+                    match lower_source_file_with_source_id(&root, build_vx_path.to_string()) {
+                        Ok(module) => module,
+                        Err(error) => {
+                            let failure =
+                                build_failure::from_lower_error(&build_vx_path, &source, &error);
+                            return Ok(build_failure_result(failure, 1));
+                        }
+                    }
                 };
                 let event_recorder = std::env::var("VX_TRACE")
                     .ok()

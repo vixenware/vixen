@@ -207,6 +207,7 @@ pub enum BuiltinFunction {
     Render,
     Exec,
     Discover,
+    Force,
     ExecutorClass,
     StructConstructor {
         type_name: Arc<str>,
@@ -685,6 +686,7 @@ impl BuiltinValue {
             | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
+            | BuiltinValue::Function(BuiltinFunction::Force)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
             | BuiltinValue::Function(BuiltinFunction::StructConstructor { .. })
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
@@ -736,6 +738,7 @@ impl BuiltinValue {
             | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
+            | BuiltinValue::Function(BuiltinFunction::Force)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
             | BuiltinValue::Function(BuiltinFunction::StructConstructor { .. })
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
@@ -789,6 +792,7 @@ impl BuiltinValue {
             BuiltinValue::Function(BuiltinFunction::Render) => Some("builtin:render".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
+            BuiltinValue::Function(BuiltinFunction::Force) => Some("builtin:force".into()),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 Some("builtin:executor_class".into())
             }
@@ -1365,6 +1369,7 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Function(BuiltinFunction::Render) => write!(f, "render"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
+            BuiltinValue::Function(BuiltinFunction::Force) => write!(f, "force"),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 write!(f, "executor_class")
             }

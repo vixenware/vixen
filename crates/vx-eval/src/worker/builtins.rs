@@ -82,6 +82,9 @@ impl Engine {
             BuiltinValue::Function(BuiltinFunction::Discover) => {
                 self.discover_builtin(args, kwargs, kwargs_expr).await
             }
+            BuiltinValue::Function(BuiltinFunction::Force) => {
+                self.force_builtin(args, kwargs, kwargs_expr).await
+            }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 self.executor_class_builtin(args, kwargs, kwargs_expr).await
             }
@@ -1220,6 +1223,27 @@ impl Engine {
             .await?;
         let name = self.expect_host_path(&name, "executor_class name").await?;
         Ok(Value::Executor(ExecutorSelector::class(name)))
+    }
+
+    pub(super) async fn force_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        if !self.capabilities.has(CapabilitySet::TEST_ONLY) {
+            return Err(PoisonError::new(
+                PoisonKind::CapabilityViolation,
+                "force is only available in test mode",
+                self.current_demand_chain(None),
+            ));
+        }
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("force does not accept keyword records"));
+        }
+        self.require_no_kwargs("force", kwargs)?;
+        self.check_arity("force", args, 1)?;
+        self.force_value(args[0].clone()).await
     }
 
     pub(super) async fn materialize_kwargs(

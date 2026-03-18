@@ -18,6 +18,9 @@ impl CapabilitySet {
     /// Discovery of volatile external state (registry queries, toolchain probing).
     pub const DISCOVER: Self = Self(1 << 1);
 
+    /// Testing-only intrinsics and helpers.
+    pub const TEST_ONLY: Self = Self(1 << 2);
+
     /// Create a set with the given capabilities.
     pub fn new(bits: u32) -> Self {
         Self(bits)

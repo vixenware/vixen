@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8Path;
-use vx_eval::{DemandChain, PoisonError, PoisonKind, SourceProvenance};
+use vx_eval::{DemandChain, LowerError, PoisonError, PoisonKind, SourceProvenance};
 use vx_parser::SyntaxError;
 use vxd_proto::{
     BuildDiagnosticLabel, BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
@@ -48,6 +48,37 @@ pub(crate) fn from_parse_errors(
             text: source.to_string(),
         }],
         reports,
+    }
+}
+
+pub(crate) fn from_lower_error(
+    build_vx_path: &Utf8Path,
+    source: &str,
+    error: &LowerError,
+) -> BuildFailure {
+    let source_id = build_vx_path.to_string();
+    let primary_span = span_from_provenance(&error.provenance);
+    BuildFailure {
+        message: format!(
+            "failed to lower {}",
+            build_vx_path.file_name().unwrap_or("build.vx")
+        ),
+        sources: vec![BuildDiagnosticSource {
+            source_id,
+            language: Some("vixen".to_string()),
+            text: source.to_string(),
+        }],
+        reports: vec![BuildDiagnosticReport {
+            severity: BuildDiagnosticSeverity::Error,
+            message: "language error in build file".to_string(),
+            primary_span: primary_span.clone(),
+            labels: vec![BuildDiagnosticLabel {
+                span: primary_span,
+                kind: BuildDiagnosticLabelKind::Primary,
+                message: Some(error.message.clone()),
+            }],
+            notes: Vec::new(),
+        }],
     }
 }
 

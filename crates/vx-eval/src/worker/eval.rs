@@ -1086,12 +1086,10 @@ impl Engine {
                     self.current_demand_chain(None),
                 ))
             }
-            #[cfg(test)]
             NodeJob::Sleep { millis, value } => {
                 tokio::time::sleep(Duration::from_millis(*millis)).await;
                 Ok(value.clone())
             }
-            #[cfg(test)]
             NodeJob::Poison(error) => Err(error.clone()),
         }
     }

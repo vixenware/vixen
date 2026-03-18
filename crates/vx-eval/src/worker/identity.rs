@@ -231,6 +231,7 @@ pub(super) fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
         "render" => Some(BuiltinValue::Function(BuiltinFunction::Render)),
         "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
         "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),
+        "force" => Some(BuiltinValue::Function(BuiltinFunction::Force)),
         "executor_class" => Some(BuiltinValue::Function(BuiltinFunction::ExecutorClass)),
         "Blob" => Some(BuiltinValue::Namespace(BuiltinNamespace::Blob)),
         "Bytes" => Some(BuiltinValue::Namespace(BuiltinNamespace::Bytes)),

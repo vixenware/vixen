@@ -95,12 +95,12 @@ pub enum NodeJob {
     Fail {
         message: Value,
     },
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     Sleep {
         millis: u64,
         value: Value,
     },
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     Poison(PoisonError),
 }
 
@@ -158,9 +158,7 @@ impl NodeJob {
             }
             NodeJob::Field { receiver, .. } => receiver.collect_pending(&mut deps),
             NodeJob::Fail { message } => message.collect_pending(&mut deps),
-            #[cfg(test)]
             NodeJob::Sleep { value, .. } => value.collect_pending(&mut deps),
-            #[cfg(test)]
             NodeJob::Poison(_) => {}
         }
         deps

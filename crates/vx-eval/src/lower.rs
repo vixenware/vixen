@@ -22,6 +22,7 @@ struct LowerCtx {
     namespace_methods: Vec<Arc<instr::FnDef>>,
     source_id: Arc<str>,
     line_index: Arc<LineIndex>,
+    error: Option<LowerError>,
 }
 
 impl Default for LowerCtx {
@@ -32,8 +33,15 @@ impl Default for LowerCtx {
             namespace_methods: Vec::new(),
             source_id: Arc::default(),
             line_index: Arc::new(LineIndex::new("")),
+            error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowerError {
+    pub provenance: instr::SourceProvenance,
+    pub message: String,
 }
 
 impl LowerCtx {
@@ -59,10 +67,32 @@ impl LowerCtx {
             label: label.into(),
         }
     }
+
+    fn report_error(
+        &mut self,
+        node: &impl AstNode,
+        label: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+
+        self.error = Some(LowerError {
+            provenance: self.provenance(node, label),
+            message: message.into(),
+        });
+    }
+
+    fn absorb_child_error(&mut self, child: LowerCtx) {
+        if self.error.is_none() {
+            self.error = child.error;
+        }
+    }
 }
 
 /// Lower a parsed source file into a module.
-pub fn lower_source_file(source: &SourceFile) -> instr::Module {
+pub fn lower_source_file(source: &SourceFile) -> Result<instr::Module, LowerError> {
     lower_source_file_with_source_id(source, "<source>")
 }
 
@@ -70,7 +100,7 @@ pub fn lower_source_file(source: &SourceFile) -> instr::Module {
 pub fn lower_source_file_with_source_id(
     source: &SourceFile,
     source_id: impl Into<Arc<str>>,
-) -> instr::Module {
+) -> Result<instr::Module, LowerError> {
     let source_text = source.syntax().text().to_string();
     let mut ctx = LowerCtx {
         source_id: source_id.into(),
@@ -81,6 +111,14 @@ pub fn lower_source_file_with_source_id(
     let mut top_level = Vec::new();
 
     for stmt in source.statements() {
+        if let AstStmt::Expr(expr) = &stmt {
+            ctx.report_error(
+                expr,
+                "expression statement",
+                "expression statements are not allowed at file scope",
+            );
+        }
+
         if let AstStmt::FnDecl(f) = &stmt
             && let Some(def) = lower_fn_decl_with_ctx(f, &mut ctx)
         {
@@ -97,11 +135,15 @@ pub fn lower_source_file_with_source_id(
 
     functions.extend(ctx.namespace_methods);
 
-    instr::Module {
+    if let Some(error) = ctx.error {
+        return Err(error);
+    }
+
+    Ok(instr::Module {
         source_id: Arc::clone(&ctx.source_id),
         functions,
         top_level: instr::Block { stmts: top_level },
-    }
+    })
 }
 
 fn lower_fn_decl_with_ctx(f: &FnDecl, ctx: &mut LowerCtx) -> Option<instr::FnDef> {
@@ -167,10 +209,22 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
 }
 
 fn lower_block_with_ctx(block: &BlockExpr, ctx: &mut LowerCtx) -> instr::Block {
-    let stmts = block
-        .statements()
-        .filter_map(|stmt| lower_stmt_with_ctx(&stmt, ctx))
-        .collect();
+    let raw_stmts = block.statements().collect::<Vec<_>>();
+    let mut stmts = Vec::with_capacity(raw_stmts.len());
+    for (index, stmt) in raw_stmts.iter().enumerate() {
+        if let AstStmt::Expr(expr) = stmt
+            && index + 1 != raw_stmts.len()
+        {
+            ctx.report_error(
+                expr,
+                "expression statement",
+                "non-tail expression statements are not allowed; only the final expression in a block may stand alone",
+            );
+        }
+        if let Some(stmt) = lower_stmt_with_ctx(stmt, ctx) {
+            stmts.push(stmt);
+        }
+    }
     instr::Block { stmts }
 }
 
@@ -208,6 +262,7 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
                 ..LowerCtx::default()
             };
             let def = lower_fn_decl_with_ctx(f, &mut fn_ctx)?;
+            ctx.absorb_child_error(fn_ctx);
             Some(instr::Stmt::FnDecl(Arc::new(def)))
         }
         AstStmt::StructDecl(decl) => {
@@ -1180,6 +1235,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
 
     let mut nested_ctx = LowerCtx {
         source_id: Arc::clone(&ctx.source_id),
+        line_index: Arc::clone(&ctx.line_index),
         ..LowerCtx::default()
     };
     let body = match closure.body()? {
@@ -1191,6 +1247,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
             )?)],
         },
     };
+    ctx.absorb_child_error(nested_ctx);
 
     let provenance = Some(ctx.provenance(closure, format!("<closure#{closure_id}>")));
     Some(instr::Expr::Closure {

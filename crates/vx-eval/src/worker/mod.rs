@@ -25,7 +25,6 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
-#[cfg(test)]
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -34,6 +33,7 @@ use facet_value::value;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 
+use crate::CapabilitySet;
 use crate::events::{ErasedEventSink, ErasedSpan};
 use crate::exec::{
     AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue,
@@ -132,6 +132,7 @@ pub struct Engine {
     host_search_path: Option<Vec<std::path::PathBuf>>,
     exec_semaphore: Option<Arc<Semaphore>>,
     event_sink: Arc<dyn ErasedEventSink>,
+    capabilities: CapabilitySet,
 }
 
 impl Engine {
@@ -179,6 +180,7 @@ impl Engine {
             host_search_path: None,
             exec_semaphore,
             event_sink: Arc::new(()),
+            capabilities: CapabilitySet::NONE,
         });
         engine
             .self_ref
@@ -231,6 +233,13 @@ impl Engine {
         let mut this =
             Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
         this.runtime = Some(runtime);
+        Self::rewrap(this)
+    }
+
+    pub fn with_capabilities(self: Arc<Self>, capabilities: CapabilitySet) -> Arc<Self> {
+        let mut this =
+            Arc::try_unwrap(self).unwrap_or_else(|_| panic!("builder called after Arc shared"));
+        this.capabilities = capabilities;
         Self::rewrap(this)
     }
 
@@ -492,8 +501,12 @@ impl Engine {
             .await
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn poison_value(&self, message: &str) -> Value {
+        assert!(
+            self.capabilities.has(CapabilitySet::TEST_ONLY),
+            "poison_value requires test-only capabilities"
+        );
         let error = PoisonError::new(PoisonKind::UserFail, message, DemandChain::new());
         self.pending_value(NodeJob::Poison(error), format!("poison({message})"), None)
     }
@@ -503,8 +516,12 @@ impl Engine {
         self.call_memo.len()
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sleep_value(&self, millis: u64, value: Value) -> Value {
+        assert!(
+            self.capabilities.has(CapabilitySet::TEST_ONLY),
+            "sleep_value requires test-only capabilities"
+        );
         self.pending_value(
             NodeJob::Sleep { millis, value },
             format!("sleep({millis}ms)"),
@@ -1083,7 +1100,6 @@ impl Engine {
             NodeJob::Field { receiver, .. } => {
                 self.collect_pending_shallow(receiver.clone()).await?
             }
-            #[cfg(test)]
             NodeJob::Sleep { .. } | NodeJob::Poison(_) => Vec::new(),
         };
         Ok(Self::dedup_node_ids(deps))
@@ -1354,6 +1370,7 @@ impl Engine {
                     | BuiltinValue::Function(BuiltinFunction::Render)
                     | BuiltinValue::Function(BuiltinFunction::Exec)
                     | BuiltinValue::Function(BuiltinFunction::Discover)
+                    | BuiltinValue::Function(BuiltinFunction::Force)
                     | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                         let mut deps = Vec::new();
                         for value in args {
@@ -1396,6 +1413,7 @@ impl Engine {
             BuiltinFunction::Render => "render".into(),
             BuiltinFunction::Exec => "exec".into(),
             BuiltinFunction::Discover => "discover".into(),
+            BuiltinFunction::Force => "force".into(),
             BuiltinFunction::ExecutorClass => "Executor.class".into(),
             BuiltinFunction::StructConstructor { type_name, .. } => {
                 format!("{type_name}.new")
@@ -1548,12 +1566,10 @@ impl Engine {
                 "message_kind": ((message.type_name())),
                 "pending_dep_count": ((node.job.pending_deps().len() as u64))
             }),
-            #[cfg(test)]
             NodeJob::Sleep { millis, value } => value!({
                 "millis": ((*millis)),
                 "value_kind": ((value.type_name()))
             }),
-            #[cfg(test)]
             NodeJob::Poison(_) => value!({}),
         }
     }
@@ -1576,9 +1592,7 @@ impl Engine {
             NodeJob::Demand { demands, .. } => format!("demand[{}]", demands.len()),
             NodeJob::Field { field, .. } => format!(".{field}"),
             NodeJob::Fail { .. } => "fail(..)".to_string(),
-            #[cfg(test)]
             NodeJob::Sleep { millis, .. } => format!("sleep({millis}ms)"),
-            #[cfg(test)]
             NodeJob::Poison(_) => "poison".to_string(),
         }
     }
@@ -1617,9 +1631,7 @@ impl Engine {
             NodeJob::Invoke { .. } => "invoke",
             NodeJob::Field { .. } => "field",
             NodeJob::Fail { .. } => "fail",
-            #[cfg(test)]
             NodeJob::Sleep { .. } => "sleep",
-            #[cfg(test)]
             NodeJob::Poison(_) => "poison",
         };
         let detail = Self::job_trace_detail(node);
