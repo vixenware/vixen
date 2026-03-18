@@ -566,6 +566,10 @@ fn track_descriptor_packet(
     clears_incremental_state: bool,
 ) -> TracePacket {
     let parent_track_id = metadata.parent_track_id;
+    let sibling_order_rank = metadata
+        .sibling_order_rank
+        .or(metadata.sort_index.map(|index| index as i32))
+        .or_else(|| (parent_track_id.is_none() && track_id != 0).then_some(track_id as i32));
     let track_name = metadata.name.unwrap_or_else(|| {
         if track_id == 0 {
             "global".to_string()
@@ -589,9 +593,7 @@ fn track_descriptor_packet(
                     .child_ordering
                     .unwrap_or_else(default_child_ordering),
             ),
-            sibling_order_rank: metadata
-                .sibling_order_rank
-                .or(metadata.sort_index.map(|index| index as i32)),
+            sibling_order_rank,
             sibling_merge_behavior: Some(
                 metadata
                     .sibling_merge_behavior
