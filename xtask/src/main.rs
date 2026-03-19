@@ -259,6 +259,7 @@ fn smoke(raw_args: &[String]) {
     let workspace_root = find_workspace_root().expect("Could not find workspace root");
     let build_status = Command::new("cargo")
         .arg("build")
+        .arg("--release")
         .current_dir(&workspace_root)
         .status()
         .expect("Failed to run cargo build for smoke test");
@@ -272,8 +273,12 @@ fn smoke(raw_args: &[String]) {
 
     prepare_smoke_home(&vx_home).expect("Failed to prepare smoke VX_HOME");
 
-    let mut cmd = Command::new(workspace_root.join("target/debug/vx"));
-    cmd.arg("build").arg("--no-tui").arg("-f").arg(build_file);
+    let mut cmd = Command::new(workspace_root.join("target/release/vx"));
+    cmd.arg("build")
+        .arg("--release")
+        .arg("--no-tui")
+        .arg("-f")
+        .arg(build_file);
     for arg in extra_args {
         cmd.arg(arg);
     }
