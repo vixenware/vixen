@@ -27,8 +27,8 @@ use vx_eval2_proto::{
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
     CrossingPattern, EngineExpectation, EngineId, EventPattern, ExternalSpec, HostSpec,
-    ObservationPattern, ObservedPoison, ObservedResult, ReusePattern, RuntimeSpec, SpecCase,
-    SpecOutcome, SpecValue, StructSpec,
+    ObservationPattern, ObservedPoison, ObservedResult, PlaceSpec, ReusePattern, RuntimeSpec,
+    SpecCase, SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -72,25 +72,48 @@ struct FixtureRuntime {
 }
 
 impl FixtureRuntime {
-    fn host(&self, place: &str) -> Result<&HostSpec, EvalError> {
-        self.spec
-            .places
-            .get(place)
-            .map(|place| &place.host)
-            .ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    format!("place {place:?} was not declared in fixture runtime"),
-                )
-            })
+    fn place(&self, place: &str) -> Result<&PlaceSpec, EvalError> {
+        self.spec.places.get(place).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("place {place:?} was not declared in fixture runtime"),
+            )
+        })
     }
 
-    fn place_file_hash(&self, place: &str, path: &str) -> Option<String> {
-        self.spec
-            .places
-            .get(place)
-            .and_then(|place| place.files.get(path))
-            .map(|contents| blake3_hash(contents.as_bytes()).to_hex().to_string())
+    fn host(&self, place: &str) -> Result<&HostSpec, EvalError> {
+        self.place(place).map(|place| &place.host)
+    }
+
+    fn tracked_file_hash(&self, place: &str, path: &str) -> Option<String> {
+        self.place(place)
+            .ok()
+            .and_then(|place| place.tracked_file_contents(path))
+            .map(hash_string)
+    }
+
+    fn opaque_bundle_file(&self, place: &str, path: &str) -> Option<(String, String, String)> {
+        let place = self.place(place).ok()?;
+        place.opaque_bundles.iter().find_map(|(name, bundle)| {
+            bundle.files.get(path).map(|contents| {
+                (
+                    name.clone(),
+                    opaque_bundle_identity(bundle),
+                    contents.to_string(),
+                )
+            })
+        })
+    }
+
+    fn bundle_identity(&self, place: &str, bundle_name: &str) -> Result<String, EvalError> {
+        let place_spec = self.place(place)?;
+        let bundle = place_spec.opaque_bundles.get(bundle_name).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("place {place:?} does not define opaque bundle {bundle_name:?}"),
+            )
+        })?;
+        Ok(opaque_bundle_identity(bundle))
     }
 
     fn read_hash(&self, place: &str, path: &str) -> Result<String, EvalError> {
@@ -99,7 +122,11 @@ impl FixtureRuntime {
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.content_hash.clone())
-            .or_else(|| self.place_file_hash(place, path))
+            .or_else(|| self.tracked_file_hash(place, path))
+            .or_else(|| {
+                self.opaque_bundle_file(place, path)
+                    .map(|(_, _, contents)| hash_string(&contents))
+            })
             .ok_or_else(|| {
                 EvalError::new(
                     EvalErrorKind::UserFail,
@@ -116,7 +143,11 @@ impl FixtureRuntime {
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.content_hash.clone())
-            .or_else(|| self.place_file_hash(place, path))
+            .or_else(|| self.tracked_file_hash(place, path))
+            .or_else(|| {
+                self.opaque_bundle_file(place, path)
+                    .map(|(_, _, contents)| hash_string(&contents))
+            })
             .ok_or_else(|| {
                 EvalError::new(
                     EvalErrorKind::UserFail,
@@ -128,12 +159,43 @@ impl FixtureRuntime {
     }
 }
 
-fn place_file_hash(runtime: &RuntimeSpec, place: &str, path: &str) -> Option<String> {
+fn hash_string(contents: &str) -> String {
+    blake3_hash(contents.as_bytes()).to_hex().to_string()
+}
+
+fn opaque_bundle_identity(bundle: &vx_spec::OpaqueBundleSpec) -> String {
+    if let Some(identity) = &bundle.identity {
+        return identity.clone();
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    for (path, contents) in &bundle.files {
+        hasher.update(path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(contents.as_bytes());
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn tracked_place_file_hash(runtime: &RuntimeSpec, place: &str, path: &str) -> Option<String> {
     runtime
         .places
         .get(place)
-        .and_then(|place| place.files.get(path))
-        .map(|contents| blake3_hash(contents.as_bytes()).to_hex().to_string())
+        .and_then(|place| place.tracked_file_contents(path))
+        .map(hash_string)
+}
+
+fn runtime_bundle_identity(
+    runtime: &RuntimeSpec,
+    place: &str,
+    bundle_name: &str,
+) -> Option<String> {
+    runtime
+        .places
+        .get(place)
+        .and_then(|place| place.opaque_bundles.get(bundle_name))
+        .map(opaque_bundle_identity)
 }
 
 impl RuntimeHooks for FixtureRuntime {
@@ -183,20 +245,21 @@ impl RuntimeHooks for FixtureRuntime {
                         format!("host.which could not find {}", name.as_ref()),
                     ));
                 };
-                Ok(Some(
-                    Value::string(found.path.clone())
-                        .with_provenance(Provenance::host_probe(
-                            source.clone(),
-                            place,
-                            "host_which",
-                        ))
-                        .with_reuse(ReuseClass::Observed)
-                        .with_crossing(CrossingPolicy::ByValue)
-                        .with_claim(Claim::Which {
-                            name: name.to_string(),
-                            expected_path: Some(found.path.clone()),
-                        }),
-                ))
+                let mut value = Value::string(found.path.clone())
+                    .with_provenance(Provenance::host_probe(source.clone(), place, "host_which"))
+                    .with_reuse(ReuseClass::Observed)
+                    .with_crossing(CrossingPolicy::ByValue)
+                    .with_claim(Claim::Which {
+                        name: name.to_string(),
+                        expected_path: Some(found.path.clone()),
+                    });
+                if let Some(bundle_name) = &found.bundle {
+                    value = value.with_claim(Claim::Bundle {
+                        name: bundle_name.clone(),
+                        identity: self.bundle_identity(place, bundle_name)?,
+                    });
+                }
+                Ok(Some(value))
             }
             "host_read" => {
                 if args.len() != 1 {
@@ -211,17 +274,37 @@ impl RuntimeHooks for FixtureRuntime {
                         "host_read() argument must evaluate to String",
                     ));
                 };
-                let content_hash = self.read_hash(place, path)?;
-                Ok(Some(
-                    Value::external("host_file", path.as_ref())
-                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_read"))
-                        .with_reuse(ReuseClass::Observed)
-                        .with_crossing(CrossingPolicy::ByProxy)
-                        .with_claim(Claim::Read {
+                let mut value = Value::external("host_file", path.as_ref())
+                    .with_provenance(Provenance::host_probe(source.clone(), place, "host_read"))
+                    .with_reuse(ReuseClass::Observed)
+                    .with_crossing(CrossingPolicy::ByProxy);
+                if let Some(entry) = host.reads.iter().find(|entry| entry.path == path.as_ref()) {
+                    if let Some(bundle_name) = &entry.bundle {
+                        value = value.with_claim(Claim::Bundle {
+                            name: bundle_name.clone(),
+                            identity: self.bundle_identity(place, bundle_name)?,
+                        });
+                    } else {
+                        value = value.with_claim(Claim::Read {
                             path: path.to_string(),
-                            content_hash,
-                        }),
-                ))
+                            content_hash: entry.content_hash.clone(),
+                        });
+                    }
+                } else if let Some((bundle_name, identity, _)) =
+                    self.opaque_bundle_file(place, path)
+                {
+                    value = value.with_claim(Claim::Bundle {
+                        name: bundle_name,
+                        identity,
+                    });
+                } else {
+                    let content_hash = self.read_hash(place, path)?;
+                    value = value.with_claim(Claim::Read {
+                        path: path.to_string(),
+                        content_hash,
+                    });
+                }
+                Ok(Some(value))
             }
             "host_hash" => {
                 if args.len() != 1 {
@@ -237,16 +320,36 @@ impl RuntimeHooks for FixtureRuntime {
                     ));
                 };
                 let content_hash = self.hashed_path(place, path)?;
-                Ok(Some(
-                    Value::string(content_hash.clone())
-                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_hash"))
-                        .with_reuse(ReuseClass::Observed)
-                        .with_crossing(CrossingPolicy::ByValue)
-                        .with_claim(Claim::Hash {
+                let mut value = Value::string(content_hash.clone())
+                    .with_provenance(Provenance::host_probe(source.clone(), place, "host_hash"))
+                    .with_reuse(ReuseClass::Observed)
+                    .with_crossing(CrossingPolicy::ByValue);
+                if let Some(entry) = host.hashes.iter().find(|entry| entry.path == path.as_ref()) {
+                    if let Some(bundle_name) = &entry.bundle {
+                        value = value.with_claim(Claim::Bundle {
+                            name: bundle_name.clone(),
+                            identity: self.bundle_identity(place, bundle_name)?,
+                        });
+                    } else {
+                        value = value.with_claim(Claim::Hash {
                             path: path.to_string(),
                             content_hash,
-                        }),
-                ))
+                        });
+                    }
+                } else if let Some((bundle_name, identity, _)) =
+                    self.opaque_bundle_file(place, path)
+                {
+                    value = value.with_claim(Claim::Bundle {
+                        name: bundle_name,
+                        identity,
+                    });
+                } else {
+                    value = value.with_claim(Claim::Hash {
+                        path: path.to_string(),
+                        content_hash,
+                    });
+                }
+                Ok(Some(value))
             }
             _ => Ok(None),
         }
@@ -562,6 +665,24 @@ fn verify_claims_against_runtime(
                     }
                 }
             }
+            Claim::Bundle { name, identity } => {
+                let Some(actual) = runtime_bundle_identity(runtime, place, name) else {
+                    return VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "opaque bundle {name:?} is no longer available at place {place:?}"
+                        )),
+                    };
+                };
+                if &actual != identity {
+                    return VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "opaque bundle {name:?} changed: expected {identity}, got {actual}"
+                        )),
+                    };
+                }
+            }
             Claim::Read { path, content_hash } => {
                 let actual = host
                     .reads
@@ -569,7 +690,7 @@ fn verify_claims_against_runtime(
                     .find(|entry| entry.path == *path)
                     .map(|entry| entry.content_hash.as_str())
                     .map(ToOwned::to_owned)
-                    .or_else(|| place_file_hash(runtime, place, path));
+                    .or_else(|| tracked_place_file_hash(runtime, place, path));
                 let Some(actual) = actual else {
                     return VerifyClaimsResult {
                         ok: false,
@@ -594,7 +715,7 @@ fn verify_claims_against_runtime(
                     .find(|entry| entry.path == *path)
                     .map(|entry| entry.content_hash.as_str())
                     .map(ToOwned::to_owned)
-                    .or_else(|| place_file_hash(runtime, place, path));
+                    .or_else(|| tracked_place_file_hash(runtime, place, path));
                 let Some(actual) = actual else {
                     return VerifyClaimsResult {
                         ok: false,
@@ -951,6 +1072,10 @@ fn eval2_claim_to_pattern(claim: Claim) -> ObservationPattern {
         } => ObservationPattern::Which {
             name: name.to_string(),
             expected_path: expected_path.map(|path| path.to_string()),
+        },
+        Claim::Bundle { name, identity } => ObservationPattern::Bundle {
+            name: name.to_string(),
+            identity: identity.to_string(),
         },
         Claim::Read { path, content_hash } => ObservationPattern::Read {
             path: path.to_string(),

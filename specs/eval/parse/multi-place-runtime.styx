@@ -15,7 +15,7 @@ invoke {
           arch aarch64
         }
 
-        files {
+        tracked_files {
           "Cargo.toml" <<TXT
 [package]
 name = "demo"
@@ -28,15 +28,29 @@ TXT
           os windows
           arch x86_64
           which (
-            {name "cl.exe", path "C:/VS/cl.exe"}
+            {name "cl.exe", path "C:/VS/cl.exe", bundle msvc}
             {name "link.exe", path "C:/VS/link.exe"}
           )
         }
 
-        files {
+        tracked_files {
           "src/main.c" <<C
 int main(void) { return 0; }
 C
+        }
+
+        opaque_bundles {
+          msvc {
+            identity "msvc-14.4"
+            files {
+              "C:/VS/cl.exe" <<TXT
+stub cl
+TXT
+              "C:/VS/include/vcruntime.h" <<TXT
+// stub runtime
+TXT
+            }
+          }
         }
       }
     }

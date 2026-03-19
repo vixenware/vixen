@@ -259,6 +259,27 @@ pub struct PlaceSpec {
     pub host: HostSpec,
     #[facet(default)]
     pub files: BTreeMap<String, String>,
+    #[facet(default)]
+    pub tracked_files: BTreeMap<String, String>,
+    #[facet(default)]
+    pub opaque_bundles: BTreeMap<String, OpaqueBundleSpec>,
+}
+
+impl PlaceSpec {
+    pub fn tracked_file_contents(&self, path: &str) -> Option<&str> {
+        self.tracked_files
+            .get(path)
+            .or_else(|| self.files.get(path))
+            .map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct OpaqueBundleSpec {
+    #[facet(default)]
+    pub identity: Option<String>,
+    #[facet(default)]
+    pub files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -284,18 +305,24 @@ pub struct HostSpec {
 pub struct WhichEntry {
     pub name: String,
     pub path: String,
+    #[facet(default)]
+    pub bundle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ReadEntry {
     pub path: String,
     pub content_hash: String,
+    #[facet(default)]
+    pub bundle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct HashEntry {
     pub path: String,
     pub content_hash: String,
+    #[facet(default)]
+    pub bundle: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
@@ -678,6 +705,10 @@ pub enum ObservationPattern {
     Which {
         name: String,
         expected_path: Option<String>,
+    },
+    Bundle {
+        name: String,
+        identity: String,
     },
     Read {
         path: String,

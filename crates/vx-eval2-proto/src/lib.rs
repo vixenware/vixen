@@ -122,6 +122,10 @@ pub enum Claim {
         name: String,
         expected_path: Option<String>,
     },
+    Bundle {
+        name: String,
+        identity: String,
+    },
     Read {
         path: String,
         content_hash: String,
