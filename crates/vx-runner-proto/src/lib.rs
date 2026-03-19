@@ -30,7 +30,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 17;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 18;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -77,6 +77,14 @@ impl RunArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum RunMountMode {
+    Tracked,
+    Opaque,
+}
+
 /// Mount a CAS tree manifest into the action VFS prefix.
 #[derive(Debug, Clone, Facet)]
 pub struct RunTreeMount {
@@ -84,6 +92,8 @@ pub struct RunTreeMount {
     pub mount: String,
     /// CAS tree manifest hash.
     pub manifest: ManifestHash,
+    /// Whether this mount participates in fine-grained dependency tracking.
+    pub mode: RunMountMode,
 }
 
 /// Materialize a single file output from a CAS node manifest into the action prefix.
@@ -95,6 +105,8 @@ pub struct RunFileMount {
     pub manifest: ManifestHash,
     /// Logical output name within that node manifest (e.g. "object", "rlib", "bin").
     pub logical: String,
+    /// Whether this mount participates in fine-grained dependency tracking.
+    pub mode: RunMountMode,
 }
 
 /// Executor-side evaluator payload shipped with a generic run request.

@@ -16,8 +16,8 @@ use vx_eval::{
     verify_host_obligations,
 };
 use vx_runner_proto::{
-    DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunRequest, RunResult,
-    RunTreeMount, TransportValue,
+    DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunMountMode,
+    RunRequest, RunResult, RunTreeMount, TransportValue,
 };
 use vx_store_proto::{
     CasNode, NodeHash, OutputBlobRef, RemoteTracePhase, RemoteTraceSpan, StoreProgress,
@@ -1459,11 +1459,13 @@ mod tests {
         let tree_mounts = vec![RunTreeMount {
             mount: "src".to_string(),
             manifest: Blake3Hash([1; 32]),
+            mode: RunMountMode::Tracked,
         }];
         let file_mounts = vec![RunFileMount {
             path: "deps/libutil.rlib".to_string(),
             manifest: Blake3Hash([2; 32]),
             logical: "rlib".to_string(),
+            mode: RunMountMode::Tracked,
         }];
         let writable_roots = vec!["out".to_string()];
 
@@ -1557,11 +1559,13 @@ mod tests {
             tree_mounts: vec![RunTreeMount {
                 mount: "src".to_string(),
                 manifest: Blake3Hash([1; 32]),
+                mode: RunMountMode::Tracked,
             }],
             file_mounts: vec![RunFileMount {
                 path: "gen/config.h".to_string(),
                 manifest: Blake3Hash([2; 32]),
                 logical: "config".to_string(),
+                mode: RunMountMode::Tracked,
             }],
             writable_roots: vec!["out".to_string()],
             create_dirs: Vec::new(),
@@ -1592,6 +1596,7 @@ mod tests {
             tree_mounts: vec![RunTreeMount {
                 mount: String::new(),
                 manifest: Blake3Hash([1; 32]),
+                mode: RunMountMode::Tracked,
             }],
             file_mounts: Vec::new(),
             writable_roots: vec!["out".to_string()],
@@ -1623,6 +1628,7 @@ mod tests {
             tree_mounts: vec![RunTreeMount {
                 mount: "src".to_string(),
                 manifest: Blake3Hash([1; 32]),
+                mode: RunMountMode::Tracked,
             }],
             file_mounts: Vec::new(),
             writable_roots: vec!["out".to_string()],

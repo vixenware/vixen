@@ -59,7 +59,7 @@ use vx_report::{GraphTopology, RulePlan, RulePlanNodeKind};
 use vx_rs::CrateGraph;
 use vx_runner_proto::{
     DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunFileMount,
-    RunRequest, RunTreeMount, RunnerClient,
+    RunMountMode, RunRequest, RunTreeMount, RunnerClient,
 };
 use vx_store_proto::chunking::{
     prepare_blob, put_node_if_missing, store_blob_stream, store_prepared_blob,
@@ -2046,6 +2046,7 @@ async fn snapshot_exec_blob_mount(
         path: path.to_string(),
         manifest: manifest_hash.0,
         logical: "blob".to_string(),
+        mode: RunMountMode::Tracked,
     })
 }
 
@@ -2091,6 +2092,7 @@ async fn prepare_exec_mounts_with_progress(
                     PreparedMount::Tree(RunTreeMount {
                         mount: mount.path.as_str().to_string(),
                         manifest: root.0,
+                        mode: RunMountMode::Tracked,
                     })
                 }
                 Value::Blob(blob) => PreparedMount::File(

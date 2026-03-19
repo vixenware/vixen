@@ -4,12 +4,12 @@
 //! sandboxed `run` request should be keyed.
 
 use facet_postcard::to_vec;
-use vx_runner_proto::{RunArg, RunRequest};
+use vx_runner_proto::{RunArg, RunMountMode, RunRequest};
 use vx_store_proto::Blake3Hash;
 
 /// Current cache key schema version for generic tool execution.
-/// Version 8: direct-program-only run requests after legacy toolchain deletion.
-pub const RUN_CACHE_KEY_VERSION: u32 = 8;
+/// Version 9: mount mode is part of run request identity.
+pub const RUN_CACHE_KEY_VERSION: u32 = 9;
 
 /// Compute a cache key for a generic `run` request.
 pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
@@ -85,11 +85,17 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
     tree_mounts.sort_by(|a, b| {
         a.mount
             .cmp(&b.mount)
+            .then_with(|| a.mode.cmp(&b.mode))
             .then_with(|| a.manifest.0.cmp(&b.manifest.0))
     });
     for mount in tree_mounts {
         hasher.update(b"tree:");
         hasher.update(mount.mount.as_bytes());
+        hasher.update(b":");
+        hasher.update(match mount.mode {
+            RunMountMode::Tracked => b"tracked",
+            RunMountMode::Opaque => b"opaque",
+        });
         hasher.update(b":");
         hasher.update(&mount.manifest.0);
         hasher.update(b"\n");
@@ -116,6 +122,7 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         a.path
             .cmp(&b.path)
             .then_with(|| a.logical.cmp(&b.logical))
+            .then_with(|| a.mode.cmp(&b.mode))
             .then_with(|| a.manifest.0.cmp(&b.manifest.0))
     });
     for mount in file_mounts {
@@ -123,6 +130,11 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         hasher.update(mount.path.as_bytes());
         hasher.update(b":");
         hasher.update(mount.logical.as_bytes());
+        hasher.update(b":");
+        hasher.update(match mount.mode {
+            RunMountMode::Tracked => b"tracked",
+            RunMountMode::Opaque => b"opaque",
+        });
         hasher.update(b":");
         hasher.update(&mount.manifest.0);
         hasher.update(b"\n");
@@ -143,8 +155,9 @@ fn update_run_arg(hasher: &mut blake3::Hasher, arg: &RunArg) {
 mod tests {
     use super::*;
     use vx_runner_proto::{
-        ExecutorSelector, RunEvalPayload, ShippedFunction, TransportBlock, TransportExpr,
-        TransportFnDef, TransportModule, TransportParam, TransportStmt,
+        ExecutorSelector, RunEvalPayload, RunMountMode, RunTreeMount, ShippedFunction,
+        TransportBlock, TransportExpr, TransportFnDef, TransportModule, TransportParam,
+        TransportStmt,
     };
 
     fn sample_request() -> RunRequest {
@@ -271,5 +284,27 @@ mod tests {
         let first = run_cache_key(&request);
         let second = run_cache_key(&request);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn run_cache_key_distinguishes_mount_modes() {
+        let tracked = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "toolchain".to_string(),
+                manifest: Blake3Hash([7; 32]),
+                mode: RunMountMode::Tracked,
+            }],
+            ..sample_request()
+        };
+        let opaque = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "toolchain".to_string(),
+                manifest: Blake3Hash([7; 32]),
+                mode: RunMountMode::Opaque,
+            }],
+            ..sample_request()
+        };
+
+        assert_ne!(run_cache_key(&tracked), run_cache_key(&opaque));
     }
 }
