@@ -12,7 +12,10 @@
 //! - boundary crossing policy is explicit metadata, not an implicit side effect
 
 mod engine;
-pub use engine::eval_source_entry;
+pub use engine::{
+    RuntimeHooks, eval_source_entry, eval_source_entry_at_place,
+    eval_source_entry_at_place_with_source_id, eval_source_entry_with_source_id,
+};
 
 mod result;
 pub use result::{DemandFrame, EvalError, EvalErrorKind, PendingRef, Resolution};
@@ -22,8 +25,8 @@ pub use value::{ExternalValue, FunctionRef, MapValue, StructValue, Value, ValueR
 
 mod wire;
 pub use vx_eval2_proto::{
-    Claim, CrossingPolicy, PlaceRef, ProjectionStep, Provenance, ProvenanceRoot, ReuseClass,
-    RuntimeInputKind, ValueMeta,
+    ByteOffset, Claim, ColumnIndex, CrossingPolicy, LineIndex, PlaceRef, ProjectionStep,
+    Provenance, ProvenanceRoot, ReuseClass, RuntimeInputKind, SourcePoint, SourceSpan, ValueMeta,
 };
 pub use wire::{envelope_to_value, resolution_to_outcome, value_to_envelope};
 

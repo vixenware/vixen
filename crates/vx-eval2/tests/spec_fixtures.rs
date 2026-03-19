@@ -7,8 +7,10 @@ use roam_stream::StreamLink;
 use roam_types::MessageFamily;
 use tempfile::TempDir;
 use vx_eval2::{
-    Claim, ProjectionStep, ProvenanceRoot, Resolution, RuntimeInputKind, Value, ValueRep,
-    envelope_to_value, eval_source_entry, resolution_to_outcome,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, ProjectionStep, Provenance, ProvenanceRoot,
+    Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind, SourcePoint, SourceSpan, Value,
+    ValueRep, envelope_to_value, eval_source_entry_at_place_with_source_id,
+    eval_source_entry_with_source_id, resolution_to_outcome,
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
@@ -17,8 +19,8 @@ use vx_eval2_proto::{
 };
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
-    EngineExpectation, EngineId, ObservationPattern, ObservedPoison, ObservedResult, SpecCase,
-    SpecOutcome, SpecValue, StructSpec,
+    EngineExpectation, EngineId, HostSpec, ObservationPattern, ObservedPoison, ObservedResult,
+    RuntimeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -42,12 +44,105 @@ async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Er
 }
 
 fn run_case_local(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
-    match eval_source_entry(&case.main_source, &case.invoke.entry) {
+    match eval_source_entry_with_source_id(
+        &case.main_source,
+        case_source_id(case),
+        &case.invoke.entry,
+    ) {
         Ok(resolution) => resolution_to_spec_outcome(resolution),
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),
         })),
+    }
+}
+
+#[derive(Clone)]
+struct FixtureRuntime {
+    spec: RuntimeSpec,
+}
+
+impl FixtureRuntime {
+    fn host(&self, place: &str) -> Result<&HostSpec, EvalError> {
+        self.spec
+            .places
+            .get(place)
+            .map(|place| &place.host)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("place {place:?} was not declared in fixture runtime"),
+                )
+            })
+    }
+}
+
+impl RuntimeHooks for FixtureRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<Option<Value>, EvalError> {
+        let host = self.host(place)?;
+        match callee {
+            "host_os" => {
+                if !args.is_empty() {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_os() does not take any arguments",
+                    ));
+                }
+                Ok(Some(
+                    Value::string(host.os.clone())
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Os {
+                            value: host.os.clone(),
+                        }),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FixtureDaemon {
+    runtime: FixtureRuntime,
+}
+
+impl Eval2Daemon for FixtureDaemon {
+    async fn version(&self) -> Eval2Version {
+        Eval2Version {
+            protocol_version: EVAL2_PROTOCOL_VERSION,
+        }
+    }
+
+    async fn eval_subgraph(&self, request: EvalSubgraphRequest) -> EvalOutcome {
+        match eval_source_entry_at_place_with_source_id(
+            &request.source,
+            &request.source_id,
+            &request.entry,
+            &self.runtime,
+            &request.place.id,
+        ) {
+            Ok(resolution) => resolution_to_outcome(resolution).expect("serialize eval2 result"),
+            Err(error) => EvalOutcome::Poison {
+                kind: format!("{:?}", error.kind),
+                message: error.message.to_string(),
+            },
+        }
+    }
+
+    async fn verify_claims(&self, request: VerifyClaimsRequest) -> VerifyClaimsResult {
+        verify_claims_against_runtime(&self.runtime.spec, &request.place.id, &request.claims)
+    }
+
+    async fn fetch_proxy(&self, _request: FetchProxyRequest) -> EvalOutcome {
+        panic!("proxy fetching is not implemented in the eval2 fixture daemon")
     }
 }
 
@@ -68,39 +163,9 @@ async fn run_case_via_rpc(
         .into());
     }
 
-    #[derive(Clone)]
-    struct FixtureDaemon;
-
-    impl Eval2Daemon for FixtureDaemon {
-        async fn version(&self) -> Eval2Version {
-            Eval2Version {
-                protocol_version: EVAL2_PROTOCOL_VERSION,
-            }
-        }
-
-        async fn eval_subgraph(&self, request: EvalSubgraphRequest) -> EvalOutcome {
-            match eval_source_entry(&request.source, &request.entry) {
-                Ok(resolution) => {
-                    resolution_to_outcome(resolution).expect("serialize eval2 result")
-                }
-                Err(error) => EvalOutcome::Poison {
-                    kind: format!("{:?}", error.kind),
-                    message: error.message.to_string(),
-                },
-            }
-        }
-
-        async fn verify_claims(&self, _request: VerifyClaimsRequest) -> VerifyClaimsResult {
-            VerifyClaimsResult {
-                ok: true,
-                error: None,
-            }
-        }
-
-        async fn fetch_proxy(&self, _request: FetchProxyRequest) -> EvalOutcome {
-            panic!("proxy fetching is not implemented in the eval2 fixture daemon")
-        }
-    }
+    let runtime = FixtureRuntime {
+        spec: case.invoke.runtime.clone(),
+    };
 
     let root = TempDir::new()?;
     let root = Utf8Path::from_path(root.path()).ok_or_else(|| {
@@ -115,7 +180,7 @@ async fn run_case_via_rpc(
             async move {
                 let (reader, writer) = tokio::io::split(stream);
                 let conduit = BareConduit::<MessageFamily, _>::new(StreamLink::new(reader, writer));
-                let dispatcher = Eval2DaemonDispatcher::new(FixtureDaemon);
+                let dispatcher = Eval2DaemonDispatcher::new(FixtureDaemon { runtime });
                 let (caller, session_handle) = acceptor(conduit)
                     .establish::<roam_core::NoopCaller>(dispatcher)
                     .await
@@ -134,6 +199,7 @@ async fn run_case_via_rpc(
             place: PlaceRef {
                 id: place.to_string(),
             },
+            source_id: case_source_id(case),
             source: case.main_source.clone(),
             entry: case.invoke.entry.clone(),
             args: Vec::new(),
@@ -141,12 +207,128 @@ async fn run_case_via_rpc(
         .await
         .map_err(|error| std::io::Error::other(format!("rpc eval_subgraph failed: {error:?}")))?;
 
+    if let Some(verify_place) = &case.invoke.verify_place {
+        let claims = match &outcome {
+            EvalOutcome::Ready(result) => result.meta.claims.clone(),
+            EvalOutcome::Poison { .. } => Vec::new(),
+        };
+        if !claims.is_empty() {
+            let verification = client
+                .verify_claims(VerifyClaimsRequest {
+                    place: PlaceRef {
+                        id: verify_place.clone(),
+                    },
+                    claims,
+                })
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("rpc verify_claims failed: {error:?}"))
+                })?;
+            if !verification.ok {
+                return Ok(SpecOutcome::Poison(ObservedPoison {
+                    kind: "VerificationFailure".to_string(),
+                    message: verification
+                        .error
+                        .unwrap_or_else(|| "claim verification failed".to_string()),
+                }));
+            }
+        }
+    }
+
     drop(client);
     drop(caller);
     drop(session_handle);
     accept_task.abort();
 
     eval_outcome_to_spec(outcome)
+}
+
+fn verify_claims_against_runtime(
+    runtime: &RuntimeSpec,
+    place: &str,
+    claims: &[Claim],
+) -> VerifyClaimsResult {
+    let Some(host) = runtime.places.get(place).map(|place| &place.host) else {
+        return VerifyClaimsResult {
+            ok: false,
+            error: Some(format!(
+                "place {place:?} was not declared in fixture runtime"
+            )),
+        };
+    };
+
+    for claim in claims {
+        match claim {
+            Claim::Os { value } if &host.os != value => {
+                return VerifyClaimsResult {
+                    ok: false,
+                    error: Some(format!(
+                        "host.os changed: expected {value}, got {}",
+                        host.os
+                    )),
+                };
+            }
+            Claim::Arch { value } if &host.arch != value => {
+                return VerifyClaimsResult {
+                    ok: false,
+                    error: Some(format!(
+                        "host.arch changed: expected {value}, got {}",
+                        host.arch
+                    )),
+                };
+            }
+            Claim::Which {
+                name,
+                expected_path,
+            } => {
+                let actual = host
+                    .which
+                    .iter()
+                    .find(|entry| entry.name == *name)
+                    .map(|entry| entry.path.as_str());
+                match (expected_path.as_deref(), actual) {
+                    (Some(expected), Some(actual)) if expected == actual => {}
+                    (Some(expected), Some(actual)) => {
+                        return VerifyClaimsResult {
+                            ok: false,
+                            error: Some(format!(
+                                "host.which({name:?}) changed: expected {expected}, got {actual}"
+                            )),
+                        };
+                    }
+                    (Some(expected), None) => {
+                        return VerifyClaimsResult {
+                            ok: false,
+                            error: Some(format!(
+                                "host.which({name:?}) changed: expected {expected}, but it is now missing"
+                            )),
+                        };
+                    }
+                    (None, None) => {}
+                    (None, Some(actual)) => {
+                        return VerifyClaimsResult {
+                            ok: false,
+                            error: Some(format!(
+                                "host.which({name:?}) changed: expected missing, got {actual}"
+                            )),
+                        };
+                    }
+                }
+            }
+            Claim::Read { .. } | Claim::Hash { .. } => {
+                return VerifyClaimsResult {
+                    ok: false,
+                    error: Some("read/hash claim verification is not implemented yet".to_string()),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    VerifyClaimsResult {
+        ok: true,
+        error: None,
+    }
 }
 
 fn resolution_to_spec_outcome(
@@ -232,6 +414,7 @@ fn eval2_value_to_spec(value: &Value) -> Result<SpecValue, std::io::Error> {
 }
 
 fn eval2_provenance_to_pattern(provenance: vx_eval2::Provenance) -> vx_spec::ProvenancePattern {
+    let source = Some(eval2_source_span_to_pattern(provenance.source.clone()));
     let path = provenance
         .path
         .iter()
@@ -239,22 +422,41 @@ fn eval2_provenance_to_pattern(provenance: vx_eval2::Provenance) -> vx_spec::Pro
         .map(eval2_projection_to_pattern)
         .collect();
     match provenance.root {
-        ProvenanceRoot::Unknown => vx_spec::ProvenancePattern::Unknown { path },
-        ProvenanceRoot::Literal => vx_spec::ProvenancePattern::Literal { path },
+        ProvenanceRoot::Unknown => vx_spec::ProvenancePattern::Unknown { source, path },
+        ProvenanceRoot::Literal => vx_spec::ProvenancePattern::Literal { source, path },
         ProvenanceRoot::Binding { name } => vx_spec::ProvenancePattern::Binding {
             name: name.to_string(),
+            source,
             path,
         },
         ProvenanceRoot::RuntimeInput { kind, label } => vx_spec::ProvenancePattern::RuntimeInput {
             kind: eval2_runtime_input_to_pattern(kind),
             label: label.to_string(),
+            source,
             path,
         },
         ProvenanceRoot::HostProbe { place, description } => vx_spec::ProvenancePattern::HostProbe {
             host: place.to_string(),
             description: description.to_string(),
+            source,
             path,
         },
+    }
+}
+
+fn eval2_source_span_to_pattern(span: SourceSpan) -> vx_spec::SourceSpanPattern {
+    vx_spec::SourceSpanPattern {
+        source_id: span.source_id,
+        start: eval2_source_point_to_pattern(span.start),
+        end: eval2_source_point_to_pattern(span.end),
+    }
+}
+
+fn eval2_source_point_to_pattern(point: SourcePoint) -> vx_spec::SourcePointPattern {
+    vx_spec::SourcePointPattern {
+        byte: point.byte.0,
+        line: point.line.0,
+        column: point.column.0,
     }
 }
 
@@ -302,6 +504,19 @@ fn eval2_claim_to_pattern(claim: Claim) -> ObservationPattern {
             content_hash: content_hash.to_string(),
         },
     }
+}
+
+fn case_source_id(case: &SpecCase) -> String {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("vx-eval2 crate should live under the workspace root");
+    let absolute = case
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| case.path.clone());
+    let relative = absolute.strip_prefix(workspace_root).unwrap_or(&absolute);
+    format!("{}#main", relative.display())
 }
 
 datatest_stable::harness! {

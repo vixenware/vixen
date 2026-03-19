@@ -1,0 +1,40 @@
+main <<VX,vx
+fn build() {
+  host_os()
+}
+VX
+
+invoke {
+  entry build
+  place win
+  verify_place win_changed
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+        }
+      }
+      win_changed {
+        host {
+          os linux
+          arch x86_64
+        }
+      }
+    }
+  }
+}
+
+expect {
+  poison {
+    kind VerificationFailure
+    message_contains "host.os changed"
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

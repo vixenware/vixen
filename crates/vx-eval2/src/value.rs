@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::{Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, ValueMeta};
+use crate::{Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta};
 
 /// A successful runtime value: payload plus orthogonal metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,12 +125,12 @@ impl ValueRep {
             | Self::Map(_)
             | Self::Struct(_)
             | Self::Function(_) => ValueMeta::new(
-                Provenance::unknown(),
+                Provenance::unknown(SourceSpan::synthetic("<unknown>")),
                 ReuseClass::Stable,
                 CrossingPolicy::ByValue,
             ),
             Self::External(_) => ValueMeta::new(
-                Provenance::unknown(),
+                Provenance::unknown(SourceSpan::synthetic("<unknown>")),
                 ReuseClass::Live,
                 CrossingPolicy::Blocked,
             ),

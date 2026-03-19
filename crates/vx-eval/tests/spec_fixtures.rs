@@ -5,7 +5,8 @@ use facet_value::Value as DynamicValue;
 use vx_eval::{CapabilitySet, Engine, Value, lower_source_file_with_source_id};
 use vx_parser::SourceFile;
 use vx_spec::{
-    EngineExpectation, EngineId, ObservedPoison, SpecCase, SpecOutcome, SpecValue, StructSpec,
+    EngineExpectation, EngineId, ObservedPoison, ObservedResult, SpecCase, SpecOutcome, SpecValue,
+    StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -38,7 +39,11 @@ async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Er
         .map(dynamic_to_eval_value)
         .collect::<Result<Vec<_>, _>>()?;
     match engine.call(&case.invoke.entry, args).await {
-        Ok(value) => Ok(SpecOutcome::Result(eval_value_to_spec(&value)?)),
+        Ok(value) => Ok(SpecOutcome::Result(ObservedResult {
+            value: eval_value_to_spec(&value)?,
+            provenance: None,
+            obligations: Vec::new(),
+        })),
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),

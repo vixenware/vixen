@@ -192,6 +192,8 @@ pub struct InvokeSpec {
     #[facet(default)]
     pub place: Option<String>,
     #[facet(default)]
+    pub verify_place: Option<String>,
+    #[facet(default)]
     pub args: Vec<DynamicValue>,
     #[facet(default)]
     pub capabilities: Vec<String>,
@@ -313,14 +315,20 @@ pub struct StructSpec {
 pub enum ProvenancePattern {
     Unknown {
         #[facet(default)]
+        source: Option<SourceSpanPattern>,
+        #[facet(default)]
         path: Vec<ProjectionPattern>,
     },
     Literal {
+        #[facet(default)]
+        source: Option<SourceSpanPattern>,
         #[facet(default)]
         path: Vec<ProjectionPattern>,
     },
     Binding {
         name: String,
+        #[facet(default)]
+        source: Option<SourceSpanPattern>,
         #[facet(default)]
         path: Vec<ProjectionPattern>,
     },
@@ -328,14 +336,32 @@ pub enum ProvenancePattern {
         kind: RuntimeInputPattern,
         label: String,
         #[facet(default)]
+        source: Option<SourceSpanPattern>,
+        #[facet(default)]
         path: Vec<ProjectionPattern>,
     },
     HostProbe {
         host: String,
         description: String,
         #[facet(default)]
+        source: Option<SourceSpanPattern>,
+        #[facet(default)]
         path: Vec<ProjectionPattern>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct SourceSpanPattern {
+    pub source_id: String,
+    pub start: SourcePointPattern,
+    pub end: SourcePointPattern,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct SourcePointPattern {
+    pub byte: u32,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -397,7 +423,7 @@ impl ExpectSpec {
                     });
                 }
                 if let Some(expected) = &self.provenance
-                    && actual.provenance.as_ref() != Some(expected)
+                    && !expected.matches(actual.provenance.as_ref())
                 {
                     return Err(SpecAssertionError::ProvenanceMismatch {
                         expected: expected.clone(),
@@ -441,6 +467,101 @@ impl ExpectSpec {
                 Ok(())
             }
         }
+    }
+}
+
+impl ProvenancePattern {
+    fn matches(&self, actual: Option<&ProvenancePattern>) -> bool {
+        let Some(actual) = actual else {
+            return false;
+        };
+        match (self, actual) {
+            (
+                Self::Unknown {
+                    source: expected_source,
+                    path: expected_path,
+                },
+                Self::Unknown {
+                    source: actual_source,
+                    path: actual_path,
+                },
+            )
+            | (
+                Self::Literal {
+                    source: expected_source,
+                    path: expected_path,
+                },
+                Self::Literal {
+                    source: actual_source,
+                    path: actual_path,
+                },
+            ) => expected_path == actual_path && source_matches(expected_source, actual_source),
+            (
+                Self::Binding {
+                    name: expected_name,
+                    source: expected_source,
+                    path: expected_path,
+                },
+                Self::Binding {
+                    name: actual_name,
+                    source: actual_source,
+                    path: actual_path,
+                },
+            ) => {
+                expected_name == actual_name
+                    && expected_path == actual_path
+                    && source_matches(expected_source, actual_source)
+            }
+            (
+                Self::RuntimeInput {
+                    kind: expected_kind,
+                    label: expected_label,
+                    source: expected_source,
+                    path: expected_path,
+                },
+                Self::RuntimeInput {
+                    kind: actual_kind,
+                    label: actual_label,
+                    source: actual_source,
+                    path: actual_path,
+                },
+            ) => {
+                expected_kind == actual_kind
+                    && expected_label == actual_label
+                    && expected_path == actual_path
+                    && source_matches(expected_source, actual_source)
+            }
+            (
+                Self::HostProbe {
+                    host: expected_host,
+                    description: expected_description,
+                    source: expected_source,
+                    path: expected_path,
+                },
+                Self::HostProbe {
+                    host: actual_host,
+                    description: actual_description,
+                    source: actual_source,
+                    path: actual_path,
+                },
+            ) => {
+                expected_host == actual_host
+                    && expected_description == actual_description
+                    && expected_path == actual_path
+                    && source_matches(expected_source, actual_source)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn source_matches(
+    expected: &Option<SourceSpanPattern>,
+    actual: &Option<SourceSpanPattern>,
+) -> bool {
+    match expected {
+        Some(expected) => actual.as_ref() == Some(expected),
+        None => true,
     }
 }
 

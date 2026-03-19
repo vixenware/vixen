@@ -1,12 +1,16 @@
 use crate::{
     Claim, CrossingPolicy, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeInputKind, Value, ValueRep, envelope_to_value, value_to_envelope,
+    RuntimeInputKind, SourceSpan, Value, ValueRep, envelope_to_value, value_to_envelope,
 };
 
 #[test]
 fn scalar_values_can_carry_claims_without_wrapper_enums() {
     let value = Value::u64(42)
-        .with_provenance(Provenance::host_probe("windows-1", "discover toolchain"))
+        .with_provenance(Provenance::host_probe(
+            SourceSpan::synthetic("discover-toolchain"),
+            "windows-1",
+            "discover toolchain",
+        ))
         .with_claim(Claim::Arch {
             value: "x86_64".to_string(),
         });
@@ -20,6 +24,7 @@ fn scalar_values_can_carry_claims_without_wrapper_enums() {
 fn projection_updates_provenance_without_changing_payload_kind() {
     let value = Value::string("clang")
         .with_provenance(Provenance::runtime_input(
+            SourceSpan::synthetic("toolchain"),
             RuntimeInputKind::DiscoverResult,
             "toolchain",
         ))
@@ -64,7 +69,11 @@ fn wire_round_trip_preserves_value_shape_and_metadata() {
         [(
             "cc".into(),
             Value::string("cl.exe")
-                .with_provenance(Provenance::host_probe("win", "toolchain probe"))
+                .with_provenance(Provenance::host_probe(
+                    SourceSpan::synthetic("toolchain-probe"),
+                    "win",
+                    "toolchain probe",
+                ))
                 .with_claim(Claim::Which {
                     name: "cl.exe".to_string(),
                     expected_path: Some("C:/VS/cl.exe".to_string()),
@@ -72,7 +81,10 @@ fn wire_round_trip_preserves_value_shape_and_metadata() {
                 .with_reuse(ReuseClass::Observed),
         )],
     )
-    .with_provenance(Provenance::binding("toolchain"))
+    .with_provenance(Provenance::binding(
+        SourceSpan::synthetic("toolchain-binding"),
+        "toolchain",
+    ))
     .with_crossing(CrossingPolicy::ByValue);
 
     let encoded = value_to_envelope(&value).expect("encode value");

@@ -46,6 +46,29 @@ pub enum ProjectionStep {
     Path(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Facet)]
+pub struct ByteOffset(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Facet)]
+pub struct LineIndex(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Facet)]
+pub struct ColumnIndex(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct SourcePoint {
+    pub byte: ByteOffset,
+    pub line: LineIndex,
+    pub column: ColumnIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct SourceSpan {
+    pub source_id: String,
+    pub start: SourcePoint,
+    pub end: SourcePoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
@@ -79,6 +102,7 @@ pub enum ProvenanceRoot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 pub struct Provenance {
+    pub source: SourceSpan,
     pub root: ProvenanceRoot,
     #[facet(default)]
     pub path: Vec<ProjectionStep>,
@@ -118,29 +142,37 @@ pub struct ValueMeta {
 }
 
 impl Provenance {
-    pub fn unknown() -> Self {
+    pub fn unknown(source: SourceSpan) -> Self {
         Self {
+            source,
             root: ProvenanceRoot::Unknown,
             path: Vec::new(),
         }
     }
 
-    pub fn literal() -> Self {
+    pub fn literal(source: SourceSpan) -> Self {
         Self {
+            source,
             root: ProvenanceRoot::Literal,
             path: Vec::new(),
         }
     }
 
-    pub fn binding(name: impl Into<String>) -> Self {
+    pub fn binding(source: SourceSpan, name: impl Into<String>) -> Self {
         Self {
+            source,
             root: ProvenanceRoot::Binding { name: name.into() },
             path: Vec::new(),
         }
     }
 
-    pub fn runtime_input(kind: RuntimeInputKind, label: impl Into<String>) -> Self {
+    pub fn runtime_input(
+        source: SourceSpan,
+        kind: RuntimeInputKind,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
+            source,
             root: ProvenanceRoot::RuntimeInput {
                 kind,
                 label: label.into(),
@@ -149,8 +181,13 @@ impl Provenance {
         }
     }
 
-    pub fn host_probe(place: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn host_probe(
+        source: SourceSpan,
+        place: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
+            source,
             root: ProvenanceRoot::HostProbe {
                 place: place.into(),
                 description: description.into(),
@@ -163,9 +200,31 @@ impl Provenance {
         let mut path = self.path.clone();
         path.push(step);
         Self {
+            source: self.source.clone(),
             root: self.root.clone(),
             path,
         }
+    }
+}
+
+impl SourcePoint {
+    pub fn new(byte: ByteOffset, line: LineIndex, column: ColumnIndex) -> Self {
+        Self { byte, line, column }
+    }
+}
+
+impl SourceSpan {
+    pub fn new(source_id: impl Into<String>, start: SourcePoint, end: SourcePoint) -> Self {
+        Self {
+            source_id: source_id.into(),
+            start,
+            end,
+        }
+    }
+
+    pub fn synthetic(source_id: impl Into<String>) -> Self {
+        let zero = SourcePoint::new(ByteOffset(0), LineIndex(0), ColumnIndex(0));
+        Self::new(source_id, zero.clone(), zero)
     }
 }
 
@@ -242,6 +301,7 @@ pub struct ValueEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalSubgraphRequest {
     pub place: PlaceRef,
+    pub source_id: String,
     pub source: String,
     pub entry: String,
     #[facet(default)]
@@ -297,6 +357,8 @@ mod tests {
 
     #[test]
     fn eval_outcome_round_trips_via_postcard() {
+        let wire_source = SourceSpan::synthetic("wire");
+        let toolchain_source = SourceSpan::synthetic("toolchain");
         let value = EvalOutcome::Ready(ValueEnvelope {
             value: WireValue::Struct(StructValue {
                 type_name: "Toolchain".to_string(),
@@ -306,7 +368,7 @@ mod tests {
                         ValueEnvelope {
                             value: WireValue::String("windows".to_string()),
                             meta: ValueMeta::new(
-                                Provenance::literal(),
+                                Provenance::literal(wire_source.clone()),
                                 ReuseClass::Stable,
                                 CrossingPolicy::ByValue,
                             ),
@@ -319,7 +381,11 @@ mod tests {
                                 "C:/VS/VC/Tools/MSVC/14.3/bin/cl.exe".to_string(),
                             ),
                             meta: ValueMeta::new(
-                                Provenance::host_probe("win", "toolchain"),
+                                Provenance::host_probe(
+                                    toolchain_source.clone(),
+                                    "win",
+                                    "toolchain",
+                                ),
                                 ReuseClass::Observed,
                                 CrossingPolicy::ByValue,
                             )
@@ -335,6 +401,7 @@ mod tests {
             }),
             meta: ValueMeta {
                 provenance: Provenance {
+                    source: toolchain_source,
                     root: ProvenanceRoot::HostProbe {
                         place: "win".to_string(),
                         description: "toolchain".to_string(),
@@ -371,6 +438,7 @@ mod tests {
                 value: WireValue::String(format!("{}::{}", request.place.id, request.entry)),
                 meta: ValueMeta {
                     provenance: Provenance {
+                        source: SourceSpan::synthetic(request.source_id),
                         root: ProvenanceRoot::RuntimeInput {
                             kind: RuntimeInputKind::ExecResult,
                             label: "rpc".to_string(),
@@ -396,6 +464,7 @@ mod tests {
                 value: WireValue::Proxy(request.reference),
                 meta: ValueMeta {
                     provenance: Provenance {
+                        source: SourceSpan::synthetic("fetch-proxy"),
                         root: ProvenanceRoot::Unknown,
                         path: Vec::new(),
                     },
@@ -449,6 +518,7 @@ mod tests {
                 place: PlaceRef {
                     id: "win".to_string(),
                 },
+                source_id: "rpc-test".to_string(),
                 source: "fn build() { 42 }".to_string(),
                 entry: "build".to_string(),
                 args: Vec::new(),
@@ -461,6 +531,7 @@ mod tests {
                 value: WireValue::String("win::build".to_string()),
                 meta: ValueMeta {
                     provenance: Provenance {
+                        source: SourceSpan::synthetic("rpc-test"),
                         root: ProvenanceRoot::RuntimeInput {
                             kind: RuntimeInputKind::ExecResult,
                             label: "rpc".to_string(),
