@@ -1,7 +1,7 @@
 //! RPC protocol between vx-runner and vx-vfsd.
 
 use facet::Facet;
-use vx_store_proto::Blake3Hash;
+use vx_store_proto::{Blake3Hash, NodeHash};
 
 #[derive(Debug, Clone, Facet)]
 pub struct VfsPrefixStateSummary {
@@ -17,6 +17,14 @@ pub struct VfsPrefixStateSummary {
     pub toolchain_bin_children: Vec<String>,
     pub path_mappings_sample: Vec<String>,
     pub src_path_mappings_sample: Vec<String>,
+}
+
+#[derive(Debug, Clone, Facet, PartialEq, Eq)]
+pub struct VfsObservedInput {
+    pub path: String,
+    pub content_hash: Blake3Hash,
+    pub blob_node: Option<NodeHash>,
+    pub size: u64,
 }
 
 /// VFS daemon RPC service.
@@ -85,4 +93,14 @@ pub trait Vfsd {
         &self,
         prefix_id: String,
     ) -> Result<VfsPrefixStateSummary, String>;
+
+    /// Return observed CAS-backed file inputs under the requested tracked roots.
+    ///
+    /// Paths are relative to the prefix root. Only observations rooted under one
+    /// of `roots` are returned.
+    async fn observed_inputs(
+        &self,
+        prefix_id: String,
+        roots: Vec<String>,
+    ) -> Result<Vec<VfsObservedInput>, String>;
 }

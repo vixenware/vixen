@@ -1,6 +1,6 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::{VfsPrefixStateSummary, Vfsd};
+use crate::protocol::{VfsObservedInput, VfsPrefixStateSummary, Vfsd};
 use crate::vfs::CasVfs;
 use camino::Utf8PathBuf;
 use std::collections::HashSet;
@@ -252,6 +252,14 @@ impl VfsdService {
     ) -> Result<VfsPrefixStateSummary, String> {
         Ok(self.vfs.describe_prefix_state(&prefix_id).await)
     }
+
+    async fn observed_inputs(
+        &self,
+        prefix_id: String,
+        roots: Vec<String>,
+    ) -> Result<Vec<VfsObservedInput>, String> {
+        Ok(self.vfs.observed_inputs(&prefix_id, &roots).await)
+    }
 }
 
 impl Vfsd for VfsdService {
@@ -288,6 +296,14 @@ impl Vfsd for VfsdService {
         prefix_id: String,
     ) -> Result<VfsPrefixStateSummary, String> {
         VfsdService::describe_prefix_state(self, prefix_id).await
+    }
+
+    async fn observed_inputs(
+        &self,
+        prefix_id: String,
+        roots: Vec<String>,
+    ) -> Result<Vec<VfsObservedInput>, String> {
+        VfsdService::observed_inputs(self, prefix_id, roots).await
     }
 }
 
@@ -745,6 +761,89 @@ mod tests {
             .lookup(src_lookup.attrs.item_id, "lua.c".to_string())
             .await;
         assert_eq!(file_lookup.error, errno::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn observed_inputs_filter_to_requested_tracked_roots() {
+        let env = TestEnv::new().await;
+        let src_hash = store_small_file_tree(&env.cas, "lua.c", b"int lua_main(void);").await;
+        let toolchain_hash = store_small_file_tree(&env.cas, "bin/cc", b"#!/bin/sh\n").await;
+
+        env.service
+            .mkdir("/pfx-observed".to_string())
+            .await
+            .expect("mkdir failed");
+        env.service
+            .mount("/pfx-observed/src".to_string(), src_hash)
+            .await
+            .expect("src mount failed");
+        env.service
+            .mount("/pfx-observed/toolchain".to_string(), toolchain_hash)
+            .await
+            .expect("toolchain mount failed");
+
+        let prefix_root = item_id_for(&env, "pfx-observed", "").await;
+        let src_lookup = env.service.vfs.lookup(prefix_root, "src".to_string()).await;
+        assert_eq!(src_lookup.error, errno::OK);
+        let lua_lookup = env
+            .service
+            .vfs
+            .lookup(src_lookup.attrs.item_id, "lua.c".to_string())
+            .await;
+        assert_eq!(lua_lookup.error, errno::OK);
+        let _ = env
+            .service
+            .vfs
+            .get_attributes(lua_lookup.attrs.item_id)
+            .await;
+
+        let toolchain_lookup = env
+            .service
+            .vfs
+            .lookup(prefix_root, "toolchain".to_string())
+            .await;
+        assert_eq!(toolchain_lookup.error, errno::OK);
+        let bin_lookup = env
+            .service
+            .vfs
+            .lookup(toolchain_lookup.attrs.item_id, "bin".to_string())
+            .await;
+        assert_eq!(bin_lookup.error, errno::OK);
+        let cc_lookup = env
+            .service
+            .vfs
+            .lookup(bin_lookup.attrs.item_id, "cc".to_string())
+            .await;
+        assert_eq!(cc_lookup.error, errno::OK);
+        let _ = env
+            .service
+            .vfs
+            .get_attributes(cc_lookup.attrs.item_id)
+            .await;
+
+        let src_only = env
+            .service
+            .observed_inputs("pfx-observed".to_string(), vec!["src".to_string()])
+            .await
+            .expect("observed_inputs should succeed");
+        assert_eq!(src_only.len(), 1);
+        assert_eq!(src_only[0].path, "src/lua.c");
+
+        let toolchain_only = env
+            .service
+            .observed_inputs("pfx-observed".to_string(), vec!["toolchain".to_string()])
+            .await
+            .expect("observed_inputs should succeed");
+        assert_eq!(toolchain_only.len(), 1);
+        assert_eq!(toolchain_only[0].path, "toolchain/bin/cc");
+
+        let exact_file = env
+            .service
+            .observed_inputs("pfx-observed".to_string(), vec!["src/lua.c".to_string()])
+            .await
+            .expect("observed_inputs should succeed");
+        assert_eq!(exact_file.len(), 1);
+        assert_eq!(exact_file[0].path, "src/lua.c");
     }
 
     #[tokio::test(flavor = "multi_thread")]

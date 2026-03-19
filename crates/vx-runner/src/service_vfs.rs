@@ -17,7 +17,7 @@ use vx_eval::{
 };
 use vx_runner_proto::{
     DiscoverRequest, DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunMountMode,
-    RunRequest, RunResult, RunTreeMount, TransportValue,
+    RunObservedInput, RunRequest, RunResult, RunTreeMount, TransportValue,
 };
 use vx_store_proto::{
     CasNode, NodeHash, OutputBlobRef, RemoteTracePhase, RemoteTraceSpan, StoreProgress,
@@ -431,6 +431,7 @@ fn run_failure_result_with_kind(
         stderr,
         duration_ms: start.elapsed().as_millis() as u64,
         observer_value: None,
+        tracked_inputs: Vec::new(),
         poison,
         error_kind,
         error,
@@ -443,6 +444,7 @@ fn run_success_result(
     stdout: String,
     stderr: String,
     observer_value: Option<TransportValue>,
+    tracked_inputs: Vec<RunObservedInput>,
 ) -> RunResult {
     RunResult {
         success: true,
@@ -451,10 +453,26 @@ fn run_success_result(
         stderr,
         duration_ms: start.elapsed().as_millis() as u64,
         observer_value,
+        tracked_inputs,
         poison: None,
         error_kind: None,
         error: None,
     }
+}
+
+fn tracked_mount_roots(request: &RunRequest) -> Vec<String> {
+    let mut roots = BTreeSet::new();
+    for mount in &request.tree_mounts {
+        if mount.mode == RunMountMode::Tracked {
+            roots.insert(mount.mount.clone());
+        }
+    }
+    for mount in &request.file_mounts {
+        if mount.mode == RunMountMode::Tracked {
+            roots.insert(mount.path.clone());
+        }
+    }
+    roots.into_iter().collect()
 }
 
 fn append_process_output(mut message: String, stdout: &str, stderr: &str) -> String {
@@ -1475,11 +1493,39 @@ impl RunnerService {
         );
 
         let exit_code = output.exit_status.code().unwrap_or(-1);
+        let tracked_inputs = match self
+            .vfs
+            .observed_inputs(&action.prefix_id, tracked_mount_roots(&request))
+            .await
+        {
+            Ok(inputs) => inputs
+                .into_iter()
+                .map(|input| RunObservedInput {
+                    path: input.path,
+                    content_hash: input.content_hash,
+                    blob_node: input.blob_node,
+                    size: input.size,
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return run_failure_result(
+                    start,
+                    exit_code,
+                    output.stdout.clone(),
+                    output.stderr.clone(),
+                    Some(format!(
+                        "failed to collect tracked VFS observations: {error}"
+                    )),
+                );
+            }
+        };
         // r[impl exec.errors]
         info!(
             action.prefix_id = %action.prefix_id,
             action_desc,
             has_eval = request.eval.is_some(),
+            tracked_inputs = tracked_inputs.len(),
             "starting shipped observer evaluation"
         );
         let observer_result: Result<Option<TransportValue>, TransportPoisonError> =
@@ -1631,6 +1677,7 @@ impl RunnerService {
             output.stdout,
             output.stderr,
             observer_value,
+            tracked_inputs,
         )
     }
 }

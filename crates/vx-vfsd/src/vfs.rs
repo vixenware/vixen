@@ -45,7 +45,7 @@ use vx_store_proto::{
     Blake3Hash, BlobNode, CasNode, ChunkHash, DirEntryKind, NodeHash, StoreClient,
 };
 
-use crate::protocol::VfsPrefixStateSummary;
+use crate::protocol::{VfsObservedInput, VfsPrefixStateSummary};
 
 /// A virtual filesystem item
 #[derive(Debug, Clone)]
@@ -2323,6 +2323,28 @@ impl CasVfs {
         paths
     }
 
+    fn path_under_root(
+        &self,
+        items: &VfsItems,
+        item_id: ItemId,
+        root_id: ItemId,
+    ) -> Option<String> {
+        let mut components = Vec::new();
+        let mut current = item_id;
+
+        while current != root_id {
+            let item = items.get(&current)?;
+            if current == ROOT_ITEM_ID || item.parent_id == 0 {
+                return None;
+            }
+            components.push(item.name.clone());
+            current = item.parent_id;
+        }
+
+        components.reverse();
+        Some(components.join("/"))
+    }
+
     pub async fn describe_prefix_state(&self, prefix_id: &str) -> VfsPrefixStateSummary {
         let state = self.state.lock();
         let root_children = Self::sorted_prefix_entries(&state, ROOT_ITEM_ID, false);
@@ -2390,6 +2412,43 @@ impl CasVfs {
             path_mappings_sample,
             src_path_mappings_sample,
         }
+    }
+
+    pub async fn observed_inputs(
+        &self,
+        prefix_id: &str,
+        roots: &[String],
+    ) -> Vec<VfsObservedInput> {
+        let state = self.state.lock();
+        let observed = self.observed_identities.lock();
+        let Some(prefix) = state.prefixes.get(prefix_id) else {
+            return Vec::new();
+        };
+
+        let mut inputs = observed
+            .iter()
+            .filter_map(|(item_id, identity)| {
+                let path = self.path_under_root(&state.items, *item_id, prefix.root_item_id)?;
+                let included = roots.iter().any(|root| {
+                    root.is_empty()
+                        || path == *root
+                        || path
+                            .strip_prefix(root.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                });
+                if !included {
+                    return None;
+                }
+                Some(VfsObservedInput {
+                    path,
+                    content_hash: identity.cas_hash,
+                    blob_node: identity.blob_node,
+                    size: identity.size,
+                })
+            })
+            .collect::<Vec<_>>();
+        inputs.sort_by(|left, right| left.path.cmp(&right.path));
+        inputs
     }
 
     /// Build the path from an item up to (but not including) a root

@@ -26,11 +26,11 @@ pub use vx_eval::{
     TransportModule, TransportParam, TransportPoisonError, TransportStmt, TransportStruct,
     TransportTree, TransportUnaryOp, TransportValue,
 };
-use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
+use vx_store_proto::{Blake3Hash, ManifestHash, NodeHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 18;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 19;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -120,6 +120,14 @@ pub struct RunEvalPayload {
     pub verification_obligations: Vec<HostObservation>,
 }
 
+#[derive(Debug, Clone, Facet, PartialEq, Eq)]
+pub struct RunObservedInput {
+    pub path: String,
+    pub content_hash: Blake3Hash,
+    pub blob_node: Option<NodeHash>,
+    pub size: u64,
+}
+
 /// Executor-side discovery request shipped to the runner.
 #[derive(Debug, Clone, Facet)]
 pub struct DiscoverRequest {
@@ -196,6 +204,7 @@ pub struct RunResult {
     pub stderr: String,
     pub duration_ms: u64,
     pub observer_value: Option<TransportValue>,
+    pub tracked_inputs: Vec<RunObservedInput>,
     pub poison: Option<TransportPoisonError>,
     pub error_kind: Option<RunFailureKind>,
     pub error: Option<String>,

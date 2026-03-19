@@ -26,6 +26,7 @@ impl RunnerService {
             command,
             success = result.success,
             has_observer_value = result.observer_value.is_some(),
+            tracked_inputs = result.tracked_inputs.len(),
             "runner.run finished"
         );
         result
