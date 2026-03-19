@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
 
 use eyre::{Context, ContextCompat, Result};
 
@@ -266,29 +266,132 @@ fn smoke(raw_args: &[String]) {
         std::process::exit(build_status.code().unwrap_or(1));
     }
 
-    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_millis();
-        std::env::temp_dir()
-            .join(format!("vx-smoke-{millis}-{}", std::process::id()))
-            .display()
-            .to_string()
-    });
+    let vx_home = std::env::var("VX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("vx-smoke-home"));
+
+    prepare_smoke_home(&vx_home).expect("Failed to prepare smoke VX_HOME");
 
     let mut cmd = Command::new(workspace_root.join("target/debug/vx"));
     cmd.arg("build").arg("--no-tui").arg("-f").arg(build_file);
     for arg in extra_args {
         cmd.arg(arg);
     }
-    cmd.current_dir(&workspace_root).env("VX_HOME", &vx_home);
+    cmd.current_dir(&workspace_root)
+        .env("VX_HOME", &vx_home)
+        .env("VX_TEST", "1");
     eprintln!("Launching: {cmd:?}");
 
     let status = cmd.status().expect("Failed to run vx smoke build");
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+fn prepare_smoke_home(vx_home: &PathBuf) -> Result<()> {
+    kill_smoke_vxd(vx_home).context("failed to stop previous smoke vxd")?;
+
+    if vx_home.exists() {
+        fs::remove_dir_all(vx_home).with_context(|| {
+            format!("failed to remove previous smoke home {}", vx_home.display())
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn kill_smoke_vxd(vx_home: &PathBuf) -> Result<()> {
+    let needle = vx_home.display().to_string();
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,args="])
+        .output()
+        .context("failed to enumerate processes with ps")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut vxd_pids = Vec::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(pid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(_ppid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let args = parts.collect::<Vec<_>>().join(" ");
+        if args.contains(&needle) && args.contains("vxd") {
+            vxd_pids.push(pid);
+        }
+    }
+
+    if vxd_pids.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "Stopping previous smoke vxd for {}: {:?}",
+        vx_home.display(),
+        vxd_pids
+    );
+
+    for pid in &vxd_pids {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .with_context(|| format!("failed to signal pid {pid}"))?;
+        if !status.success() {
+            eyre::bail!("kill -TERM {pid} failed with status {status}");
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let mut alive = Vec::new();
+        for pid in &vxd_pids {
+            let status = Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .with_context(|| format!("failed to probe pid {pid}"))?;
+            if status.success() {
+                alive.push(*pid);
+            }
+        }
+        if alive.is_empty() {
+            thread::sleep(std::time::Duration::from_millis(100));
+            return Ok(());
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    for pid in &vxd_pids {
+        let status = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .with_context(|| format!("failed to probe pid {pid}"))?;
+        if !status.success() {
+            continue;
+        }
+        let status = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .with_context(|| format!("failed to force-kill pid {pid}"))?;
+        if !status.success() {
+            eyre::bail!("kill -KILL {pid} failed with status {status}");
+        }
+    }
+
+    thread::sleep(std::time::Duration::from_millis(200));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn kill_smoke_vxd(_vx_home: &PathBuf) -> Result<()> {
+    Ok(())
 }
 
 /// Find the workspace root by walking up from the current directory
