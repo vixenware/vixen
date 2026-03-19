@@ -51,6 +51,8 @@ expect {
       content_hash "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   )
+  reuse @observed
+  crossing @by_value
 
   engines {
     eval1 @skip

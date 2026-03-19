@@ -43,10 +43,14 @@ async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Er
             value: eval_value_to_spec(&value)?,
             provenance: None,
             obligations: Vec::new(),
+            reuse: None,
+            crossing: None,
+            events: Vec::new(),
         })),
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),
+            events: Vec::new(),
         })),
     }
 }

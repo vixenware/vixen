@@ -10,8 +10,9 @@ use vx_parser::{
 };
 
 use crate::{
-    ByteOffset, ColumnIndex, EvalError, EvalErrorKind, LineIndex, ProjectionStep, Provenance,
-    Resolution, SourcePoint, SourceSpan, StructValue, Value, ValueRep,
+    ByteOffset, ColumnIndex, CrossingPolicy, EvalError, EvalErrorKind, LineIndex, ProjectionStep,
+    Provenance, Resolution, ReuseClass, SourcePoint, SourceSpan, StructValue, Value, ValueMeta,
+    ValueRep,
 };
 
 pub trait RuntimeHooks {
@@ -204,8 +205,9 @@ fn eval_expr(
                     }
                 }
             }
-            Ok(Value::array(items)
-                .with_provenance(Provenance::literal(source.span_for_node(array))))
+            let provenance = Provenance::literal(source.span_for_node(array));
+            let meta = aggregate_child_meta(provenance, items.iter());
+            Ok(Value::array(items).with_meta(meta))
         }
         Expr::Map(map) => {
             let mut entries = Vec::new();
@@ -220,7 +222,12 @@ fn eval_expr(
                 let value = eval_expr(source, &value_expr, env, runtime, place)?;
                 entries.push((key, value));
             }
-            Ok(Value::map(entries).with_provenance(Provenance::literal(source.span_for_node(map))))
+            let provenance = Provenance::literal(source.span_for_node(map));
+            let meta = aggregate_child_meta(
+                provenance,
+                entries.iter().flat_map(|(key, value)| [key, value]),
+            );
+            Ok(Value::map(entries).with_meta(meta))
         }
         Expr::Fail(fail) => {
             let message = eval_expr(
@@ -423,8 +430,37 @@ fn eval_struct_literal(
         )?;
         fields.push((name, value));
     }
-    Ok(Value::structure(type_name, fields)
-        .with_provenance(Provenance::literal(source.span_for_node(struct_literal))))
+    let provenance = Provenance::literal(source.span_for_node(struct_literal));
+    let meta = aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
+    Ok(Value::structure(type_name, fields).with_meta(meta))
+}
+
+fn aggregate_child_meta<'a>(
+    provenance: Provenance,
+    children: impl IntoIterator<Item = &'a Value>,
+) -> ValueMeta {
+    let mut meta = ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue);
+    let mut saw_blocked = false;
+
+    for child in children {
+        meta.reuse = join_reuse(meta.reuse.clone(), child.meta.reuse.clone());
+        meta = meta.with_claims(child.meta.claims.iter().cloned());
+        saw_blocked |= child.meta.crossing == CrossingPolicy::Blocked;
+    }
+
+    if saw_blocked {
+        meta.crossing = CrossingPolicy::Blocked;
+    }
+
+    meta
+}
+
+fn join_reuse(left: ReuseClass, right: ReuseClass) -> ReuseClass {
+    match (left, right) {
+        (ReuseClass::Live, _) | (_, ReuseClass::Live) => ReuseClass::Live,
+        (ReuseClass::Observed, _) | (_, ReuseClass::Observed) => ReuseClass::Observed,
+        (ReuseClass::Stable, ReuseClass::Stable) => ReuseClass::Stable,
+    }
 }
 
 fn eval_literal(source: &SourceContext, literal: &LiteralExpr) -> Result<Value, EvalError> {

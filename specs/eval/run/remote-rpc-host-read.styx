@@ -54,6 +54,8 @@ expect {
       content_hash "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   )
+  reuse @observed
+  crossing @by_proxy
 
   engines {
     eval1 @skip

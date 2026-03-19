@@ -1,0 +1,56 @@
+main <<VX,vx
+fn build() {
+  host_read("tool.txt")
+}
+VX
+
+invoke {
+  entry build
+  place win
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+        }
+
+        files {
+          "tool.txt" <<TXT
+tool v1
+TXT
+        }
+      }
+    }
+  }
+}
+
+expect {
+  result @external{
+    kind host_file
+    descriptor "tool.txt"
+  }
+  provenance @host_probe{
+    host win
+    description host_read
+    source {
+      source_id "specs/eval/run/remote-rpc-host-read-from-place-files.styx#main"
+      start {
+        byte 15
+        line 1
+        column 2
+      }
+      end {
+        byte 36
+        line 1
+        column 23
+      }
+    }
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

@@ -1,0 +1,57 @@
+main <<VX,vx
+fn build() {
+  host_which("cl.exe")
+}
+VX
+
+invoke {
+  entry build
+  place win
+  replay_place win_changed
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/14.3/cl.exe"}
+          )
+        }
+      }
+
+      win_changed {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/14.4/cl.exe"}
+          )
+        }
+      }
+    }
+  }
+}
+
+expect {
+  result @string"C:/VS/14.4/cl.exe"
+  obligations (
+    @which{
+      name "cl.exe"
+      expected_path "C:/VS/14.4/cl.exe"
+    }
+  )
+  reuse @observed
+  crossing @by_value
+  events (
+    @must_emit/@stabilize_miss
+    @must_emit/@verify_claims_fail
+    @must_not_emit/@stabilize_hit
+  )
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

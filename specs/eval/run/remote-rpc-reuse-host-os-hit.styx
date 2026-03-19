@@ -1,0 +1,52 @@
+main <<VX,vx
+fn build() {
+  host_os()
+}
+VX
+
+invoke {
+  entry build
+  place win
+  replay_place win_same
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+        }
+      }
+
+      win_same {
+        host {
+          os windows
+          arch x86_64
+        }
+      }
+    }
+  }
+}
+
+expect {
+  result @string"windows"
+  obligations (
+    @os{value windows}
+  )
+  reuse @observed
+  crossing @by_value
+  events (
+    @must_emit/@stabilize_miss
+    @must_emit/@verify_claims_ok
+    @must_emit/@stabilize_hit
+    @before{
+      first @stabilize_miss
+      then @stabilize_hit
+    }
+  )
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

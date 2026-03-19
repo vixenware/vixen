@@ -3972,6 +3972,7 @@ dependencies = [
 name = "vx-eval2"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "camino",
  "datatest-stable",
  "moire",

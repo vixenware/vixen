@@ -42,6 +42,14 @@ expect {
       }
     }
   }
+  obligations (
+    @read{
+      path "tool.txt"
+      content_hash "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  )
+  reuse @observed
+  crossing @by_value
   provenance @literal{
     source {
       source_id "specs/eval/run/remote-rpc-host-read-nested.styx#main"

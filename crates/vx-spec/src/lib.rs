@@ -33,6 +33,7 @@ pub enum SpecOutcome {
 pub struct ObservedPoison {
     pub kind: String,
     pub message: String,
+    pub events: Vec<EventPattern>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +41,9 @@ pub struct ObservedResult {
     pub value: SpecValue,
     pub provenance: Option<ProvenancePattern>,
     pub obligations: Vec<ObservationPattern>,
+    pub reuse: Option<ReusePattern>,
+    pub crossing: Option<CrossingPattern>,
+    pub events: Vec<EventPattern>,
 }
 
 #[derive(Debug, Error)]
@@ -81,6 +85,24 @@ pub enum SpecAssertionError {
     ObligationsMismatch {
         expected: Vec<ObservationPattern>,
         actual: Vec<ObservationPattern>,
+    },
+
+    #[error("reuse mismatch: expected {expected:?}, got {actual:?}")]
+    ReuseMismatch {
+        expected: ReusePattern,
+        actual: Option<ReusePattern>,
+    },
+
+    #[error("crossing mismatch: expected {expected:?}, got {actual:?}")]
+    CrossingMismatch {
+        expected: CrossingPattern,
+        actual: Option<CrossingPattern>,
+    },
+
+    #[error("event assertions failed: expected {expected:?}, got {actual:?}")]
+    EventMismatch {
+        expected: Vec<EventAssertion>,
+        actual: Vec<EventPattern>,
     },
 }
 
@@ -194,6 +216,8 @@ pub struct InvokeSpec {
     #[facet(default)]
     pub verify_place: Option<String>,
     #[facet(default)]
+    pub replay_place: Option<String>,
+    #[facet(default)]
     pub args: Vec<DynamicValue>,
     #[facet(default)]
     pub capabilities: Vec<String>,
@@ -281,10 +305,30 @@ pub struct ExpectSpec {
     pub provenance: Option<ProvenancePattern>,
     #[facet(default)]
     pub obligations: Vec<ObservationPattern>,
+    pub reuse: Option<ReusePattern>,
+    pub crossing: Option<CrossingPattern>,
     #[facet(default)]
     pub events: Vec<EventAssertion>,
     #[facet(default)]
     pub engines: BTreeMap<String, EngineExpectation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ReusePattern {
+    Stable,
+    Observed,
+    Live,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum CrossingPattern {
+    ByValue,
+    ByProxy,
+    Blocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -443,6 +487,28 @@ impl ExpectSpec {
                         actual: actual.obligations.clone(),
                     });
                 }
+                if let Some(expected) = &self.reuse
+                    && actual.reuse.as_ref() != Some(expected)
+                {
+                    return Err(SpecAssertionError::ReuseMismatch {
+                        expected: expected.clone(),
+                        actual: actual.reuse.clone(),
+                    });
+                }
+                if let Some(expected) = &self.crossing
+                    && actual.crossing.as_ref() != Some(expected)
+                {
+                    return Err(SpecAssertionError::CrossingMismatch {
+                        expected: expected.clone(),
+                        actual: actual.crossing.clone(),
+                    });
+                }
+                if !self.events_match(&actual.events) {
+                    return Err(SpecAssertionError::EventMismatch {
+                        expected: self.events.clone(),
+                        actual: actual.events.clone(),
+                    });
+                }
                 Ok(())
             }
             SpecOutcome::Poison(actual) => {
@@ -471,9 +537,30 @@ impl ExpectSpec {
                         actual: actual.message.clone(),
                     });
                 }
+                if !self.events_match(&actual.events) {
+                    return Err(SpecAssertionError::EventMismatch {
+                        expected: self.events.clone(),
+                        actual: actual.events.clone(),
+                    });
+                }
                 Ok(())
             }
         }
+    }
+
+    fn events_match(&self, actual: &[EventPattern]) -> bool {
+        self.events.iter().all(|assertion| match assertion {
+            EventAssertion::MustEmit(pattern) => actual.iter().any(|event| event == pattern),
+            EventAssertion::MustNotEmit(pattern) => actual.iter().all(|event| event != pattern),
+            EventAssertion::Before(OrderConstraint { first, then }) => {
+                let first_index = actual.iter().position(|event| event == first);
+                let then_index = actual.iter().position(|event| event == then);
+                match (first_index, then_index) {
+                    (Some(first_index), Some(then_index)) => first_index < then_index,
+                    _ => false,
+                }
+            }
+        })
     }
 }
 
@@ -617,7 +704,7 @@ pub struct OrderConstraint {
     pub then: EventPattern,
 }
 
-#[derive(Debug, Clone, PartialEq, Facet)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum EventPattern {
@@ -633,6 +720,8 @@ pub enum EventPattern {
     ExecStart,
     ExecVerifyOk,
     ExecVerifyFail,
+    VerifyClaimsOk,
+    VerifyClaimsFail,
     StabilizeHit,
     StabilizeMiss,
     Poison {
