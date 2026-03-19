@@ -1770,6 +1770,23 @@ fn main(values: Map[String, String]) {
 }
 
 #[test]
+fn map_has_and_get_are_typed_from_key_and_value_types() {
+    let src = r#"
+fn main(values: Map[String, String]) {
+    let present = values.has("CC");
+    let path = values.get("CC");
+    [present, path.len()]
+}
+"#;
+    let result = type_check(src);
+    let has_ty = find_expr_type(&result, src, r#"values.has("CC")"#);
+    assert_eq!(has_ty, Some(Ty::Scalar(vx_types::Scalar::Bool)));
+
+    let get_ty = find_expr_type(&result, src, r#"values.get("CC")"#);
+    assert_eq!(get_ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+#[test]
 fn map_map_closure_params_are_typed_from_key_and_value_types() {
     let src = r#"
 struct DependencyRequest {
@@ -2426,6 +2443,38 @@ fn main(paths: Array[String]) {
     assert_eq!(map_def.name, "map");
     assert_eq!(map_def.kind, DefKind::Function);
     assert_ne!(map_def.source(), TEST_SOURCE_ID);
+}
+
+#[test]
+fn map_builtin_method_refs_point_to_real_definitions() {
+    let src = r#"
+fn main(values: Map[String, String]) {
+    values.has("CC");
+    values.get("CC");
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+
+    let has_def = checked
+        .member_defs
+        .get(&span_for_text(src, "has"))
+        .expect("has member def");
+    assert_eq!(has_def.name, "has");
+    assert_eq!(has_def.kind, DefKind::Function);
+    assert_ne!(has_def.source(), TEST_SOURCE_ID);
+    assert_eq!(types.fn_sig_for_def(has_def).expect("has sig").name, "has");
+
+    let get_def = checked
+        .member_defs
+        .get(&span_for_text(src, "get"))
+        .expect("get member def");
+    assert_eq!(get_def.name, "get");
+    assert_eq!(get_def.kind, DefKind::Function);
+    assert_ne!(get_def.source(), TEST_SOURCE_ID);
+    assert_eq!(types.fn_sig_for_def(get_def).expect("get sig").name, "get");
 }
 
 // --- Function parameter types from declared signatures ---

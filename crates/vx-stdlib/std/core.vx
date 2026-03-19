@@ -118,6 +118,10 @@ namespace Map[K, V] {
   fn map[U](self, f: Fn(K, V) -> U) -> Array[U];
   /// Apply `f` to each value while preserving keys.
   fn map_values[U](self, f: Fn(V) -> U) -> Map[K, U];
+  /// Return true if the map contains `key`.
+  fn has(self, key: K) -> Bool;
+  /// Return the value for `key`, poisoning if it does not exist.
+  fn get(self, key: K) -> V;
 }
 
 namespace Path {

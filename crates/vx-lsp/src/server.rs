@@ -2673,6 +2673,37 @@ fn demo(host: Host) {
     }
 
     #[test]
+    fn completions_for_map_type_include_stdlib_methods() {
+        let text = r#"
+fn demo(values: Map[String, String]) {
+  values.has
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let offset = TextSize::new(text.find("values.has").unwrap() as u32);
+        let map_ty = vx_types::Ty::Map(
+            Box::new(vx_types::Ty::Scalar(vx_types::Scalar::String)),
+            Box::new(vx_types::Ty::Scalar(vx_types::Scalar::String)),
+        );
+        let items = completions_for_type(&map_ty, &state, offset).expect("member completions");
+
+        let has = items
+            .iter()
+            .find(|item| item.label == "has")
+            .expect("has completion");
+        assert_eq!(has.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(has.detail.as_deref(), Some("fn has(self, key: K) -> Bool"));
+
+        let get = items
+            .iter()
+            .find(|item| item.label == "get")
+            .expect("get completion");
+        assert_eq!(get.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(get.detail.as_deref(), Some("fn get(self, key: K) -> V"));
+    }
+
+    #[test]
     fn inlay_hints_use_stdlib_function_parameters() {
         let text = r#"
 fn demo() {
