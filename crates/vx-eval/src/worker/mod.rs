@@ -661,6 +661,20 @@ impl Engine {
         }
     }
 
+    fn reattach_discovered(
+        &self,
+        value: Value,
+        obligations: impl IntoIterator<Item = HostObservation>,
+    ) -> Value {
+        self.attach_obligations(
+            Value::Discovered(DiscoveredValue {
+                value: Box::new(value),
+                obligations: Arc::from([]),
+            }),
+            obligations,
+        )
+    }
+
     fn finish_obligated_result(
         &self,
         result: Result<Value, PoisonError>,

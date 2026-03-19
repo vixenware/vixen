@@ -185,6 +185,17 @@ impl ClosureRuntime {
     pub fn new() -> Self {
         Self::default()
     }
+
+    async fn run_sync_handler<T, F>(f: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        match tokio::task::spawn_blocking(f).await {
+            Ok(value) => value,
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        }
+    }
 }
 
 impl BuildRuntime for ClosureRuntime {
@@ -233,16 +244,21 @@ impl BuildRuntime for ClosureRuntime {
     }
 
     fn exec(&self, request: ExecRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
-        let result = (self.exec.as_ref().expect("exec handler not configured"))(request);
-        Box::pin(std::future::ready(result))
+        let handler = self
+            .exec
+            .as_ref()
+            .expect("exec handler not configured")
+            .clone();
+        Box::pin(async move { Self::run_sync_handler(move || handler(request)).await })
     }
 
     fn discover(&self, request: DiscoverRequest) -> BoxFuture<'_, Result<Value, PoisonError>> {
-        let result = (self
+        let handler = self
             .discover
             .as_ref()
-            .expect("discover handler not configured"))(request);
-        Box::pin(std::future::ready(result))
+            .expect("discover handler not configured")
+            .clone();
+        Box::pin(async move { Self::run_sync_handler(move || handler(request)).await })
     }
 
     fn has_exec(&self) -> bool {

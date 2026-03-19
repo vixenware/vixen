@@ -2675,6 +2675,201 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_marks_discovered_blob_exec_args_as_opaque() {
+    let discovered = Value::Discovered(vx_eval::DiscoveredValue {
+        value: Box::new(Value::Blob(BlobValue::Inline {
+            bytes: Arc::from("#!/bin/sh\nexit 0\n".as_bytes()),
+            executable: true,
+        })),
+        obligations: Arc::from([]),
+    });
+    let discover_transport =
+        TransportValue::try_from(&discovered).expect("discovered blob should serialize");
+    let run_observer_value =
+        TransportValue::try_from(&Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("ok.txt"),
+            Value::Blob(BlobValue::from_string("ok")),
+        )]))))
+        .expect("observer value should serialize");
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: discover_transport,
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(run_observer_value),
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let tool = discover(executor_class("linux"), (host) => host.read("/tmp/tool"));
+  exec [tool, "--version"] where {
+    executor: executor_class("linux"),
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/ok.txt")).expect("output"),
+        "ok"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    let request = requests
+        .as_slice()
+        .last()
+        .expect("exec should have reached fake runner");
+    assert!(matches!(request.program, vx_runner_proto::RunArg::Path(_)));
+    assert_eq!(request.file_mounts.len(), 1);
+    assert_eq!(request.file_mounts[0].mode, RunMountMode::Opaque);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_marks_discovered_exec_paths_as_opaque() {
+    let discovered = Value::Discovered(vx_eval::DiscoveredValue {
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("cc"),
+            Value::Blob(BlobValue::Inline {
+                bytes: Arc::from("#!/bin/sh\nexit 0\n".as_bytes()),
+                executable: true,
+            }),
+        )])))),
+        obligations: Arc::from([]),
+    });
+    let discover_transport =
+        TransportValue::try_from(&discovered).expect("discovered tree should serialize");
+    let run_observer_value =
+        TransportValue::try_from(&Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("ok.txt"),
+            Value::Blob(BlobValue::from_string("ok")),
+        )]))))
+        .expect("observer value should serialize");
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: discover_transport,
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(run_observer_value),
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let toolchain = discover(executor_class("linux"), (host) => Tree %{
+    @cc => host.read("/tmp/tool"),
+  });
+  exec [@({toolchain}/cc), "--version"] where {
+    executor: executor_class("linux"),
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/ok.txt")).expect("output"),
+        "ok"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    let request = requests
+        .as_slice()
+        .last()
+        .expect("exec should have reached fake runner");
+    assert!(matches!(request.program, vx_runner_proto::RunArg::Path(_)));
+    assert_eq!(request.tree_mounts.len(), 1);
+    assert_eq!(request.tree_mounts[0].mode, RunMountMode::Opaque);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
     let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
         FakeRunnerBehavior::PanicOnBoundaryUse,

@@ -400,7 +400,7 @@ impl Engine {
                     .internal_error("Host values cannot cross the local exec observer boundary")),
                 Value::Discovered(discovered) => {
                     let value = self.snapshot_value(*discovered.value).await?;
-                    Ok(self.attach_obligations(value, discovered.obligations.iter().cloned()))
+                    Ok(self.reattach_discovered(value, discovered.obligations.iter().cloned()))
                 }
                 Value::ExecPath(_) => Err(self.internal_error(
                     "ExecPath values cannot cross the local exec observer boundary",
@@ -493,7 +493,7 @@ impl Engine {
                 }
                 Value::Discovered(discovered) => {
                     let value = self.snapshot_exec_mount_value(*discovered.value).await?;
-                    Ok(self.attach_obligations(value, discovered.obligations.iter().cloned()))
+                    Ok(self.reattach_discovered(value, discovered.obligations.iter().cloned()))
                 }
                 Value::ExecPath(_) => {
                     Err(self.internal_error("ExecPath values cannot cross the local exec boundary"))

@@ -10,7 +10,7 @@ impl Engine {
                 Value::Pending(node_id) => self.force_pending_shallow(node_id).await,
                 Value::Discovered(discovered) => {
                     let inner = self.force_value_shallow(*discovered.value).await?;
-                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+                    Ok(self.reattach_discovered(inner, discovered.obligations.iter().cloned()))
                 }
                 other => Ok(other),
             }
@@ -29,7 +29,7 @@ impl Engine {
                 }
                 Value::Discovered(discovered) => {
                     let inner = self.demand_value_shallow(*discovered.value).await?;
-                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+                    Ok(self.reattach_discovered(inner, discovered.obligations.iter().cloned()))
                 }
                 other => Ok(other),
             }
@@ -50,7 +50,7 @@ impl Engine {
                 }
                 Value::Discovered(discovered) => {
                     let inner = self.force_value(*discovered.value).await?;
-                    Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+                    Ok(self.reattach_discovered(inner, discovered.obligations.iter().cloned()))
                 }
                 Value::Tuple(elems) => {
                     let forced = self.force_many(elems.iter().cloned().collect()).await?;
@@ -277,7 +277,7 @@ impl Engine {
                         .inspect_value_inner(*discovered.value, visiting)
                         .await?;
                     Ok(InspectedValue {
-                        value: self.attach_obligations(
+                        value: self.reattach_discovered(
                             inspected.value,
                             discovered.obligations.iter().cloned(),
                         ),
@@ -923,7 +923,7 @@ impl Engine {
                     }
                     SchedulerNodeState::Poisoned(error) => Err(error),
                 },
-                Value::Discovered(discovered) => Ok(self.attach_obligations(
+                Value::Discovered(discovered) => Ok(self.reattach_discovered(
                     self.materialize_value_shallow(*discovered.value, context)
                         .await?,
                     discovered.obligations.iter().cloned(),
@@ -2338,11 +2338,15 @@ impl Engine {
         let mut mounted_tree: Option<(TreeValue, String)> = None;
         let mut mounted_blob: Option<(BlobValue, String)> = None;
         let mut obligations = BTreeMap::new();
+        let mut preserve_discovered = false;
 
         for part in parts {
             match part {
                 TemplatePartValue::Text(text) => plain.push_str(text),
                 TemplatePartValue::Expr(value) => {
+                    if matches!(value, Value::Discovered(_)) {
+                        preserve_discovered = true;
+                    }
                     let (value, value_obligations) = self.split_obligations_ref(value);
                     Self::add_obligations(&mut obligations, value_obligations.iter().cloned());
                     match value {
@@ -2401,10 +2405,12 @@ impl Engine {
 
         if let Some((tree, prefix)) = mounted_tree {
             let suffix = PathValue::new(format!("{prefix}{plain}").trim_start_matches('/'));
-            return self.finish_obligated_result(
-                Ok(Value::ExecPath(ExecPathValue::InTree { tree, suffix })),
+            let value = Value::ExecPath(ExecPathValue::InTree { tree, suffix });
+            return Ok(self.attach_path_interpolation_obligations(
+                value,
+                preserve_discovered,
                 obligations.into_values(),
-            );
+            ));
         }
 
         if let Some((blob, leaf)) = mounted_blob {
@@ -2415,19 +2421,41 @@ impl Engine {
                 return Err(self
                     .type_error("path literal cannot append path segments to a blob-backed path"));
             }
-            return self.finish_obligated_result(
-                Ok(Value::ExecPath(ExecPathValue::InBlob {
-                    blob,
-                    leaf: normalized,
-                })),
+            let value = Value::ExecPath(ExecPathValue::InBlob {
+                blob,
+                leaf: normalized,
+            });
+            return Ok(self.attach_path_interpolation_obligations(
+                value,
+                preserve_discovered,
                 obligations.into_values(),
-            );
+            ));
         }
 
-        self.finish_obligated_result(
-            Ok(Value::Path(PathValue::new(plain))),
+        Ok(self.attach_path_interpolation_obligations(
+            Value::Path(PathValue::new(plain)),
+            preserve_discovered,
             obligations.into_values(),
-        )
+        ))
+    }
+
+    fn attach_path_interpolation_obligations(
+        &self,
+        value: Value,
+        preserve_discovered: bool,
+        obligations: impl IntoIterator<Item = HostObservation>,
+    ) -> Value {
+        if preserve_discovered {
+            self.attach_obligations(
+                Value::Discovered(DiscoveredValue {
+                    value: Box::new(value),
+                    obligations: Arc::from([]),
+                }),
+                obligations,
+            )
+        } else {
+            self.attach_obligations(value, obligations)
+        }
     }
 
     pub(super) async fn stringify_interpolated_value(

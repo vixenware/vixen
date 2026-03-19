@@ -5920,6 +5920,40 @@ async fn interpolated_path_literal_with_tree_yields_exec_path() {
 }
 
 #[tokio::test]
+async fn interpolated_path_literal_with_discovered_tree_preserves_discovery() {
+    let engine = engine(r#"fn main(input: Tree) { @({input}/include/lua.h) }"#);
+    let input = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("include"),
+            Value::Tree(TreeValue::inline(Arc::from([(
+                Arc::from("lua.h"),
+                Value::Blob(BlobValue::from_string("header")),
+            )]))),
+        )])))),
+        obligations: Arc::from([]),
+    });
+    let value = engine.call("main", vec![input]).await.unwrap();
+
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered exec path");
+    };
+    assert_eq!(
+        *discovered.value,
+        Value::ExecPath(ExecPathValue::InTree {
+            tree: TreeValue::inline(Arc::from([(
+                Arc::from("include"),
+                Value::Tree(TreeValue::inline(Arc::from([(
+                    Arc::from("lua.h"),
+                    Value::Blob(BlobValue::from_string("header")),
+                )]))),
+            )])),
+            suffix: PathValue::new("include/lua.h"),
+        })
+    );
+    assert!(discovered.obligations.is_empty());
+}
+
+#[tokio::test]
 // r[verify store.blob]
 // r[verify store.blob.utf8]
 async fn blob_from_string_round_trips_text() {
@@ -6362,6 +6396,52 @@ async fn exec_marks_runtime_discovered_mounts_as_opaque_even_without_claims() {
         .expect("exec request should be captured");
     assert_eq!(request.mounts.len(), 1);
     assert_eq!(request.mounts[0].path, PathValue::new("toolchain"));
+    assert!(matches!(request.mounts[0].mode, ExecMountMode::Opaque));
+}
+
+#[tokio::test]
+async fn exec_marks_discovered_exec_paths_as_opaque_even_without_claims() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let source = r##"fn probe() #discover {
+             discover(executor_class("default"), (host) => Tree %{
+               @cc => Blob("#!/bin/sh\nexit 0\n"),
+             })
+           }
+
+           fn observe(process: Process, tree: Tree) {
+             process.exit_code
+           }
+
+           fn build() {
+             let toolchain = probe();
+             exec [@({toolchain}/cc)] where {
+               observer: observe,
+             }
+           }"##;
+    let discovered = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("cc"),
+            Value::Blob(BlobValue::from_string("#!/bin/sh\nexit 0\n")),
+        )])))),
+        obligations: Arc::from([]),
+    });
+    let engine = engine(source)
+        .with_discover_handler(Arc::new(move |_request| Ok(discovered.clone())))
+        .with_exec_handler(Arc::new(move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(Value::U64(0))
+        }));
+
+    let value = engine.call("build", vec![]).await.unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
     assert!(matches!(request.mounts[0].mode, ExecMountMode::Opaque));
 }
 
