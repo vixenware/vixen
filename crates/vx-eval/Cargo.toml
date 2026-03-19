@@ -24,5 +24,11 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
+datatest-stable = "0.3.3"
 indoc = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+vx-spec = { path = "../vx-spec" }
+
+[[test]]
+name = "spec_fixtures"
+harness = false

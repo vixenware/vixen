@@ -1,0 +1,8 @@
+result {
+  kind host_executor_fixture
+}
+
+engines {
+  eval1 @pass
+  eval2 @pass
+}

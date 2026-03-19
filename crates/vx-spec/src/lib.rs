@@ -4,7 +4,7 @@
 //! experiment with fixture shapes independently of `vx-eval`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use facet::Facet;
 use facet_value::Value as DynamicValue;
@@ -21,6 +21,73 @@ pub enum SpecParseError {
 
     #[error("failed to parse {path}: {message}")]
     ParseError { path: String, message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EngineId {
+    Eval1,
+    Eval2,
+}
+
+impl EngineId {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Eval1 => "eval1",
+            Self::Eval2 => "eval2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecCase {
+    pub dir: PathBuf,
+    pub main_path: PathBuf,
+    pub main_source: String,
+    pub invoke_path: PathBuf,
+    pub invoke: InvokeSpec,
+    pub expect_path: PathBuf,
+    pub expect: ExpectSpec,
+}
+
+impl SpecCase {
+    pub fn from_invoke_path(path: &Path) -> Result<Self, SpecParseError> {
+        let dir = path
+            .parent()
+            .ok_or_else(|| SpecParseError::ReadError {
+                path: path.display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invoke.styx must live inside a case directory",
+                ),
+            })?
+            .to_path_buf();
+        let main_path = dir.join("main.vx");
+        let expect_path = dir.join("expect.styx");
+        let main_source =
+            std::fs::read_to_string(&main_path).map_err(|source| SpecParseError::ReadError {
+                path: main_path.display().to_string(),
+                source,
+            })?;
+        let invoke = InvokeSpec::from_path(path)?;
+        let expect = ExpectSpec::from_path(&expect_path)?;
+        Ok(Self {
+            dir,
+            main_path,
+            main_source,
+            invoke_path: path.to_path_buf(),
+            invoke,
+            expect_path,
+            expect,
+        })
+    }
+
+    pub fn expectation_for(&self, engine: EngineId) -> EngineExpectation {
+        self.expect
+            .engines
+            .get(engine.key())
+            .cloned()
+            .unwrap_or(EngineExpectation::Pass)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
@@ -105,6 +172,8 @@ pub struct ExpectSpec {
     pub obligations: Vec<ObservationPattern>,
     #[facet(default)]
     pub events: Vec<EventAssertion>,
+    #[facet(default)]
+    pub engines: BTreeMap<String, EngineExpectation>,
 }
 
 impl ExpectSpec {
@@ -195,5 +264,11 @@ pub enum EventPattern {
     },
 }
 
-#[cfg(test)]
-mod tests;
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum EngineExpectation {
+    Pass,
+    Todo,
+    Skip,
+}

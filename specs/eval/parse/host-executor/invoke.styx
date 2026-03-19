@@ -1,0 +1,15 @@
+entry build
+capabilities (fs discover)
+
+runtime {
+  executors {
+    default @host{
+      os windows
+      arch x86_64
+      which (
+        {name "cl.exe", path "C:/VS/cl.exe"}
+        {name "lib.exe", path "C:/VS/lib.exe"}
+      )
+    }
+  }
+}
