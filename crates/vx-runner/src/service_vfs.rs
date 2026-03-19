@@ -82,6 +82,10 @@ fn covers_path(prefix: &str, path: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn paths_overlap(left: &str, right: &str) -> bool {
+    covers_path(left, right) || covers_path(right, left)
+}
+
 fn path_is_covered(
     path: &str,
     tree_mounts: &[RunTreeMount],
@@ -174,6 +178,119 @@ fn resolve_program_path(program: &RunArg, expanded: String, cwd: &Utf8Path) -> S
         }
         RunArg::Literal(_) => expanded,
     }
+}
+
+fn host_path_string(path: &Utf8Path) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        path.as_str().to_string()
+    } else {
+        path.as_str()
+            .replace('/', &std::path::MAIN_SEPARATOR.to_string())
+    }
+}
+
+fn opaque_tree_prefix_id(mount: &RunTreeMount) -> String {
+    format!("opaque-tree-{}", mount.manifest)
+}
+
+fn opaque_file_prefix_id(mount: &RunFileMount) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&mount.manifest.0);
+    hasher.update(&[0]);
+    hasher.update(mount.logical.as_bytes());
+    format!("opaque-file-{}", hasher.finalize().to_hex())
+}
+
+fn opaque_file_visible_name(mount: &RunFileMount) -> &str {
+    Utf8Path::new(&mount.path).file_name().unwrap_or("file")
+}
+
+fn resolve_opaque_visible_path(
+    mount_base: &Utf8Path,
+    path: &str,
+    tree_mounts: &[RunTreeMount],
+    file_mounts: &[RunFileMount],
+) -> Option<Utf8PathBuf> {
+    if let Some(mount) = file_mounts
+        .iter()
+        .find(|mount| mount.mode == RunMountMode::Opaque && mount.path == path)
+    {
+        return Some(
+            mount_base
+                .join(opaque_file_prefix_id(mount))
+                .join(opaque_file_visible_name(mount)),
+        );
+    }
+
+    let mount = tree_mounts
+        .iter()
+        .filter(|mount| mount.mode == RunMountMode::Opaque && covers_path(&mount.mount, path))
+        .max_by_key(|mount| mount.mount.len())?;
+
+    let suffix = if mount.mount.is_empty() {
+        path
+    } else {
+        path.strip_prefix(&mount.mount)
+            .expect("covered opaque tree mount must strip prefix")
+            .trim_start_matches('/')
+    };
+
+    let mut visible = mount_base.join(opaque_tree_prefix_id(mount));
+    if !suffix.is_empty() {
+        visible.push(suffix);
+    }
+    Some(visible)
+}
+
+fn render_run_arg_for_host(
+    arg: &RunArg,
+    mount_base: &Utf8Path,
+    tree_mounts: &[RunTreeMount],
+    file_mounts: &[RunFileMount],
+) -> String {
+    match arg {
+        RunArg::Literal(value) => value.clone(),
+        RunArg::Path(path) => {
+            if Utf8Path::new(path).is_absolute() {
+                arg.render_for_host()
+            } else if let Some(visible) =
+                resolve_opaque_visible_path(mount_base, path, tree_mounts, file_mounts)
+            {
+                host_path_string(&visible)
+            } else {
+                arg.render_for_host()
+            }
+        }
+    }
+}
+
+fn resolve_cwd_path(request: &RunRequest, action: &ActionContext) -> Utf8PathBuf {
+    request
+        .cwd
+        .as_deref()
+        .map(|path| {
+            resolve_opaque_visible_path(
+                &action.mount_base,
+                path,
+                &request.tree_mounts,
+                &request.file_mounts,
+            )
+            .unwrap_or_else(|| action.prefix_path.join(path))
+        })
+        .unwrap_or_else(|| action.prefix_path.clone())
+}
+
+fn opaque_mount_overlap(
+    path: &str,
+    tree_mounts: &[RunTreeMount],
+    file_mounts: &[RunFileMount],
+) -> bool {
+    tree_mounts
+        .iter()
+        .any(|mount| mount.mode == RunMountMode::Opaque && paths_overlap(&mount.mount, path))
+        || file_mounts
+            .iter()
+            .any(|mount| mount.mode == RunMountMode::Opaque && paths_overlap(&mount.path, path))
 }
 
 #[cfg(windows)]
@@ -622,14 +739,6 @@ impl RunnerService {
         }
     }
 
-    // r[impl exec.arg]
-    fn render_run_arg(arg: &RunArg) -> String {
-        match arg {
-            RunArg::Literal(value) => value.clone(),
-            RunArg::Path(_) => arg.render_for_host(),
-        }
-    }
-
     /// Create action execution context with prefix, paths, and sandbox config.
     async fn create_action_context(&self) -> ActionContext {
         let prefix_id = self.create_action_prefix().await;
@@ -765,6 +874,46 @@ impl RunnerService {
                     }
                 }
 
+                for root in &request.writable_roots {
+                    if opaque_mount_overlap(root, &request.tree_mounts, &request.file_mounts) {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "writable root '{root}' overlaps an opaque mount"
+                            )),
+                        ));
+                    }
+                }
+
+                for dir in &request.create_dirs {
+                    if !is_relative_vfs_path(dir) {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("create dir '{dir}' must be a relative VFS path")),
+                        ));
+                    }
+                    if opaque_mount_overlap(dir, &request.tree_mounts, &request.file_mounts) {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return Err(run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
+                                "create dir '{dir}' overlaps an opaque mount"
+                            )),
+                        ));
+                    }
+                }
+
                 for mount in &request.tree_mounts {
                     match self.cas.get_node(NodeHash(mount.manifest)).await {
                         Ok(Some(_)) => {}
@@ -793,9 +942,18 @@ impl RunnerService {
                         }
                     }
 
+                    let (target_prefix_id, target_mount_path) = match mount.mode {
+                        RunMountMode::Tracked => (action.prefix_id.clone(), mount.mount.clone()),
+                        RunMountMode::Opaque => {
+                            let prefix_id = opaque_tree_prefix_id(mount);
+                            self.vfs.create_prefix(prefix_id.clone()).await;
+                            (prefix_id, String::new())
+                        }
+                    };
+
                     if let Err(e) = self
                         .vfs
-                        .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
+                        .mount_tree(&target_prefix_id, &target_mount_path, mount.manifest)
                         .named("runner.run_vfs.mount_tree")
                         .await
                     {
@@ -891,11 +1049,19 @@ impl RunnerService {
                                 content_hash, size, ..
                             } => (content_hash.0, *size),
                         };
+                        let (target_prefix_id, target_path) = match fm.mode {
+                            RunMountMode::Tracked => (action.prefix_id.clone(), fm.path.clone()),
+                            RunMountMode::Opaque => {
+                                let prefix_id = opaque_file_prefix_id(fm);
+                                self.vfs.create_prefix(prefix_id.clone()).await;
+                                (prefix_id, opaque_file_visible_name(fm).to_string())
+                            }
+                        };
                         if let Err(e) = self
                             .vfs
                             .add_file_to_prefix(
-                                &action.prefix_id,
-                                &fm.path,
+                                &target_prefix_id,
+                                &target_path,
                                 blob_hash,
                                 blob_size,
                                 entry.executable,
@@ -1081,22 +1247,30 @@ impl RunnerService {
                     ));
                 }
 
-                let cwd = request
-                    .cwd
-                    .as_deref()
-                    .map(|p| action.prefix_path.join(p))
-                    .unwrap_or_else(|| action.prefix_path.clone());
+                let cwd = resolve_cwd_path(&request, &action);
 
                 let program_path = resolve_program_path(
                     &request.program,
-                    Self::render_run_arg(&request.program),
+                    render_run_arg_for_host(
+                        &request.program,
+                        &action.mount_base,
+                        &request.tree_mounts,
+                        &request.file_mounts,
+                    ),
                     &cwd,
                 );
                 let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
                 let expanded_args = request
                     .args
                     .iter()
-                    .map(Self::render_run_arg)
+                    .map(|arg| {
+                        render_run_arg_for_host(
+                            arg,
+                            &action.mount_base,
+                            &request.tree_mounts,
+                            &request.file_mounts,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 for arg in &expanded_args {
                     cmd.arg(arg);
@@ -1110,10 +1284,28 @@ impl RunnerService {
                 let expanded_env = request
                     .env
                     .iter()
-                    .map(|(key, value)| format!("{key}={}", Self::render_run_arg(value)))
+                    .map(|(key, value)| {
+                        format!(
+                            "{key}={}",
+                            render_run_arg_for_host(
+                                value,
+                                &action.mount_base,
+                                &request.tree_mounts,
+                                &request.file_mounts,
+                            )
+                        )
+                    })
                     .collect::<Vec<_>>();
                 for (k, v) in &request.env {
-                    cmd.env(k, Self::render_run_arg(v));
+                    cmd.env(
+                        k,
+                        render_run_arg_for_host(
+                            v,
+                            &action.mount_base,
+                            &request.tree_mounts,
+                            &request.file_mounts,
+                        ),
+                    );
                 }
 
                 let action_desc = format!(
@@ -1728,6 +1920,132 @@ mod tests {
         let program = RunArg::literal("cc");
 
         assert_eq!(resolve_program_path(&program, "cc".to_string(), cwd), "cc");
+    }
+
+    #[test]
+    fn opaque_tree_paths_resolve_to_shared_visible_root() {
+        let mount_base = Utf8Path::new("/tmp/vx/vfs");
+        let tree_mounts = vec![RunTreeMount {
+            mount: "toolchain".to_string(),
+            manifest: Blake3Hash([7; 32]),
+            mode: RunMountMode::Opaque,
+        }];
+
+        let resolved =
+            resolve_opaque_visible_path(mount_base, "toolchain/bin/cc", &tree_mounts, &[])
+                .expect("opaque path should resolve");
+
+        assert_eq!(
+            resolved,
+            mount_base
+                .join(opaque_tree_prefix_id(&tree_mounts[0]))
+                .join("bin/cc")
+        );
+    }
+
+    #[test]
+    fn opaque_file_paths_resolve_to_shared_visible_file() {
+        let mount_base = Utf8Path::new("/tmp/vx/vfs");
+        let file_mounts = vec![RunFileMount {
+            path: "deps/liblua.a".to_string(),
+            manifest: Blake3Hash([8; 32]),
+            logical: "archive".to_string(),
+            mode: RunMountMode::Opaque,
+        }];
+
+        let resolved = resolve_opaque_visible_path(mount_base, "deps/liblua.a", &[], &file_mounts)
+            .expect("opaque file should resolve");
+
+        assert_eq!(
+            resolved,
+            mount_base
+                .join(opaque_file_prefix_id(&file_mounts[0]))
+                .join("liblua.a")
+        );
+    }
+
+    #[test]
+    fn opaque_args_render_as_shared_absolute_paths() {
+        let mount_base = Utf8Path::new("/tmp/vx/vfs");
+        let tree_mounts = vec![RunTreeMount {
+            mount: "toolchain".to_string(),
+            manifest: Blake3Hash([9; 32]),
+            mode: RunMountMode::Opaque,
+        }];
+        let arg = RunArg::path("toolchain/bin/clang");
+
+        let rendered = render_run_arg_for_host(&arg, mount_base, &tree_mounts, &[]);
+
+        assert_eq!(
+            rendered,
+            host_path_string(
+                &mount_base
+                    .join(opaque_tree_prefix_id(&tree_mounts[0]))
+                    .join("bin/clang")
+            )
+        );
+    }
+
+    #[test]
+    fn opaque_cwd_resolves_to_shared_absolute_path() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            program: RunArg::literal("clang"),
+            args: Vec::new(),
+            tree_mounts: vec![RunTreeMount {
+                mount: "toolchain".to_string(),
+                manifest: Blake3Hash([10; 32]),
+                mode: RunMountMode::Opaque,
+            }],
+            file_mounts: Vec::new(),
+            writable_roots: vec!["out".to_string()],
+            create_dirs: Vec::new(),
+            cwd: Some("toolchain/bin".to_string()),
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+        let action = ActionContext {
+            prefix_id: "build-123".into(),
+            mount_base: Utf8PathBuf::from("/tmp/vx/vfs"),
+            prefix_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123"),
+            write_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
+            allowed_host_exec_paths: Vec::new(),
+        };
+
+        let cwd = resolve_cwd_path(&request, &action);
+
+        assert_eq!(
+            cwd,
+            action
+                .mount_base
+                .join(opaque_tree_prefix_id(&request.tree_mounts[0]))
+                .join("bin")
+        );
+    }
+
+    #[test]
+    fn writable_roots_must_not_overlap_opaque_mounts() {
+        let tree_mounts = vec![RunTreeMount {
+            mount: "toolchain".to_string(),
+            manifest: Blake3Hash([11; 32]),
+            mode: RunMountMode::Opaque,
+        }];
+        let file_mounts = vec![RunFileMount {
+            path: "sdk/lib/libcmt.lib".to_string(),
+            manifest: Blake3Hash([12; 32]),
+            logical: "archive".to_string(),
+            mode: RunMountMode::Opaque,
+        }];
+
+        assert!(opaque_mount_overlap(
+            "toolchain/out",
+            &tree_mounts,
+            &file_mounts
+        ));
+        assert!(opaque_mount_overlap("sdk/lib", &tree_mounts, &file_mounts));
+        assert!(!opaque_mount_overlap("out", &tree_mounts, &file_mounts));
     }
 
     #[test]

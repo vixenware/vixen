@@ -17,8 +17,8 @@ use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 use crate::CapabilitySet;
 use crate::events::EventRecorder;
 use crate::exec::{
-    AcquireRequest, BoxFuture, BuildRuntime, DiscoverRequest, ExecArgValue, ExecRequest,
-    ImportRequest, RenderRequest, StabilizeRequest, StoreHydrationRequest,
+    AcquireRequest, BoxFuture, BuildRuntime, DiscoverRequest, ExecArgValue, ExecMountMode,
+    ExecRequest, ImportRequest, RenderRequest, StabilizeRequest, StoreHydrationRequest,
 };
 use crate::instr::{Block, FnDef, Module};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
@@ -6273,6 +6273,99 @@ async fn exec_handler_receives_verification_obligations_from_discovered_values()
 }
 
 #[tokio::test]
+async fn exec_marks_discovered_mounts_as_opaque() {
+    let tempdir = TempDir::new().unwrap();
+    let input_path = tempdir.path().join("tool.txt");
+    fs::write(&input_path, "toolchain-v1").unwrap();
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let source = format!(
+        r#"fn probe() #discover {{
+               discover(executor_class("default"), (host) => Tree %{{
+                 @cc => host.read({path:?}),
+               }})
+             }}
+
+             fn observe(process: Process, tree: Tree) {{
+               process.exit_code
+             }}
+
+             fn build(toolchain: Tree) {{
+               exec ["/bin/true"] where {{
+                 mounts: %{{ @toolchain => toolchain }},
+                 observer: observe,
+               }}
+             }}"#,
+        path = input_path.to_string_lossy(),
+    );
+    let engine = engine(&source).with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let discovered = engine.call("probe", vec![]).await.unwrap();
+    let value = engine.call("build", vec![discovered]).await.unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, PathValue::new("toolchain"));
+    assert!(matches!(request.mounts[0].mode, ExecMountMode::Opaque));
+}
+
+#[tokio::test]
+async fn exec_marks_runtime_discovered_mounts_as_opaque_even_without_claims() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let source = r##"fn probe() #discover {
+             discover(executor_class("default"), (host) => Tree %{
+               @cc => Blob("#!/bin/sh\nexit 0\n"),
+             })
+           }
+
+           fn observe(process: Process, tree: Tree) {
+             process.exit_code
+           }
+
+           fn build() {
+             let toolchain = probe();
+             exec ["/bin/true"] where {
+               mounts: %{ @toolchain => toolchain },
+               observer: observe,
+             }
+           }"##;
+    let discovered = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("cc"),
+            Value::Blob(BlobValue::from_string("#!/bin/sh\nexit 0\n")),
+        )])))),
+        obligations: Arc::from([]),
+    });
+    let engine = engine(source)
+        .with_discover_handler(Arc::new(move |_request| Ok(discovered.clone())))
+        .with_exec_handler(Arc::new(move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(Value::U64(0))
+        }));
+
+    let value = engine.call("build", vec![]).await.unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, PathValue::new("toolchain"));
+    assert!(matches!(request.mounts[0].mode, ExecMountMode::Opaque));
+}
+
+#[tokio::test]
 async fn exec_rejects_raw_path_mount_values() {
     let tempdir = TempDir::new().unwrap();
     fs::write(tempdir.path().join("input.txt"), "hello from path mount").unwrap();
@@ -6999,6 +7092,7 @@ async fn exec_can_be_routed_through_a_host_handler() {
     );
     assert_eq!(request.mounts.len(), 1);
     assert_eq!(request.mounts[0].path, PathValue::new("src"));
+    assert!(matches!(request.mounts[0].mode, ExecMountMode::Tracked));
     let Value::Tree(TreeValue::FsDir(root)) = &request.mounts[0].value else {
         panic!("expected preserved workspace tree handle");
     };

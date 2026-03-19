@@ -44,7 +44,7 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, EventSink, ExecArgValue,
-    ExecMount, ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
+    ExecMount, ExecMountMode, ExecPathValue, ExecRequest, ExecutorBackendKind, ExecutorSelector,
     ImportRequest as EvalImportRequest, MapValue, Module as EvalModule, PathValue, PoisonError,
     PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
     StabilizeRequest as EvalStabilizeRequest, StoreHydrationRequest as EvalStoreHydrationRequest,
@@ -1145,6 +1145,12 @@ pub(crate) fn exec_mounts_singleflight_key(mounts: &[ExecMount]) -> Option<Strin
     for mount in sorted {
         hasher.update(mount.path.as_str().as_bytes());
         hasher.update(b"\x00");
+        let mode = match mount.mode {
+            ExecMountMode::Tracked => b"tracked".as_slice(),
+            ExecMountMode::Opaque => b"opaque".as_slice(),
+        };
+        hasher.update(mode);
+        hasher.update(b"\x00");
         hash_mount_value(&mut hasher, &mount.value)?;
     }
     Some(hasher.finalize().to_hex().to_string())
@@ -2021,6 +2027,7 @@ async fn snapshot_exec_blob_mount(
     store: &StoreClient,
     path: &str,
     blob: &BlobValue,
+    mode: RunMountMode,
 ) -> std::result::Result<RunFileMount, String> {
     let (blob_ref, executable) = store_exec_blob_ref(store, blob).await?;
     let filename = path
@@ -2046,7 +2053,7 @@ async fn snapshot_exec_blob_mount(
         path: path.to_string(),
         manifest: manifest_hash.0,
         logical: "blob".to_string(),
-        mode: RunMountMode::Tracked,
+        mode,
     })
 }
 
@@ -2082,6 +2089,10 @@ async fn prepare_exec_mounts_with_progress(
     let mount_inputs: Vec<_> = mounts.iter().cloned().enumerate().collect();
     let prepared_mounts: Vec<(usize, PreparedMount)> = stream::iter(mount_inputs)
         .map(|(index, mount)| async move {
+            let mode = match mount.mode {
+                ExecMountMode::Tracked => RunMountMode::Tracked,
+                ExecMountMode::Opaque => RunMountMode::Opaque,
+            };
             let value = match &mount.value {
                 Value::Discovered(discovered) => discovered.value.as_ref(),
                 other => other,
@@ -2092,11 +2103,11 @@ async fn prepare_exec_mounts_with_progress(
                     PreparedMount::Tree(RunTreeMount {
                         mount: mount.path.as_str().to_string(),
                         manifest: root.0,
-                        mode: RunMountMode::Tracked,
+                        mode,
                     })
                 }
                 Value::Blob(blob) => PreparedMount::File(
-                    snapshot_exec_blob_mount(store, mount.path.as_str(), blob).await?,
+                    snapshot_exec_blob_mount(store, mount.path.as_str(), blob, mode).await?,
                 ),
                 other => {
                     return Err(format!(

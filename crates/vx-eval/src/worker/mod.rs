@@ -37,7 +37,7 @@ use crate::CapabilitySet;
 use crate::events::{ErasedEventSink, ErasedSpan};
 use crate::exec::{
     AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverRequest, ExecArgValue,
-    ExecMount, ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler,
+    ExecMount, ExecMountMode, ExecRequest, ImportRequest, RenderRequest, SharedAcquireHandler,
     SharedDiscoverHandler, SharedExecHandler, SharedImportHandler, SharedRenderHandler,
     SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
 };
@@ -96,7 +96,7 @@ pub(crate) enum SchedulerNodeState {
 struct ParsedExecRequest {
     args: Vec<ExecArgValue>,
     env: Vec<(String, ExecArgValue)>,
-    mounts: Vec<(PathValue, Value)>,
+    mounts: Vec<ExecMount>,
     writable_roots: Vec<PathValue>,
     create_dirs: Vec<PathValue>,
     executor: ExecutorSelector,
@@ -634,8 +634,10 @@ impl Engine {
         items: impl IntoIterator<Item = HostObservation>,
     ) -> Value {
         let mut obligations = BTreeMap::new();
+        let mut preserve_discovered = false;
         let inner = match value {
             Value::Discovered(discovered) => {
+                preserve_discovered = true;
                 Self::add_obligations(&mut obligations, discovered.obligations.iter().cloned());
                 *discovered.value
             }
@@ -643,7 +645,14 @@ impl Engine {
         };
         Self::add_obligations(&mut obligations, items);
         if obligations.is_empty() {
-            inner
+            if preserve_discovered {
+                Value::Discovered(DiscoveredValue {
+                    value: Box::new(inner),
+                    obligations: Arc::from([]),
+                })
+            } else {
+                inner
+            }
         } else {
             Value::Discovered(DiscoveredValue {
                 value: Box::new(inner),
@@ -772,6 +781,13 @@ impl Engine {
                 Self::add_obligations(obligations, discovered.obligations.iter().cloned());
                 self.collect_value_obligations(discovered.value.as_ref(), obligations);
             }
+            Value::ExecPath(ExecPathValue::InTree { tree, .. }) => {
+                self.collect_tree_obligations(tree, obligations);
+            }
+            Value::ExecPath(ExecPathValue::InBlob { .. }) => {}
+            Value::Tree(tree) => {
+                self.collect_tree_obligations(tree, obligations);
+            }
             Value::Tuple(values) | Value::Array(values) => {
                 for value in values.iter() {
                     self.collect_value_obligations(value, obligations);
@@ -846,6 +862,18 @@ impl Engine {
                 | BuiltinMethod::TreeFromPath => {}
             },
             _ => {}
+        }
+    }
+
+    fn collect_tree_obligations(
+        &self,
+        tree: &TreeValue,
+        obligations: &mut BTreeMap<String, HostObservation>,
+    ) {
+        if let TreeValue::Inline { entries, .. } = tree {
+            for (_, value) in entries.iter() {
+                self.collect_value_obligations(value, obligations);
+            }
         }
     }
 

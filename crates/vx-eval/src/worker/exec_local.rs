@@ -1,6 +1,157 @@
 use super::*;
 
 impl Engine {
+    fn materialize_value_shallow_preserving_discovery<'a>(
+        &'a self,
+        value: Value,
+        context: &'a str,
+    ) -> BoxFuture<'a, Result<Value, PoisonError>> {
+        Box::pin(async move {
+            match value {
+                Value::Pending(node_id) => match self.node_state(node_id)? {
+                    SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Err(self
+                        .internal_error(&format!(
+                            "{context} still had unresolved pending node {}",
+                            node_id.0
+                        ))),
+                    SchedulerNodeState::Resolved(value) => {
+                        self.materialize_value_shallow_preserving_discovery(value, context)
+                            .await
+                    }
+                    SchedulerNodeState::Poisoned(error) => Err(error),
+                },
+                Value::Discovered(discovered) => {
+                    let inner = self
+                        .materialize_value_shallow_preserving_discovery(*discovered.value, context)
+                        .await?;
+                    Ok(Value::Discovered(DiscoveredValue {
+                        value: Box::new(inner),
+                        obligations: discovered.obligations,
+                    }))
+                }
+                other => Ok(other),
+            }
+        })
+    }
+
+    fn value_has_obligations(&self, value: &Value) -> bool {
+        let mut obligations = BTreeMap::new();
+        self.collect_value_obligations(value, &mut obligations);
+        !obligations.is_empty()
+    }
+
+    fn value_has_discovered_content(&self, value: &Value) -> bool {
+        match value {
+            Value::Discovered(_) => true,
+            Value::ExecPath(ExecPathValue::InTree { tree, .. }) => {
+                self.tree_has_discovered_content(tree)
+            }
+            Value::ExecPath(ExecPathValue::InBlob { .. }) => false,
+            Value::Tree(tree) => self.tree_has_discovered_content(tree),
+            Value::Tuple(values) | Value::Array(values) => values
+                .iter()
+                .any(|value| self.value_has_discovered_content(value)),
+            Value::Map(map) => map.entries.iter().any(|(key, value)| {
+                self.value_has_discovered_content(key) || self.value_has_discovered_content(value)
+            }),
+            Value::Struct(struct_value) => struct_value
+                .fields
+                .iter()
+                .any(|(_, value)| self.value_has_discovered_content(value)),
+            Value::Function(function) => function
+                .captures
+                .iter()
+                .any(|(_, value)| self.value_has_discovered_content(value)),
+            Value::Partial(partial) => {
+                self.value_has_discovered_content(&partial.function)
+                    || partial
+                        .args
+                        .iter()
+                        .any(|value| self.value_has_discovered_content(value))
+                    || partial
+                        .kwargs
+                        .iter()
+                        .any(|(_, value)| self.value_has_discovered_content(value))
+                    || partial
+                        .kwargs_expr
+                        .as_deref()
+                        .is_some_and(|value| self.value_has_discovered_content(value))
+            }
+            Value::Builtin(BuiltinValue::Method(method)) => match method {
+                BuiltinMethod::StringStartsWith { receiver }
+                | BuiltinMethod::StringContains { receiver }
+                | BuiltinMethod::StringSplit { receiver }
+                | BuiltinMethod::StringLines { receiver }
+                | BuiltinMethod::StringTrim { receiver }
+                | BuiltinMethod::StringToLower { receiver }
+                | BuiltinMethod::ArrayMap { receiver }
+                | BuiltinMethod::ArrayToMap { receiver }
+                | BuiltinMethod::ArrayFlatten { receiver }
+                | BuiltinMethod::ArrayMerge { receiver }
+                | BuiltinMethod::MapMapValues { receiver }
+                | BuiltinMethod::MapHas { receiver }
+                | BuiltinMethod::MapGet { receiver }
+                | BuiltinMethod::BlobToString { receiver }
+                | BuiltinMethod::BlobExecutable { receiver }
+                | BuiltinMethod::BlobUtf8 { receiver }
+                | BuiltinMethod::BlobUtf8Lossy { receiver }
+                | BuiltinMethod::BytesUtf8 { receiver }
+                | BuiltinMethod::BytesUtf8Lossy { receiver }
+                | BuiltinMethod::BytesBlob { receiver }
+                | BuiltinMethod::StreamCollect { receiver }
+                | BuiltinMethod::TreeFile { receiver }
+                | BuiltinMethod::TreeMerge { receiver }
+                | BuiltinMethod::TreeSubtree { receiver }
+                | BuiltinMethod::OptionUnwrapOr { receiver }
+                | BuiltinMethod::FallibleCall { receiver }
+                | BuiltinMethod::HostOs { receiver }
+                | BuiltinMethod::HostArch { receiver }
+                | BuiltinMethod::HostRead { receiver }
+                | BuiltinMethod::HostHash { receiver }
+                | BuiltinMethod::HostWhich { receiver } => {
+                    self.value_has_discovered_content(receiver.as_ref())
+                }
+                BuiltinMethod::BlobFromString
+                | BuiltinMethod::BytesFromString
+                | BuiltinMethod::TreeOf
+                | BuiltinMethod::TreeEmpty
+                | BuiltinMethod::TreeFromPath => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn tree_has_discovered_content(&self, tree: &TreeValue) -> bool {
+        match tree {
+            TreeValue::Inline { entries, .. } => entries
+                .iter()
+                .any(|(_, value)| self.value_has_discovered_content(value)),
+            TreeValue::FsDir(_) | TreeValue::Store(_) => false,
+        }
+    }
+
+    fn value_requires_opaque_mount(&self, value: &Value) -> bool {
+        self.value_has_discovered_content(value) || self.value_has_obligations(value)
+    }
+
+    fn exec_mount_mode(
+        &self,
+        value: &Value,
+        top_level_obligations: &[HostObservation],
+    ) -> ExecMountMode {
+        if !top_level_obligations.is_empty() {
+            return ExecMountMode::Opaque;
+        }
+
+        let mut nested = BTreeMap::new();
+        self.collect_value_obligations(value, &mut nested);
+        if nested.is_empty() {
+            ExecMountMode::Tracked
+        } else {
+            ExecMountMode::Opaque
+        }
+    }
+
     pub(super) async fn parse_exec_request(
         &self,
         args: &[Value],
@@ -87,7 +238,14 @@ impl Engine {
         }
         self.collect_value_obligations(&observer, &mut verification_obligations);
 
-        let mut mounts = self.exec_mounts_from_value(mounts_value).await?;
+        let mounts_default_mode = mounts_value
+            .as_ref()
+            .filter(|value| self.value_requires_opaque_mount(value))
+            .map(|_| ExecMountMode::Opaque)
+            .unwrap_or(ExecMountMode::Tracked);
+        let mut mounts = self
+            .exec_mounts_from_value(mounts_value, mounts_default_mode)
+            .await?;
         let explicit_writable = self.exec_writable_from_value(writable_value).await?;
         let env = self
             .exec_env_from_value(env_value, &mut mounts, &explicit_writable)
@@ -129,11 +287,17 @@ impl Engine {
         request: &ParsedExecRequest,
     ) -> Result<ExecRequest, PoisonError> {
         let mut shipped_mounts = Vec::with_capacity(request.mounts.len());
-        for (path, value) in request.mounts.iter() {
+        for mount in request.mounts.iter() {
             shipped_mounts.push(ExecMount {
-                path: path.clone(),
-                value: self.snapshot_exec_mount_value(value.clone()).await?,
+                path: mount.path.clone(),
+                value: self.snapshot_exec_mount_value(mount.value.clone()).await?,
+                mode: mount.mode.clone(),
             });
+        }
+        if !request.verification_obligations.is_empty() {
+            for mount in &mut shipped_mounts {
+                mount.mode = ExecMountMode::Opaque;
+            }
         }
         Ok(ExecRequest {
             args: request.args.clone(),
@@ -158,8 +322,8 @@ impl Engine {
         })?;
         let sandbox_root = PathValue::new(sandbox.path().to_string_lossy());
 
-        for (mount_path, value) in &request.mounts {
-            self.materialize_mount_value(&sandbox_root, mount_path, value)
+        for mount in &request.mounts {
+            self.materialize_mount_value(&sandbox_root, &mount.path, &mount.value)
                 .await?;
         }
         for root in &request.writable_roots {
@@ -242,7 +406,8 @@ impl Engine {
     pub(super) async fn exec_mounts_from_value(
         &self,
         value: Option<Value>,
-    ) -> Result<Vec<(PathValue, Value)>, PoisonError> {
+        default_mode: ExecMountMode,
+    ) -> Result<Vec<ExecMount>, PoisonError> {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
@@ -263,12 +428,21 @@ impl Engine {
                 .materialize_value_deep(key.clone(), "forcing exec mount path")
                 .await?;
             let path = self.expect_relative_path(&key, "exec mount path")?;
-            let (value, _) = self.split_obligations(
-                self.materialize_value_shallow(value.clone(), "forcing exec mount value")
-                    .await?,
-            );
+            let value = self
+                .materialize_value_shallow_preserving_discovery(
+                    value.clone(),
+                    "forcing exec mount value",
+                )
+                .await?;
+            let discovered = self.value_has_discovered_content(&value);
+            let (value, obligations) = self.split_obligations(value);
+            let mode = match default_mode {
+                ExecMountMode::Opaque => ExecMountMode::Opaque,
+                ExecMountMode::Tracked if discovered => ExecMountMode::Opaque,
+                ExecMountMode::Tracked => self.exec_mount_mode(&value, &obligations),
+            };
             match value {
-                Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
+                Value::Blob(_) | Value::Tree(_) => mounts.push(ExecMount { path, value, mode }),
                 other => {
                     return Err(self.type_error(&format!(
                         "exec mount values must be Blob or Tree, got {}",
@@ -351,14 +525,14 @@ impl Engine {
 
     pub(super) async fn infer_exec_writable_roots(
         &self,
-        mounts: &[(PathValue, Value)],
+        mounts: &[ExecMount],
         args: &[ExecArgValue],
         env: &[(String, ExecArgValue)],
     ) -> Vec<PathValue> {
         let mut roots = BTreeSet::new();
         let mount_paths = mounts
             .iter()
-            .map(|(path, _)| path.as_str().to_string())
+            .map(|mount| mount.path.as_str().to_string())
             .collect::<Vec<_>>();
 
         let mut add_parent_paths = |path: &PathValue| {
@@ -396,7 +570,7 @@ impl Engine {
     pub(super) async fn exec_env_from_value(
         &self,
         value: Option<Value>,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         writable_roots: &[PathValue],
     ) -> Result<Vec<(String, ExecArgValue)>, PoisonError> {
         let Some(value) = value else {
@@ -437,12 +611,23 @@ impl Engine {
     pub(super) async fn parse_exec_arg(
         &self,
         value: &Value,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         _writable_roots: &[PathValue],
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
+        let surface = self
+            .materialize_value_shallow_preserving_discovery(
+                value.clone(),
+                &format!("forcing {context} surface"),
+            )
+            .await?;
+        let mount_mode = if self.value_requires_opaque_mount(&surface) {
+            ExecMountMode::Opaque
+        } else {
+            ExecMountMode::Tracked
+        };
         let (value, _) = self.split_obligations(
-            self.materialize_value_deep(value.clone(), &format!("forcing {context}"))
+            self.materialize_value_deep(surface, &format!("forcing {context}"))
                 .await?,
         );
         match value {
@@ -451,12 +636,15 @@ impl Engine {
                 let path = self.expect_relative_path(&Value::Path(path), context)?;
                 Ok(ExecArgValue::Path(path))
             }
-            Value::ExecPath(path) => self.exec_arg_from_exec_path(mounts, &path).await,
+            Value::ExecPath(path) => {
+                self.exec_arg_from_exec_path(mounts, &path, mount_mode)
+                    .await
+            }
             Value::Blob(blob) => Ok(ExecArgValue::Path(
-                self.ensure_blob_exec_mount(mounts, &blob).await,
+                self.ensure_blob_exec_mount(mounts, &blob, mount_mode).await,
             )),
             Value::Tree(tree) => Ok(ExecArgValue::Path(
-                self.ensure_tree_exec_mount(mounts, &tree).await,
+                self.ensure_tree_exec_mount(mounts, &tree, mount_mode).await,
             )),
             other => {
                 if let Some(text) = self.try_stringify_exec_arg(&other).await? {
@@ -657,12 +845,13 @@ impl Engine {
 
     pub(super) async fn exec_arg_from_exec_path(
         &self,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         path: &ExecPathValue,
+        mode: ExecMountMode,
     ) -> Result<ExecArgValue, PoisonError> {
         match path {
             ExecPathValue::InTree { tree, suffix } => Ok(ExecArgValue::Path(
-                self.ensure_tree_exec_mount(mounts, tree)
+                self.ensure_tree_exec_mount(mounts, tree, mode)
                     .await
                     .join(suffix.as_str()),
             )),
@@ -671,6 +860,7 @@ impl Engine {
                     mounts,
                     Value::Blob(blob.clone()),
                     Some(leaf.as_str().to_string()),
+                    mode,
                 )
                 .await,
             )),
@@ -791,33 +981,40 @@ impl Engine {
     // r[impl exec.arg.auto-mount]
     pub(super) async fn ensure_tree_exec_mount(
         &self,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         tree: &TreeValue,
+        mode: ExecMountMode,
     ) -> PathValue {
         let value = Value::Tree(tree.clone());
-        self.ensure_exec_mount(mounts, value, None).await
+        self.ensure_exec_mount(mounts, value, None, mode).await
     }
 
     // r[impl exec.arg.auto-mount]
     pub(super) async fn ensure_blob_exec_mount(
         &self,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         blob: &BlobValue,
+        mode: ExecMountMode,
     ) -> PathValue {
         let value = Value::Blob(blob.clone());
         let leaf = self.exec_blob_leaf_name(blob);
-        self.ensure_exec_mount(mounts, value, Some(leaf)).await
+        self.ensure_exec_mount(mounts, value, Some(leaf), mode)
+            .await
     }
 
     // r[impl exec.mount]
     pub(super) async fn ensure_exec_mount(
         &self,
-        mounts: &mut Vec<(PathValue, Value)>,
+        mounts: &mut Vec<ExecMount>,
         value: Value,
         leaf: Option<String>,
+        mode: ExecMountMode,
     ) -> PathValue {
-        if let Some((path, _)) = mounts.iter().find(|(_, mounted)| *mounted == value) {
-            return path.clone();
+        if let Some(mount) = mounts.iter_mut().find(|mount| mount.value == value) {
+            if matches!(mode, ExecMountMode::Opaque) {
+                mount.mode = ExecMountMode::Opaque;
+            }
+            return mount.path.clone();
         }
 
         let mount_root = self.next_exec_mount_root(mounts);
@@ -825,16 +1022,20 @@ impl Engine {
             Some(leaf) => mount_root.join(&leaf),
             None => mount_root,
         };
-        mounts.push((mount_path.clone(), value));
+        mounts.push(ExecMount {
+            path: mount_path.clone(),
+            value,
+            mode,
+        });
         mount_path
     }
 
-    pub(super) fn next_exec_mount_root(&self, mounts: &[(PathValue, Value)]) -> PathValue {
+    pub(super) fn next_exec_mount_root(&self, mounts: &[ExecMount]) -> PathValue {
         for index in 0usize.. {
             let candidate = PathValue::new(format!("{IMPLICIT_EXEC_MOUNT_PREFIX}/{index}"));
             if mounts
                 .iter()
-                .all(|(path, _)| !self.exec_paths_overlap(&candidate, path))
+                .all(|mount| !self.exec_paths_overlap(&candidate, &mount.path))
             {
                 return candidate;
             }

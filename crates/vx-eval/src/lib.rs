@@ -17,11 +17,11 @@ pub mod perfetto_proto_generated;
 mod exec;
 pub use exec::{
     AcquireHandler, AcquireRequest, BoxFuture, BuildRuntime, ClosureRuntime, DiscoverHandler,
-    DiscoverRequest, ExecArgValue, ExecHandler, ExecMount, ExecRequest, ImportHandler,
-    ImportRequest, RenderHandler, RenderRequest, SharedAcquireHandler, SharedDiscoverHandler,
-    SharedExecHandler, SharedImportHandler, SharedRenderHandler, SharedStabilizeHandler,
-    SharedStoreHydrationHandler, StabilizeHandler, StabilizeRequest, StoreHydrationHandler,
-    StoreHydrationRequest,
+    DiscoverRequest, ExecArgValue, ExecHandler, ExecMount, ExecMountMode, ExecRequest,
+    ImportHandler, ImportRequest, RenderHandler, RenderRequest, SharedAcquireHandler,
+    SharedDiscoverHandler, SharedExecHandler, SharedImportHandler, SharedRenderHandler,
+    SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeHandler, StabilizeRequest,
+    StoreHydrationHandler, StoreHydrationRequest,
 };
 
 mod instr;

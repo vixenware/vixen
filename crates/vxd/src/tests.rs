@@ -40,8 +40,8 @@ use vx_io::net::Listener;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_runner_proto::{
-    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
-    RunnerClient, RunnerDispatcher,
+    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunMountMode, RunRequest, RunResult,
+    Runner, RunnerClient, RunnerDispatcher,
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
@@ -523,6 +523,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
         mounts: vec![vx_eval::ExecMount {
             path: PathValue::new("probe.c"),
             value: Value::Blob(BlobValue::from_string("int main(void) { return 0; }\n")),
+            mode: vx_eval::ExecMountMode::Tracked,
         }],
         writable_roots: vec![PathValue::new("out")],
         create_dirs: vec![PathValue::new("out/obj")],
@@ -555,6 +556,7 @@ async fn store_exec_mounts_accepts_discovered_blob_leaves() {
                 obligations: Arc::from([]),
             }),
         )]))),
+        mode: vx_eval::ExecMountMode::Opaque,
     }];
 
     let root = crate::service::store_exec_mounts(&env.client, &mounts)
@@ -576,6 +578,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
         vx_eval::ExecMount {
             path: PathValue::new("src"),
             value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src"))),
+            mode: vx_eval::ExecMountMode::Tracked,
         },
         vx_eval::ExecMount {
             path: PathValue::new("gen"),
@@ -586,6 +589,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
                     suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
                 }),
             )]))),
+            mode: vx_eval::ExecMountMode::Tracked,
         },
     ];
     let same_mounts = host_mounts.clone();
@@ -594,6 +598,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
         vx_eval::ExecMount {
             path: PathValue::new("src"),
             value: Value::Tree(TreeValue::FsDir(PathValue::new("/tmp/libpng-src-other"))),
+            mode: vx_eval::ExecMountMode::Tracked,
         },
         vx_eval::ExecMount {
             path: PathValue::new("gen"),
@@ -604,6 +609,7 @@ fn exec_mounts_singleflight_key_distinguishes_mount_identity() {
                     suffix: PathValue::new("scripts/pnglibconf.h.prebuilt"),
                 }),
             )]))),
+            mode: vx_eval::ExecMountMode::Tracked,
         },
     ];
 
@@ -1698,6 +1704,11 @@ impl StoreTestEnv {
 enum FakeRunnerBehavior {
     PanicOnBoundaryUse,
     Discover(TransportValue),
+    DiscoverAndRecordRuns {
+        discover: TransportValue,
+        requests: Arc<Mutex<Vec<RunRequest>>>,
+        run_result: RunResult,
+    },
 }
 
 #[derive(Clone)]
@@ -1737,6 +1748,14 @@ impl Runner for FakeRunner {
                     "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
                 ),
             },
+            FakeRunnerBehavior::DiscoverAndRecordRuns {
+                requests,
+                run_result,
+                ..
+            } => {
+                requests.lock().expect("requests lock").push(_request);
+                run_result.clone()
+            }
         }
     }
 
@@ -1747,6 +1766,10 @@ impl Runner for FakeRunner {
             }
             FakeRunnerBehavior::Discover(value) => DiscoverResult {
                 value: Some(value.clone()),
+                poison: None,
+            },
+            FakeRunnerBehavior::DiscoverAndRecordRuns { discover, .. } => DiscoverResult {
+                value: Some(discover.clone()),
                 poison: None,
             },
         }
@@ -2551,6 +2574,104 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
         fs::read_to_string(workspace.path().join(".vx/build/tool.txt")).expect("output"),
         "present"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_marks_discovered_exec_mounts_as_opaque() {
+    let discovered = Value::Discovered(vx_eval::DiscoveredValue {
+        value: Box::new(Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("cc"),
+            Value::Blob(BlobValue::from_string("#!/bin/sh\nexit 0\n")),
+        )])))),
+        obligations: Arc::from([]),
+    });
+    let discover_transport = TransportValue::try_from(&discovered)
+        .expect("discovered tree should serialize for fake runner");
+    let run_observer_value =
+        TransportValue::try_from(&Value::Tree(TreeValue::inline(Arc::from([(
+            Arc::from("ok.txt"),
+            Value::Blob(BlobValue::from_string("ok")),
+        )]))))
+        .expect("observer value should serialize");
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: discover_transport,
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(run_observer_value),
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let toolchain = discover(executor_class("linux"), (host) => Tree %{
+    @cc => host.read("/tmp/tool"),
+  });
+  exec(["/bin/sh", "-c", "true"]) where {
+    executor: executor_class("linux"),
+    mounts: %{ @toolchain => toolchain },
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/ok.txt")).expect("output"),
+        "ok"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    let request = requests
+        .as_slice()
+        .last()
+        .expect("exec should have reached fake runner");
+    assert_eq!(request.tree_mounts.len(), 1);
+    assert_eq!(request.tree_mounts[0].mount, "toolchain");
+    assert_eq!(request.tree_mounts[0].mode, RunMountMode::Opaque);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

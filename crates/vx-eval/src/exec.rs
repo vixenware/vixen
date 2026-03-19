@@ -28,9 +28,16 @@ impl ExecArgValue {
 }
 
 #[derive(Debug, Clone)]
+pub enum ExecMountMode {
+    Tracked,
+    Opaque,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecMount {
     pub path: PathValue,
     pub value: Value,
+    pub mode: ExecMountMode,
 }
 
 #[derive(Debug, Clone)]
