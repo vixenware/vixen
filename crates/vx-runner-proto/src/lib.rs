@@ -243,8 +243,9 @@ pub trait Runner {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoverResult, RunArg};
+    use super::{DiscoverResult, RunArg, RunObservedInput, RunResult};
     use vx_eval::{HostObservation, TransportStruct, TransportValue};
+    use vx_store_proto::Blake3Hash;
 
     #[test]
     // r[verify exec.arg]
@@ -318,5 +319,33 @@ mod tests {
             facet_postcard::from_slice(&bytes).expect("discover result should deserialize");
         assert!(matches!(roundtrip.value, Some(TransportValue::Struct(_))));
         assert!(roundtrip.poison.is_none());
+    }
+
+    #[test]
+    fn run_result_with_tracked_inputs_serializes() {
+        let result = RunResult {
+            success: true,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 12,
+            observer_value: Some(TransportValue::Bool(true)),
+            tracked_inputs: vec![RunObservedInput {
+                path: "src/main.c".to_string(),
+                content_hash: Blake3Hash::from_bytes(b"int main() {}"),
+                blob_node: None,
+                size: 12,
+            }],
+            poison: None,
+            error_kind: None,
+            error: None,
+        };
+
+        let bytes = facet_postcard::to_vec(&result).expect("run result should serialize");
+        let roundtrip: RunResult =
+            facet_postcard::from_slice(&bytes).expect("run result should deserialize");
+        assert_eq!(roundtrip.tracked_inputs.len(), 1);
+        assert_eq!(roundtrip.tracked_inputs[0].path, "src/main.c");
+        assert_eq!(roundtrip.observer_value, Some(TransportValue::Bool(true)));
     }
 }

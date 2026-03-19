@@ -234,6 +234,32 @@ And then enforce:
 - opaque mounts are shared, stable-path, read-only, and coarse-grained
 - writable roots are private and excluded from shared reuse
 
+## Current implementation status
+
+The current implementation now exposes one concrete tracked/opaque difference at
+the runner boundary:
+
+- opaque mounts are mounted at stable shared visible paths
+- tracked mounts stay action-scoped
+- the runner returns observed CAS-backed file identities under tracked mount
+  roots as part of `RunResult`
+
+That is intentionally narrower than the full target model above.
+
+What is implemented today for tracked mounts:
+
+- successful observation of CAS-backed files via file reads and attribute reads
+- filtering to the explicitly tracked mount roots for the action
+
+What is not implemented yet:
+
+- lookup-miss reporting
+- directory-enumeration snapshots
+- using tracked observations in `vxd` cache keys or incremental invalidation
+
+So the current system distinguishes tracked and opaque operationally, but only
+for the first slice of tracked input reporting.
+
 ## What this does not decide yet
 
 This document does not settle:
