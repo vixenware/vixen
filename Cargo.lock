@@ -4015,6 +4015,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-spec"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "facet-styx",
+ "facet-value",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "vx-stdlib"
 version = "0.1.0"
 
