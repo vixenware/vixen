@@ -222,7 +222,8 @@ pub trait Runner {
 
 #[cfg(test)]
 mod tests {
-    use super::RunArg;
+    use super::{DiscoverResult, RunArg};
+    use vx_eval::{HostObservation, TransportStruct, TransportValue};
 
     #[test]
     // r[verify exec.arg]
@@ -240,5 +241,61 @@ mod tests {
             RunArg::literal("--flag=a/b").render_with_separator('\\'),
             "--flag=a/b"
         );
+    }
+
+    #[test]
+    fn discover_result_with_nested_discovered_struct_fields_serializes() {
+        let result = DiscoverResult {
+            value: Some(TransportValue::Struct(TransportStruct {
+                type_name: "Toolchain".to_string(),
+                fields: vec![
+                    (
+                        "os".to_string(),
+                        TransportValue::Discovered {
+                            value: Box::new(TransportValue::String("linux".to_string())),
+                            obligations: vec![HostObservation::Os {
+                                value: "linux".to_string(),
+                            }],
+                        },
+                    ),
+                    (
+                        "arch".to_string(),
+                        TransportValue::Discovered {
+                            value: Box::new(TransportValue::String("aarch64".to_string())),
+                            obligations: vec![HostObservation::Arch {
+                                value: "aarch64".to_string(),
+                            }],
+                        },
+                    ),
+                    (
+                        "cc".to_string(),
+                        TransportValue::Discovered {
+                            value: Box::new(TransportValue::String("/usr/bin/cc".to_string())),
+                            obligations: vec![HostObservation::Which {
+                                name: "cc".to_string(),
+                                expected_path: Some("/usr/bin/cc".to_string()),
+                            }],
+                        },
+                    ),
+                    (
+                        "archive".to_string(),
+                        TransportValue::Discovered {
+                            value: Box::new(TransportValue::String("/usr/bin/ar".to_string())),
+                            obligations: vec![HostObservation::Which {
+                                name: "ar".to_string(),
+                                expected_path: Some("/usr/bin/ar".to_string()),
+                            }],
+                        },
+                    ),
+                ],
+            })),
+            poison: None,
+        };
+
+        let bytes = facet_postcard::to_vec(&result).expect("discover result should serialize");
+        let roundtrip: DiscoverResult =
+            facet_postcard::from_slice(&bytes).expect("discover result should deserialize");
+        assert!(matches!(roundtrip.value, Some(TransportValue::Struct(_))));
+        assert!(roundtrip.poison.is_none());
     }
 }

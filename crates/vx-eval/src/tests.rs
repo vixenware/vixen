@@ -4763,6 +4763,73 @@ fn probe() {
 }
 
 #[tokio::test]
+async fn discover_requests_ship_the_probe_defining_module() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let imported: crate::instr::Module = engine_with_source_id(
+        indoc! {r#"
+            struct Toolchain {
+              arch: String,
+            }
+
+            fn discover_toolchain() {
+              discover(executor_class("default"), (host) => {
+                Toolchain { arch: host.arch() }
+              })
+            }
+        "#},
+        "/workspace/c-rules.vx",
+    )
+    .transport_module()
+    .into();
+    let engine = engine_with_source_id(
+        indoc! {r#"
+            fn build() {
+              let rules = import("./c-rules");
+              rules.discover_toolchain()
+            }
+        "#},
+        "/workspace/build.vx",
+    )
+    .with_import_handler(Arc::new(move |_request| Ok(imported.clone())))
+    .with_discover_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::Struct(StructValue {
+            type_name: Arc::from("Toolchain"),
+            fields: Arc::from([(
+                Arc::from("arch"),
+                Value::Discovered(DiscoveredValue {
+                    value: Box::new(Value::String(Arc::from("aarch64"))),
+                    obligations: Arc::from([HostObservation::Arch {
+                        value: "aarch64".to_string(),
+                    }]),
+                }),
+            )]),
+        }))
+    }));
+
+    let value = engine.call("build", vec![]).await.unwrap();
+    let Value::Struct(struct_value) = value else {
+        panic!("expected struct result");
+    };
+    assert_eq!(struct_value.type_name.as_ref(), "Toolchain");
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("discover request should be captured");
+    assert_eq!(request.module.source_id, "/workspace/c-rules.vx");
+    assert!(
+        request
+            .module
+            .loaded_modules
+            .iter()
+            .all(|module| module.source_id != "/workspace/c-rules.vx")
+    );
+}
+
+#[tokio::test]
 async fn acquire_handlers_receive_keyword_payloads_and_source_provenance() {
     let source = r#"
 fn fetch() {

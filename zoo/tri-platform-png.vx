@@ -16,7 +16,7 @@ fn render_png(class: ExecutorClass, exe) {
         if proc.exit_code != 0 (
           fail `process failed`
         ) else (
-          vfs.file(@(out/{static_name})).blob()
+          vfs.file(@(out/{static_name}))
         )
       ),
     };
@@ -30,7 +30,7 @@ fn render_png(class: ExecutorClass, exe) {
         if proc.exit_code != 0 (
           fail `process failed`
         ) else (
-          vfs.file(@(out/{shared_name})).blob()
+          vfs.file(@(out/{shared_name}))
         )
       ),
     };

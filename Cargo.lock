@@ -4008,6 +4008,7 @@ name = "vx-runner-proto"
 version = "0.1.0"
 dependencies = [
  "facet",
+ "facet-postcard",
  "roam",
  "vx-eval",
  "vx-store-proto",

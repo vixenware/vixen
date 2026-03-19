@@ -1195,11 +1195,12 @@ impl Engine {
         if let Some(runtime) = &self.runtime
             && runtime.has_discover()
         {
+            let probe = self.ship_function(probe).await?;
             let request = DiscoverRequest {
                 executor,
                 demand_chain: self.current_demand_chain(None),
-                module: self.transport_module(),
-                probe: self.ship_function(probe).await?,
+                module: self.transport_module_for(probe.module_id.as_str()),
+                probe,
             };
             return runtime.discover(request).await;
         }

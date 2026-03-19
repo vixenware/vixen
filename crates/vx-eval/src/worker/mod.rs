@@ -323,14 +323,19 @@ impl Engine {
     }
 
     pub fn transport_module(&self) -> TransportModule {
+        self.transport_module_for(self.root_module_id.as_ref())
+    }
+
+    pub fn transport_module_for(&self, root_module_id: &str) -> TransportModule {
+        let root_module_id: ModuleId = Arc::<str>::from(root_module_id);
         let root = self
-            .module_state(&self.root_module_id)
-            .expect("root module must exist");
+            .module_state(&root_module_id)
+            .expect("transport root module must exist");
         let mut loaded_modules = self
             .modules
             .iter()
             .filter_map(|entry| {
-                if entry.key().as_ref() == self.root_module_id.as_ref() {
+                if entry.key().as_ref() == root_module_id.as_ref() {
                     None
                 } else {
                     Some(TransportModule::from(&entry.value().module))

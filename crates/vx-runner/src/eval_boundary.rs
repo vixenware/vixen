@@ -1241,6 +1241,64 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn shipped_discover_toolchain_probe_commits_nested_discovered_fields() {
+        let env = StoreTestEnv::new().await;
+        let source = r#"struct Toolchain {
+               os: String,
+               arch: String,
+               cc: String,
+               archive: String,
+             }
+
+             fn probe(host: Host) {
+               let os = host.os();
+               let arch = host.arch();
+               let cc = host.which("cc");
+               let archive = host.which("ar");
+               Toolchain { os, arch, cc, archive }
+             }
+
+             fn make() { probe }"#;
+        let engine = shipped_function_engine(source);
+        let request = DiscoverRequest {
+            executor: ExecutorSelector::class("default"),
+            module: engine.transport_module(),
+            probe: engine
+                .ship_function(
+                    engine
+                        .call("make", vec![])
+                        .await
+                        .expect("make should evaluate"),
+                )
+                .await
+                .expect("probe should ship"),
+        };
+
+        let transport = evaluate_shipped_discover(&env.client, &request)
+            .await
+            .expect("discover should evaluate");
+
+        let vx_eval::TransportValue::Struct(struct_value) = transport else {
+            panic!("expected struct transport value");
+        };
+        assert_eq!(struct_value.type_name, "Toolchain");
+        assert_eq!(struct_value.fields.len(), 4);
+        for (name, value) in &struct_value.fields {
+            let vx_eval::TransportValue::Discovered { value, obligations } = value else {
+                panic!("expected discovered field for {name}, got {value:?}");
+            };
+            assert!(
+                matches!(value.as_ref(), vx_eval::TransportValue::String(_)),
+                "expected string field payload for {name}, got {value:?}"
+            );
+            assert!(
+                !obligations.is_empty(),
+                "expected host obligations for {name}"
+            );
+        }
+    }
+
     fn shipped_function_engine(source: &str) -> Arc<Engine> {
         let parse = vx_parser::parse(source);
         assert_eq!(parse.errors(), []);
