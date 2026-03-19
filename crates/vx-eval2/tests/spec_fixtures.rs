@@ -104,6 +104,41 @@ impl RuntimeHooks for FixtureRuntime {
                         }),
                 ))
             }
+            "host_which" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_which() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(name) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_which() argument must evaluate to String",
+                    ));
+                };
+                let Some(found) = host.which.iter().find(|entry| entry.name == name.as_ref())
+                else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("host.which could not find {}", name.as_ref()),
+                    ));
+                };
+                Ok(Some(
+                    Value::string(found.path.clone())
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "host_which",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Which {
+                            name: name.to_string(),
+                            expected_path: Some(found.path.clone()),
+                        }),
+                ))
+            }
             _ => Ok(None),
         }
     }

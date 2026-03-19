@@ -1,0 +1,46 @@
+main <<VX,vx
+fn build() {
+  host_which("cl.exe")
+}
+VX
+
+invoke {
+  entry build
+  place win
+  verify_place win_changed
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/cl.exe"}
+          )
+        }
+      }
+      win_changed {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "D:/Other/cl.exe"}
+          )
+        }
+      }
+    }
+  }
+}
+
+expect {
+  poison {
+    kind VerificationFailure
+    message_contains "host.which(\"cl.exe\") changed"
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}
