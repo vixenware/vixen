@@ -40,44 +40,50 @@ impl EngineId {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpecCase {
+    pub path: PathBuf,
     pub dir: PathBuf,
-    pub main_path: PathBuf,
     pub main_source: String,
-    pub invoke_path: PathBuf,
     pub invoke: InvokeSpec,
-    pub expect_path: PathBuf,
     pub expect: ExpectSpec,
+    pub files: BTreeMap<String, String>,
 }
 
 impl SpecCase {
-    pub fn from_invoke_path(path: &Path) -> Result<Self, SpecParseError> {
+    pub fn parse(source: &str) -> Result<Self, SpecParseError> {
+        let parsed = SpecDocument::parse(source)?;
+        Ok(Self {
+            path: PathBuf::from("<inline case>"),
+            dir: PathBuf::from("."),
+            main_source: parsed.main,
+            invoke: parsed.invoke,
+            expect: parsed.expect,
+            files: parsed.files,
+        })
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self, SpecParseError> {
         let dir = path
             .parent()
             .ok_or_else(|| SpecParseError::ReadError {
                 path: path.display().to_string(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "invoke.styx must live inside a case directory",
+                    "spec case must live inside a directory",
                 ),
             })?
             .to_path_buf();
-        let main_path = dir.join("main.vx");
-        let expect_path = dir.join("expect.styx");
-        let main_source =
-            std::fs::read_to_string(&main_path).map_err(|source| SpecParseError::ReadError {
-                path: main_path.display().to_string(),
-                source,
-            })?;
-        let invoke = InvokeSpec::from_path(path)?;
-        let expect = ExpectSpec::from_path(&expect_path)?;
+        let source = std::fs::read_to_string(path).map_err(|source| SpecParseError::ReadError {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let parsed = SpecDocument::parse_with_path(&source, path)?;
         Ok(Self {
+            path: path.to_path_buf(),
             dir,
-            main_path,
-            main_source,
-            invoke_path: path.to_path_buf(),
-            invoke,
-            expect_path,
-            expect,
+            main_source: parsed.main,
+            invoke: parsed.invoke,
+            expect: parsed.expect,
+            files: parsed.files,
         })
     }
 
@@ -87,6 +93,31 @@ impl SpecCase {
             .get(engine.key())
             .cloned()
             .unwrap_or(EngineExpectation::Pass)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct SpecDocument {
+    pub main: String,
+    pub invoke: InvokeSpec,
+    pub expect: ExpectSpec,
+    #[facet(default)]
+    pub files: BTreeMap<String, String>,
+}
+
+impl SpecDocument {
+    pub fn parse(source: &str) -> Result<Self, SpecParseError> {
+        facet_styx::from_str(source).map_err(|source| SpecParseError::ParseError {
+            path: "<inline case>".to_string(),
+            message: source.to_string(),
+        })
+    }
+
+    pub fn parse_with_path(source: &str, path: &Path) -> Result<Self, SpecParseError> {
+        facet_styx::from_str(source).map_err(|source| SpecParseError::ParseError {
+            path: path.display().to_string(),
+            message: source.to_string(),
+        })
     }
 }
 
