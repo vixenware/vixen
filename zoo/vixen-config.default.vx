@@ -2,17 +2,17 @@ fn platforms(env: Map[String, String]) {
   if env.has("VX_PLATFORMS") (
     env.get("VX_PLATFORMS").split(",")
   ) else (
-    ["local"]
+    ["darwin"]
   )
 }
 
 fn executor_for_platform(name: String) {
-  if name == "local" (
+  if name == "darwin" (
     executor_class("default")
-  ) else if name == "orb" (
+  ) else if name == "linux" (
     executor_class("ssh:orb")
-  ) else if name == "toast" (
-    executor_class("ssh:toast")
+  ) else if name == "windows" (
+    executor_class("ssh:pauline")
   ) else (
     fail `unknown platform: ${name}`
   )
