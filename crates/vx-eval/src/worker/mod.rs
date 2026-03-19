@@ -585,6 +585,11 @@ impl Engine {
                 let value = self.call(name, vec![workspace, args, env]).await?;
                 match value {
                     Value::Tree(_) => Ok(value),
+                    Value::Discovered(discovered)
+                        if matches!(discovered.value.as_ref(), Value::Tree(_)) =>
+                    {
+                        Ok(Value::Discovered(discovered))
+                    }
                     other => Err(self.type_error(&format!(
                         "build entry must return Tree, got {}",
                         other.type_name()

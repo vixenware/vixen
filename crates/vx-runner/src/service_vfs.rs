@@ -1447,8 +1447,10 @@ impl RunnerService {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
-    use vx_eval::{ExecutorSelector, HostObservation};
+    use vx_eval::{Engine, ExecutorSelector, HostObservation, lower_source_file_with_source_id};
+    use vx_parser::SourceFile;
     use vx_store_proto::Blake3Hash;
 
     #[test]
@@ -1742,6 +1744,54 @@ mod tests {
         fs::write(&path, "toolchain-v2").expect("rewrite host file");
 
         assert!(!cached_discover_value_is_valid(&cached));
+    }
+
+    #[tokio::test]
+    async fn discover_request_cache_key_handles_toolchain_probe_shape() {
+        let source = r#"
+struct Toolchain {
+  os: String,
+  arch: String,
+  cc: String,
+  archive: String,
+}
+
+fn probe(host: Host) {
+  let os = host.os();
+  let arch = host.arch();
+  let cc = host.which("cc");
+  let archive = host.which("ar");
+  Toolchain { os, arch, cc, archive }
+}
+
+fn make() { probe }
+"#;
+        let engine = shipped_function_engine(source);
+        let request = DiscoverRequest {
+            executor: ExecutorSelector::class("default"),
+            module: engine.transport_module(),
+            probe: engine
+                .ship_function(
+                    engine
+                        .call("make", vec![])
+                        .await
+                        .expect("make should evaluate"),
+                )
+                .await
+                .expect("probe should ship"),
+        };
+
+        let key = discover_request_cache_key(&request).expect("cache key should serialize");
+        assert!(!key.is_empty());
+    }
+
+    fn shipped_function_engine(source: &str) -> Arc<Engine> {
+        let parse = vx_parser::parse(source);
+        assert_eq!(parse.errors(), []);
+        let root = SourceFile::cast_root(parse.syntax());
+        let module =
+            lower_source_file_with_source_id(&root, "<test>").expect("lowering should succeed");
+        Engine::from_module(&module)
     }
 
     #[test]

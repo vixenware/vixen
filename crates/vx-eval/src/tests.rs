@@ -6418,6 +6418,76 @@ async fn host_arch_returns_discovered_string() {
 }
 
 #[tokio::test]
+async fn discovered_struct_field_access_works() {
+    let source = r#"
+struct Toolchain {
+  os: String,
+  arch: String,
+}
+
+fn probe() {
+  let tc = discover(executor_class("default"), (_host) => Toolchain {
+    os: "linux",
+    arch: "aarch64",
+  });
+  if tc.arch == "aarch64" {
+    "yes"
+  } else {
+    "no"
+  }
+}
+"#;
+    let engine = engine(source).with_discover_handler(Arc::new(|_request| {
+        Ok(Value::Discovered(DiscoveredValue {
+            value: Box::new(Value::Struct(StructValue {
+                type_name: Arc::from("Toolchain"),
+                fields: Arc::from([
+                    (Arc::from("os"), Value::String(Arc::from("linux"))),
+                    (Arc::from("arch"), Value::String(Arc::from("aarch64"))),
+                ]),
+            })),
+            obligations: Arc::from([HostObservation::Arch {
+                value: "aarch64".to_string(),
+            }]),
+        }))
+    }));
+
+    let value = engine.call("probe", vec![]).await.unwrap();
+    assert_eq!(value, Value::String(Arc::from("yes")));
+}
+
+#[tokio::test]
+async fn call_entry_accepts_discovered_top_level_trees() {
+    let source = r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let tc = discover(executor_class("default"), (_host) => "aarch64");
+  if tc == "aarch64" {
+    Tree %{ @tool.txt => Blob("arm") }
+  } else {
+    Tree %{ @tool.txt => Blob("other") }
+  }
+}
+"#;
+    let engine = engine(source).with_discover_handler(Arc::new(|_request| {
+        Ok(Value::Discovered(DiscoveredValue {
+            value: Box::new(Value::String(Arc::from("aarch64"))),
+            obligations: Arc::from([HostObservation::Arch {
+                value: "aarch64".to_string(),
+            }]),
+        }))
+    }));
+
+    let value = engine
+        .call_entry("build", "/workspace", Vec::new(), BTreeMap::new())
+        .await
+        .unwrap();
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered tree");
+    };
+    assert!(matches!(discovered.value.as_ref(), Value::Tree(_)));
+}
+
+#[tokio::test]
 async fn discovered_if_condition_accepts_discovered_bool() {
     let source = r#"fn probe() #discover {
            discover(executor_class("default"), (host) => if host.os() == "windows" {

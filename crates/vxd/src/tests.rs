@@ -2290,6 +2290,122 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_supports_field_access_on_discovered_structs_from_runner() {
+    let discovered = Value::Struct(vx_eval::StructValue {
+        type_name: Arc::from("Toolchain"),
+        fields: Arc::from([
+            (
+                Arc::from("os"),
+                Value::Discovered(vx_eval::DiscoveredValue {
+                    value: Box::new(Value::String(Arc::from("linux"))),
+                    obligations: Arc::from([vx_eval::HostObservation::Os {
+                        value: "linux".to_string(),
+                    }]),
+                }),
+            ),
+            (
+                Arc::from("arch"),
+                Value::Discovered(vx_eval::DiscoveredValue {
+                    value: Box::new(Value::String(Arc::from("aarch64"))),
+                    obligations: Arc::from([vx_eval::HostObservation::Arch {
+                        value: "aarch64".to_string(),
+                    }]),
+                }),
+            ),
+            (
+                Arc::from("cc"),
+                Value::Discovered(vx_eval::DiscoveredValue {
+                    value: Box::new(Value::String(Arc::from("/usr/bin/cc"))),
+                    obligations: Arc::from([vx_eval::HostObservation::Which {
+                        name: "cc".to_string(),
+                        expected_path: Some("/usr/bin/cc".to_string()),
+                    }]),
+                }),
+            ),
+            (
+                Arc::from("archive"),
+                Value::Discovered(vx_eval::DiscoveredValue {
+                    value: Box::new(Value::String(Arc::from("/usr/bin/ar"))),
+                    obligations: Arc::from([vx_eval::HostObservation::Which {
+                        name: "ar".to_string(),
+                        expected_path: Some("/usr/bin/ar".to_string()),
+                    }]),
+                }),
+            ),
+        ]),
+    });
+    let transport = TransportValue::try_from(&discovered)
+        .expect("discovered struct should serialize for fake runner");
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::Discover(transport),
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+struct Toolchain {
+  os: String,
+  arch: String,
+  cc: String,
+  archive: String,
+}
+
+fn discover_toolchain(class: ExecutorClass) {
+  discover(class, (host) => Toolchain {
+    os: host.os(),
+    arch: host.arch(),
+    cc: host.which("cc"),
+    archive: host.which("ar"),
+  })
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let tc = discover_toolchain(executor_class("linux"));
+  if tc.arch == "aarch64" (
+    Tree %{ @tool.txt => Blob("arm") }
+  ) else (
+    Tree %{ @tool.txt => Blob("other") }
+  )
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest::new(workspace_root.to_owned()))
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/tool.txt")).expect("output"),
+        "arm"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_routes_implicit_ssh_executor_classes() {
     let discovered = Value::Discovered(vx_eval::DiscoveredValue {
         value: Box::new(Value::Blob(BlobValue::from_string("present"))),
