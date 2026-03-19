@@ -1,4 +1,10 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use camino::Utf8Path;
 use moire::task::FutureExt;
@@ -14,8 +20,8 @@ use vx_eval2::{
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
-    EvalOutcome, EvalSubgraphRequest, FetchProxyRequest, PlaceRef, VerifyClaimsRequest,
-    VerifyClaimsResult,
+    EvalOutcome, EvalSubgraphRequest, FetchProxyRequest, PlaceRef, RemoteRef, ValueEnvelope,
+    VerifyClaimsRequest, VerifyClaimsResult, WireValue,
 };
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
@@ -225,6 +231,38 @@ impl RuntimeHooks for FixtureRuntime {
 #[derive(Clone)]
 struct FixtureDaemon {
     runtime: FixtureRuntime,
+    proxies: ProxyStore,
+}
+
+#[derive(Clone, Default)]
+struct ProxyStore {
+    next_handle: Arc<AtomicU64>,
+    entries: Arc<Mutex<Vec<(RemoteRef, ValueEnvelope)>>>,
+}
+
+impl ProxyStore {
+    fn insert(&self, owner_place: &str, mut envelope: ValueEnvelope) -> RemoteRef {
+        envelope.meta.crossing = CrossingPolicy::ByValue;
+        let handle_id = self.next_handle.fetch_add(1, Ordering::Relaxed) + 1;
+        let reference = RemoteRef {
+            owner_place: owner_place.to_string(),
+            handle_id,
+        };
+        self.entries
+            .lock()
+            .expect("proxy store lock poisoned")
+            .push((reference.clone(), envelope));
+        reference
+    }
+
+    fn get(&self, reference: &RemoteRef) -> Option<ValueEnvelope> {
+        self.entries
+            .lock()
+            .expect("proxy store lock poisoned")
+            .iter()
+            .find(|(stored, _)| stored == reference)
+            .map(|(_, envelope)| envelope.clone())
+    }
 }
 
 impl Eval2Daemon for FixtureDaemon {
@@ -242,7 +280,11 @@ impl Eval2Daemon for FixtureDaemon {
             &self.runtime,
             &request.place.id,
         ) {
-            Ok(resolution) => resolution_to_outcome(resolution).expect("serialize eval2 result"),
+            Ok(resolution) => proxify_outcome(
+                &self.proxies,
+                &request.place.id,
+                resolution_to_outcome(resolution).expect("serialize eval2 result"),
+            ),
             Err(error) => EvalOutcome::Poison {
                 kind: format!("{:?}", error.kind),
                 message: error.message.to_string(),
@@ -254,8 +296,17 @@ impl Eval2Daemon for FixtureDaemon {
         verify_claims_against_runtime(&self.runtime.spec, &request.place.id, &request.claims)
     }
 
-    async fn fetch_proxy(&self, _request: FetchProxyRequest) -> EvalOutcome {
-        panic!("proxy fetching is not implemented in the eval2 fixture daemon")
+    async fn fetch_proxy(&self, request: FetchProxyRequest) -> EvalOutcome {
+        match self.proxies.get(&request.reference) {
+            Some(envelope) => EvalOutcome::Ready(envelope),
+            None => EvalOutcome::Poison {
+                kind: "Internal".to_string(),
+                message: format!(
+                    "proxy {}:{} was not found",
+                    request.reference.owner_place, request.reference.handle_id
+                ),
+            },
+        }
     }
 }
 
@@ -279,6 +330,7 @@ async fn run_case_via_rpc(
     let runtime = FixtureRuntime {
         spec: case.invoke.runtime.clone(),
     };
+    let proxies = ProxyStore::default();
 
     let root = TempDir::new()?;
     let root = Utf8Path::from_path(root.path()).ok_or_else(|| {
@@ -293,7 +345,7 @@ async fn run_case_via_rpc(
             async move {
                 let (reader, writer) = tokio::io::split(stream);
                 let conduit = BareConduit::<MessageFamily, _>::new(StreamLink::new(reader, writer));
-                let dispatcher = Eval2DaemonDispatcher::new(FixtureDaemon { runtime });
+                let dispatcher = Eval2DaemonDispatcher::new(FixtureDaemon { runtime, proxies });
                 let (caller, session_handle) = acceptor(conduit)
                     .establish::<roam_core::NoopCaller>(dispatcher)
                     .await
@@ -348,12 +400,14 @@ async fn run_case_via_rpc(
         }
     }
 
+    let spec = eval_outcome_to_spec(&client, outcome).await;
+
     drop(client);
     drop(caller);
     drop(session_handle);
     accept_task.abort();
 
-    eval_outcome_to_spec(outcome)
+    spec
 }
 
 fn verify_claims_against_runtime(
@@ -502,9 +556,13 @@ fn resolution_to_spec_outcome(
     }
 }
 
-fn eval_outcome_to_spec(outcome: EvalOutcome) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+async fn eval_outcome_to_spec(
+    client: &Eval2DaemonClient,
+    outcome: EvalOutcome,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
     match outcome {
         EvalOutcome::Ready(result) => {
+            let result = materialize_proxy_envelope(client, result).await?;
             spec_outcome_from_value(envelope_to_value(result).map_err(|error| {
                 std::io::Error::other(format!("invalid daemon result: {error:?}"))
             })?)
@@ -513,6 +571,131 @@ fn eval_outcome_to_spec(outcome: EvalOutcome) -> Result<SpecOutcome, Box<dyn std
             Ok(SpecOutcome::Poison(ObservedPoison { kind, message }))
         }
     }
+}
+
+fn proxify_outcome(proxies: &ProxyStore, owner_place: &str, outcome: EvalOutcome) -> EvalOutcome {
+    match outcome {
+        EvalOutcome::Ready(result) => {
+            EvalOutcome::Ready(proxify_envelope(proxies, owner_place, result))
+        }
+        EvalOutcome::Poison { .. } => outcome,
+    }
+}
+
+fn proxify_envelope(
+    proxies: &ProxyStore,
+    owner_place: &str,
+    mut envelope: ValueEnvelope,
+) -> ValueEnvelope {
+    envelope.value = match envelope.value {
+        WireValue::Array(items) => WireValue::Array(
+            items
+                .into_iter()
+                .map(|item| proxify_envelope(proxies, owner_place, item))
+                .collect(),
+        ),
+        WireValue::Map(entries) => WireValue::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        proxify_envelope(proxies, owner_place, key),
+                        proxify_envelope(proxies, owner_place, value),
+                    )
+                })
+                .collect(),
+        ),
+        WireValue::Struct(mut value) => {
+            value.fields = value
+                .fields
+                .into_iter()
+                .map(|(name, envelope)| (name, proxify_envelope(proxies, owner_place, envelope)))
+                .collect();
+            WireValue::Struct(value)
+        }
+        value => value,
+    };
+
+    if envelope.meta.crossing == CrossingPolicy::ByProxy {
+        let reference = proxies.insert(owner_place, envelope.clone());
+        envelope.value = WireValue::Proxy(reference);
+    }
+
+    envelope
+}
+
+fn materialize_proxy_envelope<'a>(
+    client: &'a Eval2DaemonClient,
+    envelope: ValueEnvelope,
+) -> Pin<Box<dyn Future<Output = Result<ValueEnvelope, Box<dyn std::error::Error>>> + 'a>> {
+    Box::pin(async move {
+        let envelope = if envelope.meta.crossing == CrossingPolicy::ByProxy {
+            let WireValue::Proxy(reference) = envelope.value else {
+                return Err(std::io::Error::other(
+                    "by-proxy result crossed the RPC boundary without a proxy reference",
+                )
+                .into());
+            };
+
+            let fetched = client
+                .fetch_proxy(FetchProxyRequest {
+                    requester_place: PlaceRef {
+                        id: "local".to_string(),
+                    },
+                    reference,
+                })
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("rpc fetch_proxy failed: {error:?}"))
+                })?;
+
+            match fetched {
+                EvalOutcome::Ready(envelope) => envelope,
+                EvalOutcome::Poison { kind, message } => {
+                    return Err(std::io::Error::other(format!(
+                        "proxy fetch returned poison {kind}: {message}"
+                    ))
+                    .into());
+                }
+            }
+        } else {
+            envelope
+        };
+
+        let value = match envelope.value {
+            WireValue::Array(items) => {
+                let mut materialized = Vec::with_capacity(items.len());
+                for item in items {
+                    materialized.push(materialize_proxy_envelope(client, item).await?);
+                }
+                WireValue::Array(materialized)
+            }
+            WireValue::Map(entries) => {
+                let mut materialized = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    materialized.push((
+                        materialize_proxy_envelope(client, key).await?,
+                        materialize_proxy_envelope(client, value).await?,
+                    ));
+                }
+                WireValue::Map(materialized)
+            }
+            WireValue::Struct(mut value) => {
+                let mut fields = Vec::with_capacity(value.fields.len());
+                for (name, envelope) in value.fields {
+                    fields.push((name, materialize_proxy_envelope(client, envelope).await?));
+                }
+                value.fields = fields;
+                WireValue::Struct(value)
+            }
+            value => value,
+        };
+
+        Ok(ValueEnvelope {
+            value,
+            meta: envelope.meta,
+        })
+    })
 }
 
 fn spec_outcome_from_value(value: Value) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
