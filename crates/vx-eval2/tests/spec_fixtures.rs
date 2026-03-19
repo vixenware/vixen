@@ -19,8 +19,8 @@ use vx_eval2_proto::{
 };
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
-    EngineExpectation, EngineId, HostSpec, ObservationPattern, ObservedPoison, ObservedResult,
-    RuntimeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
+    EngineExpectation, EngineId, ExternalSpec, HostSpec, ObservationPattern, ObservedPoison,
+    ObservedResult, RuntimeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -72,6 +72,34 @@ impl FixtureRuntime {
                 EvalError::new(
                     EvalErrorKind::Internal,
                     format!("place {place:?} was not declared in fixture runtime"),
+                )
+            })
+    }
+
+    fn read_hash(&self, place: &str, path: &str) -> Result<String, EvalError> {
+        let host = self.host(place)?;
+        host.reads
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.content_hash.clone())
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("failed to read host path {path}: fixture runtime has no read entry"),
+                )
+            })
+    }
+
+    fn hashed_path(&self, place: &str, path: &str) -> Result<String, EvalError> {
+        let host = self.host(place)?;
+        host.hashes
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.content_hash.clone())
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("failed to hash host path {path}: fixture runtime has no hash entry"),
                 )
             })
     }
@@ -136,6 +164,56 @@ impl RuntimeHooks for FixtureRuntime {
                         .with_claim(Claim::Which {
                             name: name.to_string(),
                             expected_path: Some(found.path.clone()),
+                        }),
+                ))
+            }
+            "host_read" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_read() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_read() argument must evaluate to String",
+                    ));
+                };
+                let content_hash = self.read_hash(place, path)?;
+                Ok(Some(
+                    Value::external("host_file", path.as_ref())
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_read"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByProxy)
+                        .with_claim(Claim::Read {
+                            path: path.to_string(),
+                            content_hash,
+                        }),
+                ))
+            }
+            "host_hash" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_hash() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_hash() argument must evaluate to String",
+                    ));
+                };
+                let content_hash = self.hashed_path(place, path)?;
+                Ok(Some(
+                    Value::string(content_hash.clone())
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_hash"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Hash {
+                            path: path.to_string(),
+                            content_hash,
                         }),
                 ))
             }
@@ -350,11 +428,53 @@ fn verify_claims_against_runtime(
                     }
                 }
             }
-            Claim::Read { .. } | Claim::Hash { .. } => {
-                return VerifyClaimsResult {
-                    ok: false,
-                    error: Some("read/hash claim verification is not implemented yet".to_string()),
+            Claim::Read { path, content_hash } => {
+                let actual = host
+                    .reads
+                    .iter()
+                    .find(|entry| entry.path == *path)
+                    .map(|entry| entry.content_hash.as_str())
+                    .ok_or_else(|| VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "host.read verification failed for {path}: missing fixture read entry"
+                        )),
+                    });
+                let Ok(actual) = actual else {
+                    return actual.unwrap_err();
                 };
+                if actual != content_hash {
+                    return VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "host.read(\"{path}\") changed: expected {content_hash}, got {actual}"
+                        )),
+                    };
+                }
+            }
+            Claim::Hash { path, content_hash } => {
+                let actual = host
+                    .hashes
+                    .iter()
+                    .find(|entry| entry.path == *path)
+                    .map(|entry| entry.content_hash.as_str())
+                    .ok_or_else(|| VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "host.hash verification failed for {path}: missing fixture hash entry"
+                        )),
+                    });
+                let Ok(actual) = actual else {
+                    return actual.unwrap_err();
+                };
+                if actual != content_hash {
+                    return VerifyClaimsResult {
+                        ok: false,
+                        error: Some(format!(
+                            "host.hash(\"{path}\") changed: expected {content_hash}, got {actual}"
+                        )),
+                    };
+                }
             }
             _ => {}
         }
@@ -441,6 +561,10 @@ fn eval2_value_to_spec(value: &Value) -> Result<SpecValue, std::io::Error> {
                 .iter()
                 .map(|(name, value)| Ok((name.to_string(), eval2_value_to_spec(value)?)))
                 .collect::<Result<_, std::io::Error>>()?,
+        })),
+        ValueRep::External(external) => Ok(SpecValue::External(ExternalSpec {
+            kind: external.kind.to_string(),
+            descriptor: external.descriptor.to_string(),
         })),
         other => Err(std::io::Error::other(format!(
             "eval2 result value is not supported yet: {other:?}"

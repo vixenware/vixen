@@ -300,6 +300,7 @@ pub enum SpecValue {
     Array(Vec<SpecValue>),
     Map(BTreeMap<String, SpecValue>),
     Struct(StructSpec),
+    External(ExternalSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -307,6 +308,12 @@ pub struct StructSpec {
     pub r#type: String,
     #[facet(default)]
     pub fields: BTreeMap<String, SpecValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExternalSpec {
+    pub kind: String,
+    pub descriptor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
