@@ -23,6 +23,48 @@ pub enum SpecParseError {
     ParseError { path: String, message: String },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpecOutcome {
+    Result(SpecValue),
+    Poison(ObservedPoison),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedPoison {
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Error)]
+pub enum SpecAssertionError {
+    #[error("expected result {expected:?}, but evaluation poisoned with {actual:?}")]
+    ExpectedResultGotPoison {
+        expected: SpecValue,
+        actual: ObservedPoison,
+    },
+
+    #[error("expected poison {expected:?}, but evaluation returned {actual:?}")]
+    ExpectedPoisonGotResult {
+        expected: PoisonPattern,
+        actual: SpecValue,
+    },
+
+    #[error("result mismatch: expected {expected:?}, got {actual:?}")]
+    ResultMismatch {
+        expected: SpecValue,
+        actual: SpecValue,
+    },
+
+    #[error("unexpected poison {actual:?}")]
+    UnexpectedPoison { actual: ObservedPoison },
+
+    #[error("poison kind mismatch: expected {expected:?}, got {actual:?}")]
+    PoisonKindMismatch { expected: String, actual: String },
+
+    #[error("poison message mismatch: expected message containing {expected:?}, got {actual:?}")]
+    PoisonMessageMismatch { expected: String, actual: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EngineId {
     Eval1,
@@ -93,6 +135,10 @@ impl SpecCase {
             .get(engine.key())
             .cloned()
             .unwrap_or(EngineExpectation::Pass)
+    }
+
+    pub fn assert_matches(&self, outcome: &SpecOutcome) -> Result<(), SpecAssertionError> {
+        self.expect.assert_matches(outcome)
     }
 }
 
@@ -197,7 +243,7 @@ pub struct HashEntry {
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
 pub struct ExpectSpec {
-    pub result: Option<DynamicValue>,
+    pub result: Option<SpecValue>,
     pub poison: Option<PoisonPattern>,
     #[facet(default)]
     pub obligations: Vec<ObservationPattern>,
@@ -205,6 +251,28 @@ pub struct ExpectSpec {
     pub events: Vec<EventAssertion>,
     #[facet(default)]
     pub engines: BTreeMap<String, EngineExpectation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum SpecValue {
+    Unit(()),
+    Bool(bool),
+    U64(u64),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Array(Vec<SpecValue>),
+    Map(BTreeMap<String, SpecValue>),
+    Struct(StructSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct StructSpec {
+    pub r#type: String,
+    #[facet(default)]
+    pub fields: BTreeMap<String, SpecValue>,
 }
 
 impl ExpectSpec {
@@ -224,6 +292,56 @@ impl ExpectSpec {
             path: path.display().to_string(),
             message: source.to_string(),
         })
+    }
+
+    pub fn assert_matches(&self, outcome: &SpecOutcome) -> Result<(), SpecAssertionError> {
+        match outcome {
+            SpecOutcome::Result(actual) => {
+                if let Some(expected) = &self.poison {
+                    return Err(SpecAssertionError::ExpectedPoisonGotResult {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+                if let Some(expected) = &self.result
+                    && actual != expected
+                {
+                    return Err(SpecAssertionError::ResultMismatch {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+                Ok(())
+            }
+            SpecOutcome::Poison(actual) => {
+                if let Some(expected) = &self.result {
+                    return Err(SpecAssertionError::ExpectedResultGotPoison {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+                let Some(expected) = &self.poison else {
+                    return Err(SpecAssertionError::UnexpectedPoison {
+                        actual: actual.clone(),
+                    });
+                };
+                if actual.kind != expected.kind {
+                    return Err(SpecAssertionError::PoisonKindMismatch {
+                        expected: expected.kind.clone(),
+                        actual: actual.kind.clone(),
+                    });
+                }
+                if let Some(message_contains) = &expected.message_contains
+                    && !actual.message.contains(message_contains)
+                {
+                    return Err(SpecAssertionError::PoisonMessageMismatch {
+                        expected: message_contains.clone(),
+                        actual: actual.message.clone(),
+                    });
+                }
+                Ok(())
+            }
+        }
     }
 }
 

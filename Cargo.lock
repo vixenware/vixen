@@ -3973,6 +3973,7 @@ name = "vx-eval2"
 version = "0.1.0"
 dependencies = [
  "datatest-stable",
+ "vx-parser",
  "vx-spec",
 ]
 

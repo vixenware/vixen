@@ -14,6 +14,9 @@
 mod meta;
 pub use meta::{BoundaryConversion, Observation, PinnedReason, Portability, ValueMeta};
 
+mod engine;
+pub use engine::eval_source_entry;
+
 mod provenance;
 pub use provenance::{ProjectionStep, Provenance, ProvenanceRoot, RuntimeInputKind};
 

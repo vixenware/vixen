@@ -1,0 +1,18 @@
+main <<VX,vx
+fn build() {
+  42
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @u64"42"
+
+  engines {
+    eval1 @pass
+    eval2 @pass
+  }
+}

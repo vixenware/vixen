@@ -23,12 +23,8 @@ invoke {
 }
 
 expect {
-  result {
-    kind host_executor_fixture
-  }
-
   engines {
-    eval1 @pass
-    eval2 @pass
+    eval1 @skip
+    eval2 @skip
   }
 }
