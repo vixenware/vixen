@@ -230,8 +230,8 @@ pub enum ObservationPattern {
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum EventAssertion {
-    MustEmit(Vec<EventPattern>),
-    MustNotEmit(Vec<EventPattern>),
+    MustEmit(EventPattern),
+    MustNotEmit(EventPattern),
     Before(OrderConstraint),
 }
 

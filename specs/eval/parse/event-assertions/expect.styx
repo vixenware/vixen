@@ -12,9 +12,9 @@ obligations (
 )
 
 events (
-  @must_emit(@discover_start{executor default})
-  @must_emit(@discover_end)
-  @must_not_emit(@exec_start)
+  @must_emit/@discover_start{executor default}
+  @must_emit/@discover_end
+  @must_not_emit/@exec_start
   @before{
     first @discover_start{executor default}
     then @discover_end
