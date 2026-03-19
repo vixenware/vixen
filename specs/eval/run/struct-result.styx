@@ -1,0 +1,29 @@
+main <<VX,vx
+struct Pair {
+  x: U64,
+  y: U64,
+}
+
+fn build() {
+  Pair { x: 10, y: 20 }
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @struct{
+    type Pair
+    fields {
+      x @u64"10"
+      y @u64"20"
+    }
+  }
+
+  engines {
+    eval1 @pass
+    eval2 @pass
+  }
+}

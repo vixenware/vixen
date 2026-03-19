@@ -25,7 +25,7 @@ pub enum SpecParseError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpecOutcome {
-    Result(SpecValue),
+    Result(ObservedResult),
     Poison(ObservedPoison),
 }
 
@@ -33,6 +33,13 @@ pub enum SpecOutcome {
 pub struct ObservedPoison {
     pub kind: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedResult {
+    pub value: SpecValue,
+    pub provenance: Option<ProvenancePattern>,
+    pub obligations: Vec<ObservationPattern>,
 }
 
 #[derive(Debug, Error)]
@@ -63,6 +70,18 @@ pub enum SpecAssertionError {
 
     #[error("poison message mismatch: expected message containing {expected:?}, got {actual:?}")]
     PoisonMessageMismatch { expected: String, actual: String },
+
+    #[error("provenance mismatch: expected {expected:?}, got {actual:?}")]
+    ProvenanceMismatch {
+        expected: ProvenancePattern,
+        actual: Option<ProvenancePattern>,
+    },
+
+    #[error("obligations mismatch: expected {expected:?}, got {actual:?}")]
+    ObligationsMismatch {
+        expected: Vec<ObservationPattern>,
+        actual: Vec<ObservationPattern>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -171,6 +190,8 @@ impl SpecDocument {
 pub struct InvokeSpec {
     pub entry: String,
     #[facet(default)]
+    pub place: Option<String>,
+    #[facet(default)]
     pub args: Vec<DynamicValue>,
     #[facet(default)]
     pub capabilities: Vec<String>,
@@ -201,7 +222,17 @@ impl InvokeSpec {
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
 pub struct RuntimeSpec {
     #[facet(default)]
+    pub places: BTreeMap<String, PlaceSpec>,
+    #[facet(default)]
     pub executors: BTreeMap<String, ExecutorSpec>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct PlaceSpec {
+    #[facet(default)]
+    pub host: HostSpec,
+    #[facet(default)]
+    pub files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -245,6 +276,7 @@ pub struct HashEntry {
 pub struct ExpectSpec {
     pub result: Option<SpecValue>,
     pub poison: Option<PoisonPattern>,
+    pub provenance: Option<ProvenancePattern>,
     #[facet(default)]
     pub obligations: Vec<ObservationPattern>,
     #[facet(default)]
@@ -275,6 +307,59 @@ pub struct StructSpec {
     pub fields: BTreeMap<String, SpecValue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ProvenancePattern {
+    Unknown {
+        #[facet(default)]
+        path: Vec<ProjectionPattern>,
+    },
+    Literal {
+        #[facet(default)]
+        path: Vec<ProjectionPattern>,
+    },
+    Binding {
+        name: String,
+        #[facet(default)]
+        path: Vec<ProjectionPattern>,
+    },
+    RuntimeInput {
+        kind: RuntimeInputPattern,
+        label: String,
+        #[facet(default)]
+        path: Vec<ProjectionPattern>,
+    },
+    HostProbe {
+        host: String,
+        description: String,
+        #[facet(default)]
+        path: Vec<ProjectionPattern>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum RuntimeInputPattern {
+    Argument,
+    AmbientEnv,
+    Import,
+    LocalPath,
+    DiscoverResult,
+    ExecResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ProjectionPattern {
+    Field(String),
+    Index(usize),
+    MapKey(String),
+    Path(String),
+}
+
 impl ExpectSpec {
     pub fn parse(source: &str) -> Result<Self, SpecParseError> {
         facet_styx::from_str(source).map_err(|source| SpecParseError::ParseError {
@@ -300,15 +385,29 @@ impl ExpectSpec {
                 if let Some(expected) = &self.poison {
                     return Err(SpecAssertionError::ExpectedPoisonGotResult {
                         expected: expected.clone(),
-                        actual: actual.clone(),
+                        actual: actual.value.clone(),
                     });
                 }
                 if let Some(expected) = &self.result
-                    && actual != expected
+                    && &actual.value != expected
                 {
                     return Err(SpecAssertionError::ResultMismatch {
                         expected: expected.clone(),
-                        actual: actual.clone(),
+                        actual: actual.value.clone(),
+                    });
+                }
+                if let Some(expected) = &self.provenance
+                    && actual.provenance.as_ref() != Some(expected)
+                {
+                    return Err(SpecAssertionError::ProvenanceMismatch {
+                        expected: expected.clone(),
+                        actual: actual.provenance.clone(),
+                    });
+                }
+                if !self.obligations.is_empty() && actual.obligations != self.obligations {
+                    return Err(SpecAssertionError::ObligationsMismatch {
+                        expected: self.obligations.clone(),
+                        actual: actual.obligations.clone(),
                     });
                 }
                 Ok(())

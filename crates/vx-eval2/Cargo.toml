@@ -12,9 +12,18 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 vx-parser = { path = "../vx-parser" }
+vx-eval2-proto.workspace = true
 
 [dev-dependencies]
+camino.workspace = true
 datatest-stable = "0.3.3"
+moire.workspace = true
+roam-core.workspace = true
+roam-stream.workspace = true
+roam-types.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+vx-io = { path = "../vx-io" }
 vx-spec = { path = "../vx-spec" }
 
 [lints]

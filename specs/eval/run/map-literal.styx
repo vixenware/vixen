@@ -1,0 +1,21 @@
+main <<VX,vx
+fn build() {
+  %{ "a" => 1, "b" => 2 }
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @map{
+    a @u64"1"
+    b @u64"2"
+  }
+
+  engines {
+    eval1 @pass
+    eval2 @pass
+  }
+}

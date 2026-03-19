@@ -1,15 +1,32 @@
 use std::path::Path;
 
-use vx_eval2::{Resolution, Value, ValueRep, eval_source_entry};
+use camino::Utf8Path;
+use moire::task::FutureExt;
+use roam_core::{BareConduit, acceptor};
+use roam_stream::StreamLink;
+use roam_types::MessageFamily;
+use tempfile::TempDir;
+use vx_eval2::{
+    Claim, ProjectionStep, ProvenanceRoot, Resolution, RuntimeInputKind, Value, ValueRep,
+    envelope_to_value, eval_source_entry, resolution_to_outcome,
+};
+use vx_eval2_proto::{
+    EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
+    EvalOutcome, EvalSubgraphRequest, FetchProxyRequest, PlaceRef, VerifyClaimsRequest,
+    VerifyClaimsResult,
+};
+use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
-    EngineExpectation, EngineId, ObservedPoison, SpecCase, SpecOutcome, SpecValue, StructSpec,
+    EngineExpectation, EngineId, ObservationPattern, ObservedPoison, ObservedResult, SpecCase,
+    SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
     let case = SpecCase::from_path(path)?;
     match case.expectation_for(EngineId::Eval2) {
         EngineExpectation::Pass => {
-            let outcome = run_case(&case)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let outcome = runtime.block_on(run_case(&case))?;
             case.assert_matches(&outcome)?;
             Ok(())
         }
@@ -17,18 +34,162 @@ fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
     }
 }
 
-fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    match case.invoke.place.as_deref() {
+        Some(place) => run_case_via_rpc(case, place).await,
+        None => run_case_local(case),
+    }
+}
+
+fn run_case_local(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
     match eval_source_entry(&case.main_source, &case.invoke.entry) {
-        Ok(Resolution::Ready(value)) => Ok(SpecOutcome::Result(eval2_value_to_spec(&value)?)),
-        Ok(Resolution::Pending(pending)) => Err(std::io::Error::other(format!(
-            "eval2 returned pending at the external boundary: {pending:?}"
-        ))
-        .into()),
-        Ok(Resolution::Poison(error)) | Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
+        Ok(resolution) => resolution_to_spec_outcome(resolution),
+        Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),
         })),
     }
+}
+
+async fn run_case_via_rpc(
+    case: &SpecCase,
+    place: &str,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    if !case.invoke.runtime.places.contains_key(place) {
+        return Err(std::io::Error::other(format!(
+            "invoke.place {place:?} was not declared under invoke.runtime.places"
+        ))
+        .into());
+    }
+    if !case.invoke.args.is_empty() {
+        return Err(std::io::Error::other(
+            "eval2 RPC fixture runner does not support invoke.args yet",
+        )
+        .into());
+    }
+
+    #[derive(Clone)]
+    struct FixtureDaemon;
+
+    impl Eval2Daemon for FixtureDaemon {
+        async fn version(&self) -> Eval2Version {
+            Eval2Version {
+                protocol_version: EVAL2_PROTOCOL_VERSION,
+            }
+        }
+
+        async fn eval_subgraph(&self, request: EvalSubgraphRequest) -> EvalOutcome {
+            match eval_source_entry(&request.source, &request.entry) {
+                Ok(resolution) => {
+                    resolution_to_outcome(resolution).expect("serialize eval2 result")
+                }
+                Err(error) => EvalOutcome::Poison {
+                    kind: format!("{:?}", error.kind),
+                    message: error.message.to_string(),
+                },
+            }
+        }
+
+        async fn verify_claims(&self, _request: VerifyClaimsRequest) -> VerifyClaimsResult {
+            VerifyClaimsResult {
+                ok: true,
+                error: None,
+            }
+        }
+
+        async fn fetch_proxy(&self, _request: FetchProxyRequest) -> EvalOutcome {
+            panic!("proxy fetching is not implemented in the eval2 fixture daemon")
+        }
+    }
+
+    let root = TempDir::new()?;
+    let root = Utf8Path::from_path(root.path()).ok_or_else(|| {
+        std::io::Error::other("temporary directory for eval2 fixture daemon is not valid UTF-8")
+    })?;
+    let endpoint = default_local_endpoint(root, "vx-eval2-fixture-daemon");
+    let mut listener = Listener::bind(&endpoint).await?;
+
+    let accept_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept local connection");
+        moire::task::spawn(
+            async move {
+                let (reader, writer) = tokio::io::split(stream);
+                let conduit = BareConduit::<MessageFamily, _>::new(StreamLink::new(reader, writer));
+                let dispatcher = Eval2DaemonDispatcher::new(FixtureDaemon);
+                let (caller, session_handle) = acceptor(conduit)
+                    .establish::<roam_core::NoopCaller>(dispatcher)
+                    .await
+                    .expect("roam session establish");
+                park_session(caller, session_handle).await;
+            }
+            .named("vx_eval2_fixture_connection"),
+        );
+    });
+
+    let (caller, session_handle) = connect_session(&endpoint).await?;
+    let client = Eval2DaemonClient::new(caller.clone());
+
+    let outcome = client
+        .eval_subgraph(EvalSubgraphRequest {
+            place: PlaceRef {
+                id: place.to_string(),
+            },
+            source: case.main_source.clone(),
+            entry: case.invoke.entry.clone(),
+            args: Vec::new(),
+        })
+        .await
+        .map_err(|error| std::io::Error::other(format!("rpc eval_subgraph failed: {error:?}")))?;
+
+    drop(client);
+    drop(caller);
+    drop(session_handle);
+    accept_task.abort();
+
+    eval_outcome_to_spec(outcome)
+}
+
+fn resolution_to_spec_outcome(
+    resolution: Resolution,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    match resolution {
+        Resolution::Ready(value) => spec_outcome_from_value(value),
+        Resolution::Pending(pending) => Err(std::io::Error::other(format!(
+            "eval2 returned pending at the external boundary: {pending:?}"
+        ))
+        .into()),
+        Resolution::Poison(error) => Ok(SpecOutcome::Poison(ObservedPoison {
+            kind: format!("{:?}", error.kind),
+            message: error.message.to_string(),
+        })),
+    }
+}
+
+fn eval_outcome_to_spec(outcome: EvalOutcome) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    match outcome {
+        EvalOutcome::Ready(result) => {
+            spec_outcome_from_value(envelope_to_value(result).map_err(|error| {
+                std::io::Error::other(format!("invalid daemon result: {error:?}"))
+            })?)
+        }
+        EvalOutcome::Poison { kind, message } => {
+            Ok(SpecOutcome::Poison(ObservedPoison { kind, message }))
+        }
+    }
+}
+
+fn spec_outcome_from_value(value: Value) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    Ok(SpecOutcome::Result(ObservedResult {
+        value: eval2_value_to_spec(&value)?,
+        provenance: Some(eval2_provenance_to_pattern(value.meta.provenance.clone())),
+        obligations: value
+            .meta
+            .claims
+            .iter()
+            .cloned()
+            .map(eval2_claim_to_pattern)
+            .collect(),
+    }))
 }
 
 fn eval2_value_to_spec(value: &Value) -> Result<SpecValue, std::io::Error> {
@@ -67,6 +228,79 @@ fn eval2_value_to_spec(value: &Value) -> Result<SpecValue, std::io::Error> {
         other => Err(std::io::Error::other(format!(
             "eval2 result value is not supported yet: {other:?}"
         ))),
+    }
+}
+
+fn eval2_provenance_to_pattern(provenance: vx_eval2::Provenance) -> vx_spec::ProvenancePattern {
+    let path = provenance
+        .path
+        .iter()
+        .cloned()
+        .map(eval2_projection_to_pattern)
+        .collect();
+    match provenance.root {
+        ProvenanceRoot::Unknown => vx_spec::ProvenancePattern::Unknown { path },
+        ProvenanceRoot::Literal => vx_spec::ProvenancePattern::Literal { path },
+        ProvenanceRoot::Binding { name } => vx_spec::ProvenancePattern::Binding {
+            name: name.to_string(),
+            path,
+        },
+        ProvenanceRoot::RuntimeInput { kind, label } => vx_spec::ProvenancePattern::RuntimeInput {
+            kind: eval2_runtime_input_to_pattern(kind),
+            label: label.to_string(),
+            path,
+        },
+        ProvenanceRoot::HostProbe { place, description } => vx_spec::ProvenancePattern::HostProbe {
+            host: place.to_string(),
+            description: description.to_string(),
+            path,
+        },
+    }
+}
+
+fn eval2_runtime_input_to_pattern(kind: RuntimeInputKind) -> vx_spec::RuntimeInputPattern {
+    match kind {
+        RuntimeInputKind::Argument => vx_spec::RuntimeInputPattern::Argument,
+        RuntimeInputKind::AmbientEnv => vx_spec::RuntimeInputPattern::AmbientEnv,
+        RuntimeInputKind::Import => vx_spec::RuntimeInputPattern::Import,
+        RuntimeInputKind::LocalPath => vx_spec::RuntimeInputPattern::LocalPath,
+        RuntimeInputKind::DiscoverResult => vx_spec::RuntimeInputPattern::DiscoverResult,
+        RuntimeInputKind::ExecResult => vx_spec::RuntimeInputPattern::ExecResult,
+    }
+}
+
+fn eval2_projection_to_pattern(step: ProjectionStep) -> vx_spec::ProjectionPattern {
+    match step {
+        ProjectionStep::Field(name) => vx_spec::ProjectionPattern::Field(name.to_string()),
+        ProjectionStep::Index(index) => vx_spec::ProjectionPattern::Index(index as usize),
+        ProjectionStep::MapKey(key) => vx_spec::ProjectionPattern::MapKey(key.to_string()),
+        ProjectionStep::Path(path) => vx_spec::ProjectionPattern::Path(path.to_string()),
+    }
+}
+
+fn eval2_claim_to_pattern(claim: Claim) -> ObservationPattern {
+    match claim {
+        Claim::Os { value } => ObservationPattern::Os {
+            value: value.to_string(),
+        },
+        Claim::Arch { value } => ObservationPattern::Arch {
+            value: value.to_string(),
+        },
+        Claim::Which {
+            name,
+            expected_path,
+        } => ObservationPattern::Which {
+            name: name.to_string(),
+            expected_path: expected_path.map(|path| path.to_string()),
+        },
+        Claim::Read { path, content_hash } => ObservationPattern::Read {
+            path: path.to_string(),
+            content_hash: content_hash.to_string(),
+        },
+        Claim::Hash { path, content_hash } => ObservationPattern::Hash {
+            path: path.to_string(),
+            content_hash: content_hash.to_string(),
+        },
     }
 }
 

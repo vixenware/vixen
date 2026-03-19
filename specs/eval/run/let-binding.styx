@@ -1,0 +1,19 @@
+main <<VX,vx
+fn build() {
+  let answer = 7;
+  answer
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @u64"7"
+
+  engines {
+    eval1 @pass
+    eval2 @pass
+  }
+}

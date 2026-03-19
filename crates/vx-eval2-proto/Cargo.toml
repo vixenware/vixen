@@ -1,0 +1,29 @@
+[package]
+name = "vx-eval2-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+facet = { workspace = true }
+roam = { workspace = true }
+
+[dev-dependencies]
+facet-postcard = { workspace = true }
+moire = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
+roam-stream = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+camino = { workspace = true }
+vx-io = { path = "../vx-io" }
+
+[lints]
+workspace = true

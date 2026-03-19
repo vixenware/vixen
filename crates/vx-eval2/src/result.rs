@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::provenance::Provenance;
-use crate::value::Value;
+use crate::{Provenance, Value};
 
 /// A successful value, a pending computation, or a poison.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3972,9 +3972,35 @@ dependencies = [
 name = "vx-eval2"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "datatest-stable",
+ "moire",
+ "roam-core",
+ "roam-stream",
+ "roam-types",
+ "tempfile",
+ "tokio",
+ "vx-eval2-proto",
+ "vx-io",
  "vx-parser",
  "vx-spec",
+]
+
+[[package]]
+name = "vx-eval2-proto"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "facet",
+ "facet-postcard",
+ "moire",
+ "roam",
+ "roam-core",
+ "roam-stream",
+ "roam-types",
+ "tempfile",
+ "tokio",
+ "vx-io",
 ]
 
 [[package]]

@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use vx_parser::{
-    Expr, FnDecl, Item, LetStmt, LiteralExpr, NameRefExpr, SourceFile, Stmt, StructLiteralExpr,
+    ArrayItem, Expr, FnDecl, Item, LetStmt, LiteralExpr, NameRefExpr, SourceFile, Stmt,
+    StructLiteralExpr,
 };
 
 use crate::{
@@ -84,6 +85,51 @@ fn eval_expr(expr: &Expr, env: &mut BTreeMap<String, Value>) -> Result<Value, Ev
             None => Ok(Value::unit()),
         },
         Expr::NameRef(name_ref) => eval_name_ref(name_ref, env),
+        Expr::Array(array) => {
+            let mut items = Vec::new();
+            for item in array.items() {
+                match item {
+                    ArrayItem::Expr(expr) => items.push(eval_expr(&expr, env)?),
+                    ArrayItem::Spread(_) => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            "array spread is not supported yet",
+                        ));
+                    }
+                }
+            }
+            Ok(Value::array(items).with_provenance(Provenance::literal()))
+        }
+        Expr::Map(map) => {
+            let mut entries = Vec::new();
+            for entry in map.entries() {
+                let key_expr = entry.key().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "map entry has no explicit key")
+                })?;
+                let key = eval_expr(&key_expr, env)?;
+                let value_expr = entry.value().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "map entry has no value")
+                })?;
+                let value = eval_expr(&value_expr, env)?;
+                entries.push((key, value));
+            }
+            Ok(Value::map(entries).with_provenance(Provenance::literal()))
+        }
+        Expr::Fail(fail) => {
+            let message = eval_expr(
+                &fail.message().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
+                })?,
+                env,
+            )?;
+            let ValueRep::String(message) = message.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "fail message must evaluate to String",
+                ));
+            };
+            Err(EvalError::new(EvalErrorKind::UserFail, message.to_string()))
+        }
         Expr::If(if_expr) => {
             let condition = eval_expr(
                 &if_expr.condition().ok_or_else(|| {
@@ -156,7 +202,8 @@ fn eval_let(let_stmt: &LetStmt, env: &mut BTreeMap<String, Value>) -> Result<(),
             .expr()
             .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "let statement has no value"))?,
         env,
-    )?;
+    )?
+    .with_provenance(Provenance::binding(name.clone()));
     env.insert(name, value);
     Ok(())
 }

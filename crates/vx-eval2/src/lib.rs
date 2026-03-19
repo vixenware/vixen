@@ -7,24 +7,25 @@
 //! The key differences from v1 are:
 //! - payload and metadata are separate (`ValueRep` vs `ValueMeta`)
 //! - readiness is not a value (`Resolution` is separate)
-//! - host observations live next to any value, not in a wrapper enum case
+//! - claims live next to any value, not in a wrapper enum case
 //! - provenance is always available, even on successful scalar values
-//! - boundary mobility is explicit metadata, not an implicit side effect
-
-mod meta;
-pub use meta::{BoundaryConversion, Observation, PinnedReason, Portability, ValueMeta};
+//! - boundary crossing policy is explicit metadata, not an implicit side effect
 
 mod engine;
 pub use engine::eval_source_entry;
-
-mod provenance;
-pub use provenance::{ProjectionStep, Provenance, ProvenanceRoot, RuntimeInputKind};
 
 mod result;
 pub use result::{DemandFrame, EvalError, EvalErrorKind, PendingRef, Resolution};
 
 mod value;
-pub use value::{BlobRep, FunctionRef, HostRef, MapValue, StructValue, TreeRep, Value, ValueRep};
+pub use value::{ExternalValue, FunctionRef, MapValue, StructValue, Value, ValueRep};
+
+mod wire;
+pub use vx_eval2_proto::{
+    Claim, CrossingPolicy, PlaceRef, ProjectionStep, Provenance, ProvenanceRoot, ReuseClass,
+    RuntimeInputKind, ValueMeta,
+};
+pub use wire::{envelope_to_value, resolution_to_outcome, value_to_envelope};
 
 #[cfg(test)]
 mod tests;

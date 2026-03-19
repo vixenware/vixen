@@ -1,10 +1,8 @@
 //! Runtime value payloads.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::meta::{BoundaryConversion, PinnedReason, Portability, ValueMeta};
-use crate::provenance::{ProjectionStep, Provenance};
+use crate::{Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, ValueMeta};
 
 /// A successful runtime value: payload plus orthogonal metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,10 +13,9 @@ pub struct Value {
 
 impl Value {
     pub fn new(rep: ValueRep) -> Self {
-        let portability = rep.default_portability();
         Self {
+            meta: rep.default_meta(),
             rep,
-            meta: ValueMeta::new(Provenance::unknown(), portability),
         }
     }
 
@@ -58,32 +55,11 @@ impl Value {
         }))
     }
 
-    pub fn local_blob(path: impl Into<PathBuf>, executable: bool) -> Self {
-        Self::new(ValueRep::Blob(BlobRep::LocalFile {
-            path: path.into(),
-            executable,
+    pub fn external(kind: impl Into<Arc<str>>, descriptor: impl Into<Arc<str>>) -> Self {
+        Self::new(ValueRep::External(ExternalValue {
+            kind: kind.into(),
+            descriptor: descriptor.into(),
         }))
-    }
-
-    pub fn store_blob(digest: impl Into<Arc<str>>, executable: bool) -> Self {
-        Self::new(ValueRep::Blob(BlobRep::StoreRef {
-            digest: digest.into(),
-            executable,
-        }))
-    }
-
-    pub fn local_tree(path: impl Into<PathBuf>) -> Self {
-        Self::new(ValueRep::Tree(TreeRep::LocalDir { path: path.into() }))
-    }
-
-    pub fn store_tree(digest: impl Into<Arc<str>>) -> Self {
-        Self::new(ValueRep::Tree(TreeRep::StoreRef {
-            digest: digest.into(),
-        }))
-    }
-
-    pub fn host_handle(id: impl Into<Arc<str>>) -> Self {
-        Self::new(ValueRep::Host(HostRef { id: id.into() }))
     }
 
     pub fn with_meta(mut self, meta: ValueMeta) -> Self {
@@ -96,13 +72,18 @@ impl Value {
         self
     }
 
-    pub fn with_portability(mut self, portability: Portability) -> Self {
-        self.meta = self.meta.with_portability(portability);
+    pub fn with_reuse(mut self, reuse: ReuseClass) -> Self {
+        self.meta = self.meta.with_reuse(reuse);
         self
     }
 
-    pub fn with_obligation(mut self, observation: crate::Observation) -> Self {
-        self.meta = self.meta.with_obligation(observation);
+    pub fn with_crossing(mut self, crossing: CrossingPolicy) -> Self {
+        self.meta = self.meta.with_crossing(crossing);
+        self
+    }
+
+    pub fn with_claim(mut self, claim: Claim) -> Self {
+        self.meta = self.meta.with_claim(claim);
         self
     }
 
@@ -129,14 +110,12 @@ pub enum ValueRep {
     Array(Arc<[Value]>),
     Map(MapValue),
     Struct(StructValue),
-    Blob(BlobRep),
-    Tree(TreeRep),
-    Host(HostRef),
+    External(ExternalValue),
     Function(FunctionRef),
 }
 
 impl ValueRep {
-    pub fn default_portability(&self) -> Portability {
+    pub fn default_meta(&self) -> ValueMeta {
         match self {
             Self::Unit
             | Self::Bool(_)
@@ -145,22 +124,16 @@ impl ValueRep {
             | Self::Array(_)
             | Self::Map(_)
             | Self::Struct(_)
-            | Self::Function(_) => Portability::Portable,
-            Self::Blob(BlobRep::InlineBytes { .. }) | Self::Blob(BlobRep::StoreRef { .. }) => {
-                Portability::Portable
-            }
-            Self::Tree(TreeRep::Inline { .. }) | Self::Tree(TreeRep::StoreRef { .. }) => {
-                Portability::Portable
-            }
-            Self::Blob(BlobRep::LocalFile { .. }) => Portability::Convertible {
-                via: BoundaryConversion::SnapshotBlob,
-            },
-            Self::Tree(TreeRep::LocalDir { .. }) => Portability::Convertible {
-                via: BoundaryConversion::SnapshotTree,
-            },
-            Self::Host(_) => Portability::Pinned {
-                reason: PinnedReason::HostHandle,
-            },
+            | Self::Function(_) => ValueMeta::new(
+                Provenance::unknown(),
+                ReuseClass::Stable,
+                CrossingPolicy::ByValue,
+            ),
+            Self::External(_) => ValueMeta::new(
+                Provenance::unknown(),
+                ReuseClass::Live,
+                CrossingPolicy::Blocked,
+            ),
         }
     }
 }
@@ -178,26 +151,11 @@ pub struct StructValue {
     pub fields: Arc<[(Arc<str>, Value)]>,
 }
 
-/// File-like content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlobRep {
-    InlineBytes { bytes: Arc<[u8]>, executable: bool },
-    LocalFile { path: PathBuf, executable: bool },
-    StoreRef { digest: Arc<str>, executable: bool },
-}
-
-/// Directory-like content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TreeRep {
-    Inline { entries: Arc<[(Arc<str>, Value)]> },
-    LocalDir { path: PathBuf },
-    StoreRef { digest: Arc<str> },
-}
-
-/// Opaque host capability.
+/// A runtime-owned value whose meaning is outside the evaluator core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HostRef {
-    pub id: Arc<str>,
+pub struct ExternalValue {
+    pub kind: Arc<str>,
+    pub descriptor: Arc<str>,
 }
 
 /// Opaque function handle.

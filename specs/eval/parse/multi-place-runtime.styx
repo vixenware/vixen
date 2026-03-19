@@ -1,0 +1,51 @@
+main <<VX,vx
+fn build() {
+  ()
+}
+VX
+
+invoke {
+  entry build
+
+  runtime {
+    places {
+      local {
+        host {
+          os macos
+          arch aarch64
+        }
+
+        files {
+          "Cargo.toml" <<TXT
+[package]
+name = "demo"
+TXT
+        }
+      }
+
+      win {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/cl.exe"}
+            {name "link.exe", path "C:/VS/link.exe"}
+          )
+        }
+
+        files {
+          "src/main.c" <<C
+int main(void) { return 0; }
+C
+        }
+      }
+    }
+  }
+}
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @skip
+  }
+}
