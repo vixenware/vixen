@@ -1,6 +1,6 @@
 use facet::Facet;
 
-pub const EVAL2_PROTOCOL_VERSION: u32 = 1;
+pub const EVAL2_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 pub struct Eval2Version {
@@ -303,10 +303,30 @@ pub struct ValueEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
-pub struct EvalSubgraphRequest {
-    pub place: PlaceRef,
+pub struct EvalProgramSourceBundle {
     pub source_id: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct EvalProgramImportEdge {
+    pub from: u32,
+    pub to: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct EvalProgramBundle {
+    pub entry_source: u32,
+    #[facet(default)]
+    pub sources: Vec<EvalProgramSourceBundle>,
+    #[facet(default)]
+    pub imports: Vec<EvalProgramImportEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct EvalSubgraphRequest {
+    pub place: PlaceRef,
+    pub program: EvalProgramBundle,
     pub entry: String,
     #[facet(default)]
     pub args: Vec<ValueEnvelope>,
@@ -438,11 +458,17 @@ mod tests {
         }
 
         async fn eval_subgraph(&self, request: EvalSubgraphRequest) -> EvalOutcome {
+            let source_id = request
+                .program
+                .sources
+                .get(request.program.entry_source as usize)
+                .map(|source| source.source_id.clone())
+                .unwrap_or_else(|| "<missing-entry-source>".to_string());
             EvalOutcome::Ready(ValueEnvelope {
                 value: WireValue::String(format!("{}::{}", request.place.id, request.entry)),
                 meta: ValueMeta {
                     provenance: Provenance {
-                        source: SourceSpan::synthetic(request.source_id),
+                        source: SourceSpan::synthetic(source_id),
                         root: ProvenanceRoot::RuntimeInput {
                             kind: RuntimeInputKind::ExecResult,
                             label: "rpc".to_string(),
@@ -522,8 +548,14 @@ mod tests {
                 place: PlaceRef {
                     id: "win".to_string(),
                 },
-                source_id: "rpc-test".to_string(),
-                source: "fn build() { 42 }".to_string(),
+                program: EvalProgramBundle {
+                    entry_source: 0,
+                    sources: vec![EvalProgramSourceBundle {
+                        source_id: "rpc-test".to_string(),
+                        source: "fn build() { 42 }".to_string(),
+                    }],
+                    imports: Vec::new(),
+                },
                 entry: "build".to_string(),
                 args: Vec::new(),
             })

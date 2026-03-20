@@ -682,6 +682,180 @@ fn unresolved_import_missing_target_still_errors_clearly() {
 }
 
 #[test]
+fn eval_program_structurally_detects_stateful_slots() {
+    let program = EvalProgram::single_source(
+        "main.vx",
+        "fn build() { slot_current (\"pure-slot\", \"w1\", resolve_slot) }\nfn resolve_slot(ctx) { ctx.witness }\n",
+    );
+
+    assert!(
+        program
+            .uses_stateful_slots()
+            .expect("parse slot builtin program"),
+        "slot builtins should be detected structurally regardless of whitespace layout"
+    );
+}
+
+#[test]
+fn whitespace_varied_slot_calls_still_execute() {
+    let runtime = SlotBuiltinRuntime::default();
+    let source = r#"
+fn build_current(witness: String, desired: String) {
+  slot_current (
+    "whitespace-slot",
+    witness,
+    ((ctx) => desired)
+  )
+}
+
+fn build_refresh(witness: String, desired: String, intent: String) {
+  slot_refresh (
+    "whitespace-slot",
+    witness,
+    intent,
+    ((ctx) => desired)
+  )
+}
+"#;
+
+    let Resolution::Ready(first) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "whitespace-slot-call",
+        "build_current",
+        &[Value::string("w1"), Value::string("v1")],
+        &runtime,
+        "local",
+    )
+    .expect("populate whitespace-varied slot") else {
+        panic!("expected ready whitespace-varied slot result");
+    };
+    assert_eq!(first.rep, ValueRep::String("v1".into()));
+
+    let Resolution::Ready(refreshed) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "whitespace-slot-call",
+        "build_refresh",
+        &[
+            Value::string("w1"),
+            Value::string("v2"),
+            Value::string("force"),
+        ],
+        &runtime,
+        "local",
+    )
+    .expect("refresh whitespace-varied slot") else {
+        panic!("expected ready whitespace-varied refresh result");
+    };
+    assert_eq!(refreshed.rep, ValueRep::String("v2".into()));
+}
+
+#[test]
+fn closure_literal_can_be_bound_and_called() {
+    let Resolution::Ready(value) = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let id = ((value) => value);
+  id("ok")
+}
+"#,
+        "closure-bound-call",
+        "build",
+        &[],
+    )
+    .expect("evaluate bound closure call") else {
+        panic!("expected ready bound closure result");
+    };
+    assert_eq!(value.rep, ValueRep::String("ok".into()));
+}
+
+#[test]
+fn closure_captures_outer_value() {
+    let Resolution::Ready(value) = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let captured = "captured";
+  let pick = ((ignored) => captured);
+  pick("ignored")
+}
+"#,
+        "closure-capture",
+        "build",
+        &[],
+    )
+    .expect("evaluate closure capture") else {
+        panic!("expected ready closure capture result");
+    };
+    assert_eq!(value.rep, ValueRep::String("captured".into()));
+}
+
+#[test]
+fn closure_can_be_passed_as_a_value() {
+    let Resolution::Ready(value) = eval_source_entry_with_args_with_source_id(
+        r#"
+fn apply(value: String, f) {
+  f(value)
+}
+
+fn build() {
+  let echo = ((value) => value);
+  apply("forwarded", echo)
+}
+"#,
+        "closure-arg",
+        "build",
+        &[],
+    )
+    .expect("evaluate closure passed as value") else {
+        panic!("expected ready closure arg result");
+    };
+    assert_eq!(value.rep, ValueRep::String("forwarded".into()));
+}
+
+#[test]
+fn slot_builtins_accept_inline_closure_resolvers() {
+    let runtime = SlotBuiltinRuntime::default();
+    let source = r#"
+fn build_current(witness: String) {
+  slot_current("inline-slot", witness, ((ctx) => ctx.witness))
+}
+
+fn build_refresh(witness: String, value: String, intent: String) {
+  slot_refresh("inline-slot", witness, intent, ((ctx) => value))
+}
+"#;
+
+    let Resolution::Ready(first) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "inline-slot-closure",
+        "build_current",
+        &[Value::string("v1")],
+        &runtime,
+        "local",
+    )
+    .expect("populate inline closure slot") else {
+        panic!("expected ready inline closure slot result");
+    };
+    assert_eq!(first.rep, ValueRep::String("v1".into()));
+
+    let Resolution::Ready(refreshed) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "inline-slot-closure",
+        "build_refresh",
+        &[
+            Value::string("v1"),
+            Value::string("v2"),
+            Value::string("force"),
+        ],
+        &runtime,
+        "local",
+    )
+    .expect("refresh inline closure slot") else {
+        panic!("expected ready refreshed inline closure slot result");
+    };
+    assert_eq!(refreshed.rep, ValueRep::String("v2".into()));
+}
+
+#[test]
 fn authored_vixen_pure_slot_current_and_refresh_work() {
     let runtime = SlotBuiltinRuntime::default();
     let source = r#"

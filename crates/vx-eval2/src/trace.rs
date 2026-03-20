@@ -13,6 +13,7 @@ pub enum EvalExprKind {
     Block,
     Literal,
     Paren,
+    Closure,
     NameRef,
     Call,
     Array,

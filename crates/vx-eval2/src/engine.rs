@@ -7,8 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use vx_parser::{
-    ArrayExpr, ArrayItem, AstNode, BlockExpr, CallExpr, Expr, FailExpr, FieldExpr, IfExpr,
-    LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr,
+    ArrayExpr, ArrayItem, AstNode, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr, FieldExpr,
+    IfExpr, LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr,
 };
 use vx_resolve::SourceId;
 
@@ -2580,6 +2580,28 @@ fn captures_from_scope(scope: &BTreeMap<String, Value>) -> Arc<[(Arc<str>, Value
     )
 }
 
+fn compile_closure_parameters(
+    source: SourceId,
+    closure: &ClosureExpr,
+) -> Result<Arc<[CompiledParameter]>, EvalError> {
+    closure
+        .parameters()
+        .map(|parameter| {
+            let name = parameter.name().ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    "closure parameter has no binding name",
+                )
+            })?;
+            Ok(CompiledParameter {
+                label: Arc::from(name.text()),
+                name: ProgramNodeHandle::for_token(source, &name),
+            })
+        })
+        .collect::<Result<Vec<_>, EvalError>>()
+        .map(Arc::from)
+}
+
 fn bind_named_function_decl(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     function: &vx_parser::FnDecl,
@@ -2609,6 +2631,27 @@ fn bind_named_function_decl(
     let value = Value::function(function)
         .with_provenance(Provenance::binding(name_source.clone(), name.clone()));
     Ok((name, name_source, value))
+}
+
+fn eval_closure(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    closure: &ClosureExpr,
+    env: &BTreeMap<String, Value>,
+) -> Result<Value, EvalError> {
+    let body = closure
+        .body()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "closure expression has no body"))?;
+    let closure_source = state.span_for_node(closure);
+    let function = FunctionRef::new(
+        state.program.source_id(state.current_source()),
+        Arc::from("<closure>"),
+        compile_closure_parameters(state.current_source(), closure)?,
+        false,
+        Some(ProgramNodeHandle::for_node(state.current_source(), &body)),
+        captures_from_scope(env),
+        None,
+    );
+    Ok(Value::function(function).with_provenance(Provenance::literal(closure_source)))
 }
 
 fn prepare_entry(
@@ -2793,6 +2836,7 @@ fn eval_expr_with_node_id(
             },
             None => Ok(EvalStep::Ready(Value::unit())),
         },
+        Expr::Closure(closure) => eval_closure(state, closure, env).map(EvalStep::Ready),
         Expr::NameRef(name_ref) => eval_name_ref(state, name_ref, env).map(EvalStep::Ready),
         Expr::Call(call) => eval_call(state, call, env),
         Expr::Array(array) => eval_array(state, array, env),
@@ -4486,6 +4530,7 @@ fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Block(_) => EvalExprKind::Block,
         Expr::Literal(_) => EvalExprKind::Literal,
         Expr::Paren(_) => EvalExprKind::Paren,
+        Expr::Closure(_) => EvalExprKind::Closure,
         Expr::NameRef(_) => EvalExprKind::NameRef,
         Expr::Call(_) => EvalExprKind::Call,
         Expr::Array(_) => EvalExprKind::Array,

@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use vx_parser::{
-    AstNode, Expr, FnDecl, Item, LineIndex as ParserLineIndex, Parse, SourceFile, Stmt, SyntaxNode,
-    SyntaxToken, TextRange, TextSize, parse, trimmed_range,
+    AstNode, Expr, FnDecl, Item, LineIndex as ParserLineIndex, Parse, SourceFile, Stmt, SyntaxKind,
+    SyntaxNode, SyntaxToken, TextRange, TextSize, parse, trimmed_range,
 };
 use vx_resolve::{DefKind, ImportGraph, ProgramScopes, SourceFileRef, SourceId};
 
@@ -89,6 +89,30 @@ impl EvalProgram {
             sources: Arc::from(sources),
             imports: Arc::from(imports),
         })
+    }
+
+    pub fn uses_stateful_slots(&self) -> Result<bool, EvalError> {
+        for source in self.sources.iter() {
+            let parse = parse(source.source_text.as_ref());
+            let tokens = parse.syntax().descendants_with_tokens().filter_map(|node| {
+                let token = node.into_token()?;
+                (!token.kind().is_trivia()).then_some(token)
+            });
+            if tokens
+                .zip(
+                    parse
+                        .syntax()
+                        .descendants_with_tokens()
+                        .filter_map(|node| node.into_token())
+                        .filter(|token| !token.kind().is_trivia())
+                        .skip(1),
+                )
+                .any(|(current, next)| is_stateful_slot_token_pair(&current, &next))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -309,9 +333,8 @@ impl CompiledProgram {
 impl CompiledProgramSource {
     fn new(source: SourceId, program_source: &EvalProgramSource) -> Self {
         let source_id = Arc::clone(&program_source.source_id);
-        let source_text = program_source.source_text.as_ref();
-        let line_index = ParserLineIndex::new(source_text);
-        let parse = parse(source_text);
+        let (_source_text, line_index, parse) =
+            normalized_parse(program_source.source_text.as_ref());
 
         let mut functions_by_name = BTreeMap::new();
         let mut functions_by_definition = BTreeMap::new();
@@ -451,6 +474,68 @@ impl CompiledProgramSource {
     }
 }
 
+fn normalized_parse(source_text: &str) -> (String, ParserLineIndex, Parse) {
+    let parse_result = parse(source_text);
+    if parse_result.errors().is_empty() {
+        return (
+            source_text.to_string(),
+            ParserLineIndex::new(source_text),
+            parse_result,
+        );
+    }
+
+    let normalized_source = normalize_call_trivia(source_text);
+    if normalized_source == source_text {
+        return (
+            source_text.to_string(),
+            ParserLineIndex::new(source_text),
+            parse_result,
+        );
+    }
+
+    let normalized_parse = parse(&normalized_source);
+    if normalized_parse.errors().len() < parse_result.errors().len() {
+        (
+            normalized_source.clone(),
+            ParserLineIndex::new(&normalized_source),
+            normalized_parse,
+        )
+    } else {
+        (
+            source_text.to_string(),
+            ParserLineIndex::new(source_text),
+            parse_result,
+        )
+    }
+}
+
+fn normalize_call_trivia(source_text: &str) -> String {
+    let tokens = parse(source_text)
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|node| node.into_token())
+        .collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(source_text.len());
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        normalized.push_str(token.text());
+        if token.kind() == SyntaxKind::LOWER_IDENT {
+            let mut next = index + 1;
+            while next < tokens.len() && tokens[next].kind().is_trivia() {
+                next += 1;
+            }
+            if next > index + 1 && next < tokens.len() && tokens[next].kind() == SyntaxKind::L_PAREN
+            {
+                index = next;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    normalized
+}
+
 fn compile_function_decl(
     source: SourceId,
     function: &FnDecl,
@@ -509,4 +594,10 @@ fn index_nodes(
         index_nodes(source, &child, path, exprs, stmts);
         path.pop();
     }
+}
+
+fn is_stateful_slot_token_pair(current: &SyntaxToken, next: &SyntaxToken) -> bool {
+    current.kind() == SyntaxKind::LOWER_IDENT
+        && matches!(current.text(), "slot_current" | "slot_refresh")
+        && next.kind() == SyntaxKind::L_PAREN
 }

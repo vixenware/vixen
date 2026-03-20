@@ -20,11 +20,12 @@ use vx_eval2::{
     Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
     RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotResolved, SlotStore,
     SlotStoreReason, SlotVerification, SourcePoint, SourceSpan, Value, ValueRep, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
+    resolution_to_outcome, value_to_envelope,
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
-    EvalOutcome, EvalSubgraphRequest, FetchProxyRequest, PlaceRef, RemoteRef, ValueEnvelope,
+    EvalOutcome, EvalProgramBundle, EvalProgramImportEdge, EvalProgramSourceBundle,
+    EvalSubgraphRequest, FetchProxyRequest, PlaceRef, RemoteRef, ValueEnvelope,
     VerifyClaimsRequest, VerifyClaimsResult, WireValue,
 };
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
@@ -1461,14 +1462,23 @@ impl Eval2Daemon for FixtureDaemon {
                 };
             }
         };
-        match eval_source_entry_at_place_with_args_with_source_id(
-            &request.source,
-            &request.source_id,
+        let program = match eval_program_from_bundle(&request.program) {
+            Ok(program) => program,
+            Err(error) => {
+                return EvalOutcome::Poison {
+                    kind: format!("{:?}", error.kind),
+                    message: error.message.to_string(),
+                };
+            }
+        };
+        let mut session = EvalSession::new_program(
+            program,
             &request.entry,
-            &args,
+            args,
             &self.runtime,
             &request.place.id,
-        ) {
+        );
+        match session.run() {
             Ok(resolution) => proxify_outcome(
                 &self.proxies,
                 &request.place.id,
@@ -1579,24 +1589,64 @@ async fn run_rpc_invocation_at_runtime(
 
 #[derive(Clone, PartialEq, Eq)]
 struct InvocationProgram {
-    source_id: String,
-    source: String,
+    program: EvalProgram,
+    uses_stateful_slots: bool,
     entry: String,
-}
-
-fn program_uses_stateful_slots(program: &InvocationProgram) -> bool {
-    program.source.contains("slot_current(") || program.source.contains("slot_refresh(")
 }
 
 fn invocation_program(
     case: &SpecCase,
     invocation: &ResolvedSpecRun,
 ) -> Result<InvocationProgram, Box<dyn std::error::Error>> {
+    let program = case_program(case, invocation)?;
     Ok(InvocationProgram {
-        source_id: case_source_id(case),
-        source: case_source(case, invocation)?,
+        uses_stateful_slots: program
+            .uses_stateful_slots()
+            .map_err(|error| std::io::Error::other(error.message.to_string()))?,
+        program,
         entry: case_entry_name(invocation).to_string(),
     })
+}
+
+fn proto_program_bundle(program: &EvalProgram) -> EvalProgramBundle {
+    EvalProgramBundle {
+        entry_source: program.entry_source as u32,
+        sources: program
+            .sources
+            .iter()
+            .map(|source| EvalProgramSourceBundle {
+                source_id: source.source_id.to_string(),
+                source: source.source_text.to_string(),
+            })
+            .collect(),
+        imports: program
+            .imports
+            .iter()
+            .map(|import| EvalProgramImportEdge {
+                from: import.from as u32,
+                to: import.to as u32,
+            })
+            .collect(),
+    }
+}
+
+fn eval_program_from_bundle(bundle: &EvalProgramBundle) -> Result<EvalProgram, EvalError> {
+    EvalProgram::new(
+        bundle.entry_source as usize,
+        bundle
+            .sources
+            .iter()
+            .map(|source| EvalProgramSource::new(&source.source_id, &source.source))
+            .collect::<Vec<_>>(),
+        bundle
+            .imports
+            .iter()
+            .map(|import| EvalProgramImport {
+                from: import.from as usize,
+                to: import.to as usize,
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 async fn eval_subgraph_at_place(
@@ -1610,8 +1660,7 @@ async fn eval_subgraph_at_place(
             place: PlaceRef {
                 id: place.to_string(),
             },
-            source_id: program.source_id.clone(),
-            source: program.source.clone(),
+            program: proto_program_bundle(&program.program),
             entry: program.entry.clone(),
             args: args.to_vec(),
         })
@@ -1647,7 +1696,7 @@ async fn run_rpc_invocation(
         .map_err(|error| std::io::Error::other(format!("invalid invocation args: {error:?}")))?;
     let program = invocation_program(case, invocation)?;
     let runtime_fingerprint = runtime_fingerprint(&invocation.invoke.runtime);
-    let outcome = if invocation.invoke.slot.is_some() || program_uses_stateful_slots(&program) {
+    let outcome = if invocation.invoke.slot.is_some() || program.uses_stateful_slots {
         eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?
     } else if cached_outcome(
         cached,
@@ -2392,8 +2441,8 @@ fn case_source_id(case: &SpecCase) -> String {
 #[test]
 fn rpc_cache_key_separates_runtime_overrides() {
     let program = InvocationProgram {
-        source_id: "spec#main".to_string(),
-        source: "fn build() { 1 }\n".to_string(),
+        program: EvalProgram::single_source("spec#main", "fn build() { 1 }\n"),
+        uses_stateful_slots: false,
         entry: "build".to_string(),
     };
     let args = vec![value_to_envelope(&Value::u64(1)).expect("serialize cache args")];
@@ -2456,8 +2505,8 @@ fn rpc_cache_key_separates_runtime_overrides() {
 #[test]
 fn rpc_cache_key_separates_places() {
     let program = InvocationProgram {
-        source_id: "spec#main".to_string(),
-        source: "fn build() { host_os() }\n".to_string(),
+        program: EvalProgram::single_source("spec#main", "fn build() { host_os() }\n"),
+        uses_stateful_slots: false,
         entry: "build".to_string(),
     };
     let args = Vec::new();

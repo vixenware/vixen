@@ -1,0 +1,72 @@
+main <<VX,vx
+fn build_current(witness: String, desired: String) {
+  slot_current (
+    "rpc-whitespace-slot",
+    witness,
+    ((ctx) => desired)
+  )
+}
+
+fn build_refresh(witness: String, desired: String, intent: String) {
+  slot_refresh(
+    "rpc-whitespace-slot",
+    witness,
+    intent,
+    ((ctx) => desired)
+  )
+}
+VX
+
+invoke {
+  entry build_current
+  place win
+  args (@string"w1" @string"v1")
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+        }
+      }
+    }
+  }
+}
+
+runs (
+  {
+    expect {
+      result @string"v1"
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
+      args (@string"w1" @string"v2" @string"force")
+    }
+
+    expect {
+      result @string"v2"
+    }
+  }
+
+  {
+    invoke {
+      entry build_current
+      args (@string"w1" @string"v1")
+    }
+
+    expect {
+      result @string"v2"
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}
