@@ -255,12 +255,15 @@ results, not executable closures.
 
 ## Next authored resolver gap
 
-After slots, authored functions, and closures, the minimum generic substrate
-still missing for more honest authored resolver policy is small but real:
+After slots, authored functions, closures, structs, fields, maps, and simple
+authored equality, eval2 can now express a tiny slot-backed resolver entirely
+in Vixen source.
 
-- richer generic collection/query building blocks over authored data
-- enough comparison / selection surface to express policy without falling back
-  to Rust-side toy helpers
+The remaining generic substrate gap is smaller and more explicit:
+
+- richer collection/query building blocks over authored data
+- enough selection/update surface to express non-trivial dependency walks
+  without falling back to Rust-side toy helpers
 
 This does not require Cargo semantics, solver primitives, or a scheduler
 redesign. It does mean the next follow-on cut should identify the smallest

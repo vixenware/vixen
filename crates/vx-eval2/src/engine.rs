@@ -7,8 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use vx_parser::{
-    ArrayExpr, ArrayItem, AstNode, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr, FieldExpr,
-    IfExpr, LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr,
+    ArrayExpr, ArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr,
+    FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr, SyntaxKind,
 };
 use vx_resolve::SourceId;
 
@@ -1514,6 +1514,19 @@ enum ContinuationFrame {
         else_branch: ExprHandle,
         env: BTreeMap<String, Value>,
     },
+    BinaryLhs {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        operator: SyntaxKind,
+        rhs: ExprHandle,
+        env: BTreeMap<String, Value>,
+    },
+    BinaryRhs {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        lhs: Value,
+        operator: SyntaxKind,
+    },
     StructAfterField {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -2843,6 +2856,7 @@ fn eval_expr_with_node_id(
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
+        Expr::Binary(binary) => eval_binary(state, binary, env),
         Expr::StructLiteral(struct_literal) => eval_struct_literal(state, struct_literal, env),
         Expr::Field(field) => eval_field(state, field, env),
         other => Err(EvalError::new(
@@ -3712,6 +3726,47 @@ fn eval_field(
     .map(EvalStep::Ready)
 }
 
+fn eval_binary(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    binary: &BinaryExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("binary expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let lhs = binary
+        .lhs()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no lhs"))?;
+    let rhs = binary
+        .rhs()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
+    let operator = binary_operator(binary)?;
+    match eval_child_expr(state, &lhs, env)? {
+        EvalStep::Ready(lhs) => continue_binary_rhs(
+            state,
+            node_id,
+            parent_id,
+            lhs,
+            operator,
+            state.expr_handle(&rhs),
+            env.clone(),
+        ),
+        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::BinaryLhs {
+                node_id,
+                parent_id,
+                operator,
+                rhs: state.expr_handle(&rhs),
+                env: env.clone(),
+            },
+        )),
+    }
+}
+
 fn continue_block_statements(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -4424,6 +4479,31 @@ fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::BinaryLhs {
+            node_id,
+            parent_id,
+            operator,
+            rhs,
+            env,
+        } => {
+            let result = match input {
+                Ok(lhs) => continue_binary_rhs(state, node_id, parent_id, lhs, operator, rhs, env),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::BinaryRhs {
+            node_id,
+            parent_id,
+            lhs,
+            operator,
+        } => {
+            let result = match input {
+                Ok(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::StructAfterField {
             node_id,
             parent_id,
@@ -4537,9 +4617,104 @@ fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Map(_) => EvalExprKind::Map,
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
+        Expr::Binary(_) => EvalExprKind::Binary,
         Expr::StructLiteral(_) => EvalExprKind::StructLiteral,
         Expr::Field(_) => EvalExprKind::Field,
         _ => EvalExprKind::Unsupported,
+    }
+}
+
+fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalError> {
+    binary
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .map(|token| token.kind())
+        .find(|kind| matches!(kind, SyntaxKind::EQ2 | SyntaxKind::BANG_EQ))
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
+}
+
+fn continue_binary_rhs(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    lhs: Value,
+    operator: SyntaxKind,
+    rhs: ExprHandle,
+    mut env: BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    match eval_dependent_expr_handle(state, node_id, rhs, &mut env)? {
+        EvalStep::Ready(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
+        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::BinaryRhs {
+                node_id,
+                parent_id,
+                lhs,
+                operator,
+            },
+        )),
+    }
+}
+
+fn apply_binary_operator(lhs: Value, operator: SyntaxKind, rhs: Value) -> Result<Value, EvalError> {
+    let equals = values_equal(&lhs.rep, &rhs.rep)?;
+    match operator {
+        SyntaxKind::EQ2 => Ok(Value::bool(equals)),
+        SyntaxKind::BANG_EQ => Ok(Value::bool(!equals)),
+        _ => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("binary operator {operator:?} is not supported yet"),
+        )),
+    }
+}
+
+fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalError> {
+    match (lhs, rhs) {
+        (ValueRep::Unit, ValueRep::Unit) => Ok(true),
+        (ValueRep::Bool(lhs), ValueRep::Bool(rhs)) => Ok(lhs == rhs),
+        (ValueRep::U64(lhs), ValueRep::U64(rhs)) => Ok(lhs == rhs),
+        (ValueRep::String(lhs), ValueRep::String(rhs)) => Ok(lhs == rhs),
+        (ValueRep::Array(lhs), ValueRep::Array(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            lhs.iter()
+                .zip(rhs.iter())
+                .try_fold(true, |_, (lhs, rhs)| values_equal(&lhs.rep, &rhs.rep))
+        }
+        (ValueRep::Map(lhs), ValueRep::Map(rhs)) => {
+            if lhs.entries.len() != rhs.entries.len() {
+                return Ok(false);
+            }
+            lhs.entries.iter().zip(rhs.entries.iter()).try_fold(
+                true,
+                |_, ((lhs_key, lhs_value), (rhs_key, rhs_value))| {
+                    Ok(values_equal(&lhs_key.rep, &rhs_key.rep)?
+                        && values_equal(&lhs_value.rep, &rhs_value.rep)?)
+                },
+            )
+        }
+        (ValueRep::Struct(lhs), ValueRep::Struct(rhs)) => {
+            if lhs.type_name != rhs.type_name || lhs.fields.len() != rhs.fields.len() {
+                return Ok(false);
+            }
+            lhs.fields.iter().zip(rhs.fields.iter()).try_fold(
+                true,
+                |_, ((lhs_name, lhs_value), (rhs_name, rhs_value))| {
+                    Ok(lhs_name == rhs_name && values_equal(&lhs_value.rep, &rhs_value.rep)?)
+                },
+            )
+        }
+        (ValueRep::External(_), _) | (_, ValueRep::External(_)) => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "external values do not support authored equality yet",
+        )),
+        (ValueRep::Function(_), _) | (_, ValueRep::Function(_)) => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "function values do not support authored equality",
+        )),
+        _ => Ok(false),
     }
 }
 

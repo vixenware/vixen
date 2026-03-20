@@ -297,6 +297,52 @@ fn recursive_named_function_works() {
 }
 
 #[test]
+fn binary_equality_supports_authored_branching() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  if "serde" == "serde" (
+    1
+  ) else (
+    2
+  )
+}
+"#,
+        "binary-equality",
+        "build",
+        &[],
+    )
+    .expect("evaluate authored equality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready equality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(1));
+}
+
+#[test]
+fn function_values_do_not_support_authored_equality() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let f = ((value) => value);
+  f == f
+}
+"#,
+        "binary-function-equality",
+        "build",
+        &[],
+    )
+    .expect_err("function equality should fail");
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("function values do not support authored equality")
+    );
+}
+
+#[test]
 fn declaration_without_body_falls_back_to_runtime_hooks() {
     let mut session = EvalSession::new(
         "fn host_os(); fn build() { host_os() }",

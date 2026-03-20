@@ -1,0 +1,127 @@
+main <<VX,vx
+fn choose_version(pkg, ctx) {
+  if ctx.is_refresh (
+    if ctx.intent.name == pkg.name (
+      pkg.latest
+    ) else (
+      pkg.stable
+    )
+  ) else (
+    pkg.stable
+  )
+}
+
+fn resolve_registry(ctx) {
+  let serde = Package {
+    name: "serde",
+    stable: "1.0.0",
+    latest: "1.1.0",
+  };
+  let log = Package {
+    name: "log",
+    stable: "1.0.0",
+    latest: "1.0.0",
+  };
+
+  %{
+    "log" => choose_version(log, ctx),
+    "serde" => choose_version(serde, ctx),
+  }
+}
+
+fn build_current() {
+  slot_current("authored-resolver-slot", "manifest-v1", resolve_registry)
+}
+
+fn build_refresh(name: String) {
+  slot_refresh(
+    "authored-resolver-slot",
+    "manifest-v1",
+    UpdatePackage { name: name },
+    resolve_registry,
+  )
+}
+VX
+
+invoke {
+  entry build_current
+}
+
+runs (
+  {
+    expect {
+      result @map{
+        log @string"1.0.0"
+        serde @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_populate{
+          slot "authored-resolver-slot"
+          reason @missing
+        }
+      )
+    }
+  }
+
+  {
+    expect {
+      result @map{
+        log @string"1.0.0"
+        serde @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_reuse{slot "authored-resolver-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
+      args (@string"serde")
+    }
+
+    expect {
+      result @map{
+        log @string"1.0.0"
+        serde @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_rewrite{
+          slot "authored-resolver-slot"
+          reason @refresh{
+            intent @struct{
+              type UpdatePackage
+              fields {
+                name @string"serde"
+              }
+            }
+          }
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_current
+    }
+
+    expect {
+      result @map{
+        log @string"1.0.0"
+        serde @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_reuse{slot "authored-resolver-slot"}
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

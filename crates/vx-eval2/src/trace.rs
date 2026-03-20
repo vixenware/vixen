@@ -20,6 +20,7 @@ pub enum EvalExprKind {
     Map,
     Fail,
     If,
+    Binary,
     StructLiteral,
     Field,
     Unsupported,
