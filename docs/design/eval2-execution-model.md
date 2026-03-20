@@ -169,12 +169,14 @@ The next step beyond that is a resumable session with scheduler-owned state:
 
 - the session owns pending completions
 - the session owns the current node table
-- the scheduler owns a ready queue and a blocked-pending table
+- the scheduler owns a ready queue, an in-flight table, and a blocked-pending
+  table
 - the ready queue can drive both a fresh entry evaluation and resumed work
 - the session can expose one scheduler step at a time instead of only `run()`
 - start-entry setup can queue ordinary expression work instead of evaluating the
   whole entry inline
-- the session can retain a completed-work log keyed by queued work records
+- the session can retain queued, in-flight, and completed work records under
+  stable work IDs
 - resumed work records can point back to the expression node that is runnable
 - node state can distinguish "blocked on pending" from "ready to resume"
 - ordinary child expressions can also become queued work in session mode, with
@@ -192,14 +194,25 @@ The next step beyond that is a resumable session with scheduler-owned state:
   - node record metadata
   - current node state
   - dependency edges
-  - queued and completed work
+  - queued, in-flight, and completed work
   - current pending tokens
 - the session can expose explicit checkpoints so an external debugger can own
   time-travel state instead of relying only on the session's private history
-- the session can prepare one ready work item from its current state, execute it
-  outside the session, and then apply the completion back later
-- completions can be rejected as stale if the session has advanced in the
-  meantime
+- the session can lease ready work exactly once from its current state, move it
+  into an explicit in-flight state, execute it outside the session, and then
+  apply the completion back later
+- prepared sibling work items can coexist in-flight at the same time
+- completions now merge back as deltas:
+  - completed-work outcome
+  - node-state updates
+  - newly queued work
+  - pending registrations
+  - trace events
+  instead of restoring a full session snapshot
+- completion ordering is explicit today: multiple sibling leases are allowed,
+  but completions must be applied in lease order or they are rejected
+- completions can be rejected as stale if the leased work is no longer
+  in-flight
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -228,6 +241,14 @@ whole body inline. Session mode now also queues ordinary child expressions and
 lets parent nodes block on child-node completion. But there is not yet a
 general node scheduler that can park and resume arbitrary work units
 independently of the recursive evaluator.
+
+Prepared work is now a real lease, not just a read-only peek plus checkpoint
+restore. Once leased, a work item leaves the ready queue and is visible as
+in-flight until its completion is merged or the session is rewound. The merge
+path is intentionally conservative today: deltas are applied back onto live
+session state, but multiple in-flight completions must still be committed in
+lease order. That keeps sibling fan-out possible without claiming a fully
+commutative parallel scheduler yet.
 
 The current frontier is deliberately uneven:
 
@@ -276,6 +297,8 @@ The current local-resume session is also useful in its own right:
 - it proves that results can move from pending to ready or poison
 - it proves that earlier ready work is not replayed just because a later node
   suspended
+- it proves that leased work is consumed exactly once and remains inspectable
+  while it is in flight
 - it gives a debugger/replay tool a step-by-step work log without scraping the
   raw trace stream
 - it gives the session a small "why am I blocked?" substrate by retaining
@@ -287,8 +310,9 @@ The current local-resume session is also useful in its own right:
 - it can hand those checkpoints to an external debugger, which keeps the
   door open for time-travel tooling outside the evaluator itself
 - it can hand a prepared work item to a worker thread and apply the completion
-  later, which is the missing seam between "single-threaded scheduler today"
-  and "real workers later"
+  later without overwriting unrelated live scheduler state, which is the
+  missing seam between "single-threaded scheduler today" and "real workers
+  later"
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 

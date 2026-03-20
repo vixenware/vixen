@@ -84,6 +84,7 @@ pub struct EvalCompletedWork {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalWorkState {
     Queued,
+    InFlight,
     Completed(EvalCompletedWorkOutcome),
 }
 
@@ -192,16 +193,34 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     args: Vec<Value>,
     runtime: &'runtime Runtime,
     place: String,
-    base_generation: u64,
-    checkpoint: EvalSessionCheckpoint,
+    lease_sequence: u64,
+    scheduler: EvalScheduler,
     record: ReadyTaskRecord,
 }
 
 pub struct EvalWorkCompletion {
-    base_generation: u64,
+    lease_sequence: u64,
     work: EvalQueuedWork,
-    step: EvalSessionStep,
-    checkpoint: EvalSessionCheckpoint,
+    outcome: EvalCompletedWorkOutcome,
+    delta: EvalSessionDelta,
+}
+
+#[derive(Debug, Clone)]
+struct EvalSessionDelta {
+    scheduler: EvalSchedulerDelta,
+    trace_events: Vec<EvalEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct EvalSchedulerDelta {
+    next_id: u64,
+    next_work_id: u64,
+    node_records: Vec<EvalNodeRecord>,
+    node_states: Vec<(EvalNodeId, EvalNodeState)>,
+    dependency_edges: Vec<EvalDependencyEdge>,
+    queued: Vec<ReadyTaskRecord>,
+    pending_resumes: Vec<(u64, EvalSuspension)>,
+    pending_kinds: Vec<(u64, PendingKind)>,
 }
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
@@ -280,7 +299,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         let snapshot = self.checkpoint();
 
-        let Some(prepared) = self.prepare_step() else {
+        let Some(prepared) = self.prepare_step_impl(false)? else {
             return Ok(match self.scheduler.pending_nodes().into_iter().next() {
                 Some(pending) => EvalSessionStep::Pending(pending),
                 None => EvalSessionStep::Idle,
@@ -288,7 +307,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         };
         let completion = prepared.execute()?;
         self.history.push(snapshot);
-        self.apply_completion(completion)
+        self.apply_completion_impl(completion, false)
     }
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
@@ -325,6 +344,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn queued_work(&self) -> Vec<EvalQueuedWork> {
         self.scheduler.queued_work()
+    }
+
+    pub fn in_flight_work(&self) -> Vec<EvalQueuedWork> {
+        self.scheduler.in_flight_work()
     }
 
     pub fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
@@ -376,39 +399,115 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.generation += 1;
     }
 
-    pub fn prepare_step(&self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
+    pub fn prepare_step(&mut self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
+        self.prepare_step_impl(true)
+            .expect("leasing prepared work should not fail")
+    }
+
+    fn prepare_step_impl(
+        &mut self,
+        record_history: bool,
+    ) -> Result<Option<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
         if self.completed.is_some() {
-            return None;
+            return Ok(None);
         }
-        let record = self.scheduler.peek_ready_task()?;
-        Some(EvalPreparedWork {
+        let snapshot = record_history.then(|| self.checkpoint());
+        let Some(lease) = self.scheduler.lease_ready_task()? else {
+            return Ok(None);
+        };
+        if let Some(snapshot) = snapshot {
+            self.history.push(snapshot);
+        }
+        self.generation += 1;
+        Ok(Some(EvalPreparedWork {
             source: self.source.clone(),
             source_id: self.source_id.clone(),
             entry: self.entry.clone(),
             args: self.args.clone(),
             runtime: self.runtime,
             place: self.place.clone(),
-            base_generation: self.generation,
-            checkpoint: self.checkpoint(),
-            record,
-        })
+            lease_sequence: lease.lease_sequence,
+            scheduler: self.scheduler.clone_for_lease(lease.namespace),
+            record: lease.record,
+        }))
     }
 
     pub fn apply_completion(
         &mut self,
         completion: EvalWorkCompletion,
     ) -> Result<EvalSessionStep, EvalError> {
-        if completion.base_generation != self.generation {
-            return Err(EvalError::new(
-                EvalErrorKind::Internal,
-                format!(
-                    "stale eval work completion: expected generation {}, got {}",
-                    self.generation, completion.base_generation
-                ),
-            ));
+        self.apply_completion_impl(completion, true)
+    }
+
+    fn apply_completion_impl(
+        &mut self,
+        completion: EvalWorkCompletion,
+        record_history: bool,
+    ) -> Result<EvalSessionStep, EvalError> {
+        self.scheduler
+            .assert_completion_order(completion.lease_sequence)?;
+        self.scheduler.validate_in_flight_task(
+            completion.work.id,
+            completion.lease_sequence,
+            &completion.work,
+        )?;
+        if record_history {
+            self.history.push(self.checkpoint());
         }
-        self.restore(completion.checkpoint);
-        Ok(completion.step)
+        let _leased = self.scheduler.take_in_flight_task(
+            completion.work.id,
+            completion.lease_sequence,
+            &completion.work,
+        )?;
+        self.trace.events.extend(completion.delta.trace_events);
+        self.scheduler.apply_delta(completion.delta.scheduler)?;
+        self.completed_work.push(EvalCompletedWork {
+            work: completion.work.clone(),
+            outcome: completion.outcome.clone(),
+        });
+        self.generation += 1;
+        match completion.outcome {
+            EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
+                Ok(EvalSessionStep::Progressed)
+            }
+            EvalCompletedWorkOutcome::Pending(pending) => Ok(EvalSessionStep::Pending(pending)),
+            EvalCompletedWorkOutcome::Ready(value) => {
+                if self
+                    .scheduler
+                    .resolve_child_dependency(completion.work.node_id, Ok(value.clone()))?
+                {
+                    Ok(EvalSessionStep::Progressed)
+                } else if !self.scheduler.queued_work().is_empty()
+                    || !self.scheduler.in_flight_work().is_empty()
+                {
+                    Ok(EvalSessionStep::Progressed)
+                } else {
+                    self.scheduler
+                        .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                    self.completed = Some(Ok(value.clone()));
+                    Ok(EvalSessionStep::Ready(value))
+                }
+            }
+            EvalCompletedWorkOutcome::Poison(error) => {
+                if self
+                    .scheduler
+                    .resolve_child_dependency(completion.work.node_id, Err(error.clone()))?
+                {
+                    Ok(EvalSessionStep::Progressed)
+                } else if !self.scheduler.queued_work().is_empty()
+                    || !self.scheduler.in_flight_work().is_empty()
+                {
+                    Ok(EvalSessionStep::Progressed)
+                } else {
+                    self.scheduler.record_node_state(
+                        ENTRY_WORK_NODE_ID,
+                        EvalNodeState::Poison(error.clone()),
+                    );
+                    self.completed = Some(Err(error.clone()));
+                    Ok(EvalSessionStep::Poison(error))
+                }
+            }
+        }
     }
 
     pub fn work_records(&self) -> Vec<EvalWorkRecord> {
@@ -427,6 +526,15 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 .map(|work| EvalWorkRecord {
                     work,
                     state: EvalWorkState::Queued,
+                }),
+        );
+        records.extend(
+            self.scheduler
+                .in_flight_work()
+                .into_iter()
+                .map(|work| EvalWorkRecord {
+                    work,
+                    state: EvalWorkState::InFlight,
                 }),
         );
         records.sort_by_key(|record| record.work.id);
@@ -481,8 +589,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
         &self.record.work
     }
 
-    pub fn base_generation(&self) -> u64 {
-        self.base_generation
+    pub fn lease_sequence(&self) -> u64 {
+        self.lease_sequence
     }
 
     pub fn execute(self) -> Result<EvalWorkCompletion, EvalError> {
@@ -493,25 +601,25 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             args,
             runtime,
             place,
-            base_generation,
-            checkpoint,
+            lease_sequence,
+            scheduler,
             record,
         } = self;
-        let (checkpoint, step) = execute_ready_task(
+        let (delta, outcome) = execute_ready_task(
             &source,
             &source_id,
             &entry,
             &args,
             runtime,
             &place,
-            checkpoint,
+            scheduler,
             record.clone(),
         )?;
         Ok(EvalWorkCompletion {
-            base_generation,
+            lease_sequence,
             work: record.work,
-            step,
-            checkpoint,
+            outcome,
+            delta,
         })
     }
 }
@@ -521,12 +629,12 @@ impl EvalWorkCompletion {
         &self.work
     }
 
-    pub fn step(&self) -> &EvalSessionStep {
-        &self.step
+    pub fn outcome(&self) -> &EvalCompletedWorkOutcome {
+        &self.outcome
     }
 
-    pub fn base_generation(&self) -> u64 {
-        self.base_generation
+    pub fn lease_sequence(&self) -> u64 {
+        self.lease_sequence
     }
 }
 
@@ -758,11 +866,15 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
 struct EvalScheduler {
     next_id: u64,
     next_work_id: u64,
+    next_lease_namespace: u64,
+    next_lease_sequence: u64,
+    lease_namespace: Option<LeaseNamespace>,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
     node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
     dependency_edges: Vec<EvalDependencyEdge>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
+    in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
     pending_kinds: BTreeMap<u64, PendingKind>,
 }
@@ -774,43 +886,67 @@ impl Default for EvalScheduler {
         Self {
             next_id: 1,
             next_work_id: 1,
+            next_lease_namespace: 1,
+            next_lease_sequence: 1,
+            lease_namespace: None,
             node_states: BTreeMap::new(),
             node_records: BTreeMap::new(),
             dependency_edges: Vec::new(),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
+            in_flight_tasks: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
             pending_kinds: BTreeMap::new(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadyTaskRecord {
     work: EvalQueuedWork,
     task: ReadyTask,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InFlightTaskRecord {
+    lease_sequence: u64,
+    record: ReadyTaskRecord,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeaseNamespace {
+    id: u64,
+    next_node_local: u64,
+    next_work_local: u64,
+}
+
 #[derive(Debug, Clone)]
+struct ReadyTaskLease {
+    lease_sequence: u64,
+    namespace: Option<u64>,
+    record: ReadyTaskRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ScheduledResume {
     suspension: EvalSuspension,
     result: Result<Value, EvalError>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ScheduledExpr {
     expr: ExprHandle,
     env: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ReadyTask {
     StartEntry,
     EvaluateExpr(ScheduledExpr),
     Resume(ScheduledResume),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EvalSuspension {
     resume_node: EvalNodeId,
     pending: PendingRef,
@@ -833,7 +969,7 @@ enum PendingKind {
     ChildDependency { dependency: EvalNodeId },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -1193,6 +1329,16 @@ fn resolve_stmt_handle(source_text: &str, handle: StmtHandle) -> Result<Stmt, Ev
 }
 
 impl EvalScheduler {
+    fn clone_for_lease(&self, namespace: Option<u64>) -> Self {
+        let mut cloned = self.clone();
+        cloned.lease_namespace = namespace.map(|id| LeaseNamespace {
+            id,
+            next_node_local: 1,
+            next_work_local: 1,
+        });
+        cloned
+    }
+
     fn dependency_edges(&self) -> &[EvalDependencyEdge] {
         &self.dependency_edges
     }
@@ -1218,6 +1364,13 @@ impl EvalScheduler {
         self.ready_queue
             .iter()
             .filter_map(|id| self.ready_tasks.get(id).map(|record| record.work.clone()))
+            .collect()
+    }
+
+    fn in_flight_work(&self) -> Vec<EvalQueuedWork> {
+        self.in_flight_tasks
+            .values()
+            .map(|record| record.record.work.clone())
             .collect()
     }
 
@@ -1258,9 +1411,15 @@ impl EvalScheduler {
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
-        let node_id = EvalNodeId(self.next_id);
-        self.next_id += 1;
-        node_id
+        if let Some(namespace) = &mut self.lease_namespace {
+            let node_id = EvalNodeId(lease_scoped_id(namespace.id, namespace.next_node_local));
+            namespace.next_node_local += 1;
+            node_id
+        } else {
+            let node_id = EvalNodeId(self.next_id);
+            self.next_id += 1;
+            node_id
+        }
     }
 
     fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
@@ -1423,24 +1582,160 @@ impl EvalScheduler {
             .insert(suspension.pending.node_id, suspension);
     }
 
-    fn peek_ready_task(&self) -> Option<ReadyTaskRecord> {
-        let work_id = *self.ready_queue.front()?;
-        self.ready_tasks.get(&work_id).cloned()
-    }
-
-    fn dequeue_ready_task(&mut self) -> Result<ReadyTaskRecord, EvalError> {
+    fn lease_ready_task(&mut self) -> Result<Option<ReadyTaskLease>, EvalError> {
         let Some(work_id) = self.ready_queue.pop_front() else {
+            return Ok(None);
+        };
+        let Some(record) = self.ready_tasks.remove(&work_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
-                "ready queue was empty while executing prepared work",
+                format!("ready task {work_id:?} was missing from scheduler state"),
             ));
         };
-        self.ready_tasks.remove(&work_id).ok_or_else(|| {
-            EvalError::new(
+        let lease_sequence = self.next_lease_sequence;
+        self.next_lease_sequence += 1;
+        let namespace = if self.in_flight_tasks.is_empty() {
+            None
+        } else {
+            let namespace = self.next_lease_namespace;
+            self.next_lease_namespace += 1;
+            Some(namespace)
+        };
+        self.in_flight_tasks.insert(
+            work_id,
+            InFlightTaskRecord {
+                lease_sequence,
+                record: record.clone(),
+            },
+        );
+        Ok(Some(ReadyTaskLease {
+            lease_sequence,
+            namespace,
+            record,
+        }))
+    }
+
+    fn assert_completion_order(&self, lease_sequence: u64) -> Result<(), EvalError> {
+        let Some(expected) = self
+            .in_flight_tasks
+            .values()
+            .map(|record| record.lease_sequence)
+            .min()
+        else {
+            return Err(EvalError::new(
                 EvalErrorKind::Internal,
-                format!("ready task {work_id:?} was missing from scheduler state"),
-            )
-        })
+                "stale eval work completion: no in-flight work remains",
+            ));
+        };
+        if expected != lease_sequence {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "out-of-order eval work completion: expected lease sequence {}, got {}",
+                    expected, lease_sequence
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn take_in_flight_task(
+        &mut self,
+        work_id: EvalWorkId,
+        lease_sequence: u64,
+        expected_work: &EvalQueuedWork,
+    ) -> Result<ReadyTaskRecord, EvalError> {
+        self.validate_in_flight_task(work_id, lease_sequence, expected_work)?;
+        let record = self
+            .in_flight_tasks
+            .remove(&work_id)
+            .expect("validated in-flight task should exist");
+        Ok(record.record)
+    }
+
+    fn validate_in_flight_task(
+        &self,
+        work_id: EvalWorkId,
+        lease_sequence: u64,
+        expected_work: &EvalQueuedWork,
+    ) -> Result<(), EvalError> {
+        let Some(record) = self.in_flight_tasks.get(&work_id) else {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("stale eval work completion for non-in-flight work {:?}", work_id),
+            ));
+        };
+        if record.lease_sequence != lease_sequence || record.record.work != *expected_work {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("stale eval work completion for {:?}", work_id),
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_delta(&mut self, delta: EvalSchedulerDelta) -> Result<(), EvalError> {
+        self.next_id = self.next_id.max(delta.next_id);
+        self.next_work_id = self.next_work_id.max(delta.next_work_id);
+        for record in delta.node_records {
+            match self.node_records.get(&record.node_id) {
+                Some(existing) if existing != &record => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("node record {:?} diverged during completion merge", record.node_id),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.node_records.insert(record.node_id, record);
+                }
+            }
+        }
+        self.dependency_edges.extend(delta.dependency_edges);
+        for (pending_id, kind) in delta.pending_kinds {
+            match self.pending_kinds.get(&pending_id) {
+                Some(existing) if existing != &kind => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("pending kind {} diverged during completion merge", pending_id),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_kinds.insert(pending_id, kind);
+                }
+            }
+        }
+        for (pending_id, suspension) in delta.pending_resumes {
+            match self.pending_resumes.get(&pending_id) {
+                Some(existing) if existing != &suspension => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("pending resume {} diverged during completion merge", pending_id),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.pending_resumes.insert(pending_id, suspension);
+                }
+            }
+        }
+        for (node_id, state) in delta.node_states {
+            self.node_states.insert(node_id, state);
+        }
+        for record in delta.queued {
+            if self.ready_tasks.contains_key(&record.work.id)
+                || self.in_flight_tasks.contains_key(&record.work.id)
+            {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("queued work {:?} already exists during completion merge", record.work.id),
+                ));
+            }
+            self.ready_queue.push_back(record.work.id);
+            self.ready_tasks.insert(record.work.id, record);
+        }
+        Ok(())
     }
 
     fn enqueue_ready_task(
@@ -1451,12 +1746,19 @@ impl EvalScheduler {
         pending: Option<PendingRef>,
     ) -> EvalQueuedWork {
         let work = EvalQueuedWork {
-            id: EvalWorkId(self.next_work_id),
+            id: EvalWorkId(if let Some(namespace) = &mut self.lease_namespace {
+                let work_id = lease_scoped_id(namespace.id, namespace.next_work_local);
+                namespace.next_work_local += 1;
+                work_id
+            } else {
+                let work_id = self.next_work_id;
+                self.next_work_id += 1;
+                work_id
+            }),
             kind,
             node_id,
             pending,
         };
-        self.next_work_id += 1;
         self.ready_queue.push_back(work.id);
         self.ready_tasks.insert(
             work.id,
@@ -1469,6 +1771,65 @@ impl EvalScheduler {
     }
 }
 
+fn lease_scoped_id(namespace: u64, local: u64) -> u64 {
+    const LEASE_FLAG: u64 = 1 << 63;
+    LEASE_FLAG | (namespace << 32) | local
+}
+
+impl EvalSchedulerDelta {
+    fn from_diff(before: &EvalScheduler, after: &EvalScheduler) -> Self {
+        let node_records = after
+            .node_records
+            .iter()
+            .filter_map(|(node_id, record)| {
+                (!matches!(before.node_records.get(node_id), Some(existing) if existing == record))
+                    .then(|| record.clone())
+            })
+            .collect();
+        let node_states = after
+            .node_states
+            .iter()
+            .filter_map(|(node_id, state)| {
+                (!matches!(before.node_states.get(node_id), Some(existing) if existing == state))
+                    .then(|| (*node_id, state.clone()))
+            })
+            .collect();
+        let dependency_edges = after.dependency_edges[before.dependency_edges.len()..].to_vec();
+        let queued = after
+            .ready_queue
+            .iter()
+            .skip(before.ready_queue.len())
+            .filter_map(|work_id| after.ready_tasks.get(work_id).cloned())
+            .collect();
+        let pending_resumes = after
+            .pending_resumes
+            .iter()
+            .filter_map(|(pending_id, suspension)| {
+                (!matches!(before.pending_resumes.get(pending_id), Some(existing) if existing == suspension))
+                    .then(|| (*pending_id, suspension.clone()))
+            })
+            .collect();
+        let pending_kinds = after
+            .pending_kinds
+            .iter()
+            .filter_map(|(pending_id, kind)| {
+                (!matches!(before.pending_kinds.get(pending_id), Some(existing) if existing == kind))
+                    .then(|| (*pending_id, *kind))
+            })
+            .collect();
+        Self {
+            next_id: after.next_id,
+            next_work_id: after.next_work_id,
+            node_records,
+            node_states,
+            dependency_edges,
+            queued,
+            pending_resumes,
+            pending_kinds,
+        }
+    }
+}
+
 fn execute_ready_task(
     source_text: &str,
     source_id: &str,
@@ -1476,26 +1837,12 @@ fn execute_ready_task(
     args: &[Value],
     runtime: &impl RuntimeHooks,
     place: &str,
-    checkpoint: EvalSessionCheckpoint,
+    scheduler: EvalScheduler,
     record: ReadyTaskRecord,
-) -> Result<(EvalSessionCheckpoint, EvalSessionStep), EvalError> {
-    let EvalSessionCheckpoint {
-        mut scheduler,
-        mut trace,
-        mut completed_work,
-        mut completed,
-    } = checkpoint;
-    let dequeued = scheduler.dequeue_ready_task()?;
-    if dequeued.work != record.work {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            format!(
-                "prepared work mismatch: expected {:?}, dequeued {:?}",
-                record.work, dequeued.work
-            ),
-        ));
-    }
-
+) -> Result<(EvalSessionDelta, EvalCompletedWorkOutcome), EvalError> {
+    let before = scheduler;
+    let mut after = before.clone();
+    let mut trace = EvalTrace::default();
     let source = SourceContext::new(source_id.to_string(), source_text);
     let mut state = EvalState::new(
         source_text,
@@ -1503,12 +1850,12 @@ fn execute_ready_task(
         runtime,
         place,
         &mut trace,
-        &mut scheduler,
-        Some(dequeued.work.id),
+        &mut after,
+        Some(record.work.id),
         true,
     );
 
-    let step = match dequeued.task {
+    let outcome = match record.task {
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, source_text, entry, args)?;
             let node_id = state.alloc_node_id();
@@ -1546,109 +1893,82 @@ fn execute_ready_task(
                     pending: None,
                 },
             );
-            completed_work.push(EvalCompletedWork {
-                work: dequeued.work,
-                outcome: EvalCompletedWorkOutcome::Progressed,
-            });
-            return Ok((
-                EvalSessionCheckpoint {
-                    scheduler,
-                    trace,
-                    completed_work,
-                    completed,
-                },
-                EvalSessionStep::Progressed,
-            ));
+            EvalCompletedWorkOutcome::Progressed
         }
         ReadyTask::EvaluateExpr(scheduled) => {
             let mut env = scheduled.env;
             let expr = resolve_expr_handle(state.source_text, scheduled.expr)?;
-            eval_expr_with_node_id(&mut state, dequeued.work.node_id, &expr, &mut env)
-        }
-        ReadyTask::Resume(ready) => resume_suspension(&mut state, ready.suspension, ready.result),
-    };
-
-    let step = match step {
-        Ok(EvalStep::Ready(value)) => {
-            completed_work.push(EvalCompletedWork {
-                work: dequeued.work.clone(),
-                outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
-            });
-            if state
-                .scheduler
-                .resolve_child_dependency(dequeued.work.node_id, Ok(value.clone()))?
-            {
-                EvalSessionStep::Progressed
-            } else {
-                state
-                    .scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
-                completed = Some(Ok(value.clone()));
-                EvalSessionStep::Ready(value)
+            match eval_expr_with_node_id(&mut state, record.work.node_id, &expr, &mut env) {
+                Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
+                Ok(EvalStep::Suspended(suspension)) => {
+                    let pending = suspension.pending.clone();
+                    state.scheduler.register_suspension(suspension);
+                    match state.scheduler.pending_kind(&pending) {
+                        Some(PendingKind::External) => {
+                            state.scheduler.record_node_state(
+                                ENTRY_WORK_NODE_ID,
+                                EvalNodeState::Pending(pending.clone()),
+                            );
+                            EvalCompletedWorkOutcome::Pending(pending)
+                        }
+                        Some(PendingKind::ChildDependency { dependency }) => {
+                            state.scheduler.record_node_state(
+                                record.work.node_id,
+                                EvalNodeState::BlockedOnNode { dependency },
+                            );
+                            EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                        }
+                        None => {
+                            return Err(EvalError::new(
+                                EvalErrorKind::Internal,
+                                format!("pending node {} has no registered kind", pending.node_id),
+                            ));
+                        }
+                    }
+                }
+                Err(error) => EvalCompletedWorkOutcome::Poison(error),
             }
         }
-        Ok(EvalStep::Suspended(suspension)) => {
-            let pending = suspension.pending.clone();
-            state.scheduler.register_suspension(suspension);
-            match state.scheduler.pending_kind(&pending) {
-                Some(PendingKind::External) => {
-                    state.scheduler.record_node_state(
-                        ENTRY_WORK_NODE_ID,
-                        EvalNodeState::Pending(pending.clone()),
-                    );
-                    completed_work.push(EvalCompletedWork {
-                        work: dequeued.work,
-                        outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
-                    });
-                    EvalSessionStep::Pending(pending)
+        ReadyTask::Resume(ready) => {
+            match resume_suspension(&mut state, ready.suspension, ready.result) {
+                Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
+                Ok(EvalStep::Suspended(suspension)) => {
+                    let pending = suspension.pending.clone();
+                    state.scheduler.register_suspension(suspension);
+                    match state.scheduler.pending_kind(&pending) {
+                        Some(PendingKind::External) => {
+                            state.scheduler.record_node_state(
+                                ENTRY_WORK_NODE_ID,
+                                EvalNodeState::Pending(pending.clone()),
+                            );
+                            EvalCompletedWorkOutcome::Pending(pending)
+                        }
+                        Some(PendingKind::ChildDependency { dependency }) => {
+                            state.scheduler.record_node_state(
+                                record.work.node_id,
+                                EvalNodeState::BlockedOnNode { dependency },
+                            );
+                            EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                        }
+                        None => {
+                            return Err(EvalError::new(
+                                EvalErrorKind::Internal,
+                                format!("pending node {} has no registered kind", pending.node_id),
+                            ));
+                        }
+                    }
                 }
-                Some(PendingKind::ChildDependency { dependency }) => {
-                    state.scheduler.record_node_state(
-                        dequeued.work.node_id,
-                        EvalNodeState::BlockedOnNode { dependency },
-                    );
-                    completed_work.push(EvalCompletedWork {
-                        work: dequeued.work,
-                        outcome: EvalCompletedWorkOutcome::BlockedOnNode(dependency),
-                    });
-                    EvalSessionStep::Progressed
-                }
-                None => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("pending node {} has no registered kind", pending.node_id),
-                    ));
-                }
-            }
-        }
-        Err(error) => {
-            completed_work.push(EvalCompletedWork {
-                work: dequeued.work.clone(),
-                outcome: EvalCompletedWorkOutcome::Poison(error.clone()),
-            });
-            if state
-                .scheduler
-                .resolve_child_dependency(dequeued.work.node_id, Err(error.clone()))?
-            {
-                EvalSessionStep::Progressed
-            } else {
-                state
-                    .scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
-                completed = Some(Err(error.clone()));
-                EvalSessionStep::Poison(error)
+                Err(error) => EvalCompletedWorkOutcome::Poison(error),
             }
         }
     };
 
     Ok((
-        EvalSessionCheckpoint {
-            scheduler,
-            trace,
-            completed_work,
-            completed,
+        EvalSessionDelta {
+            scheduler: EvalSchedulerDelta::from_diff(&before, &after),
+            trace_events: trace.events,
         },
-        step,
+        outcome,
     ))
 }
 
