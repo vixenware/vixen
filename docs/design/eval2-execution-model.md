@@ -59,6 +59,7 @@ The minimum useful slice is:
 3. explicit parent-child relationships in those events
 4. trace preservation even when evaluation ends in poison
 5. thread-ready interfaces for runtime calls and event delivery
+6. explicit dependency edges and pending-node registration
 
 ## First slice
 
@@ -129,6 +130,43 @@ The first concrete mechanism here is a channel-backed event sink. That gives us
 one real message-passing path immediately, instead of postponing concurrency
 pressure until after the evaluator API is already set in stone.
 
+### Dependency edges
+
+Parent-child nesting in the trace is useful, but it is not enough on its own to
+answer "why did this parent block or rerun?"
+
+So eval2 should also emit explicit dependency-edge events when one expression
+demands another child expression. This is deliberately redundant with the raw
+ call tree:
+
+- the child node still emits its own enter/exit events
+- the parent also emits `depend_on(child_id)`
+
+That redundancy is useful for later explanation tooling, because "this node
+depends on that node" should be queryable without reconstructing it from stack
+shape alone.
+
+### Pending nodes
+
+`Resolution::Pending` already existed as a public result kind, but the engine
+did not actually produce it for ordinary evaluation.
+
+The next substrate step is to let runtime calls return:
+
+- unsupported
+- ready value
+- pending description
+
+The evaluator then:
+
+- allocates the pending reference itself
+- registers that pending node in the trace
+- returns `Resolution::Pending(...)`
+
+This is still not a resumable scheduler. It is the smallest "scheduler-owned
+pending node" shape that keeps the allocator and identity source inside the
+evaluator rather than inside the runtime hook.
+
 ## What this does not do yet
 
 This slice does not yet provide:
@@ -142,6 +180,8 @@ This slice does not yet provide:
 - a debugger UI
 
 It is still a recursive single-threaded evaluator with a structured event sink.
+Some runtime calls can now surface `Pending`, but there is not yet a scheduler
+that can later resume those pending nodes.
 
 ## Why this is still useful
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::{CrossingPolicy, EvalErrorKind, ReuseClass, SourceSpan};
+use crate::{CrossingPolicy, EvalErrorKind, PendingRef, ReuseClass, SourceSpan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalNodeId(pub u64);
@@ -29,6 +29,9 @@ pub enum EvalEventKind {
     BindArgument {
         label: Arc<str>,
     },
+    DependOn {
+        dependency: EvalNodeId,
+    },
     EnterExpr {
         kind: EvalExprKind,
     },
@@ -36,9 +39,15 @@ pub enum EvalEventKind {
         reuse: ReuseClass,
         crossing: CrossingPolicy,
     },
+    ExitPending {
+        pending: PendingRef,
+    },
     ExitPoison {
         kind: EvalErrorKind,
         message: Arc<str>,
+    },
+    RegisterPending {
+        pending: PendingRef,
     },
     RuntimeCallStarted {
         callee: Arc<str>,
@@ -47,6 +56,9 @@ pub enum EvalEventKind {
     RuntimeCallFinishedReady {
         reuse: ReuseClass,
         crossing: CrossingPolicy,
+    },
+    RuntimeCallFinishedPending {
+        pending: PendingRef,
     },
     RuntimeCallFinishedPoison {
         kind: EvalErrorKind,

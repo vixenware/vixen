@@ -15,8 +15,9 @@ use roam_types::MessageFamily;
 use tempfile::TempDir;
 use vx_eval2::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, ProjectionStep, Provenance, ProvenanceRoot,
-    Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind, SourcePoint, SourceSpan, Value,
-    ValueRep, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
+    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourcePoint,
+    SourceSpan, Value, ValueRep, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
 };
 use vx_eval2_proto::{
@@ -233,7 +234,7 @@ impl RuntimeHooks for FixtureRuntime {
         callee: &str,
         args: &[Value],
         source: &SourceSpan,
-    ) -> Result<Option<Value>, EvalError> {
+    ) -> Result<RuntimeCallOutcome, EvalError> {
         let host = self.host(place)?;
         match callee {
             "host_os" => {
@@ -243,7 +244,7 @@ impl RuntimeHooks for FixtureRuntime {
                         "host_os() does not take any arguments",
                     ));
                 }
-                Ok(Some(
+                Ok(RuntimeCallOutcome::Ready(
                     Value::string(host.os.clone())
                         .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
                         .with_reuse(ReuseClass::Observed)
@@ -287,7 +288,7 @@ impl RuntimeHooks for FixtureRuntime {
                         identity: self.bundle_identity(place, bundle_name)?,
                     });
                 }
-                Ok(Some(value))
+                Ok(RuntimeCallOutcome::Ready(value))
             }
             "host_read" => {
                 if args.len() != 1 {
@@ -332,7 +333,7 @@ impl RuntimeHooks for FixtureRuntime {
                         content_hash,
                     });
                 }
-                Ok(Some(value))
+                Ok(RuntimeCallOutcome::Ready(value))
             }
             "host_hash" => {
                 if args.len() != 1 {
@@ -377,9 +378,9 @@ impl RuntimeHooks for FixtureRuntime {
                         content_hash,
                     });
                 }
-                Ok(Some(value))
+                Ok(RuntimeCallOutcome::Ready(value))
             }
-            _ => Ok(None),
+            _ => Ok(RuntimeCallOutcome::Unsupported),
         }
     }
 }

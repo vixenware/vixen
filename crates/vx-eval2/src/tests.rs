@@ -2,8 +2,8 @@ use std::thread;
 
 use crate::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalTrace,
-    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind,
-    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome,
+    RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
@@ -198,15 +198,18 @@ impl RuntimeHooks for TestRuntime {
         callee: &str,
         args: &[Value],
         source: &SourceSpan,
-    ) -> Result<Option<Value>, EvalError> {
+    ) -> Result<RuntimeCallOutcome, EvalError> {
         match (place, callee, args) {
-            ("win", "host_os", []) => Ok(Some(
+            ("win", "host_os", []) => Ok(RuntimeCallOutcome::Ready(
                 Value::string("windows")
                     .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
                     .with_reuse(ReuseClass::Observed)
                     .with_crossing(CrossingPolicy::ByValue),
             )),
-            _ => Ok(None),
+            ("win", "host_wait", []) => Ok(RuntimeCallOutcome::Pending {
+                description: "waiting for remote host observation".into(),
+            }),
+            _ => Ok(RuntimeCallOutcome::Unsupported),
         }
     }
 }
@@ -241,6 +244,12 @@ fn traced_runtime_calls_emit_start_and_finish_events() {
                 argc: 0,
             }
     }));
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EvalEventKind::DependOn { .. }))
+    );
     assert!(trace.events.iter().any(|event| {
         event.kind
             == EvalEventKind::RuntimeCallFinishedReady {
@@ -290,6 +299,46 @@ fn traced_fail_expression_emits_poison_exit() {
             == EvalEventKind::ExitPoison {
                 kind: EvalErrorKind::UserFail,
                 message: "boom".into(),
+            }
+    }));
+}
+
+#[test]
+fn traced_runtime_calls_can_produce_pending_nodes() {
+    let (resolution, trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
+        "fn build() { host_wait() }",
+        "trace-pending",
+        "build",
+        &[],
+        &TestRuntime,
+        "win",
+    )
+    .expect("evaluate traced pending runtime call");
+
+    let Resolution::Pending(pending) = resolution else {
+        panic!("expected pending resolution, got {resolution:?}");
+    };
+    assert_eq!(
+        pending.description.as_ref(),
+        "waiting for remote host observation"
+    );
+
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::RegisterPending {
+                pending: pending.clone(),
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::RuntimeCallFinishedPending {
+                pending: pending.clone(),
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::ExitPending {
+                pending: pending.clone(),
             }
     }));
 }

@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use vx_parser::{
-    ArrayItem, AstNode, CallExpr, Expr, FnDecl, Item, LetStmt, LineIndex as ParserLineIndex,
-    LiteralExpr, NameRefExpr, Parameter, SourceFile, Stmt, StructLiteralExpr, SyntaxToken,
-    TextRange, TextSize, trimmed_range,
+    ArrayExpr, ArrayItem, AstNode, BlockExpr, CallExpr, Expr, FailExpr, FieldExpr, FnDecl, IfExpr,
+    Item, LetStmt, LineIndex as ParserLineIndex, LiteralExpr, MapExpr, NameRefExpr, Parameter,
+    SourceFile, Stmt, StructLiteralExpr, SyntaxToken, TextRange, TextSize, trimmed_range,
 };
 
 use crate::{
     ByteOffset, ColumnIndex, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind,
-    EvalEventSink, EvalExprKind, EvalNodeId, EvalTrace, LineIndex, NullEvalEventSink,
+    EvalEventSink, EvalExprKind, EvalNodeId, EvalTrace, LineIndex, NullEvalEventSink, PendingRef,
     ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SourcePoint, SourceSpan,
     StructValue, Value, ValueMeta, ValueRep,
 };
@@ -23,7 +23,14 @@ pub trait RuntimeHooks: Send + Sync {
         callee: &str,
         args: &[Value],
         source: &SourceSpan,
-    ) -> Result<Option<Value>, EvalError>;
+    ) -> Result<RuntimeCallOutcome, EvalError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCallOutcome {
+    Unsupported,
+    Ready(Value),
+    Pending { description: Arc<str> },
 }
 
 struct NoRuntime;
@@ -35,8 +42,8 @@ impl RuntimeHooks for NoRuntime {
         _callee: &str,
         _args: &[Value],
         _source: &SourceSpan,
-    ) -> Result<Option<Value>, EvalError> {
-        Ok(None)
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        Ok(RuntimeCallOutcome::Unsupported)
     }
 }
 
@@ -229,7 +236,7 @@ pub fn eval_source_entry_at_place_with_args_with_source_id_with_sink(
     })?;
     let mut state = EvalState::new(&source, runtime, place, sink);
     let mut env = bind_arguments(&mut state, &parameters, args)?;
-    Ok(Resolution::Ready(eval_expr(&mut state, &body, &mut env)?))
+    Ok(eval_expr(&mut state, &body, &mut env)?.into_resolution())
 }
 
 struct SourceContext {
@@ -242,8 +249,19 @@ struct EvalState<'a, Runtime, Sink> {
     runtime: &'a Runtime,
     place: &'a str,
     sink: &'a mut Sink,
-    next_node_id: u64,
+    scheduler: EvalScheduler,
     stack: Vec<EvalNodeId>,
+}
+
+#[derive(Default)]
+struct EvalScheduler {
+    next_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvalStep {
+    Ready(Value),
+    Pending(PendingRef),
 }
 
 impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink> {
@@ -258,15 +276,17 @@ impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink
             runtime,
             place,
             sink,
-            next_node_id: 1,
+            scheduler: EvalScheduler { next_id: 1 },
             stack: Vec::new(),
         }
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
-        let node_id = EvalNodeId(self.next_node_id);
-        self.next_node_id += 1;
-        node_id
+        self.scheduler.alloc_node_id()
+    }
+
+    fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
+        self.scheduler.alloc_pending(description)
     }
 
     fn current_parent(&self) -> Option<EvalNodeId> {
@@ -287,6 +307,40 @@ impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink
             source,
             kind,
         });
+    }
+
+    fn emit_current_dependency(&mut self, dependency: EvalNodeId, source: Option<SourceSpan>) {
+        if let Some(node_id) = self.current_parent() {
+            let parent_id = self.stack.iter().rev().nth(1).copied();
+            self.emit(
+                node_id,
+                parent_id,
+                source,
+                EvalEventKind::DependOn { dependency },
+            );
+        }
+    }
+}
+
+impl EvalScheduler {
+    fn alloc_node_id(&mut self) -> EvalNodeId {
+        let node_id = EvalNodeId(self.next_id);
+        self.next_id += 1;
+        node_id
+    }
+
+    fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
+        let pending_id = self.alloc_node_id();
+        PendingRef::new(pending_id.0, description)
+    }
+}
+
+impl EvalStep {
+    fn into_resolution(self) -> Resolution {
+        match self {
+            Self::Ready(value) => Resolution::Ready(value),
+            Self::Pending(pending) => Resolution::Pending(pending),
+        }
     }
 }
 
@@ -383,8 +437,17 @@ fn eval_expr(
     state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
-) -> Result<Value, EvalError> {
+) -> Result<EvalStep, EvalError> {
     let node_id = state.alloc_node_id();
+    eval_expr_with_node_id(state, node_id, expr, env)
+}
+
+fn eval_expr_with_node_id(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    expr: &Expr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
     let parent_id = state.current_parent();
     state.emit(
         node_id,
@@ -397,142 +460,20 @@ fn eval_expr(
     state.stack.push(node_id);
 
     let result = match expr {
-        Expr::Block(block) => {
-            let mut scope = env.clone();
-            let mut last = Value::unit();
-            for statement in block.statements() {
-                match statement {
-                    Stmt::Let(let_stmt) => eval_let(state, &let_stmt, &mut scope)?,
-                    Stmt::Expr(expr) => {
-                        last = eval_expr(state, &expr, &mut scope)?;
-                    }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unsupported block statement: {other:?}"),
-                        ));
-                    }
-                }
-            }
-            Ok(last)
-        }
-        Expr::Literal(literal) => eval_literal(state.source, literal),
+        Expr::Block(block) => eval_block(state, block, env),
+        Expr::Literal(literal) => eval_literal(state.source, literal).map(EvalStep::Ready),
         Expr::Paren(paren) => match paren.expr() {
-            Some(inner) => eval_expr(state, &inner, env),
-            None => Ok(Value::unit()),
+            Some(inner) => eval_child_expr(state, &inner, env),
+            None => Ok(EvalStep::Ready(Value::unit())),
         },
-        Expr::NameRef(name_ref) => eval_name_ref(name_ref, env),
+        Expr::NameRef(name_ref) => eval_name_ref(name_ref, env).map(EvalStep::Ready),
         Expr::Call(call) => eval_call(state, call, env),
-        Expr::Array(array) => {
-            let mut items = Vec::new();
-            for item in array.items() {
-                match item {
-                    ArrayItem::Expr(expr) => items.push(eval_expr(state, &expr, env)?),
-                    ArrayItem::Spread(_) => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            "array spread is not supported yet",
-                        ));
-                    }
-                }
-            }
-            let provenance = Provenance::literal(state.source.span_for_node(array));
-            let meta = aggregate_child_meta(provenance, items.iter());
-            Ok(Value::array(items).with_meta(meta))
-        }
-        Expr::Map(map) => {
-            let mut entries = Vec::new();
-            for entry in map.entries() {
-                let key_expr = entry.key().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "map entry has no explicit key")
-                })?;
-                let key = eval_expr(state, &key_expr, env)?;
-                let value_expr = entry.value().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "map entry has no value")
-                })?;
-                let value = eval_expr(state, &value_expr, env)?;
-                entries.push((key, value));
-            }
-            let provenance = Provenance::literal(state.source.span_for_node(map));
-            let meta = aggregate_child_meta(
-                provenance,
-                entries.iter().flat_map(|(key, value)| [key, value]),
-            );
-            Ok(Value::map(entries).with_meta(meta))
-        }
-        Expr::Fail(fail) => {
-            let message = eval_expr(
-                state,
-                &fail.message().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
-                })?,
-                env,
-            )?;
-            let ValueRep::String(message) = message.rep else {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    "fail message must evaluate to String",
-                ));
-            };
-            Err(EvalError::new(EvalErrorKind::UserFail, message.to_string()))
-        }
-        Expr::If(if_expr) => {
-            let condition = eval_expr(
-                state,
-                &if_expr.condition().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
-                })?,
-                env,
-            )?;
-            let ValueRep::Bool(value) = condition.rep else {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    "if condition must evaluate to Bool",
-                ));
-            };
-            let branch = if value {
-                if_expr.then_branch()
-            } else {
-                if_expr.else_branch()
-            }
-            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
-            eval_expr(state, &branch, env)
-        }
+        Expr::Array(array) => eval_array(state, array, env),
+        Expr::Map(map) => eval_map(state, map, env),
+        Expr::Fail(fail) => eval_fail(state, fail, env),
+        Expr::If(if_expr) => eval_if(state, if_expr, env),
         Expr::StructLiteral(struct_literal) => eval_struct_literal(state, struct_literal, env),
-        Expr::Field(field) => {
-            let receiver = eval_expr(
-                state,
-                &field.receiver().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
-                })?,
-                env,
-            )?;
-            let field_name = field
-                .field_name()
-                .map(|name| name.text().to_string())
-                .ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "field expression has no field name",
-                    )
-                })?;
-            let ValueRep::Struct(StructValue { fields, .. }) = &receiver.rep else {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    format!("cannot project field {field_name} from non-struct value"),
-                ));
-            };
-            let value = fields
-                .iter()
-                .find_map(|(name, value)| (name.as_ref() == field_name).then(|| value.clone()))
-                .ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::TypeError,
-                        format!("struct field {field_name} was not found"),
-                    )
-                })?;
-            Ok(value.project(ProjectionStep::Field(field_name.into())))
-        }
+        Expr::Field(field) => eval_field(state, field, env),
         other => Err(EvalError::new(
             EvalErrorKind::Internal,
             format!("unsupported expression: {other:?}"),
@@ -542,13 +483,21 @@ fn eval_expr(
     let popped = state.stack.pop();
     debug_assert_eq!(popped, Some(node_id));
     match &result {
-        Ok(value) => state.emit(
+        Ok(EvalStep::Ready(value)) => state.emit(
             node_id,
             parent_id,
             None,
             EvalEventKind::ExitReady {
                 reuse: value.meta.reuse.clone(),
                 crossing: value.meta.crossing.clone(),
+            },
+        ),
+        Ok(EvalStep::Pending(pending)) => state.emit(
+            node_id,
+            parent_id,
+            None,
+            EvalEventKind::ExitPending {
+                pending: pending.clone(),
             },
         ),
         Err(error) => state.emit(
@@ -565,11 +514,21 @@ fn eval_expr(
     result
 }
 
+fn eval_child_expr(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    expr: &Expr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let child_id = state.alloc_node_id();
+    state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
+    eval_expr_with_node_id(state, child_id, expr, env)
+}
+
 fn eval_call(
     state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
     env: &mut BTreeMap<String, Value>,
-) -> Result<Value, EvalError> {
+) -> Result<EvalStep, EvalError> {
     let callee = call
         .callee()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
@@ -583,11 +542,13 @@ fn eval_call(
         .token()
         .map(|token| token.text().to_string())
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
-    let args = call
-        .positional_args()
-        .into_iter()
-        .map(|arg| eval_expr(state, &arg, env))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut args = Vec::new();
+    for arg in call.positional_args() {
+        match eval_child_expr(state, &arg, env)? {
+            EvalStep::Ready(value) => args.push(value),
+            EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+        }
+    }
     let call_source = state.source.span_for_node(call);
     let node_id = state
         .stack
@@ -604,58 +565,84 @@ fn eval_call(
             argc: args.len() as u32,
         },
     );
-    if let Some(value) = state
+    match state
         .runtime
         .call(state.place, &callee_name, &args, &call_source)?
     {
-        state.emit(
-            node_id,
-            parent_id,
-            Some(call_source),
-            EvalEventKind::RuntimeCallFinishedReady {
-                reuse: value.meta.reuse.clone(),
-                crossing: value.meta.crossing.clone(),
-            },
-        );
-        return Ok(value);
+        RuntimeCallOutcome::Ready(value) => {
+            state.emit(
+                node_id,
+                parent_id,
+                Some(call_source),
+                EvalEventKind::RuntimeCallFinishedReady {
+                    reuse: value.meta.reuse.clone(),
+                    crossing: value.meta.crossing.clone(),
+                },
+            );
+            Ok(EvalStep::Ready(value))
+        }
+        RuntimeCallOutcome::Pending { description } => {
+            let pending = state.alloc_pending(description);
+            state.emit(
+                node_id,
+                parent_id,
+                Some(call_source.clone()),
+                EvalEventKind::RegisterPending {
+                    pending: pending.clone(),
+                },
+            );
+            state.emit(
+                node_id,
+                parent_id,
+                Some(call_source),
+                EvalEventKind::RuntimeCallFinishedPending {
+                    pending: pending.clone(),
+                },
+            );
+            Ok(EvalStep::Pending(pending))
+        }
+        RuntimeCallOutcome::Unsupported => {
+            state.emit(
+                node_id,
+                parent_id,
+                Some(call_source),
+                EvalEventKind::RuntimeCallFinishedPoison {
+                    kind: EvalErrorKind::Internal,
+                    message: Arc::from(format!("call target {callee_name} is not supported yet")),
+                },
+            );
+            Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("call target {callee_name} is not supported yet"),
+            ))
+        }
     }
-    state.emit(
-        node_id,
-        parent_id,
-        Some(call_source),
-        EvalEventKind::RuntimeCallFinishedPoison {
-            kind: EvalErrorKind::Internal,
-            message: Arc::from(format!("call target {callee_name} is not supported yet")),
-        },
-    );
-    Err(EvalError::new(
-        EvalErrorKind::Internal,
-        format!("call target {callee_name} is not supported yet"),
-    ))
 }
 
 fn eval_let(
     state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     let_stmt: &LetStmt,
     env: &mut BTreeMap<String, Value>,
-) -> Result<(), EvalError> {
+) -> Result<Option<PendingRef>, EvalError> {
     let name_token = let_stmt
         .name()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "let statement has no name"))?;
     let name = name_token.text().to_string();
-    let value = eval_expr(
+    let value = match eval_child_expr(
         state,
         &let_stmt
             .expr()
             .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "let statement has no value"))?,
         env,
-    )?
-    .with_provenance(Provenance::binding(
-        state.source.span_for_token(&name_token),
-        name.clone(),
-    ));
+    )? {
+        EvalStep::Ready(value) => value.with_provenance(Provenance::binding(
+            state.source.span_for_token(&name_token),
+            name.clone(),
+        )),
+        EvalStep::Pending(pending) => return Ok(Some(pending)),
+    };
     env.insert(name, value);
-    Ok(())
+    Ok(None)
 }
 
 fn eval_name_ref(
@@ -678,7 +665,7 @@ fn eval_struct_literal(
     state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     struct_literal: &StructLiteralExpr,
     env: &mut BTreeMap<String, Value>,
-) -> Result<Value, EvalError> {
+) -> Result<EvalStep, EvalError> {
     let type_name = struct_literal
         .name()
         .map(|name| Arc::<str>::from(name.text()))
@@ -695,18 +682,206 @@ fn eval_struct_literal(
                     EvalError::new(EvalErrorKind::Internal, "struct field has no name")
                 })?,
         );
-        let value = eval_expr(
+        let value = match eval_child_expr(
             state,
             &field.expr().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "struct field has no value")
             })?,
             env,
-        )?;
+        )? {
+            EvalStep::Ready(value) => value,
+            EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+        };
         fields.push((name, value));
     }
     let provenance = Provenance::literal(state.source.span_for_node(struct_literal));
     let meta = aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
-    Ok(Value::structure(type_name, fields).with_meta(meta))
+    Ok(EvalStep::Ready(
+        Value::structure(type_name, fields).with_meta(meta),
+    ))
+}
+
+fn eval_block(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    block: &BlockExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let mut scope = env.clone();
+    let mut last = Value::unit();
+    for statement in block.statements() {
+        match statement {
+            Stmt::Let(let_stmt) => {
+                if let Some(pending) = eval_let(state, &let_stmt, &mut scope)? {
+                    return Ok(EvalStep::Pending(pending));
+                }
+            }
+            Stmt::Expr(expr) => match eval_child_expr(state, &expr, &mut scope)? {
+                EvalStep::Ready(value) => last = value,
+                EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+            },
+            other => {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("unsupported block statement: {other:?}"),
+                ));
+            }
+        }
+    }
+    Ok(EvalStep::Ready(last))
+}
+
+fn eval_array(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    array: &ArrayExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let mut items = Vec::new();
+    for item in array.items() {
+        match item {
+            ArrayItem::Expr(expr) => match eval_child_expr(state, &expr, env)? {
+                EvalStep::Ready(value) => items.push(value),
+                EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+            },
+            ArrayItem::Spread(_) => {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "array spread is not supported yet",
+                ));
+            }
+        }
+    }
+    let provenance = Provenance::literal(state.source.span_for_node(array));
+    let meta = aggregate_child_meta(provenance, items.iter());
+    Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+}
+
+fn eval_map(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    map: &MapExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let mut entries = Vec::new();
+    for entry in map.entries() {
+        let key_expr = entry.key().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "map entry has no explicit key")
+        })?;
+        let key = match eval_child_expr(state, &key_expr, env)? {
+            EvalStep::Ready(value) => value,
+            EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+        };
+        let value_expr = entry
+            .value()
+            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "map entry has no value"))?;
+        let value = match eval_child_expr(state, &value_expr, env)? {
+            EvalStep::Ready(value) => value,
+            EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+        };
+        entries.push((key, value));
+    }
+    let provenance = Provenance::literal(state.source.span_for_node(map));
+    let meta = aggregate_child_meta(
+        provenance,
+        entries.iter().flat_map(|(key, value)| [key, value]),
+    );
+    Ok(EvalStep::Ready(Value::map(entries).with_meta(meta)))
+}
+
+fn eval_fail(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    fail: &FailExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let message = match eval_child_expr(
+        state,
+        &fail.message().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
+        })?,
+        env,
+    )? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+    };
+    let ValueRep::String(message) = message.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "fail message must evaluate to String",
+        ));
+    };
+    Err(EvalError::new(EvalErrorKind::UserFail, message.to_string()))
+}
+
+fn eval_if(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    if_expr: &IfExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let condition = match eval_child_expr(
+        state,
+        &if_expr.condition().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
+        })?,
+        env,
+    )? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+    };
+    let ValueRep::Bool(value) = condition.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "if condition must evaluate to Bool",
+        ));
+    };
+    let branch = if value {
+        if_expr.then_branch()
+    } else {
+        if_expr.else_branch()
+    }
+    .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
+    eval_child_expr(state, &branch, env)
+}
+
+fn eval_field(
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    field: &FieldExpr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let receiver = match eval_child_expr(
+        state,
+        &field.receiver().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
+        })?,
+        env,
+    )? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Pending(pending) => return Ok(EvalStep::Pending(pending)),
+    };
+    let field_name = field
+        .field_name()
+        .map(|name| name.text().to_string())
+        .ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "field expression has no field name",
+            )
+        })?;
+    let ValueRep::Struct(StructValue { fields, .. }) = &receiver.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("cannot project field {field_name} from non-struct value"),
+        ));
+    };
+    let value = fields
+        .iter()
+        .find_map(|(name, value)| (name.as_ref() == field_name).then(|| value.clone()))
+        .ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::TypeError,
+                format!("struct field {field_name} was not found"),
+            )
+        })?;
+    Ok(EvalStep::Ready(
+        value.project(ProjectionStep::Field(field_name.into())),
+    ))
 }
 
 fn expr_kind(expr: &Expr) -> EvalExprKind {
