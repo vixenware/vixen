@@ -993,6 +993,9 @@ fn resolution_to_spec_outcome(
             "eval2 returned pending at the external boundary: {pending:?}"
         ))
         .into()),
+        Resolution::Waiting => {
+            Err(std::io::Error::other("eval2 returned waiting at the external boundary").into())
+        }
         Resolution::Poison(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),

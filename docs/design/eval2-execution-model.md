@@ -209,10 +209,22 @@ The next step beyond that is a resumable session with scheduler-owned state:
   - pending registrations
   - trace events
   instead of restoring a full session snapshot
+- the session owns a compiled program object:
+  - source text and source ID
+  - line index
+  - one parsed green tree plus handle indexes
+  Prepared work and checkpoints share this program instead of cloning raw
+  source text or reparsing on handle resolution
 - completion ordering is explicit today: multiple sibling leases are allowed,
   but completions must be applied in lease order or they are rejected
+- lease identity must stay monotonic across `restore()` / `step_back()` so
+  rewinding cannot make an old completion look current again
 - completions can be rejected as stale if the leased work is no longer
   in-flight
+- `apply_completion` is transactional: a failed delta merge must not leave the
+  live session partially mutated
+- a session with no ready work and no external pending nodes can still be in a
+  valid waiting state if leased work remains in-flight
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 

@@ -9,6 +9,7 @@ use crate::{Provenance, Value};
 pub enum Resolution {
     Ready(Value),
     Pending(PendingRef),
+    Waiting,
     Poison(EvalError),
 }
 

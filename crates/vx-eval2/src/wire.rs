@@ -27,6 +27,10 @@ pub fn resolution_to_outcome(resolution: Resolution) -> Result<EvalOutcome, Eval
             EvalErrorKind::Internal,
             format!("pending values cannot cross the daemon boundary: {pending:?}"),
         )),
+        Resolution::Waiting => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "waiting eval sessions cannot cross the daemon boundary",
+        )),
         Resolution::Poison(error) => Ok(EvalOutcome::Poison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),

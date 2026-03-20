@@ -11,6 +11,8 @@
 //! - provenance is always available, even on successful scalar values
 //! - boundary crossing policy is explicit metadata, not an implicit side effect
 
+mod program;
+
 mod engine;
 pub use engine::{
     EvalCompletedWork, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalExplainTerminal,

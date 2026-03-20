@@ -1264,6 +1264,77 @@ fn prepared_work_can_execute_on_a_scoped_worker_thread() {
 }
 
 #[test]
+fn sibling_prepared_block_work_survives_checkpoint_restore_and_resolves_handles() {
+    let mut session = EvalSession::new(
+        "fn build() { [{ let os = host_os(); os }, { let os = host_os(); os }] }",
+        "prepared-checkpoint-blocks",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(session.program_parse_count(), 1);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root expression step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("first leased sibling");
+    let second = session.prepare_step().expect("second leased sibling");
+    let checkpoint = session.checkpoint();
+
+    let (first_completion, second_completion) = thread::scope(|scope| {
+        let first_join = scope.spawn(move || first.execute().expect("first work should execute"));
+        let second_join =
+            scope.spawn(move || second.execute().expect("second work should execute"));
+        (
+            first_join.join().expect("first worker should not panic"),
+            second_join.join().expect("second worker should not panic"),
+        )
+    });
+
+    session.restore(checkpoint);
+    assert_eq!(session.program_parse_count(), 1);
+
+    assert_eq!(
+        session
+            .apply_completion(first_completion)
+            .expect("first completion should apply"),
+        EvalSessionStep::Progressed,
+    );
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("second completion should apply"),
+        EvalSessionStep::Progressed,
+    );
+
+    let resolution = session.run().expect("resume queued parent work");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+    assert_eq!(session.program_parse_count(), 1);
+}
+
+#[test]
 fn stale_prepared_work_completion_is_rejected() {
     let runtime = TestRuntime;
     let mut session = EvalSession::new(
@@ -1275,9 +1346,18 @@ fn stale_prepared_work_completion_is_rejected() {
         "win",
     );
 
-    assert_eq!(session.step().expect("start-entry step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("root block step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("array step"), EvalSessionStep::Progressed);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
 
     let completion = session
         .prepare_step()
@@ -1300,6 +1380,53 @@ fn stale_prepared_work_completion_is_rejected() {
 }
 
 #[test]
+fn old_completion_is_rejected_after_step_back_and_re_lease() {
+    let mut session = EvalSession::new(
+        "fn build() { host_os() }",
+        "prepared-release-stale",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("leased root work");
+    let first_work = first.work().clone();
+    let old_completion = first.execute().expect("old completion should execute");
+
+    assert!(session.step_back());
+
+    let released = session.prepare_step().expect("re-leased root work");
+    assert_eq!(released.work().node_id, first_work.node_id);
+    assert!(
+        released.lease_sequence() > old_completion.lease_sequence(),
+        "re-leased work must receive a fresh lease identity",
+    );
+
+    let error = session
+        .apply_completion(old_completion)
+        .expect_err("old completion should be stale after re-lease");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error.message.contains("stale eval work completion"),
+        "unexpected error message: {}",
+        error.message
+    );
+
+    assert_eq!(
+        session
+            .apply_completion(released.execute().expect("fresh completion"))
+            .expect("fresh completion should apply"),
+        EvalSessionStep::Progressed,
+    );
+}
+
+#[test]
 fn preparing_twice_never_returns_the_same_work_twice() {
     let mut session = EvalSession::new(
         "fn build() { [host_os(), host_os()] }",
@@ -1310,9 +1437,18 @@ fn preparing_twice_never_returns_the_same_work_twice() {
         "win",
     );
 
-    assert_eq!(session.step().expect("start-entry step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("root block step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("array step"), EvalSessionStep::Progressed);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
     assert_eq!(session.queued_work().len(), 2);
     assert!(session.in_flight_work().is_empty());
 
@@ -1342,6 +1478,42 @@ fn preparing_twice_never_returns_the_same_work_twice() {
 }
 
 #[test]
+fn run_returns_waiting_when_only_in_flight_work_remains() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "prepared-run-waiting",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let _first = session.prepare_step().expect("first leased sibling");
+    let _second = session.prepare_step().expect("second leased sibling");
+
+    assert!(session.queued_work().is_empty());
+    assert!(session.pending_nodes().is_empty());
+    assert_eq!(
+        session.step().expect("waiting session step"),
+        EvalSessionStep::WaitingOnInFlight
+    );
+    assert_eq!(session.run().expect("waiting run"), Resolution::Waiting);
+}
+
+#[test]
 fn sibling_prepared_work_can_execute_on_threads_and_preserve_live_state() {
     let mut session = EvalSession::new(
         "fn build() { [host_os(), host_os()] }",
@@ -1352,9 +1524,18 @@ fn sibling_prepared_work_can_execute_on_threads_and_preserve_live_state() {
         "win",
     );
 
-    assert_eq!(session.step().expect("start-entry step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("root block step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("array step"), EvalSessionStep::Progressed);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
 
     let first = session.prepare_step().expect("first leased sibling");
     let first_work = first.work().clone();
@@ -1363,7 +1544,8 @@ fn sibling_prepared_work_can_execute_on_threads_and_preserve_live_state() {
 
     let (first_completion, second_completion) = thread::scope(|scope| {
         let first_join = scope.spawn(move || first.execute().expect("first work should execute"));
-        let second_join = scope.spawn(move || second.execute().expect("second work should execute"));
+        let second_join =
+            scope.spawn(move || second.execute().expect("second work should execute"));
         (
             first_join.join().expect("first worker should not panic"),
             second_join.join().expect("second worker should not panic"),
@@ -1401,7 +1583,62 @@ fn sibling_prepared_work_can_execute_on_threads_and_preserve_live_state() {
         panic!("expected array value");
     };
     assert_eq!(items.len(), 2);
-    assert!(items.iter().all(|item| item.rep == ValueRep::String("windows".into())));
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+}
+
+#[test]
+fn apply_completion_is_transactional_when_delta_merge_fails() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "prepared-transactional-merge",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("first leased sibling");
+    let before_graph = session.graph_snapshot();
+    let before_trace = session.trace().clone();
+    let before_completed = session.completed_work().to_vec();
+    let before_work = session.work_records();
+    let duplicate = session.first_queued_work_for_testing();
+
+    let mut completion = first.execute().expect("completion should execute");
+    completion.inject_duplicate_queued_work(duplicate);
+
+    let error = session
+        .apply_completion(completion)
+        .expect_err("corrupted delta merge should fail");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error
+            .message
+            .contains("already exists during completion merge"),
+        "unexpected error message: {}",
+        error.message
+    );
+    assert_eq!(session.graph_snapshot(), before_graph);
+    assert_eq!(session.trace(), &before_trace);
+    assert_eq!(session.completed_work(), before_completed.as_slice());
+    assert_eq!(session.work_records(), before_work);
 }
 
 #[test]
@@ -1415,9 +1652,18 @@ fn out_of_order_sibling_completion_is_rejected_deterministically() {
         "win",
     );
 
-    assert_eq!(session.step().expect("start-entry step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("root block step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("array step"), EvalSessionStep::Progressed);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
 
     let first = session.prepare_step().expect("first leased sibling");
     let second = session.prepare_step().expect("second leased sibling");
@@ -1453,9 +1699,18 @@ fn step_back_and_checkpoint_define_in_flight_work_behavior() {
         "win",
     );
 
-    assert_eq!(session.step().expect("start-entry step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("root block step"), EvalSessionStep::Progressed);
-    assert_eq!(session.step().expect("array step"), EvalSessionStep::Progressed);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
 
     let leased = session.prepare_step().expect("leased sibling");
     let leased_work = leased.work().clone();
