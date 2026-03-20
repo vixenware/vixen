@@ -1,6 +1,7 @@
 //! Execution trace events for eval2.
 
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use crate::{CrossingPolicy, EvalErrorKind, ReuseClass, SourceSpan};
 
@@ -62,7 +63,7 @@ pub struct EvalEvent {
     pub kind: EvalEventKind,
 }
 
-pub trait EvalEventSink {
+pub trait EvalEventSink: Send {
     fn push(&mut self, event: EvalEvent);
 }
 
@@ -77,8 +78,29 @@ impl EvalEventSink for EvalTrace {
     }
 }
 
+pub struct ChannelEvalEventSink {
+    sender: Sender<EvalEvent>,
+}
+
+impl ChannelEvalEventSink {
+    pub fn new(sender: Sender<EvalEvent>) -> Self {
+        Self { sender }
+    }
+}
+
+impl EvalEventSink for ChannelEvalEventSink {
+    fn push(&mut self, event: EvalEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
 pub struct NullEvalEventSink;
 
 impl EvalEventSink for NullEvalEventSink {
     fn push(&mut self, _event: EvalEvent) {}
+}
+
+pub fn channel_trace() -> (ChannelEvalEventSink, Receiver<EvalEvent>) {
+    let (sender, receiver) = channel();
+    (ChannelEvalEventSink::new(sender), receiver)
 }

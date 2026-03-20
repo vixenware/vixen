@@ -16,7 +16,7 @@ use crate::{
     StructValue, Value, ValueMeta, ValueRep,
 };
 
-pub trait RuntimeHooks {
+pub trait RuntimeHooks: Send + Sync {
     fn call(
         &self,
         place: &str,
@@ -75,9 +75,7 @@ pub fn eval_source_entry_with_args_with_source_id(
     args: &[Value],
 ) -> Result<Resolution, EvalError> {
     let mut sink = NullEvalEventSink;
-    eval_source_entry_at_place_with_args_with_source_id_and_sink(
-        source, source_id, entry, args, &NoRuntime, "local", &mut sink,
-    )
+    eval_source_entry_with_args_with_source_id_with_sink(source, source_id, entry, args, &mut sink)
 }
 
 pub fn eval_source_entry_with_args_with_source_id_traced(
@@ -87,8 +85,8 @@ pub fn eval_source_entry_with_args_with_source_id_traced(
     args: &[Value],
 ) -> Result<(Resolution, EvalTrace), EvalError> {
     let mut trace = EvalTrace::default();
-    let resolution = eval_source_entry_at_place_with_args_with_source_id_and_sink(
-        source, source_id, entry, args, &NoRuntime, "local", &mut trace,
+    let resolution = eval_source_entry_with_args_with_source_id_with_sink(
+        source, source_id, entry, args, &mut trace,
     )
     .unwrap_or_else(Resolution::Poison);
     Ok((resolution, trace))
@@ -103,7 +101,7 @@ pub fn eval_source_entry_at_place_with_args_with_source_id_traced(
     place: &str,
 ) -> Result<(Resolution, EvalTrace), EvalError> {
     let mut trace = EvalTrace::default();
-    let resolution = eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    let resolution = eval_source_entry_at_place_with_args_with_source_id_with_sink(
         source, source_id, entry, args, runtime, place, &mut trace,
     )
     .unwrap_or_else(Resolution::Poison);
@@ -117,7 +115,7 @@ pub fn eval_source_entry_at_place(
     place: &str,
 ) -> Result<Resolution, EvalError> {
     let mut sink = NullEvalEventSink;
-    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    eval_source_entry_at_place_with_args_with_source_id_with_sink(
         source,
         "<memory>",
         entry,
@@ -136,7 +134,7 @@ pub fn eval_source_entry_at_place_with_source_id(
     place: &str,
 ) -> Result<Resolution, EvalError> {
     let mut sink = NullEvalEventSink;
-    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    eval_source_entry_at_place_with_args_with_source_id_with_sink(
         source,
         source_id,
         entry,
@@ -155,7 +153,7 @@ pub fn eval_source_entry_at_place_with_args(
     place: &str,
 ) -> Result<Resolution, EvalError> {
     let mut sink = NullEvalEventSink;
-    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    eval_source_entry_at_place_with_args_with_source_id_with_sink(
         source, "<memory>", entry, args, runtime, place, &mut sink,
     )
 }
@@ -169,12 +167,24 @@ pub fn eval_source_entry_at_place_with_args_with_source_id(
     place: &str,
 ) -> Result<Resolution, EvalError> {
     let mut sink = NullEvalEventSink;
-    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    eval_source_entry_at_place_with_args_with_source_id_with_sink(
         source, source_id, entry, args, runtime, place, &mut sink,
     )
 }
 
-fn eval_source_entry_at_place_with_args_with_source_id_and_sink(
+pub fn eval_source_entry_with_args_with_source_id_with_sink(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+    sink: &mut impl EvalEventSink,
+) -> Result<Resolution, EvalError> {
+    eval_source_entry_at_place_with_args_with_source_id_with_sink(
+        source, source_id, entry, args, &NoRuntime, "local", sink,
+    )
+}
+
+pub fn eval_source_entry_at_place_with_args_with_source_id_with_sink(
     source: &str,
     source_id: impl Into<String>,
     entry: &str,

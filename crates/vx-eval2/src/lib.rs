@@ -16,9 +16,11 @@ pub use engine::{
     RuntimeHooks, eval_source_entry, eval_source_entry_at_place,
     eval_source_entry_at_place_with_args, eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
+    eval_source_entry_at_place_with_args_with_source_id_with_sink,
     eval_source_entry_at_place_with_source_id, eval_source_entry_with_args,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
-    eval_source_entry_with_source_id, eval_source_entry_with_source_id_traced,
+    eval_source_entry_with_args_with_source_id_with_sink, eval_source_entry_with_source_id,
+    eval_source_entry_with_source_id_traced,
 };
 
 mod result;
@@ -26,7 +28,8 @@ pub use result::{DemandFrame, EvalError, EvalErrorKind, PendingRef, Resolution};
 
 mod trace;
 pub use trace::{
-    EvalEvent, EvalEventKind, EvalEventSink, EvalExprKind, EvalNodeId, EvalTrace, NullEvalEventSink,
+    ChannelEvalEventSink, EvalEvent, EvalEventKind, EvalEventSink, EvalExprKind, EvalNodeId,
+    EvalTrace, NullEvalEventSink, channel_trace,
 };
 
 mod value;

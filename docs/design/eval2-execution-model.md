@@ -58,6 +58,7 @@ The minimum useful slice is:
 2. emitted step events
 3. explicit parent-child relationships in those events
 4. trace preservation even when evaluation ends in poison
+5. thread-ready interfaces for runtime calls and event delivery
 
 ## First slice
 
@@ -106,6 +107,27 @@ That matters because "what just happened before this failed?" is one of the
 main reasons to capture a semantic trace in the first place. If the trace is
 dropped on failure, the interface is much less useful for debugging and
 explanation.
+
+### Thread-ready boundaries
+
+Even before the scheduler is parallel, eval2 should avoid baking in
+single-threaded interface assumptions.
+
+So this slice also treats two boundaries as thread-ready from the start:
+
+- runtime hooks are `Send + Sync`
+- event sinks are `Send`
+
+That does not make the evaluator internally parallel yet. It does mean:
+
+- values, results, and traces must stay movable across threads
+- runtime implementations must not rely on thread-local non-`Send` state
+- debugger/trace tooling can consume events through message passing instead of
+  sharing one in-thread buffer
+
+The first concrete mechanism here is a channel-backed event sink. That gives us
+one real message-passing path immediately, instead of postponing concurrency
+pressure until after the evaluator API is already set in stone.
 
 ## What this does not do yet
 

@@ -1,9 +1,12 @@
+use std::thread;
+
 use crate::{
-    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEventKind, PendingRef, ProjectionStep,
-    Provenance, Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind, SourceSpan, Value,
-    ValueRep, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalTrace,
+    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind,
+    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
-    value_to_envelope,
+    eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
 
 #[test]
@@ -289,4 +292,48 @@ fn traced_fail_expression_emits_poison_exit() {
                 message: "boom".into(),
             }
     }));
+}
+
+#[test]
+fn eval2_core_trace_types_are_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<Value>();
+    assert_send_sync::<Resolution>();
+    assert_send_sync::<EvalEvent>();
+    assert_send_sync::<EvalTrace>();
+    assert_send_sync::<crate::SourceSpan>();
+}
+
+#[test]
+fn evaluation_can_stream_events_from_a_background_thread() {
+    let (mut sink, receiver) = channel_trace();
+    let handle = thread::spawn(move || {
+        eval_source_entry_with_args_with_source_id_with_sink(
+            "fn build(value: String) { value }",
+            "threaded-trace",
+            "build",
+            &[Value::string("forty-two")],
+            &mut sink,
+        )
+    });
+
+    let resolution = handle
+        .join()
+        .expect("background eval thread should not panic")
+        .expect("background eval should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("forty-two".into()));
+
+    let events = receiver.iter().collect::<Vec<_>>();
+    assert!(!events.is_empty(), "channel sink should receive events");
+    assert_eq!(
+        events[0].kind,
+        EvalEventKind::BindArgument {
+            label: "value".into(),
+        },
+    );
+    assert!(events.iter().all(|event| event.place.as_ref() == "local"));
 }
