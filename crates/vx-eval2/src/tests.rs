@@ -11,12 +11,12 @@ use std::{
 use crate::{
     Claim, CrossingPolicy, EvalBranchContext, EvalCompletedWorkOutcome, EvalDependencyEdge,
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
-    EvalNodeId, EvalNodeKind, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind,
-    EvalWorkState, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady, SlotAction, SlotEventReason,
-    SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
-    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id_traced,
+    EvalNodeId, EvalNodeKind, EvalNodeState, EvalProgram, EvalProgramImport, EvalProgramSource,
+    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, PendingRef,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
+    RuntimeInputKind, RuntimeReady, SlotAction, SlotEventReason, SlotId, SlotResolutionKind,
+    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
+    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -321,6 +321,136 @@ fn unsupported_call_target_still_errors_clearly() {
         &[],
     )
     .expect_err("unsupported call target should surface an eval error");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error
+            .message
+            .contains("call target does_not_exist is not supported yet")
+    );
+}
+
+fn test_program(sources: [(&str, &str); 2], imports: Vec<EvalProgramImport>) -> EvalProgram {
+    EvalProgram::new(
+        0,
+        sources
+            .into_iter()
+            .map(|(source_id, source_text)| EvalProgramSource::new(source_id, source_text))
+            .collect::<Vec<_>>(),
+        imports,
+    )
+    .expect("build test eval program")
+}
+
+fn run_program(program: EvalProgram) -> Resolution {
+    let runtime = UnsupportedRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+    session.run().expect("run eval program")
+}
+
+struct UnsupportedRuntime;
+
+impl RuntimeHooks for UnsupportedRuntime {
+    fn call(
+        &self,
+        _place: &str,
+        _callee: &str,
+        _args: &[Value],
+        _source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        Ok(RuntimeCallOutcome::Unsupported)
+    }
+}
+
+#[test]
+fn imported_helper_function_can_be_called() {
+    let program = test_program(
+        [
+            ("main.vx", "fn build() { helper(41) }"),
+            ("helpers.vx", "fn helper(value: U64) { value }"),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+
+    let Resolution::Ready(value) = run_program(program) else {
+        panic!("expected ready imported helper result");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
+fn imported_helper_can_call_another_imported_or_local_helper() {
+    let program = EvalProgram::new(
+        0,
+        vec![
+            EvalProgramSource::new("main.vx", "fn build() { outer() }"),
+            EvalProgramSource::new(
+                "helpers.vx",
+                "fn outer() { local_helper() }\nfn local_helper() { imported_helper() }",
+            ),
+            EvalProgramSource::new("shared.vx", "fn imported_helper() { 42 }"),
+        ],
+        vec![
+            EvalProgramImport { from: 0, to: 1 },
+            EvalProgramImport { from: 1, to: 2 },
+        ],
+    )
+    .expect("build imported helper chain program");
+
+    let Resolution::Ready(value) = run_program(program) else {
+        panic!("expected ready imported helper chain result");
+    };
+    assert_eq!(value.rep, ValueRep::U64(42));
+}
+
+#[test]
+fn stdlib_style_bodyful_function_executes_directly() {
+    let program = test_program(
+        [
+            ("main.vx", "fn build() { std_direct() }"),
+            ("crates/vx-stdlib/std/test.vx", "fn std_direct() { 41 }"),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+
+    let Resolution::Ready(value) = run_program(program) else {
+        panic!("expected ready stdlib-style bodyful result");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
+fn stdlib_style_declaration_without_body_uses_runtime_hooks() {
+    let program = test_program(
+        [
+            ("main.vx", "fn build() { host_os() }"),
+            ("crates/vx-stdlib/std/test.vx", "fn host_os();"),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &TestRuntime, "win");
+    let resolution = session
+        .run()
+        .expect("evaluate imported runtime-backed declaration");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready imported runtime-backed result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+}
+
+#[test]
+fn unresolved_import_missing_target_still_errors_clearly() {
+    let program = test_program(
+        [
+            ("main.vx", "fn build() { does_not_exist() }"),
+            ("helpers.vx", "fn helper() { 41 }"),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+
+    let Resolution::Poison(error) = run_program(program) else {
+        panic!("expected poison for unresolved imported target");
+    };
     assert_eq!(error.kind, EvalErrorKind::Internal);
     assert!(
         error

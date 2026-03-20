@@ -12,6 +12,7 @@
 //! - boundary crossing policy is explicit metadata, not an implicit side effect
 
 mod program;
+pub use program::{EvalProgram, EvalProgramImport, EvalProgramSource};
 
 mod engine;
 pub use engine::{

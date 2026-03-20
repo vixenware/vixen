@@ -7,16 +7,17 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use vx_parser::{
-    ArrayExpr, ArrayItem, BlockExpr, CallExpr, Expr, FailExpr, FieldExpr, IfExpr, LiteralExpr,
-    MapExpr, NameRefExpr, Stmt, StructLiteralExpr,
+    ArrayExpr, ArrayItem, AstNode, BlockExpr, CallExpr, Expr, FailExpr, FieldExpr, IfExpr,
+    LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr,
 };
+use vx_resolve::SourceId;
 
 use crate::{
     CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalEventSink,
-    EvalExprKind, EvalNodeId, EvalTrace, NullEvalEventSink, PendingRef, ProjectionStep, Provenance,
-    Resolution, ReuseClass, RuntimeInputKind, SourceSpan, StructValue, Value, ValueMeta, ValueRep,
-    program::{CompiledParameter, CompiledProgram, ProgramNodeHandle},
-    FunctionRef,
+    EvalExprKind, EvalNodeId, EvalTrace, FunctionRef, NullEvalEventSink, PendingRef,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SourceSpan, StructValue,
+    Value, ValueMeta, ValueRep,
+    program::{CompiledParameter, CompiledProgram, EvalProgram, ProgramNodeHandle},
 };
 
 pub trait RuntimeHooks: Send + Sync {
@@ -317,6 +318,30 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         let mut scheduler = EvalScheduler::default();
         scheduler.enqueue_start_entry();
         let program = Arc::new(CompiledProgram::new(source_id, source));
+        Self::new_with_program(program, entry, args, runtime, place, scheduler)
+    }
+
+    pub fn new_program(
+        program: EvalProgram,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+    ) -> Self {
+        let mut scheduler = EvalScheduler::default();
+        scheduler.enqueue_start_entry();
+        let program = Arc::new(CompiledProgram::from_eval_program(program));
+        Self::new_with_program(program, entry, args, runtime, place, scheduler)
+    }
+
+    fn new_with_program(
+        program: Arc<CompiledProgram>,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+        scheduler: EvalScheduler,
+    ) -> Self {
         Self {
             program,
             entry: entry.into(),
@@ -1207,7 +1232,16 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
     let program = CompiledProgram::new(source_id, source_text);
-    let mut state = EvalState::new(&program, runtime, place, sink, scheduler, None, false);
+    let mut state = EvalState::new(
+        &program,
+        program.entry_source(),
+        runtime,
+        place,
+        sink,
+        scheduler,
+        None,
+        false,
+    );
     match evaluate_entry_once(&mut state, entry, args)? {
         EvalStep::Ready(value) => Ok(Resolution::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(Resolution::Pending(suspension.pending)),
@@ -1216,6 +1250,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
 
 struct EvalState<'source, 'scheduler, Runtime, Sink> {
     program: &'source CompiledProgram,
+    current_source: SourceId,
     runtime: &'source Runtime,
     place: &'source str,
     sink: &'source mut Sink,
@@ -1474,6 +1509,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 {
     fn new(
         program: &'source CompiledProgram,
+        current_source: SourceId,
         runtime: &'source Runtime,
         place: &'source str,
         sink: &'source mut Sink,
@@ -1483,6 +1519,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     ) -> Self {
         Self {
             program,
+            current_source,
             runtime,
             place,
             sink,
@@ -1499,6 +1536,38 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 
     fn current_parent(&self) -> Option<EvalNodeId> {
         self.stack.last().copied()
+    }
+
+    fn current_source(&self) -> SourceId {
+        self.current_source
+    }
+
+    fn with_source<T>(&mut self, source: SourceId, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.current_source;
+        self.current_source = source;
+        let result = f(self);
+        self.current_source = previous;
+        result
+    }
+
+    fn span_for_node<T: AstNode>(&self, node: &T) -> SourceSpan {
+        self.program.span_for_node(self.current_source, node)
+    }
+
+    fn span_for_token(&self, token: &vx_parser::SyntaxToken) -> SourceSpan {
+        self.program.span_for_token(self.current_source, token)
+    }
+
+    fn expr_handle(&self, expr: &Expr) -> ExprHandle {
+        ExprHandle {
+            key: ProgramNodeHandle::for_node(self.current_source, expr),
+        }
+    }
+
+    fn stmt_handle(&self, stmt: &Stmt) -> StmtHandle {
+        StmtHandle {
+            key: ProgramNodeHandle::for_node(self.current_source, stmt),
+        }
     }
 
     fn emit(
@@ -1656,16 +1725,16 @@ fn eval_dependent_expr(
     }
 }
 
-fn expr_handle(expr: &Expr) -> ExprHandle {
-    ExprHandle {
-        key: ProgramNodeHandle::for_node(expr),
-    }
-}
-
-fn stmt_handle(stmt: &Stmt) -> StmtHandle {
-    StmtHandle {
-        key: ProgramNodeHandle::for_node(stmt),
-    }
+fn eval_dependent_expr_handle(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    handle: ExprHandle,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    let expr = state.program.resolve_expr(handle.key)?;
+    state.with_source(handle.key.source(), |state| {
+        eval_dependent_expr(state, node_id, &expr, env)
+    })
 }
 
 impl EvalScheduler {
@@ -2305,6 +2374,7 @@ fn execute_ready_task(
     let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
         program.as_ref(),
+        program.entry_source(),
         runtime,
         place,
         &mut trace,
@@ -2318,7 +2388,9 @@ fn execute_ready_task(
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
             let body_kind = expr_kind(&prepared.body);
-            let body_source = state.program.span_for_node(&prepared.body);
+            let body_source = state
+                .program
+                .span_for_handle(ProgramNodeHandle::for_node(prepared.source, &prepared.body));
             state
                 .scheduler
                 .record_dependency(ENTRY_WORK_NODE_ID, node_id);
@@ -2330,7 +2402,9 @@ fn execute_ready_task(
             });
             let work = state.scheduler.enqueue_ready_task(
                 ReadyTask::EvaluateExpr(ScheduledExpr {
-                    expr: expr_handle(&prepared.body),
+                    expr: ExprHandle {
+                        key: ProgramNodeHandle::for_node(prepared.source, &prepared.body),
+                    },
                     env: prepared.env,
                 }),
                 EvalWorkKind::EvaluateExpr,
@@ -2356,7 +2430,9 @@ fn execute_ready_task(
         ReadyTask::EvaluateExpr(scheduled) => {
             let mut env = scheduled.env;
             let expr = state.program.resolve_expr(scheduled.expr.key)?;
-            match eval_expr_with_node_id(&mut state, record.work.node_id, &expr, &mut env) {
+            match state.with_source(scheduled.expr.key.source(), |state| {
+                eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
+            }) {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {
                     let pending = suspension.pending.clone();
@@ -2431,6 +2507,7 @@ fn execute_ready_task(
 }
 
 struct PreparedEntry {
+    source: SourceId,
     body: Expr,
     env: BTreeMap<String, Value>,
 }
@@ -2443,7 +2520,7 @@ fn function_ref_from_compiled(
     self_name: Option<Arc<str>>,
 ) -> FunctionRef {
     FunctionRef::new(
-        state.program.source_id(),
+        state.program.source_id(function.source),
         name,
         function.parameters,
         function.has_keyword_parameters,
@@ -2455,7 +2532,8 @@ fn function_ref_from_compiled(
 
 fn captures_from_scope(scope: &BTreeMap<String, Value>) -> Arc<[(Arc<str>, Value)]> {
     Arc::from(
-        scope.iter()
+        scope
+            .iter()
             .map(|(name, value)| (Arc::<str>::from(name.as_str()), value.clone()))
             .collect::<Vec<_>>(),
     )
@@ -2466,12 +2544,15 @@ fn bind_named_function_decl(
     function: &vx_parser::FnDecl,
     scope: &BTreeMap<String, Value>,
 ) -> Result<(String, SourceSpan, Value), EvalError> {
-    let name_token = function
-        .name()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "function declaration has no name"))?;
+    let name_token = function.name().ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "function declaration has no name")
+    })?;
     let name = name_token.text().to_string();
-    let name_source = state.program.span_for_token(&name_token);
-    let Some((compiled_name, compiled)) = state.program.compile_function_decl(function)? else {
+    let name_source = state.span_for_token(&name_token);
+    let Some((compiled_name, compiled)) = state
+        .program
+        .compile_function_decl(state.current_source(), function)?
+    else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "function declaration could not be compiled",
@@ -2519,6 +2600,7 @@ fn prepare_entry(
     })?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
+        source: body.source(),
         body: state.program.resolve_expr(body)?,
         env,
     })
@@ -2559,6 +2641,7 @@ fn prepare_function_call(
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
     Ok(Some(PreparedEntry {
+        source: body.source(),
         body: state.program.resolve_expr(body)?,
         env,
     }))
@@ -2571,7 +2654,9 @@ fn evaluate_entry_once(
 ) -> Result<EvalStep, EvalError> {
     let prepared = prepare_entry(state, entry, args)?;
     let mut env = prepared.env;
-    eval_expr(state, &prepared.body, &mut env)
+    state.with_source(prepared.source, |state| {
+        eval_expr(state, &prepared.body, &mut env)
+    })
 }
 
 fn bind_arguments(
@@ -2639,7 +2724,7 @@ fn eval_expr_with_node_id(
 ) -> Result<EvalStep, EvalError> {
     let parent_id = state.current_parent();
     let kind = expr_kind(expr);
-    let source = state.program.span_for_node(expr);
+    let source = state.span_for_node(expr);
     state.scheduler.record_node(EvalNodeRecord {
         node_id,
         parent_id,
@@ -2656,7 +2741,7 @@ fn eval_expr_with_node_id(
 
     let result = match expr {
         Expr::Block(block) => eval_block(state, block, env),
-        Expr::Literal(literal) => eval_literal(state.program, literal).map(EvalStep::Ready),
+        Expr::Literal(literal) => eval_literal(state, literal).map(EvalStep::Ready),
         Expr::Paren(paren) => match paren.expr() {
             Some(inner) => match eval_child_expr(state, &inner, env)? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
@@ -2705,7 +2790,7 @@ fn eval_child_expr(
 ) -> Result<EvalStep, EvalError> {
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
-        state.emit_current_dependency(child_id, Some(state.program.span_for_node(expr)));
+        state.emit_current_dependency(child_id, Some(state.span_for_node(expr)));
         return eval_expr_with_node_id(state, child_id, expr, env);
     }
     let child_id = queue_child_expr(state, expr, env);
@@ -2728,7 +2813,7 @@ fn eval_call(
     let callee = call
         .callee()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let call_source = state.program.span_for_node(call);
+    let call_source = state.span_for_node(call);
     let node_id = state
         .stack
         .last()
@@ -2762,7 +2847,10 @@ fn eval_call(
             callee_value,
             call_source,
             Vec::new(),
-            positional_args.iter().map(expr_handle).collect(),
+            positional_args
+                .iter()
+                .map(|arg| state.expr_handle(arg))
+                .collect(),
             env.clone(),
         );
     }
@@ -2777,7 +2865,10 @@ fn eval_call(
                     call_source,
                     env: env.clone(),
                     args: Vec::new(),
-                    remaining_args: positional_args.iter().map(expr_handle).collect(),
+                    remaining_args: positional_args
+                        .iter()
+                        .map(|arg| state.expr_handle(arg))
+                        .collect(),
                 },
             ));
         }
@@ -2789,7 +2880,10 @@ fn eval_call(
         callee_value,
         call_source,
         Vec::new(),
-        positional_args.iter().map(expr_handle).collect(),
+        positional_args
+            .iter()
+            .map(|arg| state.expr_handle(arg))
+            .collect(),
         env.clone(),
     )
 }
@@ -2809,17 +2903,20 @@ fn immediate_call_callee_value(
     if let Some(value) = env.get(&name) {
         return Ok(Some(value.clone()));
     }
-    if let Some(function) = state.program.lookup_function(&name)? {
+    let reference = ProgramNodeHandle::for_token(state.current_source(), &name_token);
+    if let Some((resolved_name, function)) =
+        state.program.resolve_function_reference(reference, &name)?
+    {
         return Ok(Some(Value::function(function_ref_from_compiled(
             state,
-            Arc::from(name.as_str()),
+            resolved_name.clone(),
             function,
             Arc::from([]),
-            Some(Arc::from(name.as_str())),
+            Some(resolved_name),
         ))));
     }
     Ok(Some(Value::function(FunctionRef::new(
-        state.program.source_id(),
+        state.program.source_id(state.current_source()),
         Arc::from(name.as_str()),
         Arc::from([]),
         false,
@@ -2841,14 +2938,17 @@ fn eval_name_ref(
     if let Some(value) = env.get(&name) {
         return Ok(value.clone());
     }
-    if let Some(function) = state.program.lookup_function(&name)? {
-        let name_source = state.program.span_for_token(&name_token);
+    let reference = ProgramNodeHandle::for_token(state.current_source(), &name_token);
+    if let Some((resolved_name, function)) =
+        state.program.resolve_function_reference(reference, &name)?
+    {
+        let name_source = state.span_for_token(&name_token);
         let function = function_ref_from_compiled(
             state,
-            Arc::from(name.as_str()),
+            resolved_name.clone(),
             function,
             Arc::from([]),
-            Some(Arc::from(name.as_str())),
+            Some(resolved_name),
         );
         return Ok(
             Value::function(function).with_provenance(Provenance::binding(name_source, name))
@@ -2883,8 +2983,7 @@ fn continue_call_from_args(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_args.into_iter();
     while let Some(arg_handle) = remaining.next() {
-        let arg = state.program.resolve_expr(arg_handle.key)?;
-        match eval_dependent_expr(state, node_id, &arg, &mut env)? {
+        match eval_dependent_expr_handle(state, node_id, arg_handle, &mut env)? {
             EvalStep::Ready(value) => args.push(value),
             EvalStep::Suspended(suspension) => {
                 let remaining_args = remaining.collect::<Vec<_>>();
@@ -2911,7 +3010,9 @@ fn continue_call_from_args(
     };
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
         let mut env = prepared.env;
-        return eval_dependent_expr(state, node_id, &prepared.body, &mut env);
+        return state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        });
     }
     let callee_name = function.name.to_string();
     state.emit(
@@ -3021,7 +3122,7 @@ fn eval_struct_literal(
         .copied()
         .expect("struct literal should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let struct_source = state.program.span_for_node(struct_literal);
+    let struct_source = state.span_for_node(struct_literal);
     let remaining_fields = struct_literal
         .fields()
         .map(|field| {
@@ -3036,7 +3137,7 @@ fn eval_struct_literal(
             let expr = field.expr().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "struct field has no value")
             })?;
-            Ok((name, expr_handle(&expr)))
+            Ok((name, state.expr_handle(&expr)))
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     if state.queue_child_work && !remaining_fields.is_empty() {
@@ -3091,7 +3192,10 @@ fn eval_block(
         parent_id,
         env.clone(),
         Value::unit(),
-        block.statements().map(|stmt| stmt_handle(&stmt)).collect(),
+        block
+            .statements()
+            .map(|stmt| state.stmt_handle(&stmt))
+            .collect(),
     )
 }
 
@@ -3120,7 +3224,7 @@ fn eval_array(
             }
         }
         if child_nodes.is_empty() {
-            let provenance = Provenance::literal(state.program.span_for_node(array));
+            let provenance = Provenance::literal(state.span_for_node(array));
             return Ok(EvalStep::Ready(Value::array(Vec::new()).with_meta(
                 ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
             )));
@@ -3133,7 +3237,7 @@ fn eval_array(
                 node_id,
                 parent_id,
                 child_nodes,
-                array_source: state.program.span_for_node(array),
+                array_source: state.span_for_node(array),
             }],
         ));
     }
@@ -3145,7 +3249,7 @@ fn eval_array(
         array
             .items()
             .map(|item| match item {
-                ArrayItem::Expr(expr) => Ok(expr_handle(&expr)),
+                ArrayItem::Expr(expr) => Ok(state.expr_handle(&expr)),
                 ArrayItem::Spread(_) => Err(EvalError::new(
                     EvalErrorKind::Internal,
                     "array spread is not supported yet",
@@ -3153,7 +3257,7 @@ fn eval_array(
             })
             .collect::<Result<Vec<_>, EvalError>>()?,
         env.clone(),
-        state.program.span_for_node(array),
+        state.span_for_node(array),
     )
 }
 
@@ -3177,7 +3281,7 @@ fn eval_map(
             let value_expr = entry
                 .value()
                 .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "map entry has no value"))?;
-            Ok((expr_handle(&key_expr), expr_handle(&value_expr)))
+            Ok((state.expr_handle(&key_expr), state.expr_handle(&value_expr)))
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
@@ -3187,7 +3291,7 @@ fn eval_map(
         Vec::new(),
         entries,
         env.clone(),
-        state.program.span_for_node(map),
+        state.span_for_node(map),
     )
 }
 
@@ -3256,13 +3360,13 @@ fn eval_if(
                         .ok_or_else(|| {
                             EvalError::new(EvalErrorKind::Internal, "if branch is missing")
                         })
-                        .map(|expr| expr_handle(&expr))?,
+                        .map(|expr| state.expr_handle(&expr))?,
                     else_branch: if_expr
                         .else_branch()
                         .ok_or_else(|| {
                             EvalError::new(EvalErrorKind::Internal, "if branch is missing")
                         })
-                        .map(|expr| expr_handle(&expr))?,
+                        .map(|expr| state.expr_handle(&expr))?,
                     env: env.clone(),
                 },
             ));
@@ -3360,11 +3464,15 @@ fn continue_block_statements(
                     EvalError::new(EvalErrorKind::Internal, "let statement has no name")
                 })?;
                 let name = name_token.text().to_string();
-                let name_source = state.program.span_for_token(&name_token);
+                let name_source = state.with_source(statement_handle.key.source(), |state| {
+                    state.span_for_token(&name_token)
+                });
                 let expr = let_stmt.expr().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "let statement has no value")
                 })?;
-                match eval_dependent_expr(state, node_id, &expr, &mut scope)? {
+                match state.with_source(statement_handle.key.source(), |state| {
+                    eval_dependent_expr(state, node_id, &expr, &mut scope)
+                })? {
                     EvalStep::Ready(value) => {
                         scope.insert(
                             name.clone(),
@@ -3388,10 +3496,15 @@ fn continue_block_statements(
                 }
             }
             Stmt::FnDecl(function) => {
-                let (name, _name_source, value) = bind_named_function_decl(state, &function, &scope)?;
+                let (name, _name_source, value) = state
+                    .with_source(statement_handle.key.source(), |state| {
+                        bind_named_function_decl(state, &function, &scope)
+                    })?;
                 scope.insert(name, value);
             }
-            Stmt::Expr(expr) => match eval_dependent_expr(state, node_id, &expr, &mut scope)? {
+            Stmt::Expr(expr) => match state.with_source(statement_handle.key.source(), |state| {
+                eval_dependent_expr(state, node_id, &expr, &mut scope)
+            })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
                     return Ok(extend_suspension(
@@ -3427,8 +3540,7 @@ fn continue_array_items(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
-        let expr = state.program.resolve_expr(item_handle.key)?;
-        match eval_dependent_expr(state, node_id, &expr, &mut env)? {
+        match eval_dependent_expr_handle(state, node_id, item_handle, &mut env)? {
             EvalStep::Ready(value) => items.push(value),
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3455,7 +3567,7 @@ fn queue_child_expr(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
 ) -> EvalNodeId {
-    queue_child_expr_handle(state, expr_handle(expr), env)
+    queue_child_expr_handle(state, state.expr_handle(expr), env)
 }
 
 fn queue_child_expr_handle(
@@ -3468,14 +3580,15 @@ fn queue_child_expr_handle(
         .program
         .resolve_expr(expr.key)
         .expect("queued child expression handle should resolve");
-    state.emit_current_dependency(child_id, Some(state.program.span_for_node(&resolved)));
+    let resolved_source = state.program.span_for_handle(expr.key);
+    state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
         node_id: child_id,
         parent_id: state.current_parent(),
         kind: EvalNodeKind::Expr {
             kind: expr_kind(&resolved),
         },
-        source: Some(state.program.span_for_node(&resolved)),
+        source: Some(resolved_source),
     });
     let work = state.scheduler.enqueue_ready_task(
         ReadyTask::EvaluateExpr(ScheduledExpr {
@@ -3521,8 +3634,7 @@ fn continue_map_entries(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_entries.into_iter();
     while let Some((key_handle, value_handle)) = remaining.next() {
-        let key_expr = state.program.resolve_expr(key_handle.key)?;
-        let key = match eval_dependent_expr(state, node_id, &key_expr, &mut env)? {
+        let key = match eval_dependent_expr_handle(state, node_id, key_handle, &mut env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3539,8 +3651,7 @@ fn continue_map_entries(
                 ));
             }
         };
-        let value_expr = state.program.resolve_expr(value_handle.key)?;
-        let value = match eval_dependent_expr(state, node_id, &value_expr, &mut env)? {
+        let value = match eval_dependent_expr_handle(state, node_id, value_handle, &mut env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3579,8 +3690,7 @@ fn continue_struct_fields(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_fields.into_iter();
     while let Some((name, expr_handle)) = remaining.next() {
-        let expr = state.program.resolve_expr(expr_handle.key)?;
-        match eval_dependent_expr(state, node_id, &expr, &mut env)? {
+        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut env)? {
             EvalStep::Ready(value) => fields.push((name, value)),
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3756,18 +3866,16 @@ fn resume_frame(
             remaining_args,
         } => {
             let result = match input {
-                Ok(callee) => {
-                    continue_call_from_args(
-                        state,
-                        node_id,
-                        parent_id,
-                        callee,
-                        call_source,
-                        args,
-                        remaining_args,
-                        env,
-                    )
-                }
+                Ok(callee) => continue_call_from_args(
+                    state,
+                    node_id,
+                    parent_id,
+                    callee,
+                    call_source,
+                    args,
+                    remaining_args,
+                    env,
+                ),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
@@ -3921,24 +4029,24 @@ fn resume_frame(
         } => {
             let result = match input {
                 Ok(key) => {
-                    let value_expr = state.program.resolve_expr(value_expr.key)?;
-                    let value = match eval_dependent_expr(state, node_id, &value_expr, &mut env)? {
-                        EvalStep::Ready(value) => value,
-                        EvalStep::Suspended(suspension) => {
-                            return Ok(ResumeOutcome::Suspended(extend_resume(
-                                suspension,
-                                ContinuationFrame::MapAfterValue {
-                                    node_id,
-                                    parent_id,
-                                    entries,
-                                    key,
-                                    remaining_entries,
-                                    env,
-                                    map_source,
-                                },
-                            )));
-                        }
-                    };
+                    let value =
+                        match eval_dependent_expr_handle(state, node_id, value_expr, &mut env)? {
+                            EvalStep::Ready(value) => value,
+                            EvalStep::Suspended(suspension) => {
+                                return Ok(ResumeOutcome::Suspended(extend_resume(
+                                    suspension,
+                                    ContinuationFrame::MapAfterValue {
+                                        node_id,
+                                        parent_id,
+                                        entries,
+                                        key,
+                                        remaining_entries,
+                                        env,
+                                        map_source,
+                                    },
+                                )));
+                            }
+                        };
                     let mut entries = entries;
                     entries.push((key, value));
                     continue_map_entries(
@@ -4011,10 +4119,12 @@ fn resume_frame(
                             "if condition must evaluate to Bool",
                         ));
                     };
-                    let branch = state
-                        .program
-                        .resolve_expr(if value { then_branch } else { else_branch }.key)?;
-                    match eval_dependent_expr(state, node_id, &branch, &mut env)? {
+                    match eval_dependent_expr_handle(
+                        state,
+                        node_id,
+                        if value { then_branch } else { else_branch },
+                        &mut env,
+                    )? {
                         EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
                         EvalStep::Suspended(suspension) => Ok(extend_suspension(
                             suspension,
@@ -4172,11 +4282,14 @@ fn join_reuse(left: ReuseClass, right: ReuseClass) -> ReuseClass {
     }
 }
 
-fn eval_literal(program: &CompiledProgram, literal: &LiteralExpr) -> Result<Value, EvalError> {
+fn eval_literal(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    literal: &LiteralExpr,
+) -> Result<Value, EvalError> {
     let token = literal
         .token()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "literal has no token"))?;
-    let literal_source = program.span_for_node(literal);
+    let literal_source = state.span_for_node(literal);
     match token.kind() {
         vx_parser::SyntaxKind::INT => {
             let value = token.text().parse::<u64>().map_err(|source| {

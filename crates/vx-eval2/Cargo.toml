@@ -12,6 +12,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 vx-parser = { path = "../vx-parser" }
+vx-resolve = { path = "../vx-resolve" }
 vx-eval2-proto.workspace = true
 
 [dev-dependencies]

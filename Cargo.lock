@@ -3985,6 +3985,7 @@ dependencies = [
  "vx-eval2-proto",
  "vx-io",
  "vx-parser",
+ "vx-resolve",
  "vx-spec",
 ]
 
