@@ -84,61 +84,63 @@ impl SlotVerification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlotStoreReason {
+pub enum SlotStoreReason<Intent> {
     Missing,
     WitnessChanged,
     ClaimsInvalid { reason: Arc<str> },
-    Refresh,
+    Refresh { intent: Intent },
 }
 
-impl SlotStoreReason {
+impl<Intent> SlotStoreReason<Intent> {
     pub fn is_rewrite(&self) -> bool {
         !matches!(self, Self::Missing)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotRecordMeta {
+pub struct SlotRecordMeta<Intent> {
     pub write_count: u64,
     pub rewrite_count: u64,
-    pub last_store_reason: SlotStoreReason,
+    pub last_store_reason: SlotStoreReason<Intent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotRecord<Value, Witness, VerifierPayload> {
+pub struct SlotRecord<Value, Witness, VerifierPayload, Intent> {
     pub slot_id: SlotId,
     pub value: Value,
     pub witness: Witness,
     pub claims: Vec<Claim>,
     pub verifier_payload: Option<VerifierPayload>,
-    pub meta: SlotRecordMeta,
+    pub meta: SlotRecordMeta<Intent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotResolveRequest<'a, Value, Witness, Intent, VerifierPayload> {
     pub witness: &'a Witness,
-    pub current: Option<&'a SlotRecord<Value, Witness, VerifierPayload>>,
+    pub current: Option<&'a SlotRecord<Value, Witness, VerifierPayload, Intent>>,
     pub action: &'a SlotAction<Intent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlotResolutionKind {
+pub enum SlotResolutionKind<Intent> {
     Reused,
-    Stored { reason: SlotStoreReason },
+    Stored { reason: SlotStoreReason<Intent> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotResolution<Value, Witness, VerifierPayload> {
-    pub kind: SlotResolutionKind,
-    pub record: SlotRecord<Value, Witness, VerifierPayload>,
+pub struct SlotResolution<Value, Witness, VerifierPayload, Intent> {
+    pub kind: SlotResolutionKind<Intent>,
+    pub record: SlotRecord<Value, Witness, VerifierPayload, Intent>,
 }
 
 #[derive(Debug, Clone)]
-pub struct SlotStore<Value, Witness, VerifierPayload> {
-    records: BTreeMap<SlotId, SlotRecord<Value, Witness, VerifierPayload>>,
+pub struct SlotStore<Value, Witness, VerifierPayload, Intent> {
+    records: BTreeMap<SlotId, SlotRecord<Value, Witness, VerifierPayload, Intent>>,
 }
 
-impl<Value, Witness, VerifierPayload> Default for SlotStore<Value, Witness, VerifierPayload> {
+impl<Value, Witness, VerifierPayload, Intent> Default
+    for SlotStore<Value, Witness, VerifierPayload, Intent>
+{
     fn default() -> Self {
         Self {
             records: BTreeMap::new(),
@@ -146,11 +148,12 @@ impl<Value, Witness, VerifierPayload> Default for SlotStore<Value, Witness, Veri
     }
 }
 
-impl<Value, Witness, VerifierPayload> SlotStore<Value, Witness, VerifierPayload>
+impl<Value, Witness, VerifierPayload, Intent> SlotStore<Value, Witness, VerifierPayload, Intent>
 where
     Value: Clone,
     Witness: Clone + PartialEq,
     VerifierPayload: Clone,
+    Intent: Clone,
 {
     pub fn len(&self) -> usize {
         self.records.len()
@@ -160,20 +163,23 @@ where
         self.records.is_empty()
     }
 
-    pub fn get(&self, slot_id: &SlotId) -> Option<&SlotRecord<Value, Witness, VerifierPayload>> {
+    pub fn get(
+        &self,
+        slot_id: &SlotId,
+    ) -> Option<&SlotRecord<Value, Witness, VerifierPayload, Intent>> {
         self.records.get(slot_id)
     }
 
-    pub fn resolve<Intent, Error, Verify, Resolve>(
+    pub fn resolve<Error, Verify, Resolve>(
         &mut self,
         slot_id: impl Into<SlotId>,
         witness: Witness,
         action: SlotAction<Intent>,
         verify: Verify,
         resolve: Resolve,
-    ) -> Result<SlotResolution<Value, Witness, VerifierPayload>, Error>
+    ) -> Result<SlotResolution<Value, Witness, VerifierPayload, Intent>, Error>
     where
-        Verify: FnOnce(&SlotRecord<Value, Witness, VerifierPayload>) -> SlotVerification,
+        Verify: FnOnce(&SlotRecord<Value, Witness, VerifierPayload, Intent>) -> SlotVerification,
         Resolve: FnOnce(
             SlotResolveRequest<'_, Value, Witness, Intent, VerifierPayload>,
         ) -> Result<SlotResolved<Value, VerifierPayload>, Error>,
@@ -181,7 +187,9 @@ where
         let slot_id = slot_id.into();
         let current = self.records.get(&slot_id).cloned();
         let store_reason = match (&action, current.as_ref()) {
-            (SlotAction::Refresh(_), _) => Some(SlotStoreReason::Refresh),
+            (SlotAction::Refresh(intent), _) => Some(SlotStoreReason::Refresh {
+                intent: intent.clone(),
+            }),
             (SlotAction::Current, None) => Some(SlotStoreReason::Missing),
             (SlotAction::Current, Some(current)) if current.witness != witness => {
                 Some(SlotStoreReason::WitnessChanged)

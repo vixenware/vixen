@@ -22,7 +22,10 @@ runs (
     expect {
       result @u64"1"
       events (
-        @must_emit/@slot_populate{slot "pure-slot"}
+        @must_emit/@slot_populate{
+          slot "pure-slot"
+          reason @missing
+        }
       )
     }
   }
@@ -49,7 +52,10 @@ runs (
     expect {
       result @u64"2"
       events (
-        @must_emit/@slot_rewrite{slot "pure-slot"}
+        @must_emit/@slot_rewrite{
+          slot "pure-slot"
+          reason @witness_changed
+        }
       )
     }
   }
@@ -70,7 +76,12 @@ runs (
     expect {
       result @u64"3"
       events (
-        @must_emit/@slot_rewrite{slot "pure-slot"}
+        @must_emit/@slot_rewrite{
+          slot "pure-slot"
+          reason @refresh{
+            intent @string"refresh"
+          }
+        }
       )
     }
   }

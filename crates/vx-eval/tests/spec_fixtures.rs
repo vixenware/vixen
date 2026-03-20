@@ -13,7 +13,8 @@ fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
     match case.expectation_for(EngineId::Eval1) {
         EngineExpectation::Pass => {
             let runtime = tokio::runtime::Runtime::new()?;
-            for (index, invocation) in case.invocations().iter().enumerate() {
+            let invocations = case.invocations()?;
+            for (index, invocation) in invocations.iter().enumerate() {
                 let outcome = runtime.block_on(run_case(&case, invocation))?;
                 invocation
                     .expect

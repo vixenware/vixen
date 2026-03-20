@@ -20,7 +20,7 @@ pub use engine::{
     EvalGraphSnapshot, EvalLeasedWork, EvalLeasedWorkState, EvalNodeExplanation, EvalNodeKind,
     EvalNodeRecord, EvalNodeState, EvalPreparedWork, EvalQueuedWork, EvalRunnableNode, EvalSession,
     EvalSessionCheckpoint, EvalSessionStep, EvalWaveId, EvalWorkCompletion, EvalWorkId,
-    EvalWorkKind, EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks,
+    EvalWorkKind, EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks, RuntimeReady,
     eval_source_entry, eval_source_entry_at_place, eval_source_entry_at_place_with_args,
     eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
@@ -43,7 +43,7 @@ pub use slot::{
 mod trace;
 pub use trace::{
     ChannelEvalEventSink, EvalEvent, EvalEventKind, EvalEventSink, EvalExprKind, EvalNodeId,
-    EvalTrace, NullEvalEventSink, channel_trace,
+    EvalTrace, NullEvalEventSink, SlotEventReason, channel_trace,
 };
 
 mod value;

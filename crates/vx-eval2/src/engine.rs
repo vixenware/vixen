@@ -29,9 +29,16 @@ pub trait RuntimeHooks: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeReady {
+    pub value: Value,
+    pub events: Vec<EvalEventKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCallOutcome {
     Unsupported,
     Ready(Value),
+    ReadyWithEvents(RuntimeReady),
     Pending { description: Arc<str> },
 }
 
@@ -2717,6 +2724,21 @@ fn continue_call_from_args(
         .call(state.place, &callee_name, &args, &call_source)?
     {
         RuntimeCallOutcome::Ready(value) => {
+            state.emit(
+                node_id,
+                parent_id,
+                Some(call_source.clone()),
+                EvalEventKind::RuntimeCallFinishedReady {
+                    reuse: value.meta.reuse.clone(),
+                    crossing: value.meta.crossing.clone(),
+                },
+            );
+            Ok(EvalStep::Ready(value))
+        }
+        RuntimeCallOutcome::ReadyWithEvents(RuntimeReady { value, events }) => {
+            for event in events {
+                state.emit(node_id, parent_id, Some(call_source.clone()), event);
+            }
             state.emit(
                 node_id,
                 parent_id,

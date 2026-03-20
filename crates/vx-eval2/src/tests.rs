@@ -13,22 +13,23 @@ use crate::{
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
     EvalNodeId, EvalNodeKind, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind,
     EvalWorkState, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SlotAction, SlotId, SlotResolutionKind,
-    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
-    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady, SlotAction, SlotEventReason,
+    SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
+    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
 
 #[test]
 fn current_populates_missing_slot_and_then_reuses_it() {
-    let mut slots = SlotStore::<u64, String, String>::default();
+    let mut slots = SlotStore::<u64, String, String, String>::default();
 
     let initial = slots
         .resolve(
             "toolchain",
             "w1".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| Ok::<_, EvalError>(SlotResolved::new(41)),
         )
@@ -48,7 +49,7 @@ fn current_populates_missing_slot_and_then_reuses_it() {
         .resolve(
             "toolchain",
             "w1".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| -> Result<SlotResolved<u64, String>, EvalError> {
                 panic!("reused slot should not resolve again")
@@ -63,13 +64,13 @@ fn current_populates_missing_slot_and_then_reuses_it() {
 
 #[test]
 fn witness_changes_and_failed_verification_rewrite_in_place() {
-    let mut slots = SlotStore::<u64, String, String>::default();
+    let mut slots = SlotStore::<u64, String, String, String>::default();
 
     slots
         .resolve(
             "toolchain",
             "w1".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| Ok::<_, EvalError>(SlotResolved::new(41)),
         )
@@ -79,7 +80,7 @@ fn witness_changes_and_failed_verification_rewrite_in_place() {
         .resolve(
             "toolchain",
             "w2".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| Ok::<_, EvalError>(SlotResolved::new(42)),
         )
@@ -100,7 +101,7 @@ fn witness_changes_and_failed_verification_rewrite_in_place() {
         .resolve(
             "toolchain",
             "w2".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::invalid("claims no longer verify"),
             |_| Ok::<_, EvalError>(SlotResolved::new(43)),
         )
@@ -120,12 +121,12 @@ fn witness_changes_and_failed_verification_rewrite_in_place() {
 
 #[test]
 fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
-    let mut slots = SlotStore::<u64, String, String>::default();
+    let mut slots = SlotStore::<u64, String, String, String>::default();
     slots
         .resolve(
             "toolchain",
             "w1".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| Ok::<_, EvalError>(SlotResolved::new(41)),
         )
@@ -155,7 +156,9 @@ fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
     assert_eq!(
         refreshed.kind,
         SlotResolutionKind::Stored {
-            reason: SlotStoreReason::Refresh,
+            reason: SlotStoreReason::Refresh {
+                intent: "force-rediscover".to_string(),
+            },
         }
     );
     assert_eq!(slots.len(), 1);
@@ -163,6 +166,12 @@ fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
     assert_eq!(refreshed.record.value, 99);
     assert_eq!(refreshed.record.meta.write_count, 2);
     assert_eq!(refreshed.record.meta.rewrite_count, 1);
+    assert_eq!(
+        refreshed.record.meta.last_store_reason,
+        SlotStoreReason::Refresh {
+            intent: "force-rediscover".to_string(),
+        }
+    );
     assert_eq!(
         seen_current
             .lock()
@@ -178,7 +187,7 @@ fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
         .resolve(
             "toolchain",
             "w1".to_string(),
-            SlotAction::<()>::Current,
+            SlotAction::<String>::Current,
             |_| SlotVerification::Valid,
             |_| -> Result<SlotResolved<u64, String>, EvalError> {
                 panic!("refreshed slot should reuse its new current value")
@@ -187,6 +196,178 @@ fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
         .expect("reuse refreshed slot");
     assert_eq!(current.kind, SlotResolutionKind::Reused);
     assert_eq!(current.record.value, 99);
+}
+
+#[test]
+fn slot_runtime_calls_emit_trace_events_with_refresh_intent() {
+    #[derive(Clone)]
+    struct SlotRuntime {
+        slots: Arc<Mutex<SlotStore<Value, Value, (), Value>>>,
+    }
+
+    impl SlotRuntime {
+        fn new() -> Self {
+            Self {
+                slots: Arc::new(Mutex::new(SlotStore::default())),
+            }
+        }
+    }
+
+    impl RuntimeHooks for SlotRuntime {
+        fn call(
+            &self,
+            _place: &str,
+            callee: &str,
+            args: &[Value],
+            _source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match callee {
+                "slot_current_pure" => {
+                    let ValueRep::String(slot_id) = &args[0].rep else {
+                        panic!("slot id should be a string");
+                    };
+                    let mut slots = self.slots.lock().expect("slot lock poisoned");
+                    let resolution = slots.resolve(
+                        slot_id.to_string(),
+                        args[1].clone(),
+                        SlotAction::Current,
+                        |_| SlotVerification::Valid,
+                        |_| Ok::<_, EvalError>(SlotResolved::new(args[2].clone())),
+                    )?;
+                    let event = match resolution.kind {
+                        SlotResolutionKind::Reused => EvalEventKind::SlotReuse {
+                            slot: slot_id.clone(),
+                        },
+                        SlotResolutionKind::Stored {
+                            reason: SlotStoreReason::Missing,
+                        } => EvalEventKind::SlotPopulate {
+                            slot: slot_id.clone(),
+                            reason: SlotEventReason::Missing,
+                        },
+                        SlotResolutionKind::Stored { reason } => EvalEventKind::SlotRewrite {
+                            slot: slot_id.clone(),
+                            reason: match reason {
+                                SlotStoreReason::WitnessChanged => SlotEventReason::WitnessChanged,
+                                SlotStoreReason::ClaimsInvalid { reason } => {
+                                    SlotEventReason::ClaimsInvalid { reason }
+                                }
+                                SlotStoreReason::Refresh { intent } => {
+                                    SlotEventReason::Refresh { intent }
+                                }
+                                SlotStoreReason::Missing => SlotEventReason::Missing,
+                            },
+                        },
+                    };
+                    Ok(RuntimeCallOutcome::ReadyWithEvents(RuntimeReady {
+                        value: resolution.record.value,
+                        events: vec![event],
+                    }))
+                }
+                "slot_refresh_pure" => {
+                    let ValueRep::String(slot_id) = &args[0].rep else {
+                        panic!("slot id should be a string");
+                    };
+                    let mut slots = self.slots.lock().expect("slot lock poisoned");
+                    let resolution = slots.resolve(
+                        slot_id.to_string(),
+                        args[1].clone(),
+                        SlotAction::Refresh(args[3].clone()),
+                        |_| SlotVerification::Valid,
+                        |_| Ok::<_, EvalError>(SlotResolved::new(args[2].clone())),
+                    )?;
+                    Ok(RuntimeCallOutcome::ReadyWithEvents(RuntimeReady {
+                        value: resolution.record.value,
+                        events: vec![EvalEventKind::SlotRewrite {
+                            slot: slot_id.clone(),
+                            reason: SlotEventReason::Refresh {
+                                intent: match resolution.kind {
+                                    SlotResolutionKind::Stored {
+                                        reason: SlotStoreReason::Refresh { intent },
+                                    } => intent,
+                                    other => panic!("expected refresh store reason, got {other:?}"),
+                                },
+                            },
+                        }],
+                    }))
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = SlotRuntime::new();
+    let source = r#"
+fn build() {
+  slot_current_pure("toolchain", "w1", 41)
+}
+"#;
+    let (initial, initial_trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
+        source,
+        "slot-trace-current",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate initial slot current");
+    let Resolution::Ready(initial_value) = initial else {
+        panic!("expected ready resolution, got {initial:?}");
+    };
+    assert_eq!(initial_value.as_u64(), Some(41));
+    assert!(initial_trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::SlotPopulate {
+                slot: "toolchain".into(),
+                reason: SlotEventReason::Missing,
+            }
+    }));
+
+    let refresh_source = r#"
+fn build() {
+  slot_refresh_pure("toolchain", "w1", 99, "force-rediscover")
+}
+"#;
+    let (refreshed, refresh_trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
+        refresh_source,
+        "slot-trace-refresh",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate slot refresh");
+    let Resolution::Ready(refreshed_value) = refreshed else {
+        panic!("expected ready resolution, got {refreshed:?}");
+    };
+    assert_eq!(refreshed_value.as_u64(), Some(99));
+    assert!(refresh_trace.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EvalEventKind::SlotRewrite {
+                slot,
+                reason: SlotEventReason::Refresh { intent },
+            } if slot.as_ref() == "toolchain"
+                && matches!(&intent.rep, ValueRep::String(value) if value.as_ref() == "force-rediscover")
+        )
+    }));
+
+    let stored = runtime
+        .slots
+        .lock()
+        .expect("slot lock poisoned")
+        .get(&SlotId::from("toolchain"))
+        .cloned()
+        .expect("stored slot");
+    assert_eq!(stored.value.as_u64(), Some(99));
+    match stored.meta.last_store_reason {
+        SlotStoreReason::Refresh { intent } => {
+            assert!(matches!(
+                &intent.rep,
+                ValueRep::String(value) if value.as_ref() == "force-rediscover"
+            ));
+        }
+        other => panic!("expected refresh store reason, got {other:?}"),
+    }
 }
 
 #[test]

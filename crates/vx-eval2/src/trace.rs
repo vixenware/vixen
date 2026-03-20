@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::{CrossingPolicy, EvalErrorKind, EvalWorkId, PendingRef, ReuseClass, SourceSpan};
+use crate::{CrossingPolicy, EvalErrorKind, EvalWorkId, PendingRef, ReuseClass, SourceSpan, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalNodeId(pub u64);
@@ -22,6 +22,14 @@ pub enum EvalExprKind {
     StructLiteral,
     Field,
     Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotEventReason {
+    Missing,
+    WitnessChanged,
+    ClaimsInvalid { reason: Arc<str> },
+    Refresh { intent: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +60,17 @@ pub enum EvalEventKind {
     RuntimeCallStarted {
         callee: Arc<str>,
         argc: u32,
+    },
+    SlotPopulate {
+        slot: Arc<str>,
+        reason: SlotEventReason,
+    },
+    SlotReuse {
+        slot: Arc<str>,
+    },
+    SlotRewrite {
+        slot: Arc<str>,
+        reason: SlotEventReason,
     },
     RuntimeCallFinishedReady {
         reuse: ReuseClass,

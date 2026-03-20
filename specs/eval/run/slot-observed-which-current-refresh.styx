@@ -64,7 +64,10 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@slot_populate{slot "toolchain-slot"}
+        @must_emit/@slot_populate{
+          slot "toolchain-slot"
+          reason @missing
+        }
       )
     }
   }
@@ -85,12 +88,7 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@verify_claims_ok
         @must_emit/@slot_reuse{slot "toolchain-slot"}
-        @before{
-          first @verify_claims_ok
-          then @slot_reuse{slot "toolchain-slot"}
-        }
       )
     }
   }
@@ -111,11 +109,11 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@verify_claims_fail
-        @must_emit/@slot_rewrite{slot "toolchain-slot"}
-        @before{
-          first @verify_claims_fail
-          then @slot_rewrite{slot "toolchain-slot"}
+        @must_emit/@slot_rewrite{
+          slot "toolchain-slot"
+          reason @claims_invalid{
+            reason_contains "host.which(\"cl.exe\") changed"
+          }
         }
       )
     }
@@ -142,9 +140,12 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@slot_rewrite{slot "toolchain-slot"}
-        @must_not_emit/@verify_claims_ok
-        @must_not_emit/@verify_claims_fail
+        @must_emit/@slot_rewrite{
+          slot "toolchain-slot"
+          reason @refresh{
+            intent @string"force_rediscover"
+          }
+        }
       )
     }
   }
@@ -168,7 +169,6 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@verify_claims_ok
         @must_emit/@slot_reuse{slot "toolchain-slot"}
       )
     }

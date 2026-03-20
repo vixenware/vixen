@@ -20,6 +20,9 @@ pub enum SpecParseError {
 
     #[error("failed to parse {path}: {message}")]
     ParseError { path: String, message: String },
+
+    #[error("invalid spec {path}: {message}")]
+    ValidationError { path: String, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,7 +31,7 @@ pub enum SpecOutcome {
     Poison(ObservedPoison),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObservedPoison {
     pub kind: String,
     pub message: String,
@@ -184,19 +187,22 @@ impl SpecCase {
         self.expect.assert_matches(outcome)
     }
 
-    pub fn invocations(&self) -> Vec<ResolvedSpecRun> {
+    pub fn invocations(&self) -> Result<Vec<ResolvedSpecRun>, SpecParseError> {
         if self.runs.is_empty() {
-            return vec![ResolvedSpecRun {
-                invoke: self.invoke.clone(),
+            let invoke = InvokeOverrideSpec::default().resolve_against(&self.path, &self.invoke)?;
+            return Ok(vec![ResolvedSpecRun {
+                invoke,
                 expect: self.expect.clone(),
-            }];
+            }]);
         }
 
         self.runs
             .iter()
-            .map(|run| ResolvedSpecRun {
-                invoke: run.invoke.resolve_against(&self.invoke),
-                expect: run.expect.clone(),
+            .map(|run| {
+                Ok(ResolvedSpecRun {
+                    invoke: run.invoke.resolve_against(&self.path, &self.invoke)?,
+                    expect: run.expect.clone(),
+                })
             })
             .collect()
     }
@@ -280,8 +286,19 @@ pub struct InvokeOverrideSpec {
 }
 
 impl InvokeOverrideSpec {
-    fn resolve_against(&self, base: &InvokeSpec) -> InvokeSpec {
-        InvokeSpec {
+    fn resolve_against(
+        &self,
+        path: &Path,
+        base: &InvokeSpec,
+    ) -> Result<InvokeSpec, SpecParseError> {
+        let slot =
+            resolve_slot_override(base.slot.as_ref(), self.slot.as_ref()).map_err(|message| {
+                SpecParseError::ValidationError {
+                    path: path.display().to_string(),
+                    message,
+                }
+            })?;
+        Ok(InvokeSpec {
             entry: self.entry.clone().unwrap_or_else(|| base.entry.clone()),
             place: self.place.clone().or_else(|| base.place.clone()),
             verify_place: self
@@ -297,9 +314,9 @@ impl InvokeOverrideSpec {
                 .capabilities
                 .clone()
                 .unwrap_or_else(|| base.capabilities.clone()),
-            slot: resolve_slot_override(base.slot.as_ref(), self.slot.as_ref()),
+            slot,
             runtime: base.runtime.clone(),
-        }
+        })
     }
 }
 
@@ -350,22 +367,23 @@ pub enum SlotActionSpec {
 fn resolve_slot_override(
     base: Option<&SlotInvokeSpec>,
     override_spec: Option<&SlotInvokeOverrideSpec>,
-) -> Option<SlotInvokeSpec> {
+) -> Result<Option<SlotInvokeSpec>, String> {
     match (base, override_spec) {
-        (None, None) => None,
-        (Some(base), None) => Some(base.clone()),
-        (None, Some(override_spec)) => Some(SlotInvokeSpec {
-            id: override_spec.id.clone().unwrap_or_default(),
-            domain: override_spec
-                .domain
-                .clone()
-                .expect("slot override must provide a domain when no base slot exists"),
-            action: override_spec
-                .action
-                .clone()
-                .expect("slot override must provide an action when no base slot exists"),
-        }),
-        (Some(base), Some(override_spec)) => Some(SlotInvokeSpec {
+        (None, None) => Ok(None),
+        (Some(base), None) => validate_slot_spec(base.clone()).map(Some),
+        (None, Some(override_spec)) => validate_slot_spec(SlotInvokeSpec {
+            id: override_spec.id.clone().ok_or_else(|| {
+                "slot override must provide id when no base slot exists".to_string()
+            })?,
+            domain: override_spec.domain.clone().ok_or_else(|| {
+                "slot override must provide a domain when no base slot exists".to_string()
+            })?,
+            action: override_spec.action.clone().ok_or_else(|| {
+                "slot override must provide an action when no base slot exists".to_string()
+            })?,
+        })
+        .map(Some),
+        (Some(base), Some(override_spec)) => validate_slot_spec(SlotInvokeSpec {
             id: override_spec.id.clone().unwrap_or_else(|| base.id.clone()),
             domain: override_spec
                 .domain
@@ -375,8 +393,16 @@ fn resolve_slot_override(
                 .action
                 .clone()
                 .unwrap_or_else(|| base.action.clone()),
-        }),
+        })
+        .map(Some),
     }
+}
+
+fn validate_slot_spec(slot: SlotInvokeSpec) -> Result<SlotInvokeSpec, String> {
+    if slot.id.trim().is_empty() {
+        return Err("slot id must be present and non-empty".to_string());
+    }
+    Ok(slot)
 }
 
 impl InvokeSpec {
@@ -731,17 +757,75 @@ impl ExpectSpec {
 
     fn events_match(&self, actual: &[EventPattern]) -> bool {
         self.events.iter().all(|assertion| match assertion {
-            EventAssertion::MustEmit(pattern) => actual.iter().any(|event| event == pattern),
-            EventAssertion::MustNotEmit(pattern) => actual.iter().all(|event| event != pattern),
+            EventAssertion::MustEmit(pattern) => actual.iter().any(|event| pattern.matches(event)),
+            EventAssertion::MustNotEmit(pattern) => {
+                actual.iter().all(|event| !pattern.matches(event))
+            }
             EventAssertion::Before(OrderConstraint { first, then }) => {
-                let first_index = actual.iter().position(|event| event == first);
-                let then_index = actual.iter().position(|event| event == then);
+                let first_index = actual.iter().position(|event| first.matches(event));
+                let then_index = actual.iter().position(|event| then.matches(event));
                 match (first_index, then_index) {
                     (Some(first_index), Some(then_index)) => first_index < then_index,
                     _ => false,
                 }
             }
         })
+    }
+}
+
+impl EventPattern {
+    fn matches(&self, actual: &EventPattern) -> bool {
+        match (self, actual) {
+            (
+                Self::SlotPopulate {
+                    slot: expected_slot,
+                    reason: expected_reason,
+                },
+                Self::SlotPopulate {
+                    slot: actual_slot,
+                    reason: actual_reason,
+                },
+            )
+            | (
+                Self::SlotRewrite {
+                    slot: expected_slot,
+                    reason: expected_reason,
+                },
+                Self::SlotRewrite {
+                    slot: actual_slot,
+                    reason: actual_reason,
+                },
+            ) => expected_slot == actual_slot && expected_reason.matches(actual_reason),
+            (Self::SlotReuse { slot: expected }, Self::SlotReuse { slot: actual }) => {
+                expected == actual
+            }
+            _ => self == actual,
+        }
+    }
+}
+
+impl SlotEventReasonPattern {
+    fn matches(&self, actual: &SlotEventReasonPattern) -> bool {
+        match (self, actual) {
+            (Self::Missing, Self::Missing) | (Self::WitnessChanged, Self::WitnessChanged) => true,
+            (
+                Self::ClaimsInvalid {
+                    reason_contains: expected,
+                },
+                Self::ClaimsInvalid {
+                    reason_contains: actual,
+                },
+            ) => match expected {
+                Some(expected) => actual
+                    .as_ref()
+                    .is_some_and(|actual| actual.contains(expected)),
+                None => true,
+            },
+            (Self::Refresh { intent: expected }, Self::Refresh { intent: actual }) => {
+                expected == actual
+            }
+            _ => false,
+        }
     }
 }
 
@@ -889,18 +973,20 @@ pub struct OrderConstraint {
     pub then: EventPattern,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, PartialEq, Facet)]
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum EventPattern {
     SlotPopulate {
         slot: String,
+        reason: SlotEventReasonPattern,
     },
     SlotReuse {
         slot: String,
     },
     SlotRewrite {
         slot: String,
+        reason: SlotEventReasonPattern,
     },
     DiscoverStart {
         executor: String,
@@ -923,6 +1009,16 @@ pub enum EventPattern {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum SlotEventReasonPattern {
+    Missing,
+    WitnessChanged,
+    ClaimsInvalid { reason_contains: Option<String> },
+    Refresh { intent: SpecValue },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
@@ -930,4 +1026,86 @@ pub enum EngineExpectation {
     Pass,
     Todo,
     Skip,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SpecCase, SpecParseError};
+
+    #[test]
+    fn slot_override_without_base_id_is_rejected() {
+        let case = SpecCase::parse(
+            r#"
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+invoke {
+  entry build
+}
+
+runs (
+  {
+    invoke {
+      slot {
+        domain @pure{
+          witness @string"w1"
+          value @u64"1"
+        }
+        action @current
+      }
+    }
+
+    expect {
+      result @u64"1"
+    }
+  }
+)
+"#,
+        )
+        .expect("parse inline spec");
+
+        let error = case.invocations().expect_err("missing slot id should fail");
+        assert!(matches!(
+            error,
+            SpecParseError::ValidationError { message, .. }
+            if message.contains("slot override must provide id")
+        ));
+    }
+
+    #[test]
+    fn empty_slot_id_is_rejected() {
+        let case = SpecCase::parse(
+            r#"
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+invoke {
+  entry build
+
+  slot {
+    id ""
+    domain @pure{
+      witness @string"w1"
+      value @u64"1"
+    }
+    action @current
+  }
+}
+"#,
+        )
+        .expect("parse inline spec");
+
+        let error = case.invocations().expect_err("empty slot id should fail");
+        assert!(matches!(
+            error,
+            SpecParseError::ValidationError { message, .. }
+            if message.contains("slot id must be present and non-empty")
+        ));
+    }
 }
