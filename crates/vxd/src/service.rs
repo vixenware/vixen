@@ -41,6 +41,7 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use vx_cache::{run_cache_key, tracked_observations_fingerprint};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, BoxFuture, BuildRuntime, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, EventSink, ExecArgValue,
@@ -3374,6 +3375,135 @@ async fn run_build_vx_exec_via_runner(
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
 
+    let tree_mount_count = prepared_mounts.tree_mounts.len();
+    let file_mount_count = prepared_mounts.file_mounts.len();
+    let run_request = RunRequest {
+        executor: request.executor.clone(),
+        program: exec_arg_to_run_arg(&program),
+        args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
+        tree_mounts: prepared_mounts.tree_mounts,
+        file_mounts: prepared_mounts.file_mounts,
+        writable_roots: request
+            .writable_roots
+            .iter()
+            .map(|path| path.as_str().to_string())
+            .collect(),
+        create_dirs: request
+            .create_dirs
+            .iter()
+            .map(|path| path.as_str().to_string())
+            .collect(),
+        cwd: None,
+        env: request
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
+            .collect(),
+        clear_env: false,
+        eval: Some(RunEvalPayload {
+            module: request.module,
+            observer: Some(observer),
+            verification_obligations: request.verification_obligations,
+        }),
+        macos_commandlinetools_version: None,
+    };
+    let exec_cache_key = run_cache_key(&run_request);
+
+    if let Some(cached_manifest_hash) =
+        target_store.lookup(exec_cache_key).await.map_err(|error| {
+            exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+        })?
+    {
+        match load_build_vx_exec_cache_entry_from_manifest(target_store, cached_manifest_hash).await
+        {
+            Ok(cached_entry) => match verify_run_tracked_observations(
+                target_store,
+                &run_request,
+                &cached_entry.tracked_observations,
+            )
+            .await
+            {
+                Ok(true) => {
+                    if let Some(recorder) = event_recorder.as_ref() {
+                        EventSink::instant_with_args(
+                            recorder,
+                            "exec.cache.hit",
+                            value!({
+                                "executor": ((executor_summary.clone())),
+                                "cache_key": ((exec_cache_key.to_hex())),
+                                "tracked_observations": ((cached_entry.tracked_observations.len() as u64))
+                            }),
+                        );
+                    }
+                    tracing::info!(
+                        executor = %executor_summary,
+                        cache_key = %exec_cache_key,
+                        tracked_observations = cached_entry.tracked_observations.len(),
+                        "build.vx exec cache hit"
+                    );
+                    emit_build_vx_progress_activity(
+                        &progress_listener,
+                        &activity,
+                        format!(
+                            "build.vx executor {}: reused cached exec result",
+                            executor_summary
+                        ),
+                    )
+                    .await;
+                    let observer_value = if std::ptr::eq(target_store, &**store) {
+                        cached_entry.observer_value
+                    } else {
+                        mirror_transport_value_store_refs(
+                            target_store,
+                            store,
+                            cached_entry.observer_value,
+                        )
+                        .await
+                        .map_err(|message| {
+                            exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain)
+                        })?
+                    };
+                    return Value::try_from(observer_value).map_err(|error| {
+                        exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
+                    });
+                }
+                Ok(false) => {
+                    if let Some(recorder) = event_recorder.as_ref() {
+                        EventSink::instant_with_args(
+                            recorder,
+                            "exec.cache.stale",
+                            value!({
+                                "executor": ((executor_summary.clone())),
+                                "cache_key": ((exec_cache_key.to_hex()))
+                            }),
+                        );
+                    }
+                    tracing::info!(
+                        executor = %executor_summary,
+                        cache_key = %exec_cache_key,
+                        "build.vx exec cache stale; rerunning"
+                    );
+                }
+                Err(message) => {
+                    warn!(
+                        executor = %executor_summary,
+                        cache_key = %exec_cache_key,
+                        error = %message,
+                        "failed to verify tracked observations for cached build.vx exec result"
+                    );
+                }
+            },
+            Err(message) => {
+                warn!(
+                    executor = %executor_summary,
+                    cache_key = %exec_cache_key,
+                    error = %message,
+                    "failed to load cached build.vx exec result"
+                );
+            }
+        }
+    }
+
     emit_build_vx_progress_activity(
         &progress_listener,
         &activity,
@@ -3390,8 +3520,8 @@ async fn run_build_vx_exec_via_runner(
                     "executor": ((executor_summary.clone())),
                     "command": ((command.clone())),
                     "command_preview": ((command_preview.clone())),
-                    "tree_mount_count": ((prepared_mounts.tree_mounts.len() as u64)),
-                    "file_mount_count": ((prepared_mounts.file_mounts.len() as u64)),
+                    "tree_mount_count": ((tree_mount_count as u64)),
+                    "file_mount_count": ((file_mount_count as u64)),
                     "cross_store": ((!std::ptr::eq(target_store, &**store))),
                     "store_supports_readthrough": ((store_supports_readthrough))
                 }),
@@ -3491,41 +3621,7 @@ async fn run_build_vx_exec_via_runner(
             }
             .named("build_vx_exec_progress_fwd"),
         );
-        let run_result = exec
-            .run(
-                RunRequest {
-                    executor: request.executor.clone(),
-                    program: exec_arg_to_run_arg(&program),
-                    args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
-                    tree_mounts: prepared_mounts.tree_mounts,
-                    file_mounts: prepared_mounts.file_mounts,
-                    writable_roots: request
-                        .writable_roots
-                        .iter()
-                        .map(|path| path.as_str().to_string())
-                        .collect(),
-                    create_dirs: request
-                        .create_dirs
-                        .iter()
-                        .map(|path| path.as_str().to_string())
-                        .collect(),
-                    cwd: None,
-                    env: request
-                        .env
-                        .iter()
-                        .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
-                        .collect(),
-                    clear_env: false,
-                    eval: Some(RunEvalPayload {
-                        module: request.module,
-                        observer: Some(observer),
-                        verification_obligations: request.verification_obligations,
-                    }),
-                    macos_commandlinetools_version: None,
-                },
-                progress,
-            )
-            .await;
+        let run_result = exec.run(run_request.clone(), progress).await;
         let _ = progress_handle.await;
         run_result.map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
@@ -3541,10 +3637,25 @@ async fn run_build_vx_exec_via_runner(
         ),
     )
     .await;
+    let tracked_observations_fingerprint =
+        tracked_observations_fingerprint(&result.tracked_observations);
+    if let Some(recorder) = event_recorder.as_ref() {
+        EventSink::instant_with_args(
+            recorder,
+            "exec.runner.tracked_observations",
+            value!({
+                "executor": ((executor_summary.clone())),
+                "count": ((result.tracked_observations.len() as u64)),
+                "fingerprint": ((tracked_observations_fingerprint.to_hex()))
+            }),
+        );
+    }
     tracing::info!(
         executor = %executor_summary,
         success = result.success,
         has_observer_value = result.observer_value.is_some(),
+        tracked_observations = result.tracked_observations.len(),
+        tracked_observations_fingerprint = %tracked_observations_fingerprint,
         "build.vx exec returned from runner"
     );
 
@@ -3577,6 +3688,66 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
+    let exec_cache_entry = BuildVxExecCacheEntry {
+        observer_value: observer_value.clone(),
+        tracked_observations: result.tracked_observations.clone(),
+    };
+    let cache_entry_bytes = to_vec(&exec_cache_entry).map_err(|error| {
+        exec_bridge_poison(
+            PoisonKind::Internal,
+            format!("failed to serialize exec cache entry: {error}"),
+            &demand_chain,
+        )
+    })?;
+    let cache_entry_prepared = prepare_blob(&cache_entry_bytes);
+    let cache_entry_blob_ref =
+        store_prepared_blob(target_store, &cache_entry_prepared, &cache_entry_bytes)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::Internal, message, &demand_chain))?;
+    let cache_entry_manifest = NodeManifest {
+        node_id: NodeId("exec:result".to_string()),
+        cache_key: exec_cache_key,
+        produced_at: String::new(),
+        outputs: vec![OutputEntry {
+            logical: "result".to_string(),
+            filename: "exec-result".to_string(),
+            blob: output_blob_ref_from_blob_ref(&cache_entry_blob_ref),
+            executable: false,
+        }],
+    };
+    let (cache_entry_manifest_bytes, cache_entry_manifest_hash) =
+        CasNode::Manifest(cache_entry_manifest).to_bytes_and_hash();
+    target_store
+        .put_node(cache_entry_manifest_hash, cache_entry_manifest_bytes)
+        .await
+        .map_err(|error| {
+            exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+        })?;
+    if let Err(message) = publish_store_cache_entry(
+        target_store,
+        exec_cache_key,
+        cache_entry_manifest_hash,
+        "exec",
+    )
+    .await
+    {
+        warn!(
+            executor = %executor_summary,
+            cache_key = %exec_cache_key,
+            error = %message,
+            "failed to publish build.vx exec cache entry"
+        );
+    } else if let Some(recorder) = event_recorder.as_ref() {
+        EventSink::instant_with_args(
+            recorder,
+            "exec.cache.store",
+            value!({
+                "executor": ((executor_summary.clone())),
+                "cache_key": ((exec_cache_key.to_hex())),
+                "tracked_observations": ((exec_cache_entry.tracked_observations.len() as u64))
+            }),
+        );
+    }
     let observer_bridge_started = Instant::now();
     emit_build_vx_progress_activity(
         &progress_listener,
@@ -3989,6 +4160,307 @@ fn stabilize_cache_key(resolve: &[u8], witness: &[u8]) -> Blake3Hash {
     hasher.update(witness);
     hasher.update(b"\n");
     Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct BuildVxExecCacheEntry {
+    observer_value: TransportValue,
+    tracked_observations: Vec<vx_runner_proto::RunTrackedObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunFileObservation {
+    content_hash: ContentHash,
+    blob_node: Option<NodeHash>,
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedTrackedPath {
+    File(RunFileObservation),
+    Directory(NodeHash),
+    Missing,
+}
+
+enum TrackedMountResolution<'a> {
+    Tree {
+        mount: &'a RunTreeMount,
+        relative_path: &'a str,
+    },
+    File(&'a RunFileMount),
+}
+
+fn tracked_tree_relative_path<'a>(mount: &'a str, path: &'a str) -> Option<&'a str> {
+    if mount.is_empty() {
+        Some(path)
+    } else if path == mount {
+        Some("")
+    } else {
+        path.strip_prefix(mount)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+    }
+}
+
+fn resolve_tracked_mount<'a>(
+    request: &'a RunRequest,
+    path: &'a str,
+) -> Option<TrackedMountResolution<'a>> {
+    if let Some(file_mount) = request
+        .file_mounts
+        .iter()
+        .find(|mount| mount.mode == RunMountMode::Tracked && mount.path == path)
+    {
+        return Some(TrackedMountResolution::File(file_mount));
+    }
+
+    request
+        .tree_mounts
+        .iter()
+        .filter(|mount| mount.mode == RunMountMode::Tracked)
+        .filter_map(|mount| {
+            tracked_tree_relative_path(&mount.mount, path).map(|relative_path| {
+                (
+                    mount.mount.len(),
+                    TrackedMountResolution::Tree {
+                        mount,
+                        relative_path,
+                    },
+                )
+            })
+        })
+        .max_by_key(|(prefix_len, _)| *prefix_len)
+        .map(|(_, resolution)| resolution)
+}
+
+async fn load_node_manifest(
+    store: &StoreClient,
+    manifest_hash: NodeHash,
+) -> std::result::Result<NodeManifest, String> {
+    let node_bytes = store
+        .get_node(manifest_hash)
+        .await
+        .map_err(|error| format!("failed to load manifest {manifest_hash}: {error:?}"))?
+        .ok_or_else(|| format!("manifest {manifest_hash} not found"))?;
+    let node = CasNode::from_bytes(&node_bytes)
+        .map_err(|error| format!("failed to decode manifest {manifest_hash}: {error}"))?;
+    let CasNode::Manifest(manifest) = node else {
+        return Err(format!("node {manifest_hash} is not a manifest"));
+    };
+    Ok(manifest)
+}
+
+async fn load_run_file_mount_observation(
+    store: &StoreClient,
+    mount: &RunFileMount,
+) -> std::result::Result<RunFileObservation, String> {
+    let manifest = load_node_manifest(store, NodeHash(mount.manifest)).await?;
+    let output = manifest
+        .outputs
+        .iter()
+        .find(|output| output.logical == mount.logical)
+        .ok_or_else(|| {
+            format!(
+                "manifest {} has no output named {}",
+                mount.manifest, mount.logical
+            )
+        })?;
+    let observation = match &output.blob {
+        OutputBlobRef::Small { chunk, size } => RunFileObservation {
+            content_hash: ContentHash(chunk.0),
+            blob_node: None,
+            size: *size,
+        },
+        OutputBlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => RunFileObservation {
+            content_hash: *content_hash,
+            blob_node: Some(*blob_node),
+            size: *size,
+        },
+    };
+    Ok(observation)
+}
+
+async fn resolve_directory_entry(
+    store: &StoreClient,
+    root: NodeHash,
+    relative_path: &str,
+) -> std::result::Result<ResolvedTrackedPath, String> {
+    if relative_path.is_empty() {
+        return Ok(ResolvedTrackedPath::Directory(root));
+    }
+
+    let mut current = root;
+    let mut components = relative_path.split('/').peekable();
+    while let Some(component) = components.next() {
+        let directory = load_store_directory(store, current)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(entry) = directory
+            .entries
+            .iter()
+            .find(|entry| entry.name == component)
+        else {
+            return Ok(ResolvedTrackedPath::Missing);
+        };
+
+        let is_last = components.peek().is_none();
+        match &entry.kind {
+            DirEntryKind::SmallFile {
+                content_hash, size, ..
+            } => {
+                if !is_last {
+                    return Ok(ResolvedTrackedPath::Missing);
+                }
+                return Ok(ResolvedTrackedPath::File(RunFileObservation {
+                    content_hash: *content_hash,
+                    blob_node: None,
+                    size: *size,
+                }));
+            }
+            DirEntryKind::LargeFile {
+                content_hash,
+                blob_node,
+                size,
+                ..
+            } => {
+                if !is_last {
+                    return Ok(ResolvedTrackedPath::Missing);
+                }
+                return Ok(ResolvedTrackedPath::File(RunFileObservation {
+                    content_hash: *content_hash,
+                    blob_node: Some(*blob_node),
+                    size: *size,
+                }));
+            }
+            DirEntryKind::Dir { hash } => {
+                if is_last {
+                    return Ok(ResolvedTrackedPath::Directory(*hash));
+                }
+                current = *hash;
+            }
+            DirEntryKind::Symlink { .. } => return Ok(ResolvedTrackedPath::Missing),
+        }
+    }
+
+    Ok(ResolvedTrackedPath::Directory(current))
+}
+
+async fn resolve_tracked_path(
+    store: &StoreClient,
+    request: &RunRequest,
+    path: &str,
+) -> std::result::Result<ResolvedTrackedPath, String> {
+    match resolve_tracked_mount(request, path) {
+        Some(TrackedMountResolution::File(mount)) => Ok(ResolvedTrackedPath::File(
+            load_run_file_mount_observation(store, mount).await?,
+        )),
+        Some(TrackedMountResolution::Tree {
+            mount,
+            relative_path,
+        }) => resolve_directory_entry(store, NodeHash(mount.manifest), relative_path).await,
+        None => Ok(ResolvedTrackedPath::Missing),
+    }
+}
+
+pub(crate) async fn verify_run_tracked_observations(
+    store: &StoreClient,
+    request: &RunRequest,
+    observations: &[vx_runner_proto::RunTrackedObservation],
+) -> std::result::Result<bool, String> {
+    for observation in observations {
+        match observation {
+            vx_runner_proto::RunTrackedObservation::File {
+                path,
+                content_hash,
+                blob_node,
+                size,
+            } => match resolve_tracked_path(store, request, path).await? {
+                ResolvedTrackedPath::File(actual) => {
+                    if actual.content_hash != ContentHash(*content_hash)
+                        || actual.blob_node != *blob_node
+                        || actual.size != *size
+                    {
+                        return Ok(false);
+                    }
+                }
+                _ => return Ok(false),
+            },
+            vx_runner_proto::RunTrackedObservation::Directory {
+                path,
+                directory_node,
+            } => match resolve_tracked_path(store, request, path).await? {
+                ResolvedTrackedPath::Directory(actual) if actual == *directory_node => {}
+                _ => return Ok(false),
+            },
+            vx_runner_proto::RunTrackedObservation::LookupMiss {
+                path,
+                parent_path,
+                directory_node,
+            } => {
+                let relative_name = path
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| format!("invalid lookup-miss path {path}"))?;
+                match resolve_tracked_path(store, request, parent_path).await? {
+                    ResolvedTrackedPath::Directory(actual_dir) if actual_dir == *directory_node => {
+                        let directory = load_store_directory(store, actual_dir)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if directory
+                            .entries
+                            .iter()
+                            .any(|entry| entry.name == relative_name)
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    _ => return Ok(false),
+                }
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+async fn load_build_vx_exec_cache_entry_from_manifest(
+    store: &StoreClient,
+    manifest_hash: NodeHash,
+) -> std::result::Result<BuildVxExecCacheEntry, String> {
+    let manifest = load_node_manifest(store, manifest_hash).await?;
+    let [output] = manifest.outputs.as_slice() else {
+        return Err(format!(
+            "exec cache manifest {manifest_hash} must contain exactly one output"
+        ));
+    };
+    let bytes = fetch_store_blob_bytes(store, &blob_ref_from_output_blob_ref(&output.blob))
+        .await
+        .map_err(|error| format!("failed to load exec cache entry blob: {error}"))?;
+    from_slice::<BuildVxExecCacheEntry>(&bytes)
+        .map_err(|error| format!("failed to deserialize exec cache entry: {error}"))
+}
+
+async fn publish_store_cache_entry(
+    store: &StoreClient,
+    cache_key: Blake3Hash,
+    node_hash: NodeHash,
+    context: &str,
+) -> std::result::Result<(), String> {
+    let publish = store
+        .publish(cache_key, node_hash)
+        .await
+        .map_err(|error| format!("failed to publish {context} cache entry: {error:?}"))?;
+    if publish.success {
+        Ok(())
+    } else {
+        Err(publish
+            .error
+            .unwrap_or_else(|| format!("failed to publish {context} cache entry")))
+    }
 }
 
 async fn load_stabilized_value_from_manifest(

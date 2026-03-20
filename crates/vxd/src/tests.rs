@@ -40,12 +40,15 @@ use vx_io::net::Listener;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_runner_proto::{
-    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunMountMode, RunRequest, RunResult,
-    Runner, RunnerClient, RunnerDispatcher,
+    DiscoverRequest, DiscoverResult, ExecutorSelector, RUNNER_PROTOCOL_VERSION, RunArg,
+    RunMountMode, RunRequest, RunResult, RunTrackedObservation, RunTreeMount, Runner, RunnerClient,
+    RunnerDispatcher,
 };
+use vx_store_proto::cas_tree::{MerkleTreeFile, build_merkle_tree};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
-    Blake3Hash, BlobRef, ContentHash, DirEntryKind, ServiceVersion, StoreClient, StoreProgress,
+    Blake3Hash, BlobRef, ContentHash, DirEntryKind, NodeHash, ServiceVersion, StoreClient,
+    StoreProgress,
 };
 use vxd_proto::BuildRequest;
 
@@ -1876,6 +1879,44 @@ impl Drop for FakeRunnerHandle {
     }
 }
 
+fn static_tree_output(text: &str) -> TransportValue {
+    TransportValue::try_from(&Value::Tree(TreeValue::inline(Arc::from([(
+        Arc::from("ok.txt"),
+        Value::Blob(BlobValue::from_string(text)),
+    )]))))
+    .expect("observer value should serialize")
+}
+
+fn tracked_file_observation(path: &str, contents: &[u8]) -> RunTrackedObservation {
+    RunTrackedObservation::File {
+        path: path.to_string(),
+        content_hash: Blake3Hash::from_bytes(contents),
+        blob_node: None,
+        size: contents.len() as u64,
+    }
+}
+
+fn tracked_tree_run_request(root: NodeHash) -> RunRequest {
+    RunRequest {
+        executor: ExecutorSelector::class("default"),
+        program: RunArg::literal("tool"),
+        args: Vec::new(),
+        tree_mounts: vec![RunTreeMount {
+            mount: "src".to_string(),
+            manifest: root.0,
+            mode: RunMountMode::Tracked,
+        }],
+        file_mounts: Vec::new(),
+        writable_roots: Vec::new(),
+        create_dirs: Vec::new(),
+        cwd: None,
+        env: Vec::new(),
+        clear_env: false,
+        eval: None,
+        macos_commandlinetools_version: None,
+    }
+}
+
 struct BuildServiceDaemonTestEnv {
     _store_root: TempDir,
     _vx_home: TempDir,
@@ -2871,6 +2912,355 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
     assert!(matches!(request.program, vx_runner_proto::RunArg::Path(_)));
     assert_eq!(request.tree_mounts.len(), 1);
     assert_eq!(request.tree_mounts[0].mode, RunMountMode::Opaque);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verify_run_tracked_observations_rejects_lookup_miss_when_file_appears() {
+    let env = StoreTestEnv::new().await;
+    let initial_root = build_merkle_tree(
+        &env.client,
+        vec![MerkleTreeFile {
+            path: "input.txt".to_string(),
+            kind: DirEntryKind::SmallFile {
+                content_hash: ContentHash(Blake3Hash::from_bytes(b"hello")),
+                size: 5,
+                executable: false,
+            },
+        }],
+    )
+    .await
+    .expect("build initial tree")
+    .0;
+    let request = tracked_tree_run_request(initial_root);
+    let observations = vec![
+        tracked_file_observation("src/input.txt", b"hello"),
+        RunTrackedObservation::LookupMiss {
+            path: "src/generated.h".to_string(),
+            parent_path: "src".to_string(),
+            directory_node: initial_root,
+        },
+    ];
+
+    assert!(
+        crate::service::verify_run_tracked_observations(&env.client, &request, &observations)
+            .await
+            .expect("verify initial observations"),
+        "initial tracked observations should verify"
+    );
+
+    let changed_root = build_merkle_tree(
+        &env.client,
+        vec![
+            MerkleTreeFile {
+                path: "input.txt".to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(Blake3Hash::from_bytes(b"hello")),
+                    size: 5,
+                    executable: false,
+                },
+            },
+            MerkleTreeFile {
+                path: "generated.h".to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(Blake3Hash::from_bytes(b"#define X 1\n")),
+                    size: 11,
+                    executable: false,
+                },
+            },
+        ],
+    )
+    .await
+    .expect("build changed tree")
+    .0;
+    let changed_request = tracked_tree_run_request(changed_root);
+
+    assert!(
+        !crate::service::verify_run_tracked_observations(
+            &env.client,
+            &changed_request,
+            &observations,
+        )
+        .await
+        .expect("verify changed observations"),
+        "lookup miss should invalidate when the missing file appears"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_exec_reuses_cached_result_when_tracked_inputs_match() {
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: TransportValue::String("unused".to_string()),
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(static_tree_output("cached\n")),
+                tracked_observations: vec![tracked_file_observation("src/input.txt", b"hello\n")],
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let src = Tree %{
+    @input.txt => Tree.from_path(workspace).file(@input.txt),
+  };
+  exec ["/bin/sh", "-c", "true"] where {
+    executor: executor_class("linux"),
+    mounts: %{ @src => src },
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+    fs::write(workspace.path().join("input.txt"), "hello\n").expect("write input");
+
+    let request = BuildRequest::new(workspace_root.to_owned());
+
+    let first = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("first build should succeed");
+    assert!(first.success, "first build failed: {:?}", first.failure);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/ok.txt")).expect("first output"),
+        "cached\n"
+    );
+
+    let second = env
+        .service
+        .do_build(request)
+        .await
+        .expect("second build should succeed");
+    assert!(second.success, "second build failed: {:?}", second.failure);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/ok.txt")).expect("second output"),
+        "cached\n"
+    );
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(
+        requests.len(),
+        1,
+        "runner should only be called once when tracked inputs still verify"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_exec_reruns_cached_result_when_tracked_inputs_change() {
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: TransportValue::String("unused".to_string()),
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(static_tree_output("rerun\n")),
+                tracked_observations: vec![tracked_file_observation("src/input.txt", b"hello\n")],
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let src = Tree %{
+    @input.txt => Tree.from_path(workspace).file(@input.txt),
+  };
+  exec ["/bin/sh", "-c", "true"] where {
+    executor: executor_class("linux"),
+    mounts: %{ @src => src },
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+    fs::write(workspace.path().join("input.txt"), "hello\n").expect("write input");
+
+    let request = BuildRequest::new(workspace_root.to_owned());
+
+    let first = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("first build should succeed");
+    assert!(first.success, "first build failed: {:?}", first.failure);
+
+    fs::write(workspace.path().join("input.txt"), "goodbye\n").expect("rewrite input");
+
+    let second = env
+        .service
+        .do_build(request)
+        .await
+        .expect("second build should succeed");
+    assert!(second.success, "second build failed: {:?}", second.failure);
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(
+        requests.len(),
+        2,
+        "runner should be called again when tracked inputs no longer verify"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_exec_reruns_cached_result_when_tracked_lookup_miss_changes() {
+    let store = StoreTestEnv::new().await;
+    let initial_root = build_merkle_tree(
+        &store.client,
+        vec![MerkleTreeFile {
+            path: "input.txt".to_string(),
+            kind: DirEntryKind::SmallFile {
+                content_hash: ContentHash(Blake3Hash::from_bytes(b"hello\n")),
+                size: 6,
+                executable: false,
+            },
+        }],
+    )
+    .await
+    .expect("build initial tree")
+    .0;
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: TransportValue::String("unused".to_string()),
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(static_tree_output("lookup-miss\n")),
+                tracked_observations: vec![RunTrackedObservation::LookupMiss {
+                    path: "src/generated.h".to_string(),
+                    parent_path: "src".to_string(),
+                    directory_node: initial_root,
+                }],
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let src = Tree(workspace / @src);
+  exec ["/bin/sh", "-c", "true"] where {
+    executor: executor_class("linux"),
+    mounts: %{ @src => src },
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+    fs::create_dir_all(workspace.path().join("src")).expect("create src dir");
+    fs::write(workspace.path().join("src/input.txt"), "hello\n").expect("write input");
+
+    let request = BuildRequest::new(workspace_root.to_owned());
+
+    let first = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("first build should succeed");
+    assert!(first.success, "first build failed: {:?}", first.failure);
+
+    fs::write(workspace.path().join("src/generated.h"), "#define X 1\n")
+        .expect("write generated header");
+
+    let second = env
+        .service
+        .do_build(request)
+        .await
+        .expect("second build should succeed");
+    assert!(second.success, "second build failed: {:?}", second.failure);
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(
+        requests.len(),
+        2,
+        "runner should be called again when a tracked lookup miss becomes present"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

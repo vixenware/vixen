@@ -241,8 +241,17 @@ the runner boundary:
 
 - opaque mounts are mounted at stable shared visible paths
 - tracked mounts stay action-scoped
+- generic run-request keys now treat tracked mounts as structural only; they no
+  longer hash the tracked bundle identity directly
 - the runner returns tracked observations under tracked mount roots as part of
   `RunResult`
+- the daemon computes a canonical fingerprint for those tracked observations at
+  the build.vx exec boundary
+- the daemon can verify a prior tracked observation set against the current
+  tracked mounts before reusing a cached `build.vx exec` result
+- cached `build.vx exec` results now reuse the structural run key plus tracked
+  observation verification, instead of treating tracked mounts as opaque bundle
+  identities
 
 That is intentionally narrower than the full target model above.
 
@@ -255,10 +264,13 @@ What is implemented today for tracked mounts:
 
 What is not implemented yet:
 
-- using tracked observations in `vxd` cache keys or incremental invalidation
+- turning tracked observations into a more general incremental invalidation
+  mechanism outside the current `build.vx exec` cache path
+- persisting a richer dependency graph than the single observed set attached to
+  one cached exec result
 
 So the current system distinguishes tracked and opaque operationally, but only
-for the first slice of tracked input reporting.
+for the first slice of tracked observation reuse.
 
 ## What this does not decide yet
 

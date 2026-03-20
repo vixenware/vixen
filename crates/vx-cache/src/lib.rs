@@ -4,12 +4,13 @@
 //! sandboxed `run` request should be keyed.
 
 use facet_postcard::to_vec;
-use vx_runner_proto::{RunArg, RunMountMode, RunRequest};
+use vx_runner_proto::{RunArg, RunMountMode, RunRequest, RunTrackedObservation};
 use vx_store_proto::Blake3Hash;
 
 /// Current cache key schema version for generic tool execution.
-/// Version 9: mount mode is part of run request identity.
-pub const RUN_CACHE_KEY_VERSION: u32 = 9;
+/// Version 10: tracked mounts contribute only structural identity; opaque mounts
+/// keep whole-bundle identity in the request key.
+pub const RUN_CACHE_KEY_VERSION: u32 = 10;
 
 /// Compute a cache key for a generic `run` request.
 pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
@@ -92,12 +93,15 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         hasher.update(b"tree:");
         hasher.update(mount.mount.as_bytes());
         hasher.update(b":");
-        hasher.update(match mount.mode {
-            RunMountMode::Tracked => b"tracked",
-            RunMountMode::Opaque => b"opaque",
-        });
-        hasher.update(b":");
-        hasher.update(&mount.manifest.0);
+        match mount.mode {
+            RunMountMode::Tracked => {
+                hasher.update(b"tracked");
+            }
+            RunMountMode::Opaque => {
+                hasher.update(b"opaque:");
+                hasher.update(&mount.manifest.0);
+            }
+        }
         hasher.update(b"\n");
     }
 
@@ -131,16 +135,147 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         hasher.update(b":");
         hasher.update(mount.logical.as_bytes());
         hasher.update(b":");
-        hasher.update(match mount.mode {
-            RunMountMode::Tracked => b"tracked",
-            RunMountMode::Opaque => b"opaque",
-        });
-        hasher.update(b":");
-        hasher.update(&mount.manifest.0);
+        match mount.mode {
+            RunMountMode::Tracked => {
+                hasher.update(b"tracked");
+            }
+            RunMountMode::Opaque => {
+                hasher.update(b"opaque:");
+                hasher.update(&mount.manifest.0);
+            }
+        }
         hasher.update(b"\n");
     }
 
     Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+/// Compute a canonical fingerprint for tracked observations returned by a run.
+///
+/// This is independent of observation order and stable across transports.
+pub fn tracked_observations_fingerprint(observations: &[RunTrackedObservation]) -> Blake3Hash {
+    let mut normalized = observations.to_vec();
+    normalized.sort_by(compare_tracked_observations);
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tracked-observations-v1\n");
+
+    for observation in &normalized {
+        match observation {
+            RunTrackedObservation::File {
+                path,
+                content_hash,
+                blob_node,
+                size,
+            } => {
+                hasher.update(b"file:");
+                hasher.update(path.as_bytes());
+                hasher.update(b":");
+                hasher.update(&content_hash.0);
+                hasher.update(b":");
+                if let Some(blob_node) = blob_node {
+                    hasher.update(&blob_node.0.0);
+                } else {
+                    hasher.update(b"-");
+                }
+                hasher.update(b":");
+                hasher.update(&size.to_le_bytes());
+                hasher.update(b"\n");
+            }
+            RunTrackedObservation::Directory {
+                path,
+                directory_node,
+            } => {
+                hasher.update(b"dir:");
+                hasher.update(path.as_bytes());
+                hasher.update(b":");
+                hasher.update(&directory_node.0.0);
+                hasher.update(b"\n");
+            }
+            RunTrackedObservation::LookupMiss {
+                path,
+                parent_path,
+                directory_node,
+            } => {
+                hasher.update(b"miss:");
+                hasher.update(path.as_bytes());
+                hasher.update(b":");
+                hasher.update(parent_path.as_bytes());
+                hasher.update(b":");
+                hasher.update(&directory_node.0.0);
+                hasher.update(b"\n");
+            }
+        }
+    }
+
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+fn compare_tracked_observations(
+    left: &RunTrackedObservation,
+    right: &RunTrackedObservation,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    fn kind_rank(observation: &RunTrackedObservation) -> u8 {
+        match observation {
+            RunTrackedObservation::File { .. } => 0,
+            RunTrackedObservation::Directory { .. } => 1,
+            RunTrackedObservation::LookupMiss { .. } => 2,
+        }
+    }
+
+    fn path(observation: &RunTrackedObservation) -> &str {
+        match observation {
+            RunTrackedObservation::File { path, .. }
+            | RunTrackedObservation::Directory { path, .. }
+            | RunTrackedObservation::LookupMiss { path, .. } => path,
+        }
+    }
+
+    fn parent_path(observation: &RunTrackedObservation) -> &str {
+        match observation {
+            RunTrackedObservation::LookupMiss { parent_path, .. } => parent_path,
+            _ => "",
+        }
+    }
+
+    fn primary_hash(observation: &RunTrackedObservation) -> &[u8; 32] {
+        match observation {
+            RunTrackedObservation::File { content_hash, .. } => &content_hash.0,
+            RunTrackedObservation::Directory { directory_node, .. }
+            | RunTrackedObservation::LookupMiss { directory_node, .. } => &directory_node.0.0,
+        }
+    }
+
+    fn secondary_hash(observation: &RunTrackedObservation) -> Option<&[u8; 32]> {
+        match observation {
+            RunTrackedObservation::File { blob_node, .. } => {
+                blob_node.as_ref().map(|node| &node.0.0)
+            }
+            _ => None,
+        }
+    }
+
+    fn size(observation: &RunTrackedObservation) -> u64 {
+        match observation {
+            RunTrackedObservation::File { size, .. } => *size,
+            _ => 0,
+        }
+    }
+
+    path(left)
+        .cmp(path(right))
+        .then_with(|| kind_rank(left).cmp(&kind_rank(right)))
+        .then_with(|| parent_path(left).cmp(parent_path(right)))
+        .then_with(|| primary_hash(left).cmp(primary_hash(right)))
+        .then_with(|| match (secondary_hash(left), secondary_hash(right)) {
+            (Some(left), Some(right)) => left.cmp(right),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        })
+        .then_with(|| size(left).cmp(&size(right)))
 }
 
 fn update_run_arg(hasher: &mut blake3::Hasher, arg: &RunArg) {
@@ -155,10 +290,11 @@ fn update_run_arg(hasher: &mut blake3::Hasher, arg: &RunArg) {
 mod tests {
     use super::*;
     use vx_runner_proto::{
-        ExecutorSelector, RunEvalPayload, RunMountMode, RunTreeMount, ShippedFunction,
-        TransportBlock, TransportExpr, TransportFnDef, TransportModule, TransportParam,
-        TransportStmt,
+        ExecutorSelector, RunEvalPayload, RunMountMode, RunTrackedObservation, RunTreeMount,
+        ShippedFunction, TransportBlock, TransportExpr, TransportFnDef, TransportModule,
+        TransportParam, TransportStmt,
     };
+    use vx_store_proto::NodeHash;
 
     fn sample_request() -> RunRequest {
         RunRequest {
@@ -306,5 +442,93 @@ mod tests {
         };
 
         assert_ne!(run_cache_key(&tracked), run_cache_key(&opaque));
+    }
+
+    #[test]
+    fn run_cache_key_ignores_tracked_mount_manifest_identity() {
+        let first = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "src".to_string(),
+                manifest: Blake3Hash([1; 32]),
+                mode: RunMountMode::Tracked,
+            }],
+            ..sample_request()
+        };
+        let second = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "src".to_string(),
+                manifest: Blake3Hash([2; 32]),
+                mode: RunMountMode::Tracked,
+            }],
+            ..sample_request()
+        };
+
+        assert_eq!(run_cache_key(&first), run_cache_key(&second));
+    }
+
+    #[test]
+    fn run_cache_key_keeps_opaque_mount_manifest_identity() {
+        let first = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "toolchain".to_string(),
+                manifest: Blake3Hash([1; 32]),
+                mode: RunMountMode::Opaque,
+            }],
+            ..sample_request()
+        };
+        let second = RunRequest {
+            tree_mounts: vec![RunTreeMount {
+                mount: "toolchain".to_string(),
+                manifest: Blake3Hash([2; 32]),
+                mode: RunMountMode::Opaque,
+            }],
+            ..sample_request()
+        };
+
+        assert_ne!(run_cache_key(&first), run_cache_key(&second));
+    }
+
+    #[test]
+    fn tracked_observations_fingerprint_is_order_independent() {
+        let file = RunTrackedObservation::File {
+            path: "src/main.c".to_string(),
+            content_hash: Blake3Hash::from_bytes(b"main"),
+            blob_node: None,
+            size: 4,
+        };
+        let directory = RunTrackedObservation::Directory {
+            path: "src/include".to_string(),
+            directory_node: NodeHash(Blake3Hash::from_bytes(b"include-dir")),
+        };
+        let miss = RunTrackedObservation::LookupMiss {
+            path: "src/generated/config.h".to_string(),
+            parent_path: "src/generated".to_string(),
+            directory_node: NodeHash(Blake3Hash::from_bytes(b"generated-dir")),
+        };
+
+        let left =
+            tracked_observations_fingerprint(&[file.clone(), directory.clone(), miss.clone()]);
+        let right = tracked_observations_fingerprint(&[miss, file, directory]);
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn tracked_observations_fingerprint_distinguishes_observation_kind() {
+        let file = RunTrackedObservation::File {
+            path: "src/generated".to_string(),
+            content_hash: Blake3Hash::from_bytes(b"payload"),
+            blob_node: None,
+            size: 7,
+        };
+        let directory = RunTrackedObservation::Directory {
+            path: "src/generated".to_string(),
+            directory_node: NodeHash(Blake3Hash::from_bytes(b"payload")),
+        };
+
+        assert_ne!(
+            tracked_observations_fingerprint(&[file]),
+            tracked_observations_fingerprint(&[directory])
+        );
     }
 }
