@@ -3125,6 +3125,41 @@ fn slot_builtin_action(
     )))
 }
 
+fn eval_builtin_call(callee_name: &str, args: &[Value]) -> Result<Option<Value>, EvalError> {
+    match callee_name {
+        "map_get" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_get() requires map and key",
+                ));
+            }
+            let ValueRep::Map(map) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_get() first argument must evaluate to a map",
+                ));
+            };
+            let key = &args[1];
+            let mut selected = None;
+            for (entry_key, entry_value) in map.entries.iter() {
+                if values_equal(&entry_key.rep, &key.rep)? {
+                    selected = Some(entry_value.clone());
+                    break;
+                }
+            }
+            let mut value = selected.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::TypeError, "map_get() key was not found")
+            })?;
+            if let ValueRep::String(key) = &key.rep {
+                value = value.project(ProjectionStep::MapKey(key.to_string()));
+            }
+            Ok(Some(value))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn slot_context_value(
     slot_id: Arc<str>,
     witness: Value,
@@ -3293,6 +3328,9 @@ fn continue_call_from_args(
             action,
             resolver,
         );
+    }
+    if let Some(value) = eval_builtin_call(&callee_name, &args)? {
+        return Ok(EvalStep::Ready(value));
     }
     state.emit(
         node_id,
@@ -4681,7 +4719,9 @@ fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalError> {
             }
             lhs.iter()
                 .zip(rhs.iter())
-                .try_fold(true, |_, (lhs, rhs)| values_equal(&lhs.rep, &rhs.rep))
+                .try_fold(true, |equal, (lhs, rhs)| {
+                    Ok(equal && values_equal(&lhs.rep, &rhs.rep)?)
+                })
         }
         (ValueRep::Map(lhs), ValueRep::Map(rhs)) => {
             if lhs.entries.len() != rhs.entries.len() {
@@ -4689,8 +4729,9 @@ fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalError> {
             }
             lhs.entries.iter().zip(rhs.entries.iter()).try_fold(
                 true,
-                |_, ((lhs_key, lhs_value), (rhs_key, rhs_value))| {
-                    Ok(values_equal(&lhs_key.rep, &rhs_key.rep)?
+                |equal, ((lhs_key, lhs_value), (rhs_key, rhs_value))| {
+                    Ok(equal
+                        && values_equal(&lhs_key.rep, &rhs_key.rep)?
                         && values_equal(&lhs_value.rep, &rhs_value.rep)?)
                 },
             )
@@ -4701,8 +4742,10 @@ fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalError> {
             }
             lhs.fields.iter().zip(rhs.fields.iter()).try_fold(
                 true,
-                |_, ((lhs_name, lhs_value), (rhs_name, rhs_value))| {
-                    Ok(lhs_name == rhs_name && values_equal(&lhs_value.rep, &rhs_value.rep)?)
+                |equal, ((lhs_name, lhs_value), (rhs_name, rhs_value))| {
+                    Ok(equal
+                        && lhs_name == rhs_name
+                        && values_equal(&lhs_value.rep, &rhs_value.rep)?)
                 },
             )
         }

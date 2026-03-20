@@ -321,6 +321,136 @@ fn build() {
 }
 
 #[test]
+fn array_equality_checks_all_elements() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [1, 2] == [9, 2]
+}
+"#,
+        "array-equality-all-elements",
+        "build",
+        &[],
+    )
+    .expect("evaluate array equality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array equality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(false));
+}
+
+#[test]
+fn array_inequality_checks_all_elements() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [1, 2] != [9, 2]
+}
+"#,
+        "array-inequality-all-elements",
+        "build",
+        &[],
+    )
+    .expect("evaluate array inequality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array inequality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn struct_equality_checks_all_fields() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Pair {
+  left: U64,
+  right: U64,
+}
+
+fn build() {
+  Pair { left: 1, right: 2 } == Pair { left: 9, right: 2 }
+}
+"#,
+        "struct-equality-all-fields",
+        "build",
+        &[],
+    )
+    .expect("evaluate struct equality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready struct equality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(false));
+}
+
+#[test]
+fn struct_inequality_checks_all_fields() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Pair {
+  left: U64,
+  right: U64,
+}
+
+fn build() {
+  Pair { left: 1, right: 2 } != Pair { left: 9, right: 2 }
+}
+"#,
+        "struct-inequality-all-fields",
+        "build",
+        &[],
+    )
+    .expect("evaluate struct inequality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready struct inequality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn map_equality_checks_all_entries() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  %{ "left" => 1, "right" => 2 } == %{ "left" => 9, "right" => 2 }
+}
+"#,
+        "map-equality-all-entries",
+        "build",
+        &[],
+    )
+    .expect("evaluate map equality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map equality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(false));
+}
+
+#[test]
+fn map_inequality_checks_all_entries() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  %{ "left" => 1, "right" => 2 } != %{ "left" => 9, "right" => 2 }
+}
+"#,
+        "map-inequality-all-entries",
+        "build",
+        &[],
+    )
+    .expect("evaluate map inequality");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map inequality result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
 fn function_values_do_not_support_authored_equality() {
     let error = eval_source_entry_with_args_with_source_id(
         r#"
