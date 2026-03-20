@@ -248,6 +248,8 @@ The current local-resume session is also useful in its own right:
   suspended
 - it gives a debugger/replay tool a step-by-step work log without scraping the
   raw trace stream
+- it gives the session a small "why am I blocked?" substrate by retaining
+  dependency edges and following blocked-on-child chains to their terminal node
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 

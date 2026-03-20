@@ -81,6 +81,41 @@ pub struct EvalCompletedWork {
     pub outcome: EvalCompletedWorkOutcome,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalDependencyEdge {
+    pub parent: EvalNodeId,
+    pub child: EvalNodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalExplainTerminal {
+    Runnable {
+        node_id: EvalNodeId,
+        work: EvalWorkId,
+        pending: Option<PendingRef>,
+    },
+    Pending {
+        node_id: EvalNodeId,
+        pending: PendingRef,
+    },
+    Ready {
+        node_id: EvalNodeId,
+    },
+    Poison {
+        node_id: EvalNodeId,
+        error: EvalError,
+    },
+    Unknown {
+        node_id: EvalNodeId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalNodeExplanation {
+    pub chain: Vec<EvalNodeId>,
+    pub terminal: EvalExplainTerminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalQueuedWork {
     pub id: EvalWorkId,
@@ -325,6 +360,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.node_state(node_id)
     }
 
+    pub fn dependency_edges(&self) -> &[EvalDependencyEdge] {
+        self.scheduler.dependency_edges()
+    }
+
+    pub fn explain_node(&self, node_id: EvalNodeId) -> EvalNodeExplanation {
+        self.scheduler.explain_node(node_id)
+    }
+
     pub fn trace(&self) -> &EvalTrace {
         &self.trace
     }
@@ -552,6 +595,7 @@ struct EvalScheduler {
     next_id: u64,
     next_work_id: u64,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
+    dependency_edges: Vec<EvalDependencyEdge>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
@@ -566,6 +610,7 @@ impl Default for EvalScheduler {
             next_id: 1,
             next_work_id: 1,
             node_states: BTreeMap::new(),
+            dependency_edges: Vec::new(),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
@@ -758,6 +803,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 
     fn emit_current_dependency(&mut self, dependency: EvalNodeId, source: Option<SourceSpan>) {
         if let Some(node_id) = self.current_parent() {
+            self.scheduler.record_dependency(node_id, dependency);
             let parent_id = self.stack.iter().rev().nth(1).copied();
             self.emit(
                 node_id,
@@ -894,6 +940,15 @@ fn eval_dependent_expr(
 }
 
 impl EvalScheduler {
+    fn dependency_edges(&self) -> &[EvalDependencyEdge] {
+        &self.dependency_edges
+    }
+
+    fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
+        self.dependency_edges
+            .push(EvalDependencyEdge { parent, child });
+    }
+
     fn queued_work(&self) -> Vec<EvalQueuedWork> {
         self.ready_queue
             .iter()
@@ -972,6 +1027,36 @@ impl EvalScheduler {
 
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.node_states.get(&node_id)
+    }
+
+    fn explain_node(&self, node_id: EvalNodeId) -> EvalNodeExplanation {
+        let mut chain = vec![node_id];
+        let mut current = node_id;
+        loop {
+            let terminal = match self.node_states.get(&current) {
+                Some(EvalNodeState::Runnable { work, pending }) => EvalExplainTerminal::Runnable {
+                    node_id: current,
+                    work: *work,
+                    pending: pending.clone(),
+                },
+                Some(EvalNodeState::BlockedOnNode { dependency }) => {
+                    chain.push(*dependency);
+                    current = *dependency;
+                    continue;
+                }
+                Some(EvalNodeState::Pending(pending)) => EvalExplainTerminal::Pending {
+                    node_id: current,
+                    pending: pending.clone(),
+                },
+                Some(EvalNodeState::Ready(_)) => EvalExplainTerminal::Ready { node_id: current },
+                Some(EvalNodeState::Poison(error)) => EvalExplainTerminal::Poison {
+                    node_id: current,
+                    error: error.clone(),
+                },
+                None => EvalExplainTerminal::Unknown { node_id: current },
+            };
+            return EvalNodeExplanation { chain, terminal };
+        }
     }
 
     fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {

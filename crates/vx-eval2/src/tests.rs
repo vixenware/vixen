@@ -7,11 +7,11 @@ use std::{
 };
 
 use crate::{
-    Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalError, EvalErrorKind, EvalEvent,
-    EvalEventKind, EvalNodeId, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace,
-    EvalWorkKind, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace,
-    envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalError, EvalErrorKind,
+    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalNodeId, EvalNodeState, EvalSession,
+    EvalSessionStep, EvalTrace, EvalWorkKind, PendingRef, ProjectionStep, Provenance, Resolution,
+    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep,
+    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -676,6 +676,54 @@ fn session_queues_child_expression_work_and_resumes_parent_block() {
     assert!(progressed_after_child >= 1);
     assert_eq!(value.rep, ValueRep::String("windows".into()));
     assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn session_exposes_dependency_edges_and_blocked_node_explanations() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls,
+        host_wait_calls,
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); os }",
+        "session-explain",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    let root_work = session.queued_work();
+    let root_node = root_work[0].node_id;
+
+    assert_eq!(
+        session.step().expect("root expression step"),
+        EvalSessionStep::Progressed
+    );
+    let child_work = session.queued_work();
+    let child_node = child_work[0].node_id;
+
+    assert!(session.dependency_edges().contains(&EvalDependencyEdge {
+        parent: root_node,
+        child: child_node,
+    }));
+
+    let explanation = session.explain_node(root_node);
+    assert_eq!(explanation.chain, vec![root_node, child_node]);
+    assert_eq!(
+        explanation.terminal,
+        EvalExplainTerminal::Runnable {
+            node_id: child_node,
+            work: child_work[0].id,
+            pending: None,
+        },
+    );
 }
 
 #[test]
