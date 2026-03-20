@@ -40,6 +40,9 @@ pub enum EvalNodeState {
         work: EvalWorkId,
         pending: Option<PendingRef>,
     },
+    BlockedOnNode {
+        dependency: EvalNodeId,
+    },
     Pending(PendingRef),
     Poison(EvalError),
 }
@@ -66,6 +69,7 @@ pub enum EvalSessionStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalCompletedWorkOutcome {
     Progressed,
+    BlockedOnNode(EvalNodeId),
     Pending(PendingRef),
     Ready(Value),
     Poison(EvalError),
@@ -178,6 +182,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             &mut self.trace,
             &mut self.scheduler,
             Some(record.work.id),
+            true,
         );
 
         let step = match record.task {
@@ -215,36 +220,79 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             }
             ReadyTask::EvaluateExpr(scheduled) => {
                 let mut env = scheduled.env;
-                eval_expr_with_node_id(&mut state, record.work.node_id, &scheduled.expr, &mut env)?
+                eval_expr_with_node_id(&mut state, record.work.node_id, &scheduled.expr, &mut env)
             }
             ReadyTask::Resume(ready) => {
-                resume_suspension(&mut state, ready.suspension, ready.result)?
+                resume_suspension(&mut state, ready.suspension, ready.result)
             }
         };
 
         match step {
-            EvalStep::Ready(value) => {
+            Ok(EvalStep::Ready(value)) => {
+                self.completed_work.push(EvalCompletedWork {
+                    work: record.work.clone(),
+                    outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
+                });
+                if state
+                    .scheduler
+                    .resolve_child_dependency(record.work.node_id, Ok(value.clone()))?
+                {
+                    return Ok(EvalSessionStep::Progressed);
+                }
                 state
                     .scheduler
                     .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
                 self.completed = Some(Ok(value.clone()));
-                self.completed_work.push(EvalCompletedWork {
-                    work: record.work,
-                    outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
-                });
                 Ok(EvalSessionStep::Ready(value))
             }
-            EvalStep::Suspended(suspension) => {
+            Ok(EvalStep::Suspended(suspension)) => {
                 let pending = suspension.pending.clone();
+                state.scheduler.register_suspension(suspension);
+                match state.scheduler.pending_kind(&pending) {
+                    Some(PendingKind::External) => {
+                        state.scheduler.record_node_state(
+                            ENTRY_WORK_NODE_ID,
+                            EvalNodeState::Pending(pending.clone()),
+                        );
+                        self.completed_work.push(EvalCompletedWork {
+                            work: record.work,
+                            outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
+                        });
+                        Ok(EvalSessionStep::Pending(pending))
+                    }
+                    Some(PendingKind::ChildDependency { dependency }) => {
+                        state.scheduler.record_node_state(
+                            record.work.node_id,
+                            EvalNodeState::BlockedOnNode { dependency },
+                        );
+                        self.completed_work.push(EvalCompletedWork {
+                            work: record.work,
+                            outcome: EvalCompletedWorkOutcome::BlockedOnNode(dependency),
+                        });
+                        Ok(EvalSessionStep::Progressed)
+                    }
+                    None => Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("pending node {} has no registered kind", pending.node_id),
+                    )),
+                }
+            }
+            Err(error) => {
+                self.completed_work.push(EvalCompletedWork {
+                    work: record.work.clone(),
+                    outcome: EvalCompletedWorkOutcome::Poison(error.clone()),
+                });
+                if state
+                    .scheduler
+                    .resolve_child_dependency(record.work.node_id, Err(error.clone()))?
+                {
+                    return Ok(EvalSessionStep::Progressed);
+                }
                 state
                     .scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Pending(pending.clone()));
-                state.scheduler.register_suspension(suspension);
-                self.completed_work.push(EvalCompletedWork {
-                    work: record.work,
-                    outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
-                });
-                Ok(EvalSessionStep::Pending(pending))
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
+                self.completed = Some(Err(error.clone()));
+                Ok(EvalSessionStep::Poison(error))
             }
         }
     }
@@ -477,7 +525,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
     let source = SourceContext::new(source_id, source_text);
-    let mut state = EvalState::new(&source, runtime, place, sink, scheduler, None);
+    let mut state = EvalState::new(&source, runtime, place, sink, scheduler, None, false);
     match evaluate_entry_once(&mut state, source_text, entry, args)? {
         EvalStep::Ready(value) => Ok(Resolution::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(Resolution::Pending(suspension.pending)),
@@ -496,6 +544,7 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
     sink: &'source mut Sink,
     scheduler: &'scheduler mut EvalScheduler,
     current_work: Option<EvalWorkId>,
+    queue_child_work: bool,
     stack: Vec<EvalNodeId>,
 }
 
@@ -506,6 +555,7 @@ struct EvalScheduler {
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
+    pending_kinds: BTreeMap<u64, PendingKind>,
 }
 
 const ENTRY_WORK_NODE_ID: EvalNodeId = EvalNodeId(0);
@@ -519,6 +569,7 @@ impl Default for EvalScheduler {
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
+            pending_kinds: BTreeMap::new(),
         }
     }
 }
@@ -553,6 +604,12 @@ struct EvalSuspension {
     resume_node: EvalNodeId,
     pending: PendingRef,
     frames: Vec<ContinuationFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    External,
+    ChildDependency { dependency: EvalNodeId },
 }
 
 #[derive(Debug, Clone)]
@@ -660,6 +717,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         sink: &'source mut Sink,
         scheduler: &'scheduler mut EvalScheduler,
         current_work: Option<EvalWorkId>,
+        queue_child_work: bool,
     ) -> Self {
         Self {
             source,
@@ -668,6 +726,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
             sink,
             scheduler,
             current_work,
+            queue_child_work,
             stack: Vec::new(),
         }
     }
@@ -880,15 +939,35 @@ impl EvalScheduler {
 
     fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
         let pending_id = self.alloc_node_id();
-        PendingRef::new(pending_id.0, description)
+        let pending = PendingRef::new(pending_id.0, description);
+        self.pending_kinds
+            .insert(pending.node_id, PendingKind::External);
+        pending
+    }
+
+    fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
+        let pending = PendingRef::new(dependency.0, "waiting on child expression");
+        self.pending_kinds
+            .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+        pending
     }
 
     fn pending_nodes(&self) -> Vec<PendingRef> {
         self.pending_resumes
             .values()
+            .filter(|suspension| {
+                matches!(
+                    self.pending_kinds.get(&suspension.pending.node_id),
+                    Some(PendingKind::External)
+                )
+            })
             .map(|suspension| &suspension.pending)
             .cloned()
             .collect()
+    }
+
+    fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
+        self.pending_kinds.get(&pending.node_id).copied()
     }
 
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
@@ -904,12 +983,56 @@ impl EvalScheduler {
         pending: &PendingRef,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
-        let Some(suspension) = self.pending_resumes.remove(&pending.node_id) else {
+        match self.pending_kind(pending) {
+            Some(PendingKind::External) => {}
+            Some(PendingKind::ChildDependency { .. }) => {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "pending node {} is internal to the evaluator",
+                        pending.node_id
+                    ),
+                ));
+            }
+            None => {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("pending node {} is not registered", pending.node_id),
+                ));
+            }
+        }
+        self.resolve_registered_suspension(pending.node_id, result)
+    }
+
+    fn resolve_child_dependency(
+        &mut self,
+        dependency: EvalNodeId,
+        result: Result<Value, EvalError>,
+    ) -> Result<bool, EvalError> {
+        match self.pending_kinds.get(&dependency.0).copied() {
+            Some(PendingKind::ChildDependency {
+                dependency: registered,
+            }) if registered == dependency => {
+                self.resolve_registered_suspension(dependency.0, result)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn resolve_registered_suspension(
+        &mut self,
+        pending_id: u64,
+        result: Result<Value, EvalError>,
+    ) -> Result<(), EvalError> {
+        let Some(suspension) = self.pending_resumes.remove(&pending_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
-                format!("pending node {} is not registered", pending.node_id),
+                format!("pending node {pending_id} is not registered"),
             ));
         };
+        self.pending_kinds.remove(&pending_id);
+        let pending = suspension.pending.clone();
         let node_id = EvalNodeId(pending.node_id);
         let resume_node = suspension.resume_node;
         match &result {
@@ -1193,7 +1316,34 @@ fn eval_child_expr(
 ) -> Result<EvalStep, EvalError> {
     let child_id = state.alloc_node_id();
     state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
-    eval_expr_with_node_id(state, child_id, expr, env)
+    if !state.queue_child_work {
+        return eval_expr_with_node_id(state, child_id, expr, env);
+    }
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(ScheduledExpr {
+            expr: expr.clone(),
+            env: env.clone(),
+        }),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    let pending = state.scheduler.alloc_child_dependency_pending(child_id);
+    let resume_node = state
+        .current_parent()
+        .expect("child expression should have an active parent node");
+    Ok(EvalStep::Suspended(EvalSuspension {
+        resume_node,
+        pending,
+        frames: Vec::new(),
+    }))
 }
 
 fn eval_call(

@@ -177,6 +177,9 @@ The next step beyond that is a resumable session with scheduler-owned state:
 - the session can retain a completed-work log keyed by queued work records
 - resumed work records can point back to the expression node that is runnable
 - node state can distinguish "blocked on pending" from "ready to resume"
+- ordinary child expressions can also become queued work in session mode, with
+  parent nodes blocked on child-node completion instead of always recursing
+  inline
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -199,11 +202,12 @@ This slice does not yet provide:
 It is still a recursive single-threaded evaluator with a structured event sink.
 Some runtime calls can now surface `Pending`, and a session can later resume
 them through a scheduler-owned ready/pending queue and stored continuation
-frames. The first ordinary queued work beyond that is the root entry body:
-`StartEntry` now parses/binds and enqueues an `EvaluateExpr` task instead of
-running the whole body inline. But there is not yet a general node scheduler
-that can park and resume arbitrary work units independently of the recursive
-evaluator.
+frames. The first ordinary queued work was the root entry body: `StartEntry`
+now parses/binds and enqueues an `EvaluateExpr` task instead of running the
+whole body inline. Session mode now also queues ordinary child expressions and
+lets parent nodes block on child-node completion. But there is not yet a
+general node scheduler that can park and resume arbitrary work units
+independently of the recursive evaluator.
 
 ## Why this is still useful
 
