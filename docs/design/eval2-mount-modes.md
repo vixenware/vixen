@@ -241,20 +241,20 @@ the runner boundary:
 
 - opaque mounts are mounted at stable shared visible paths
 - tracked mounts stay action-scoped
-- the runner returns observed CAS-backed file identities under tracked mount
-  roots as part of `RunResult`
+- the runner returns tracked observations under tracked mount roots as part of
+  `RunResult`
 
 That is intentionally narrower than the full target model above.
 
 What is implemented today for tracked mounts:
 
 - successful observation of CAS-backed files via file reads and attribute reads
+- directory snapshots via `read_dir`
+- lookup-miss tracking rooted in CAS-backed directories
 - filtering to the explicitly tracked mount roots for the action
 
 What is not implemented yet:
 
-- lookup-miss reporting
-- directory-enumeration snapshots
 - using tracked observations in `vxd` cache keys or incremental invalidation
 
 So the current system distinguishes tracked and opaque operationally, but only

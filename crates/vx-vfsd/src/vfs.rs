@@ -45,7 +45,7 @@ use vx_store_proto::{
     Blake3Hash, BlobNode, CasNode, ChunkHash, DirEntryKind, NodeHash, StoreClient,
 };
 
-use crate::protocol::{VfsObservedInput, VfsPrefixStateSummary};
+use crate::protocol::{VfsPrefixStateSummary, VfsTrackedObservation};
 
 /// A virtual filesystem item
 #[derive(Debug, Clone)]
@@ -380,6 +380,10 @@ pub struct CasVfs {
     chunk_l1_cache: SyncMutex<ChunkL1Cache>,
     /// Diagnostic tracker for CAS-backed file identity stability.
     observed_identities: SyncMutex<HashMap<ItemId, ObservedIdentity>>,
+    /// Observed directory snapshots from `read_dir`.
+    observed_directories: SyncMutex<HashMap<ItemId, ObservedDirectory>>,
+    /// Observed missing lookups under CAS-backed directories.
+    observed_lookup_misses: SyncMutex<HashMap<LookupMissKey, ObservedLookupMiss>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
 }
@@ -389,6 +393,22 @@ struct ObservedIdentity {
     cas_hash: Blake3Hash,
     blob_node: Option<NodeHash>,
     size: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservedDirectory {
+    directory_node: NodeHash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LookupMissKey {
+    parent_id: ItemId,
+    name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservedLookupMiss {
+    directory_node: NodeHash,
 }
 
 impl CasVfs {
@@ -434,6 +454,11 @@ impl CasVfs {
                 ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
             ),
             observed_identities: SyncMutex::new("CasVfs::observed_identities", HashMap::new()),
+            observed_directories: SyncMutex::new("CasVfs::observed_directories", HashMap::new()),
+            observed_lookup_misses: SyncMutex::new(
+                "CasVfs::observed_lookup_misses",
+                HashMap::new(),
+            ),
             mount_path,
         }
     }
@@ -735,6 +760,41 @@ impl CasVfs {
 
     fn clear_observed_identity(&self, item_id: ItemId) {
         self.observed_identities.lock().remove(&item_id);
+    }
+
+    fn observe_directory(&self, item_id: ItemId, observation: ObservedDirectory) {
+        self.observed_directories
+            .lock()
+            .insert(item_id, observation);
+    }
+
+    fn clear_observed_directory(&self, item_id: ItemId) {
+        self.observed_directories.lock().remove(&item_id);
+    }
+
+    fn observe_lookup_miss(&self, parent_id: ItemId, name: &str, observation: ObservedLookupMiss) {
+        self.observed_lookup_misses.lock().insert(
+            LookupMissKey {
+                parent_id,
+                name: name.to_string(),
+            },
+            observation,
+        );
+    }
+
+    fn clear_observed_lookup_miss(&self, parent_id: ItemId, name: &str) {
+        self.observed_lookup_misses.lock().remove(&LookupMissKey {
+            parent_id,
+            name: name.to_string(),
+        });
+    }
+
+    fn clear_observations_for_item(&self, item_id: ItemId) {
+        self.clear_observed_identity(item_id);
+        self.clear_observed_directory(item_id);
+        self.observed_lookup_misses
+            .lock()
+            .retain(|key, _| key.parent_id != item_id);
     }
 
     async fn cas_truth_size(
@@ -1060,7 +1120,7 @@ impl CasVfs {
         state.prefixes.remove(prefix_id);
         drop(state);
         for id in to_remove {
-            self.clear_observed_identity(id);
+            self.clear_observations_for_item(id);
         }
 
         tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
@@ -1233,6 +1293,7 @@ impl CasVfs {
         {
             let state = self.state.lock();
             if let Some(item) = state.items.lookup_child(parent_id, &name) {
+                self.clear_observed_lookup_miss(parent_id, &name);
                 tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
                 return LookupResult {
                     attrs: ItemAttributes {
@@ -1265,6 +1326,7 @@ impl CasVfs {
 
         let state = self.state.lock();
         if let Some(item) = state.items.lookup_child(parent_id, &name) {
+            self.clear_observed_lookup_miss(parent_id, &name);
             tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found after populate");
             return LookupResult {
                 attrs: ItemAttributes {
@@ -1277,6 +1339,15 @@ impl CasVfs {
                 },
                 error: errno::OK,
             };
+        }
+
+        if let Some(directory_node) = state
+            .items
+            .get(&parent_id)
+            .filter(|item| item.item_type == ItemType::Directory)
+            .and_then(|item| item.dir_node)
+        {
+            self.observe_lookup_miss(parent_id, &name, ObservedLookupMiss { directory_node });
         }
 
         tracing::debug!(parent_id, name = %name, "VFS lookup -> NOT FOUND");
@@ -1442,6 +1513,18 @@ impl CasVfs {
         };
         drop(state);
 
+        if result.error == errno::OK
+            && let Some(directory_node) = self
+                .state
+                .lock()
+                .items
+                .get(&item_id)
+                .filter(|item| item.item_type == ItemType::Directory)
+                .and_then(|item| item.dir_node)
+        {
+            self.observe_directory(item_id, ObservedDirectory { directory_node });
+        }
+
         let elapsed = started.elapsed();
         tracing::trace!(
             item_id,
@@ -1601,7 +1684,7 @@ impl CasVfs {
         // Update size on the item
         state.items.get_mut(&item_id).unwrap().size = new_size;
         drop(state);
-        self.clear_observed_identity(item_id);
+        self.clear_observations_for_item(item_id);
 
         WriteResult {
             bytes_written: data.len() as u64,
@@ -1665,6 +1748,8 @@ impl CasVfs {
             dir_node: None,
             dir_children_loaded,
         });
+        drop(state);
+        self.clear_observations_for_item(parent_id);
 
         CreateResult {
             item_id: new_id,
@@ -1683,7 +1768,7 @@ impl CasVfs {
 
         let mut state = self.state.lock();
 
-        let Some(item) = state.items.get(&item_id) else {
+        let Some(item) = state.items.get(&item_id).cloned() else {
             return VfsResult {
                 error: errno::ENOENT,
             };
@@ -1698,7 +1783,8 @@ impl CasVfs {
 
         state.items.remove(item_id);
         drop(state);
-        self.clear_observed_identity(item_id);
+        self.clear_observations_for_item(item_id);
+        self.clear_observations_for_item(item.parent_id);
         VfsResult { error: errno::OK }
     }
 
@@ -1781,9 +1867,11 @@ impl CasVfs {
         drop(state);
 
         if let Some(replaced_item_id) = replaced_item_id {
-            self.clear_observed_identity(replaced_item_id);
+            self.clear_observations_for_item(replaced_item_id);
         }
-        self.clear_observed_identity(item_id);
+        self.clear_observations_for_item(item_id);
+        self.clear_observations_for_item(source_item.parent_id);
+        self.clear_observations_for_item(new_parent_id);
         VfsResult { error: errno::OK }
     }
 
@@ -1815,7 +1903,7 @@ impl CasVfs {
             buffer.resize(new_size as usize, 0);
             state.items.get_mut(&item_id).unwrap().size = new_size;
             drop(state);
-            self.clear_observed_identity(item_id);
+            self.clear_observations_for_item(item_id);
             return VfsResult { error: errno::OK };
         }
 
@@ -2038,7 +2126,7 @@ impl CasVfs {
                     item.size = size;
                 }
                 drop(state);
-                self.clear_observed_identity(item_id);
+                self.clear_observations_for_item(item_id);
                 Some((content_hash, size))
             }
             Err(e) => {
@@ -2414,32 +2502,37 @@ impl CasVfs {
         }
     }
 
-    pub async fn observed_inputs(
+    pub async fn tracked_observations(
         &self,
         prefix_id: &str,
         roots: &[String],
-    ) -> Vec<VfsObservedInput> {
+    ) -> Vec<VfsTrackedObservation> {
         let state = self.state.lock();
-        let observed = self.observed_identities.lock();
         let Some(prefix) = state.prefixes.get(prefix_id) else {
             return Vec::new();
         };
+        let observed_files = self.observed_identities.lock();
+        let observed_directories = self.observed_directories.lock();
+        let observed_lookup_misses = self.observed_lookup_misses.lock();
 
-        let mut inputs = observed
+        let includes_path = |path: &str| {
+            roots.iter().any(|root| {
+                root.is_empty()
+                    || path == root
+                    || path
+                        .strip_prefix(root.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        };
+
+        let mut observations = observed_files
             .iter()
             .filter_map(|(item_id, identity)| {
                 let path = self.path_under_root(&state.items, *item_id, prefix.root_item_id)?;
-                let included = roots.iter().any(|root| {
-                    root.is_empty()
-                        || path == *root
-                        || path
-                            .strip_prefix(root.as_str())
-                            .is_some_and(|suffix| suffix.starts_with('/'))
-                });
-                if !included {
+                if !includes_path(&path) {
                     return None;
                 }
-                Some(VfsObservedInput {
+                Some(VfsTrackedObservation::File {
                     path,
                     content_hash: identity.cas_hash,
                     blob_node: identity.blob_node,
@@ -2447,8 +2540,46 @@ impl CasVfs {
                 })
             })
             .collect::<Vec<_>>();
-        inputs.sort_by(|left, right| left.path.cmp(&right.path));
-        inputs
+
+        observations.extend(
+            observed_directories
+                .iter()
+                .filter_map(|(item_id, directory)| {
+                    let path = self.path_under_root(&state.items, *item_id, prefix.root_item_id)?;
+                    if !includes_path(&path) {
+                        return None;
+                    }
+                    Some(VfsTrackedObservation::Directory {
+                        path,
+                        directory_node: directory.directory_node,
+                    })
+                }),
+        );
+
+        observations.extend(observed_lookup_misses.iter().filter_map(|(key, miss)| {
+            let parent_path =
+                self.path_under_root(&state.items, key.parent_id, prefix.root_item_id)?;
+            let path = if parent_path.is_empty() {
+                key.name.clone()
+            } else {
+                format!("{parent_path}/{}", key.name)
+            };
+            if !includes_path(&path) {
+                return None;
+            }
+            Some(VfsTrackedObservation::LookupMiss {
+                path,
+                parent_path,
+                directory_node: miss.directory_node,
+            })
+        }));
+
+        observations.sort_by_key(|observation| match observation {
+            VfsTrackedObservation::File { path, .. } => (path.clone(), 0u8),
+            VfsTrackedObservation::Directory { path, .. } => (path.clone(), 1u8),
+            VfsTrackedObservation::LookupMiss { path, .. } => (path.clone(), 2u8),
+        });
+        observations
     }
 
     /// Build the path from an item up to (but not including) a root

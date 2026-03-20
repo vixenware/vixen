@@ -30,7 +30,7 @@ use vx_store_proto::{Blake3Hash, ManifestHash, NodeHash, ServiceVersion, StorePr
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 19;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 20;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -121,11 +121,24 @@ pub struct RunEvalPayload {
 }
 
 #[derive(Debug, Clone, Facet, PartialEq, Eq)]
-pub struct RunObservedInput {
-    pub path: String,
-    pub content_hash: Blake3Hash,
-    pub blob_node: Option<NodeHash>,
-    pub size: u64,
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum RunTrackedObservation {
+    File {
+        path: String,
+        content_hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
+        size: u64,
+    },
+    Directory {
+        path: String,
+        directory_node: NodeHash,
+    },
+    LookupMiss {
+        path: String,
+        parent_path: String,
+        directory_node: NodeHash,
+    },
 }
 
 /// Executor-side discovery request shipped to the runner.
@@ -204,7 +217,7 @@ pub struct RunResult {
     pub stderr: String,
     pub duration_ms: u64,
     pub observer_value: Option<TransportValue>,
-    pub tracked_inputs: Vec<RunObservedInput>,
+    pub tracked_observations: Vec<RunTrackedObservation>,
     pub poison: Option<TransportPoisonError>,
     pub error_kind: Option<RunFailureKind>,
     pub error: Option<String>,
@@ -243,9 +256,9 @@ pub trait Runner {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoverResult, RunArg, RunObservedInput, RunResult};
+    use super::{DiscoverResult, RunArg, RunResult, RunTrackedObservation};
     use vx_eval::{HostObservation, TransportStruct, TransportValue};
-    use vx_store_proto::Blake3Hash;
+    use vx_store_proto::{Blake3Hash, NodeHash};
 
     #[test]
     // r[verify exec.arg]
@@ -322,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn run_result_with_tracked_inputs_serializes() {
+    fn run_result_with_tracked_observations_serializes() {
         let result = RunResult {
             success: true,
             exit_code: 0,
@@ -330,12 +343,23 @@ mod tests {
             stderr: String::new(),
             duration_ms: 12,
             observer_value: Some(TransportValue::Bool(true)),
-            tracked_inputs: vec![RunObservedInput {
-                path: "src/main.c".to_string(),
-                content_hash: Blake3Hash::from_bytes(b"int main() {}"),
-                blob_node: None,
-                size: 12,
-            }],
+            tracked_observations: vec![
+                RunTrackedObservation::File {
+                    path: "src/main.c".to_string(),
+                    content_hash: Blake3Hash::from_bytes(b"int main() {}"),
+                    blob_node: None,
+                    size: 12,
+                },
+                RunTrackedObservation::Directory {
+                    path: "src/include".to_string(),
+                    directory_node: NodeHash(Blake3Hash::from_bytes(b"directory")),
+                },
+                RunTrackedObservation::LookupMiss {
+                    path: "src/generated/config.h".to_string(),
+                    parent_path: "src/generated".to_string(),
+                    directory_node: NodeHash(Blake3Hash::from_bytes(b"missing-parent")),
+                },
+            ],
             poison: None,
             error_kind: None,
             error: None,
@@ -344,8 +368,11 @@ mod tests {
         let bytes = facet_postcard::to_vec(&result).expect("run result should serialize");
         let roundtrip: RunResult =
             facet_postcard::from_slice(&bytes).expect("run result should deserialize");
-        assert_eq!(roundtrip.tracked_inputs.len(), 1);
-        assert_eq!(roundtrip.tracked_inputs[0].path, "src/main.c");
+        assert_eq!(roundtrip.tracked_observations.len(), 3);
+        assert!(matches!(
+            &roundtrip.tracked_observations[0],
+            RunTrackedObservation::File { path, .. } if path == "src/main.c"
+        ));
         assert_eq!(roundtrip.observer_value, Some(TransportValue::Bool(true)));
     }
 }

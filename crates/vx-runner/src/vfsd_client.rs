@@ -6,7 +6,7 @@ use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
     chunking::put_node_if_missing,
 };
-use vx_vfsd::protocol::{VfsObservedInput, VfsPrefixStateSummary};
+use vx_vfsd::protocol::{VfsPrefixStateSummary, VfsTrackedObservation};
 
 type RpcClient = vx_vfsd::protocol::VfsdClient;
 
@@ -158,13 +158,13 @@ impl VfsdClient {
             .map_err(|e| format!("{e:?}"))
     }
 
-    pub async fn observed_inputs(
+    pub async fn tracked_observations(
         &self,
         prefix_id: &str,
         roots: Vec<String>,
-    ) -> Result<Vec<VfsObservedInput>, String> {
+    ) -> Result<Vec<VfsTrackedObservation>, String> {
         self.client
-            .observed_inputs(prefix_id.to_string(), roots)
+            .tracked_observations(prefix_id.to_string(), roots)
             .await
             .map_err(|e| format!("{e:?}"))
     }

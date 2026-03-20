@@ -20,11 +20,24 @@ pub struct VfsPrefixStateSummary {
 }
 
 #[derive(Debug, Clone, Facet, PartialEq, Eq)]
-pub struct VfsObservedInput {
-    pub path: String,
-    pub content_hash: Blake3Hash,
-    pub blob_node: Option<NodeHash>,
-    pub size: u64,
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum VfsTrackedObservation {
+    File {
+        path: String,
+        content_hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
+        size: u64,
+    },
+    Directory {
+        path: String,
+        directory_node: NodeHash,
+    },
+    LookupMiss {
+        path: String,
+        parent_path: String,
+        directory_node: NodeHash,
+    },
 }
 
 /// VFS daemon RPC service.
@@ -94,13 +107,13 @@ pub trait Vfsd {
         prefix_id: String,
     ) -> Result<VfsPrefixStateSummary, String>;
 
-    /// Return observed CAS-backed file inputs under the requested tracked roots.
+    /// Return tracked observations under the requested tracked roots.
     ///
     /// Paths are relative to the prefix root. Only observations rooted under one
     /// of `roots` are returned.
-    async fn observed_inputs(
+    async fn tracked_observations(
         &self,
         prefix_id: String,
         roots: Vec<String>,
-    ) -> Result<Vec<VfsObservedInput>, String>;
+    ) -> Result<Vec<VfsTrackedObservation>, String>;
 }

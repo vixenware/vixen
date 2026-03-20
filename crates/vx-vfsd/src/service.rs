@@ -1,6 +1,6 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::{VfsObservedInput, VfsPrefixStateSummary, Vfsd};
+use crate::protocol::{VfsPrefixStateSummary, VfsTrackedObservation, Vfsd};
 use crate::vfs::CasVfs;
 use camino::Utf8PathBuf;
 use std::collections::HashSet;
@@ -253,12 +253,12 @@ impl VfsdService {
         Ok(self.vfs.describe_prefix_state(&prefix_id).await)
     }
 
-    async fn observed_inputs(
+    async fn tracked_observations(
         &self,
         prefix_id: String,
         roots: Vec<String>,
-    ) -> Result<Vec<VfsObservedInput>, String> {
-        Ok(self.vfs.observed_inputs(&prefix_id, &roots).await)
+    ) -> Result<Vec<VfsTrackedObservation>, String> {
+        Ok(self.vfs.tracked_observations(&prefix_id, &roots).await)
     }
 }
 
@@ -298,12 +298,12 @@ impl Vfsd for VfsdService {
         VfsdService::describe_prefix_state(self, prefix_id).await
     }
 
-    async fn observed_inputs(
+    async fn tracked_observations(
         &self,
         prefix_id: String,
         roots: Vec<String>,
-    ) -> Result<Vec<VfsObservedInput>, String> {
-        VfsdService::observed_inputs(self, prefix_id, roots).await
+    ) -> Result<Vec<VfsTrackedObservation>, String> {
+        VfsdService::tracked_observations(self, prefix_id, roots).await
     }
 }
 
@@ -424,6 +424,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::protocol::VfsTrackedObservation;
     use crate::vfs::CasVfs;
 
     struct TestEnv {
@@ -764,7 +765,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn observed_inputs_filter_to_requested_tracked_roots() {
+    async fn tracked_observations_filter_to_requested_tracked_roots() {
         let env = TestEnv::new().await;
         let src_hash = store_small_file_tree(&env.cas, "lua.c", b"int lua_main(void);").await;
         let toolchain_hash = store_small_file_tree(&env.cas, "bin/cc", b"#!/bin/sh\n").await;
@@ -785,6 +786,12 @@ mod tests {
         let prefix_root = item_id_for(&env, "pfx-observed", "").await;
         let src_lookup = env.service.vfs.lookup(prefix_root, "src".to_string()).await;
         assert_eq!(src_lookup.error, errno::OK);
+        let src_listing = env
+            .service
+            .vfs
+            .read_dir(src_lookup.attrs.item_id, 0, 0)
+            .await;
+        assert_eq!(src_listing.error, errno::OK);
         let lua_lookup = env
             .service
             .vfs
@@ -796,6 +803,12 @@ mod tests {
             .vfs
             .get_attributes(lua_lookup.attrs.item_id)
             .await;
+        let missing_lookup = env
+            .service
+            .vfs
+            .lookup(src_lookup.attrs.item_id, "missing.h".to_string())
+            .await;
+        assert_eq!(missing_lookup.error, errno::ENOENT);
 
         let toolchain_lookup = env
             .service
@@ -823,27 +836,45 @@ mod tests {
 
         let src_only = env
             .service
-            .observed_inputs("pfx-observed".to_string(), vec!["src".to_string()])
+            .tracked_observations("pfx-observed".to_string(), vec!["src".to_string()])
             .await
-            .expect("observed_inputs should succeed");
-        assert_eq!(src_only.len(), 1);
-        assert_eq!(src_only[0].path, "src/lua.c");
+            .expect("tracked_observations should succeed");
+        assert_eq!(src_only.len(), 3);
+        assert!(matches!(
+            &src_only[0],
+            VfsTrackedObservation::Directory { path, .. } if path == "src"
+        ));
+        assert!(matches!(
+            &src_only[1],
+            VfsTrackedObservation::File { path, .. } if path == "src/lua.c"
+        ));
+        assert!(matches!(
+            &src_only[2],
+            VfsTrackedObservation::LookupMiss { path, parent_path, .. }
+                if path == "src/missing.h" && parent_path == "src"
+        ));
 
         let toolchain_only = env
             .service
-            .observed_inputs("pfx-observed".to_string(), vec!["toolchain".to_string()])
+            .tracked_observations("pfx-observed".to_string(), vec!["toolchain".to_string()])
             .await
-            .expect("observed_inputs should succeed");
+            .expect("tracked_observations should succeed");
         assert_eq!(toolchain_only.len(), 1);
-        assert_eq!(toolchain_only[0].path, "toolchain/bin/cc");
+        assert!(matches!(
+            &toolchain_only[0],
+            VfsTrackedObservation::File { path, .. } if path == "toolchain/bin/cc"
+        ));
 
         let exact_file = env
             .service
-            .observed_inputs("pfx-observed".to_string(), vec!["src/lua.c".to_string()])
+            .tracked_observations("pfx-observed".to_string(), vec!["src/lua.c".to_string()])
             .await
-            .expect("observed_inputs should succeed");
+            .expect("tracked_observations should succeed");
         assert_eq!(exact_file.len(), 1);
-        assert_eq!(exact_file[0].path, "src/lua.c");
+        assert!(matches!(
+            &exact_file[0],
+            VfsTrackedObservation::File { path, .. } if path == "src/lua.c"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
