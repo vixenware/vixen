@@ -36,6 +36,10 @@ pub enum RuntimeCallOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalNodeState {
     Ready(Value),
+    Runnable {
+        work: EvalWorkId,
+        pending: Option<PendingRef>,
+    },
     Pending(PendingRef),
     Poison(EvalError),
 }
@@ -46,12 +50,45 @@ pub struct EvalWorkId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalWorkKind {
     StartEntry,
+    EvaluateExpr,
     ResumePending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalSessionStep {
+    Progressed,
+    Pending(PendingRef),
+    Ready(Value),
+    Poison(EvalError),
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalCompletedWorkOutcome {
+    Progressed,
+    Pending(PendingRef),
+    Ready(Value),
+    Poison(EvalError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalCompletedWork {
+    pub work: EvalQueuedWork,
+    pub outcome: EvalCompletedWorkOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalQueuedWork {
     pub id: EvalWorkId,
+    pub kind: EvalWorkKind,
+    pub node_id: EvalNodeId,
+    pub pending: Option<PendingRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalRunnableNode {
+    pub node_id: EvalNodeId,
+    pub work_id: EvalWorkId,
     pub kind: EvalWorkKind,
     pub pending: Option<PendingRef>,
 }
@@ -65,7 +102,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     place: String,
     scheduler: EvalScheduler,
     trace: EvalTrace,
-    started: bool,
+    completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
 }
 
@@ -78,6 +115,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         runtime: &'runtime Runtime,
         place: impl Into<String>,
     ) -> Self {
+        let mut scheduler = EvalScheduler::default();
+        scheduler.enqueue_start_entry();
         Self {
             source: source.into(),
             source_id: source_id.into(),
@@ -85,20 +124,51 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args,
             runtime,
             place: place.into(),
-            scheduler: EvalScheduler::default(),
+            scheduler,
             trace: EvalTrace::default(),
-            started: false,
+            completed_work: Vec::new(),
             completed: None,
         }
     }
 
     pub fn run(&mut self) -> Result<Resolution, EvalError> {
+        loop {
+            match self.step()? {
+                EvalSessionStep::Progressed => {}
+                EvalSessionStep::Pending(pending) => return Ok(Resolution::Pending(pending)),
+                EvalSessionStep::Ready(value) => return Ok(Resolution::Ready(value)),
+                EvalSessionStep::Poison(error) => return Ok(Resolution::Poison(error)),
+                EvalSessionStep::Idle => {
+                    return Ok(match self.scheduler.pending_nodes().into_iter().next() {
+                        Some(pending) => Resolution::Pending(pending),
+                        None => match &self.completed {
+                            Some(Ok(value)) => Resolution::Ready(value.clone()),
+                            Some(Err(error)) => Resolution::Poison(error.clone()),
+                            None => Resolution::Poison(EvalError::new(
+                                EvalErrorKind::Internal,
+                                "eval session has no ready work and no pending nodes",
+                            )),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn step(&mut self) -> Result<EvalSessionStep, EvalError> {
         if let Some(result) = &self.completed {
             return Ok(match result {
-                Ok(value) => Resolution::Ready(value.clone()),
-                Err(error) => Resolution::Poison(error.clone()),
+                Ok(value) => EvalSessionStep::Ready(value.clone()),
+                Err(error) => EvalSessionStep::Poison(error.clone()),
             });
         }
+
+        let Some(record) = self.scheduler.pop_ready_task() else {
+            return Ok(match self.scheduler.pending_nodes().into_iter().next() {
+                Some(pending) => EvalSessionStep::Pending(pending),
+                None => EvalSessionStep::Idle,
+            });
+        };
 
         let source = SourceContext::new(self.source_id.clone(), &self.source);
         let mut state = EvalState::new(
@@ -107,46 +177,76 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             &self.place,
             &mut self.trace,
             &mut self.scheduler,
+            Some(record.work.id),
         );
 
-        if !self.started {
-            self.started = true;
-            state.scheduler.enqueue_start_entry();
-        }
+        let step = match record.task {
+            ReadyTask::StartEntry => {
+                let prepared = prepare_entry(&mut state, &self.source, &self.entry, &self.args)?;
+                let node_id = state.alloc_node_id();
+                let work = state.scheduler.enqueue_ready_task(
+                    ReadyTask::EvaluateExpr(ScheduledExpr {
+                        expr: prepared.body,
+                        env: prepared.env,
+                    }),
+                    EvalWorkKind::EvaluateExpr,
+                    node_id,
+                    None,
+                );
+                state.scheduler.record_node_state(
+                    node_id,
+                    EvalNodeState::Runnable {
+                        work: work.id,
+                        pending: None,
+                    },
+                );
+                state.scheduler.record_node_state(
+                    ENTRY_WORK_NODE_ID,
+                    EvalNodeState::Runnable {
+                        work: work.id,
+                        pending: None,
+                    },
+                );
+                self.completed_work.push(EvalCompletedWork {
+                    work: record.work,
+                    outcome: EvalCompletedWorkOutcome::Progressed,
+                });
+                return Ok(EvalSessionStep::Progressed);
+            }
+            ReadyTask::EvaluateExpr(scheduled) => {
+                let mut env = scheduled.env;
+                eval_expr_with_node_id(&mut state, record.work.node_id, &scheduled.expr, &mut env)?
+            }
+            ReadyTask::Resume(ready) => {
+                resume_suspension(&mut state, ready.suspension, ready.result)?
+            }
+        };
 
-        while let Some(record) = state.scheduler.pop_ready_task() {
-            let step = match record.task {
-                ReadyTask::StartEntry => {
-                    evaluate_entry_once(&mut state, &self.source, &self.entry, &self.args)?
-                }
-                ReadyTask::Resume(ready) => {
-                    resume_suspension(&mut state, ready.suspension, ready.result)?
-                }
-            };
-            match step {
-                EvalStep::Ready(value) => {
-                    self.completed = Some(Ok(value.clone()));
-                    return Ok(Resolution::Ready(value));
-                }
-                EvalStep::Suspended(suspension) => {
-                    let pending = suspension.pending.clone();
-                    state.scheduler.register_suspension(suspension);
-                    return Ok(Resolution::Pending(pending));
-                }
+        match step {
+            EvalStep::Ready(value) => {
+                state
+                    .scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                self.completed = Some(Ok(value.clone()));
+                self.completed_work.push(EvalCompletedWork {
+                    work: record.work,
+                    outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
+                });
+                Ok(EvalSessionStep::Ready(value))
+            }
+            EvalStep::Suspended(suspension) => {
+                let pending = suspension.pending.clone();
+                state
+                    .scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Pending(pending.clone()));
+                state.scheduler.register_suspension(suspension);
+                self.completed_work.push(EvalCompletedWork {
+                    work: record.work,
+                    outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
+                });
+                Ok(EvalSessionStep::Pending(pending))
             }
         }
-
-        Ok(match state.scheduler.pending_nodes().into_iter().next() {
-            Some(pending) => Resolution::Pending(pending),
-            None => match &self.completed {
-                Some(Ok(value)) => Resolution::Ready(value.clone()),
-                Some(Err(error)) => Resolution::Poison(error.clone()),
-                None => Resolution::Poison(EvalError::new(
-                    EvalErrorKind::Internal,
-                    "eval session has no ready work and no pending nodes",
-                )),
-            },
-        })
     }
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
@@ -169,12 +269,20 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.queued_work()
     }
 
+    pub fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
+        self.scheduler.runnable_nodes()
+    }
+
     pub fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.scheduler.node_state(node_id)
     }
 
     pub fn trace(&self) -> &EvalTrace {
         &self.trace
+    }
+
+    pub fn completed_work(&self) -> &[EvalCompletedWork] {
+        &self.completed_work
     }
 }
 
@@ -369,7 +477,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
     let source = SourceContext::new(source_id, source_text);
-    let mut state = EvalState::new(&source, runtime, place, sink, scheduler);
+    let mut state = EvalState::new(&source, runtime, place, sink, scheduler, None);
     match evaluate_entry_once(&mut state, source_text, entry, args)? {
         EvalStep::Ready(value) => Ok(Resolution::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(Resolution::Pending(suspension.pending)),
@@ -387,6 +495,7 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
     place: &'source str,
     sink: &'source mut Sink,
     scheduler: &'scheduler mut EvalScheduler,
+    current_work: Option<EvalWorkId>,
     stack: Vec<EvalNodeId>,
 }
 
@@ -398,6 +507,8 @@ struct EvalScheduler {
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
 }
+
+const ENTRY_WORK_NODE_ID: EvalNodeId = EvalNodeId(0);
 
 impl Default for EvalScheduler {
     fn default() -> Self {
@@ -425,13 +536,21 @@ struct ScheduledResume {
 }
 
 #[derive(Debug, Clone)]
+struct ScheduledExpr {
+    expr: Expr,
+    env: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
 enum ReadyTask {
     StartEntry,
+    EvaluateExpr(ScheduledExpr),
     Resume(ScheduledResume),
 }
 
 #[derive(Debug, Clone)]
 struct EvalSuspension {
+    resume_node: EvalNodeId,
     pending: PendingRef,
     frames: Vec<ContinuationFrame>,
 }
@@ -540,6 +659,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         place: &'source str,
         sink: &'source mut Sink,
         scheduler: &'scheduler mut EvalScheduler,
+        current_work: Option<EvalWorkId>,
     ) -> Self {
         Self {
             source,
@@ -547,6 +667,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
             place,
             sink,
             scheduler,
+            current_work,
             stack: Vec::new(),
         }
     }
@@ -567,6 +688,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         kind: EvalEventKind,
     ) {
         self.sink.push(EvalEvent {
+            work_id: self.current_work,
             node_id,
             parent_id,
             place: Arc::from(self.place),
@@ -660,8 +782,13 @@ fn record_poison_step(
     );
 }
 
-fn wrap_suspended(pending: PendingRef, frame: ContinuationFrame) -> EvalStep {
+fn wrap_suspended(
+    pending: PendingRef,
+    resume_node: EvalNodeId,
+    frame: ContinuationFrame,
+) -> EvalStep {
     EvalStep::Suspended(EvalSuspension {
+        resume_node,
         pending,
         frames: vec![frame],
     })
@@ -715,8 +842,34 @@ impl EvalScheduler {
             .collect()
     }
 
+    fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
+        self.ready_queue
+            .iter()
+            .filter_map(|id| self.ready_tasks.get(id))
+            .map(|record| EvalRunnableNode {
+                node_id: record.work.node_id,
+                work_id: record.work.id,
+                kind: record.work.kind,
+                pending: record.work.pending.clone(),
+            })
+            .collect()
+    }
+
     fn enqueue_start_entry(&mut self) -> EvalQueuedWork {
-        self.enqueue_ready_task(ReadyTask::StartEntry, EvalWorkKind::StartEntry, None)
+        let work = self.enqueue_ready_task(
+            ReadyTask::StartEntry,
+            EvalWorkKind::StartEntry,
+            ENTRY_WORK_NODE_ID,
+            None,
+        );
+        self.record_node_state(
+            ENTRY_WORK_NODE_ID,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        work
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
@@ -758,14 +911,23 @@ impl EvalScheduler {
             ));
         };
         let node_id = EvalNodeId(pending.node_id);
+        let resume_node = suspension.resume_node;
         match &result {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
-        self.enqueue_ready_task(
+        let work = self.enqueue_ready_task(
             ReadyTask::Resume(ScheduledResume { suspension, result }),
             EvalWorkKind::ResumePending,
+            resume_node,
             Some(pending.clone()),
+        );
+        self.record_node_state(
+            resume_node,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: Some(pending.clone()),
+            },
         );
         Ok(())
     }
@@ -784,11 +946,13 @@ impl EvalScheduler {
         &mut self,
         task: ReadyTask,
         kind: EvalWorkKind,
+        node_id: EvalNodeId,
         pending: Option<PendingRef>,
     ) -> EvalQueuedWork {
         let work = EvalQueuedWork {
             id: EvalWorkId(self.next_work_id),
             kind,
+            node_id,
             pending,
         };
         self.next_work_id += 1;
@@ -859,12 +1023,17 @@ fn find_function(root: &SourceFile, entry: &str) -> Result<FnDecl, EvalError> {
         })
 }
 
-fn evaluate_entry_once(
+struct PreparedEntry {
+    body: Expr,
+    env: BTreeMap<String, Value>,
+}
+
+fn prepare_entry(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     source_text: &str,
     entry: &str,
     args: &[Value],
-) -> Result<EvalStep, EvalError> {
+) -> Result<PreparedEntry, EvalError> {
     let parse = vx_parser::parse(source_text);
     if !parse.errors().is_empty() {
         return Err(EvalError::new(
@@ -898,8 +1067,19 @@ fn evaluate_entry_once(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let mut env = bind_arguments(state, &parameters, args)?;
-    eval_expr(state, &body, &mut env)
+    let env = bind_arguments(state, &parameters, args)?;
+    Ok(PreparedEntry { body, env })
+}
+
+fn evaluate_entry_once(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source_text: &str,
+    entry: &str,
+    args: &[Value],
+) -> Result<EvalStep, EvalError> {
+    let prepared = prepare_entry(state, source_text, entry, args)?;
+    let mut env = prepared.env;
+    eval_expr(state, &prepared.body, &mut env)
 }
 
 fn bind_arguments(
@@ -1149,6 +1329,7 @@ fn continue_call_from_args(
             );
             Ok(wrap_suspended(
                 pending,
+                node_id,
                 ContinuationFrame::RuntimeCall {
                     node_id,
                     parent_id,

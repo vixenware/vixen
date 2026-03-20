@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::{CrossingPolicy, EvalErrorKind, PendingRef, ReuseClass, SourceSpan};
+use crate::{CrossingPolicy, EvalErrorKind, EvalWorkId, PendingRef, ReuseClass, SourceSpan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalNodeId(pub u64);
@@ -68,6 +68,7 @@ pub enum EvalEventKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalEvent {
+    pub work_id: Option<EvalWorkId>,
     pub node_id: EvalNodeId,
     pub parent_id: Option<EvalNodeId>,
     pub place: Arc<str>,

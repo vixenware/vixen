@@ -7,11 +7,11 @@ use std::{
 };
 
 use crate::{
-    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalNodeId,
-    EvalNodeState, EvalSession, EvalTrace, EvalWorkKind, PendingRef, ProjectionStep, Provenance,
-    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value,
-    ValueRep, channel_trace, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id_traced,
+    Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalError, EvalErrorKind, EvalEvent,
+    EvalEventKind, EvalNodeId, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace,
+    EvalWorkKind, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
+    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace,
+    envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -173,6 +173,7 @@ fn traced_entry_arguments_emit_binding_and_ready_events() {
     );
     assert_eq!(trace.events[0].node_id.0, 1);
     assert_eq!(trace.events[0].parent_id, None);
+    assert_eq!(trace.events[0].work_id, None);
     assert_eq!(trace.events[0].place.as_ref(), "local");
     assert_eq!(
         trace.events[0]
@@ -194,6 +195,7 @@ fn traced_entry_arguments_emit_binding_and_ready_events() {
                 crossing: CrossingPolicy::ByValue,
             }
     }));
+    assert!(trace.events.iter().all(|event| event.work_id.is_none()));
 }
 
 struct TestRuntime;
@@ -435,12 +437,27 @@ fn session_can_resume_pending_runtime_call() {
         &TestRuntime,
         "win",
     );
+    let queued_before_run = session.queued_work();
+    assert_eq!(queued_before_run.len(), 1);
+    assert_eq!(queued_before_run[0].kind, EvalWorkKind::StartEntry);
+    assert_eq!(queued_before_run[0].node_id, EvalNodeId(0));
+    assert_eq!(
+        session.node_state(EvalNodeId(0)),
+        Some(&EvalNodeState::Runnable {
+            work: queued_before_run[0].id,
+            pending: None,
+        }),
+    );
 
     let first = session.run().expect("first session run");
     let Resolution::Pending(pending) = first else {
         panic!("expected pending resolution, got {first:?}");
     };
     assert_eq!(session.pending_nodes(), vec![pending.clone()]);
+    assert_eq!(
+        session.node_state(EvalNodeId(0)),
+        Some(&EvalNodeState::Pending(pending.clone()))
+    );
     assert_eq!(
         session.node_state(EvalNodeId(1)),
         Some(&EvalNodeState::Pending(pending.clone()))
@@ -461,6 +478,10 @@ fn session_can_resume_pending_runtime_call() {
     assert_eq!(value.rep, ValueRep::String("windows".into()));
     assert!(session.pending_nodes().is_empty());
     assert_eq!(
+        session.node_state(EvalNodeId(0)),
+        Some(&EvalNodeState::Ready(Value::string("windows")))
+    );
+    assert_eq!(
         session.node_state(EvalNodeId(1)),
         Some(&EvalNodeState::Ready(Value::string("windows")))
     );
@@ -475,6 +496,80 @@ fn session_can_resume_pending_runtime_call() {
             .iter()
             .any(|event| matches!(event.kind, EvalEventKind::RegisterPending { .. })),
         "session trace should retain the first suspension",
+    );
+}
+
+#[test]
+fn session_step_queues_root_expression_work_before_evaluating_it() {
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "session-step-root",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let queued_before = session.queued_work();
+    assert_eq!(queued_before.len(), 1);
+    assert_eq!(queued_before[0].kind, EvalWorkKind::StartEntry);
+    assert_eq!(queued_before[0].node_id, EvalNodeId(0));
+
+    let first = session.step().expect("first session step");
+    assert_eq!(first, EvalSessionStep::Progressed);
+    assert_eq!(session.completed_work().len(), 1);
+    assert_eq!(
+        session.completed_work()[0].outcome,
+        EvalCompletedWorkOutcome::Progressed
+    );
+    assert_eq!(
+        session.completed_work()[0].work.kind,
+        EvalWorkKind::StartEntry
+    );
+
+    let queued_after = session.queued_work();
+    assert_eq!(queued_after.len(), 1);
+    assert_eq!(queued_after[0].kind, EvalWorkKind::EvaluateExpr);
+    assert_eq!(queued_after[0].node_id, EvalNodeId(1));
+    assert_eq!(
+        session.node_state(EvalNodeId(0)),
+        Some(&EvalNodeState::Runnable {
+            work: queued_after[0].id,
+            pending: None,
+        }),
+    );
+    assert_eq!(
+        session.node_state(EvalNodeId(1)),
+        Some(&EvalNodeState::Runnable {
+            work: queued_after[0].id,
+            pending: None,
+        }),
+    );
+
+    let second = session.step().expect("second session step");
+    let EvalSessionStep::Pending(pending) = second else {
+        panic!("expected pending step, got {second:?}");
+    };
+    assert_eq!(
+        pending.description.as_ref(),
+        "waiting for remote host observation"
+    );
+    assert!(session.queued_work().is_empty());
+    assert_eq!(session.completed_work().len(), 2);
+    assert_eq!(
+        session.completed_work()[1].work.kind,
+        EvalWorkKind::EvaluateExpr
+    );
+    assert_eq!(
+        session.completed_work()[1].outcome,
+        EvalCompletedWorkOutcome::Pending(pending.clone()),
+    );
+    assert!(
+        session
+            .trace()
+            .events
+            .iter()
+            .all(|event| event.work_id == Some(queued_after[0].id))
     );
 }
 
@@ -539,6 +634,17 @@ fn resolving_pending_node_requeues_resume_work_record() {
         panic!("expected pending resolution, got {first:?}");
     };
     assert!(session.queued_work().is_empty());
+    let blocked_call_node = session
+        .trace()
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EvalEventKind::RegisterPending {
+                pending: registered,
+            } if registered == &pending => Some(event.node_id),
+            _ => None,
+        })
+        .expect("trace should record the blocked call node");
 
     session
         .resolve_pending(&pending, Value::string("windows"))
@@ -547,7 +653,25 @@ fn resolving_pending_node_requeues_resume_work_record() {
     let queued = session.queued_work();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].kind, EvalWorkKind::ResumePending);
+    assert_eq!(queued[0].node_id, blocked_call_node);
     assert_eq!(queued[0].pending.as_ref(), Some(&pending));
+    assert_eq!(
+        session.node_state(blocked_call_node),
+        Some(&EvalNodeState::Runnable {
+            work: queued[0].id,
+            pending: Some(pending.clone()),
+        }),
+    );
+    let runnable = session.runnable_nodes();
+    assert_eq!(runnable.len(), 1);
+    assert_eq!(runnable[0].node_id, blocked_call_node);
+    assert_eq!(runnable[0].work_id, queued[0].id);
+    assert_eq!(runnable[0].kind, EvalWorkKind::ResumePending);
+    assert_eq!(runnable[0].pending.as_ref(), Some(&pending));
+    assert_eq!(
+        session.node_state(EvalNodeId(pending.node_id)),
+        Some(&EvalNodeState::Ready(Value::string("windows"))),
+    );
 
     let second = session.run().expect("second session run");
     let Resolution::Ready(value) = second else {
@@ -555,6 +679,15 @@ fn resolving_pending_node_requeues_resume_work_record() {
     };
     assert_eq!(value.rep, ValueRep::String("windows".into()));
     assert!(session.queued_work().is_empty());
+    assert_eq!(session.completed_work().len(), 3);
+    assert_eq!(
+        session.completed_work()[2].work.kind,
+        EvalWorkKind::ResumePending
+    );
+    assert_eq!(
+        session.completed_work()[2].outcome,
+        EvalCompletedWorkOutcome::Ready(Value::string("windows")),
+    );
 }
 
 #[test]

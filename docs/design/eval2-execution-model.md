@@ -93,6 +93,7 @@ The engine emits structured events for:
 
 Each event carries:
 
+- work ID, if the event came from scheduler-owned session work
 - node ID
 - parent node ID, if any
 - place
@@ -170,6 +171,12 @@ The next step beyond that is a resumable session with scheduler-owned state:
 - the session owns the current node table
 - the scheduler owns a ready queue and a blocked-pending table
 - the ready queue can drive both a fresh entry evaluation and resumed work
+- the session can expose one scheduler step at a time instead of only `run()`
+- start-entry setup can queue ordinary expression work instead of evaluating the
+  whole entry inline
+- the session can retain a completed-work log keyed by queued work records
+- resumed work records can point back to the expression node that is runnable
+- node state can distinguish "blocked on pending" from "ready to resume"
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -192,8 +199,11 @@ This slice does not yet provide:
 It is still a recursive single-threaded evaluator with a structured event sink.
 Some runtime calls can now surface `Pending`, and a session can later resume
 them through a scheduler-owned ready/pending queue and stored continuation
-frames. But there is not yet a general node scheduler that can park and resume
-arbitrary work units independently of the recursive evaluator.
+frames. The first ordinary queued work beyond that is the root entry body:
+`StartEntry` now parses/binds and enqueues an `EvaluateExpr` task instead of
+running the whole body inline. But there is not yet a general node scheduler
+that can park and resume arbitrary work units independently of the recursive
+evaluator.
 
 ## Why this is still useful
 
@@ -232,6 +242,8 @@ The current local-resume session is also useful in its own right:
 - it proves that results can move from pending to ready or poison
 - it proves that earlier ready work is not replayed just because a later node
   suspended
+- it gives a debugger/replay tool a step-by-step work log without scraping the
+  raw trace stream
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 
