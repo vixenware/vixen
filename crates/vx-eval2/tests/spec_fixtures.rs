@@ -1479,11 +1479,13 @@ impl Eval2Daemon for FixtureDaemon {
             &request.place.id,
         );
         match session.run() {
-            Ok(resolution) => proxify_outcome(
-                &self.proxies,
-                &request.place.id,
-                resolution_to_outcome(resolution).expect("serialize eval2 result"),
-            ),
+            Ok(resolution) => match resolution_to_outcome(resolution) {
+                Ok(outcome) => proxify_outcome(&self.proxies, &request.place.id, outcome),
+                Err(error) => EvalOutcome::Poison {
+                    kind: format!("{:?}", error.kind),
+                    message: error.message.to_string(),
+                },
+            },
             Err(error) => EvalOutcome::Poison {
                 kind: format!("{:?}", error.kind),
                 message: error.message.to_string(),

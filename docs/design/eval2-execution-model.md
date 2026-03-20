@@ -234,6 +234,39 @@ This is still not a full continuation machine or a parallel scheduler. It is
 already enough to move pending-node identity, wakeup, and local progress into
 the evaluator rather than the runtime hook.
 
+## Current authored-function boundary
+
+Eval2 now supports authored named functions and closure literals as ordinary
+evaluator-owned function values. That works:
+
+- locally
+- across bundled source-program resolution inside one eval2 session
+- for inline slot resolvers and imported authored helpers
+
+The remote daemon boundary is still stricter:
+
+- bundled programs cross the boundary
+- function values themselves do not
+- a remote result that finishes as a function value is a normal eval poison,
+  not a daemon crash
+
+That rule is intentional for now. The wire format still transports evaluator
+results, not executable closures.
+
+## Next authored resolver gap
+
+After slots, authored functions, and closures, the minimum generic substrate
+still missing for more honest authored resolver policy is small but real:
+
+- richer generic collection/query building blocks over authored data
+- enough comparison / selection surface to express policy without falling back
+  to Rust-side toy helpers
+
+This does not require Cargo semantics, solver primitives, or a scheduler
+redesign. It does mean the next follow-on cut should identify the smallest
+authorable data-manipulation surface that lets resolver logic stay in Vixen
+instead of Rust.
+
 ## What this does not do yet
 
 This slice does not yet provide:

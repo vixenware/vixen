@@ -70,10 +70,10 @@ fn value_to_wire_value(value: &Value) -> Result<WireValue, EvalError> {
             descriptor: external.descriptor.to_string(),
         }),
         ValueRep::Function(function) => Err(EvalError::new(
-            EvalErrorKind::Internal,
+            EvalErrorKind::TypeError,
             format!(
-                "function values are not serializable yet: {}::{}",
-                function.source_id, function.name
+                "function values cannot cross the daemon boundary yet: {}::{}",
+                function.source_id, function.name,
             ),
         )),
     }

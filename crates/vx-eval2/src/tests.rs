@@ -20,7 +20,7 @@ use crate::{
     eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
-    eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
+    eval_source_entry_with_args_with_source_id_with_sink, resolution_to_outcome, value_to_envelope,
 };
 
 #[test]
@@ -1243,6 +1243,28 @@ fn wire_round_trip_preserves_value_shape_and_metadata() {
     let decoded = envelope_to_value(encoded).expect("decode value");
 
     assert_eq!(decoded, value);
+}
+
+#[test]
+fn function_values_fail_cleanly_at_the_wire_boundary() {
+    let Resolution::Ready(value) = eval_source_entry_with_args_with_source_id(
+        "fn build() { ((value) => value) }",
+        "wire-function-result",
+        "build",
+        &[],
+    )
+    .expect("evaluate closure-valued result") else {
+        panic!("expected ready closure-valued result");
+    };
+
+    let error = resolution_to_outcome(Resolution::Ready(value))
+        .expect_err("function values should not serialize across the daemon boundary");
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("function values cannot cross the daemon boundary yet")
+    );
 }
 
 #[test]

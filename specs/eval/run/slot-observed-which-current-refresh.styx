@@ -1,18 +1,10 @@
 main <<VX,vx
 fn build_current(name: String) {
-  fn resolve_slot(ctx) {
-    host_which(ctx.witness)
-  }
-
-  slot_current("toolchain-slot", name, resolve_slot)
+  slot_current("toolchain-slot", name, ((ctx) => host_which(ctx.witness)))
 }
 
 fn build_refresh(name: String, intent: String) {
-  fn resolve_slot(ctx) {
-    host_which(ctx.witness)
-  }
-
-  slot_refresh("toolchain-slot", name, intent, resolve_slot)
+  slot_refresh("toolchain-slot", name, intent, ((ctx) => host_which(ctx.witness)))
 }
 VX
 

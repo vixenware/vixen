@@ -1,18 +1,10 @@
 main <<VX,vx
 fn build_current(witness: String, desired: U64) {
-  fn resolve_slot(ctx) {
-    desired
-  }
-
-  slot_current("pure-slot", witness, resolve_slot)
+  slot_current("pure-slot", witness, ((ctx) => desired))
 }
 
 fn build_refresh(witness: String, desired: U64, intent: String) {
-  fn resolve_slot(ctx) {
-    desired
-  }
-
-  slot_refresh("pure-slot", witness, intent, resolve_slot)
+  slot_refresh("pure-slot", witness, intent, ((ctx) => desired))
 }
 VX
 
