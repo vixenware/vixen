@@ -180,6 +180,13 @@ The next step beyond that is a resumable session with scheduler-owned state:
 - ordinary child expressions can also become queued work in session mode, with
   parent nodes blocked on child-node completion instead of always recursing
   inline
+- some expression forms can now expose multiple runnable sibling children at
+  once:
+  - array items
+  - call arguments
+  This is still driven by a single-threaded scheduler today, but it means the
+  evaluator can already surface a real runnable frontier instead of discovering
+  siblings only one at a time
 - the session can retain node records and expose a graph snapshot over:
   - node record metadata
   - current node state
@@ -216,6 +223,15 @@ whole body inline. Session mode now also queues ordinary child expressions and
 lets parent nodes block on child-node completion. But there is not yet a
 general node scheduler that can park and resume arbitrary work units
 independently of the recursive evaluator.
+
+The current frontier is deliberately uneven:
+
+- block/let sequencing is still mostly continuation-driven
+- array items can already become multiple queued sibling work items
+- call arguments can already become multiple queued sibling work items
+
+So the scheduler can now observe a little real fan-out, even though the engine
+is not yet a general parallel task VM.
 
 ## Why this is still useful
 

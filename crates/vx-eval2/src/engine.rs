@@ -840,6 +840,13 @@ enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         call_source: SourceSpan,
     },
+    CallJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        callee_name: String,
+        call_source: SourceSpan,
+        child_nodes: Vec<EvalNodeId>,
+    },
     BlockAfterLet {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -870,6 +877,12 @@ enum ContinuationFrame {
         items: Vec<Value>,
         remaining_items: Vec<ArrayItem>,
         env: BTreeMap<String, Value>,
+        array_source: SourceSpan,
+    },
+    ArrayJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        child_nodes: Vec<EvalNodeId>,
         array_source: SourceSpan,
     },
     MapAfterKey {
@@ -1610,44 +1623,21 @@ fn eval_child_expr(
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
-    let child_id = state.alloc_node_id();
-    state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
     if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
         return eval_expr_with_node_id(state, child_id, expr, env);
     }
-    state.scheduler.record_node(EvalNodeRecord {
-        node_id: child_id,
-        parent_id: state.current_parent(),
-        kind: EvalNodeKind::Expr {
-            kind: expr_kind(expr),
-        },
-        source: Some(state.source.span_for_node(expr)),
-    });
-    let work = state.scheduler.enqueue_ready_task(
-        ReadyTask::EvaluateExpr(ScheduledExpr {
-            expr: expr.clone(),
-            env: env.clone(),
-        }),
-        EvalWorkKind::EvaluateExpr,
-        child_id,
-        None,
-    );
-    state.scheduler.record_node_state(
-        child_id,
-        EvalNodeState::Runnable {
-            work: work.id,
-            pending: None,
-        },
-    );
-    let pending = state.scheduler.alloc_child_dependency_pending(child_id);
+    let child_id = queue_child_expr(state, expr, env);
     let resume_node = state
         .current_parent()
         .expect("child expression should have an active parent node");
-    Ok(EvalStep::Suspended(EvalSuspension {
+    Ok(wait_on_child_dependency(
+        state,
         resume_node,
-        pending,
-        frames: Vec::new(),
-    }))
+        child_id,
+        Vec::new(),
+    ))
 }
 
 fn eval_call(
@@ -1675,6 +1665,25 @@ fn eval_call(
         .copied()
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
+    if state.queue_child_work && !positional_args.is_empty() {
+        let child_nodes = positional_args
+            .iter()
+            .map(|arg| queue_child_expr(state, arg, env))
+            .collect::<Vec<_>>();
+        return Ok(wait_on_child_dependency(
+            state,
+            node_id,
+            child_nodes[0],
+            vec![ContinuationFrame::CallJoin {
+                node_id,
+                parent_id,
+                callee_name,
+                call_source,
+                child_nodes,
+            }],
+        ));
+    }
     continue_call_from_args(
         state,
         node_id,
@@ -1682,7 +1691,7 @@ fn eval_call(
         callee_name,
         call_source,
         Vec::new(),
-        call.positional_args().into_iter().collect(),
+        positional_args,
         env.clone(),
     )
 }
@@ -1888,6 +1897,37 @@ fn eval_array(
         .copied()
         .expect("array should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    if state.queue_child_work {
+        let mut child_nodes = Vec::new();
+        for item in array.items() {
+            match item {
+                ArrayItem::Expr(expr) => child_nodes.push(queue_child_expr(state, &expr, env)),
+                ArrayItem::Spread(_) => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        "array spread is not supported yet",
+                    ));
+                }
+            }
+        }
+        if child_nodes.is_empty() {
+            let provenance = Provenance::literal(state.source.span_for_node(array));
+            return Ok(EvalStep::Ready(Value::array(Vec::new()).with_meta(
+                ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
+            )));
+        }
+        return Ok(wait_on_child_dependency(
+            state,
+            node_id,
+            child_nodes[0],
+            vec![ContinuationFrame::ArrayJoin {
+                node_id,
+                parent_id,
+                child_nodes,
+                array_source: state.source.span_for_node(array),
+            }],
+        ));
+    }
     continue_array_items(
         state,
         node_id,
@@ -2188,6 +2228,54 @@ fn continue_array_items(
     Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
 }
 
+fn queue_child_expr(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    expr: &Expr,
+    env: &BTreeMap<String, Value>,
+) -> EvalNodeId {
+    let child_id = state.alloc_node_id();
+    state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: expr_kind(expr),
+        },
+        source: Some(state.source.span_for_node(expr)),
+    });
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(ScheduledExpr {
+            expr: expr.clone(),
+            env: env.clone(),
+        }),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    child_id
+}
+
+fn wait_on_child_dependency(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    resume_node: EvalNodeId,
+    dependency: EvalNodeId,
+    frames: Vec<ContinuationFrame>,
+) -> EvalStep {
+    let pending = state.scheduler.alloc_child_dependency_pending(dependency);
+    EvalStep::Suspended(EvalSuspension {
+        resume_node,
+        pending,
+        frames,
+    })
+}
+
 fn continue_map_entries(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -2374,6 +2462,54 @@ fn resume_frame(
                 ResumeOutcome::Continue(Err(error))
             }
         }),
+        ContinuationFrame::CallJoin {
+            node_id,
+            parent_id,
+            callee_name,
+            call_source,
+            child_nodes,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut args = Vec::with_capacity(child_nodes.len());
+                    for child_node in &child_nodes {
+                        match state.scheduler.node_state(*child_node) {
+                            Some(EvalNodeState::Ready(value)) => args.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(*child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    frames: vec![ContinuationFrame::CallJoin {
+                                        node_id,
+                                        parent_id,
+                                        callee_name,
+                                        call_source,
+                                        child_nodes: child_nodes.clone(),
+                                    }],
+                                }));
+                            }
+                        }
+                    }
+                    continue_call_from_args(
+                        state,
+                        node_id,
+                        parent_id,
+                        callee_name,
+                        call_source,
+                        args,
+                        Vec::new(),
+                        BTreeMap::new(),
+                    )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::BlockAfterLet {
             node_id,
             parent_id,
@@ -2468,6 +2604,45 @@ fn resume_frame(
                         env,
                         array_source,
                     )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayJoin {
+            node_id,
+            parent_id,
+            child_nodes,
+            array_source,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut items = Vec::with_capacity(child_nodes.len());
+                    for child_node in &child_nodes {
+                        match state.scheduler.node_state(*child_node) {
+                            Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(*child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    frames: vec![ContinuationFrame::ArrayJoin {
+                                        node_id,
+                                        parent_id,
+                                        child_nodes: child_nodes.clone(),
+                                        array_source: array_source.clone(),
+                                    }],
+                                }));
+                            }
+                        }
+                    }
+                    let provenance = Provenance::literal(array_source);
+                    let meta = aggregate_child_meta(provenance, items.iter());
+                    Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
                 }
                 Err(error) => Err(error),
             };
