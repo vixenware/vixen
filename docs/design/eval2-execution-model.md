@@ -265,6 +265,18 @@ earliest outstanding lease, and commit order remains deterministic. That keeps
 sibling fan-out possible without claiming a fully commutative parallel
 scheduler yet.
 
+Buffered completions are part of the public session/debugger model now. A work
+item can be:
+
+- queued: not leased yet
+- in-flight: leased and not yet returned
+- buffered: returned but still waiting behind an earlier lease
+- completed: committed into session state
+
+That matters for observability. A buffered sibling is no longer an invisible
+gap between "in-flight" and "completed"; it shows up in work records, graph
+snapshots, and node explanation as explicitly buffered work.
+
 The current frontier is deliberately uneven:
 
 - block/let sequencing is still mostly continuation-driven
@@ -330,6 +342,9 @@ The current local-resume session is also useful in its own right:
   later"
 - it can accept legitimate out-of-order sibling completions without exposing
   them as committed state before earlier leases land
+- it now has a built-in bounded worker loop that can lease ready siblings,
+  execute them on worker threads, and still commit their results in lease
+  order
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 

@@ -15,9 +15,9 @@ mod program;
 
 mod engine;
 pub use engine::{
-    EvalCompletedWork, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalExplainTerminal,
-    EvalGraphNode, EvalGraphSnapshot, EvalNodeExplanation, EvalNodeKind, EvalNodeRecord,
-    EvalNodeState, EvalPreparedWork, EvalQueuedWork, EvalRunnableNode, EvalSession,
+    EvalBufferedWork, EvalCompletedWork, EvalCompletedWorkOutcome, EvalDependencyEdge,
+    EvalExplainTerminal, EvalGraphNode, EvalGraphSnapshot, EvalNodeExplanation, EvalNodeKind,
+    EvalNodeRecord, EvalNodeState, EvalPreparedWork, EvalQueuedWork, EvalRunnableNode, EvalSession,
     EvalSessionCheckpoint, EvalSessionStep, EvalWorkCompletion, EvalWorkId, EvalWorkKind,
     EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks, eval_source_entry,
     eval_source_entry_at_place, eval_source_entry_at_place_with_args,

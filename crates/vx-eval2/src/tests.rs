@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use crate::{
@@ -293,6 +294,79 @@ impl RuntimeHooks for DoublePendingRuntime {
                 Ok(RuntimeCallOutcome::Pending {
                     description: "waiting for second remote result".into(),
                 })
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+struct ParallelObserveRuntime {
+    active_calls: Arc<AtomicUsize>,
+    max_calls: Arc<AtomicUsize>,
+}
+
+impl RuntimeHooks for ParallelObserveRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        _args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (place, callee) {
+            ("win", "host_os") => {
+                let active = self.active_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_calls.fetch_max(active, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(40));
+                self.active_calls.fetch_sub(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("windows")
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+struct StaggeredRuntime;
+
+impl RuntimeHooks for StaggeredRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        _args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (place, callee) {
+            ("win", "slow_value") => {
+                thread::sleep(Duration::from_millis(50));
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("slow")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "slow_value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            ("win", "fast_value") => {
+                thread::sleep(Duration::from_millis(5));
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("fast")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "fast_value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
             }
             _ => Ok(RuntimeCallOutcome::Unsupported),
         }
@@ -1671,6 +1745,8 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
     let second_work = second.work().clone();
     let first_completion = first.execute().expect("first completion");
     let second_completion = second.execute().expect("second completion");
+    let second_lease_sequence = second_completion.lease_sequence();
+    let second_outcome = second_completion.outcome().clone();
 
     assert_eq!(
         session
@@ -1680,6 +1756,24 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
     );
     assert_eq!(session.in_flight_work(), vec![first_work.clone()]);
     assert!(session.queued_work().is_empty());
+    assert_eq!(session.buffered_work().len(), 1);
+    assert_eq!(session.buffered_work()[0].lease_sequence, second_lease_sequence);
+    assert_eq!(session.buffered_work()[0].work, second_work.clone());
+    assert_eq!(session.buffered_work()[0].outcome, second_outcome.clone());
+    assert!(session.work_records().iter().any(|record| {
+        record.work.id == second_work.id
+            && record.state == EvalWorkState::Buffered(second_outcome.clone())
+    }));
+    assert_eq!(
+        session.explain_node(second_work.node_id).terminal,
+        EvalExplainTerminal::Buffered {
+            node_id: second_work.node_id,
+            work: second_work.id,
+            pending: None,
+            lease_sequence: second_lease_sequence,
+            outcome: second_outcome.clone(),
+        },
+    );
     assert_eq!(
         session.run().expect("session should still be waiting"),
         Resolution::Waiting
@@ -1698,6 +1792,7 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
             .expect("first completion should commit and drain"),
         EvalSessionStep::Progressed,
     );
+    assert!(session.buffered_work().is_empty());
     assert!(session.in_flight_work().is_empty());
     assert_eq!(
         session
@@ -1759,6 +1854,8 @@ fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
     let first_completion = first.execute().expect("first completion");
     let second_completion = second.execute().expect("second completion");
     let third_completion = third.execute().expect("third completion");
+    let second_lease_sequence = second_completion.lease_sequence();
+    let third_lease_sequence = third_completion.lease_sequence();
 
     assert_eq!(
         session
@@ -1773,6 +1870,14 @@ fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
         EvalSessionStep::WaitingOnInFlight,
     );
     assert_eq!(session.in_flight_work(), vec![first_work.clone()]);
+    assert_eq!(
+        session
+            .buffered_work()
+            .iter()
+            .map(|buffered| buffered.lease_sequence)
+            .collect::<Vec<_>>(),
+        vec![second_lease_sequence, third_lease_sequence],
+    );
     assert!(session.completed_work().iter().all(|completed| {
         completed.work.id != second_work.id && completed.work.id != third_work.id
     }));
@@ -1783,6 +1888,7 @@ fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
             .expect("first completion should drain buffered siblings"),
         EvalSessionStep::Progressed,
     );
+    assert!(session.buffered_work().is_empty());
     assert_eq!(
         session
             .completed_work()
@@ -1807,6 +1913,221 @@ fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
             .iter()
             .all(|item| item.rep == ValueRep::String("windows".into()))
     );
+}
+
+#[test]
+fn graph_snapshot_reflects_buffered_work() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "prepared-buffered-graph",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("first leased sibling");
+    let second = session.prepare_step().expect("second leased sibling");
+    let second_work = second.work().clone();
+    let second_outcome = second.execute().expect("second completion");
+    let second_lease_sequence = second_outcome.lease_sequence();
+    let second_result = second_outcome.outcome().clone();
+
+    assert_eq!(
+        session
+            .apply_completion(second_outcome)
+            .expect("second completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+
+    let snapshot = session.graph_snapshot();
+    assert!(snapshot.work.iter().any(|record| {
+        record.work.id == second_work.id
+            && record.state == EvalWorkState::Buffered(second_result.clone())
+    }));
+    assert_eq!(
+        session.buffered_work(),
+        vec![crate::EvalBufferedWork {
+            lease_sequence: second_lease_sequence,
+            work: second_work,
+            outcome: second_result,
+        }],
+    );
+
+    let _first_completion = first.execute().expect("first completion");
+}
+
+#[test]
+fn run_parallel_executes_sibling_frontier_on_worker_threads() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "parallel-ready",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "parallel driver should overlap sibling runtime calls",
+    );
+}
+
+#[test]
+fn run_parallel_commits_out_of_order_worker_results_in_lease_order() {
+    let mut session = EvalSession::new(
+        "fn build() { [slow_value(), fast_value()] }",
+        "parallel-out-of-order",
+        "build",
+        Vec::new(),
+        &StaggeredRuntime,
+        "win",
+    );
+
+    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| match &item.rep {
+                ValueRep::String(value) => value.as_ref().to_string(),
+                other => panic!("expected string item, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec!["slow".to_string(), "fast".to_string()],
+    );
+    assert_eq!(
+        session
+            .completed_work()
+            .iter()
+            .filter_map(|completed| match &completed.outcome {
+                EvalCompletedWorkOutcome::Ready(value) => match &value.rep {
+                    ValueRep::String(value) => Some(value.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["slow".to_string(), "fast".to_string()],
+    );
+}
+
+#[test]
+fn run_parallel_returns_pending_when_external_work_suspends() {
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "parallel-pending",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let Resolution::Pending(pending) = resolution else {
+        panic!("expected pending resolution, got {resolution:?}");
+    };
+    assert_eq!(
+        pending.description.as_ref(),
+        "waiting for remote host observation"
+    );
+    assert_eq!(session.pending_nodes(), vec![pending]);
+}
+
+#[test]
+fn run_parallel_returns_poison_when_evaluation_fails() {
+    let mut session = EvalSession::new(
+        "fn build() { fail \"boom\" }",
+        "parallel-poison",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let Resolution::Poison(error) = resolution else {
+        panic!("expected poison resolution, got {resolution:?}");
+    };
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "boom");
+}
+
+#[test]
+fn run_parallel_returns_waiting_when_external_in_flight_work_blocks_commit() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "parallel-waiting",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("external lease should exist");
+    let first_work = first.work().clone();
+
+    assert_eq!(
+        session.run_parallel(1).expect("parallel driver should wait"),
+        Resolution::Waiting,
+    );
+    assert_eq!(session.in_flight_work(), vec![first_work]);
+    assert_eq!(session.buffered_work().len(), 1);
+    assert!(matches!(
+        session.explain_node(session.buffered_work()[0].work.node_id).terminal,
+        EvalExplainTerminal::Buffered { .. }
+    ));
 }
 
 #[test]

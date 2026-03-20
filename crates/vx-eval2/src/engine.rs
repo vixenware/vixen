@@ -1,7 +1,8 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::thread;
 
 use vx_parser::{
     ArrayExpr, ArrayItem, BlockExpr, CallExpr, Expr, FailExpr, FieldExpr, IfExpr, LiteralExpr,
@@ -82,9 +83,17 @@ pub struct EvalCompletedWork {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalBufferedWork {
+    pub lease_sequence: u64,
+    pub work: EvalQueuedWork,
+    pub outcome: EvalCompletedWorkOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalWorkState {
     Queued,
     InFlight,
+    Buffered(EvalCompletedWorkOutcome),
     Completed(EvalCompletedWorkOutcome),
 }
 
@@ -122,6 +131,13 @@ pub enum EvalExplainTerminal {
         node_id: EvalNodeId,
         work: EvalWorkId,
         pending: Option<PendingRef>,
+    },
+    Buffered {
+        node_id: EvalNodeId,
+        work: EvalWorkId,
+        pending: Option<PendingRef>,
+        lease_sequence: u64,
+        outcome: EvalCompletedWorkOutcome,
     },
     Pending {
         node_id: EvalNodeId,
@@ -272,22 +288,55 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 EvalSessionStep::WaitingOnInFlight => return Ok(Resolution::Waiting),
                 EvalSessionStep::Ready(value) => return Ok(Resolution::Ready(value)),
                 EvalSessionStep::Poison(error) => return Ok(Resolution::Poison(error)),
-                EvalSessionStep::Idle => {
-                    return Ok(match self.scheduler.pending_nodes().into_iter().next() {
-                        Some(pending) => Resolution::Pending(pending),
-                        None if !self.scheduler.in_flight_work().is_empty() => Resolution::Waiting,
-                        None => match &self.completed {
-                            Some(Ok(value)) => Resolution::Ready(value.clone()),
-                            Some(Err(error)) => Resolution::Poison(error.clone()),
-                            None => Resolution::Poison(EvalError::new(
-                                EvalErrorKind::Internal,
-                                "eval session has no ready work and no pending nodes",
-                            )),
-                        },
-                    });
-                }
+                EvalSessionStep::Idle => return Ok(resolution_without_ready_work(&self.scheduler, &self.completed)),
             }
         }
+    }
+
+    pub fn run_parallel(&mut self, max_workers: usize) -> Result<Resolution, EvalError> {
+        if max_workers == 0 {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                "parallel eval requires at least one worker",
+            ));
+        }
+
+        if let Some(result) = &self.completed {
+            return Ok(match result {
+                Ok(value) => Resolution::Ready(value.clone()),
+                Err(error) => Resolution::Poison(error.clone()),
+            });
+        }
+
+        thread::scope(|scope| -> Result<Resolution, EvalError> {
+            let (completion_tx, completion_rx) = mpsc::channel();
+            let mut active_workers = 0usize;
+
+            loop {
+                if active_workers == 0 {
+                    while active_workers < max_workers {
+                        let Some(prepared) = self.prepare_step_impl(false)? else {
+                            break;
+                        };
+                        let completion_tx = completion_tx.clone();
+                        scope.spawn(move || {
+                            let _ = completion_tx.send(prepared.execute());
+                        });
+                        active_workers += 1;
+                    }
+                }
+
+                if active_workers == 0 {
+                    return Ok(resolution_without_ready_work(&self.scheduler, &self.completed));
+                }
+
+                let completion = completion_rx.recv().expect(
+                    "parallel eval worker channel closed before all leased work completed",
+                )?;
+                active_workers -= 1;
+                let _step = self.apply_completion_impl(completion, false)?;
+            }
+        })
     }
 
     pub fn step(&mut self) -> Result<EvalSessionStep, EvalError> {
@@ -301,13 +350,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         let snapshot = self.checkpoint();
 
         let Some(prepared) = self.prepare_step_impl(false)? else {
-            return Ok(match self.scheduler.pending_nodes().into_iter().next() {
-                Some(pending) => EvalSessionStep::Pending(pending),
-                None if !self.scheduler.in_flight_work().is_empty() => {
-                    EvalSessionStep::WaitingOnInFlight
-                }
-                None => EvalSessionStep::Idle,
-            });
+            return Ok(step_without_ready_work(&self.scheduler, &self.completed));
         };
         let completion = prepared.execute()?;
         self.history.push(snapshot);
@@ -352,6 +395,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn in_flight_work(&self) -> Vec<EvalQueuedWork> {
         self.scheduler.in_flight_work()
+    }
+
+    pub fn buffered_work(&self) -> Vec<EvalBufferedWork> {
+        self.scheduler.buffered_work()
     }
 
     pub fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
@@ -534,6 +581,15 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                     state: EvalWorkState::InFlight,
                 }),
         );
+        records.extend(
+            self.scheduler
+                .buffered_work()
+                .into_iter()
+                .map(|buffered| EvalWorkRecord {
+                    work: buffered.work,
+                    state: EvalWorkState::Buffered(buffered.outcome),
+                }),
+        );
         records.sort_by_key(|record| record.work.id);
         records
     }
@@ -661,8 +717,7 @@ fn commit_completion(
         EvalCompletedWorkOutcome::Ready(value) => {
             if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
                 Ok(EvalSessionStep::Progressed)
-            } else if !scheduler.queued_work().is_empty() || !scheduler.in_flight_work().is_empty()
-            {
+            } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
                 Ok(EvalSessionStep::Progressed)
             } else {
                 scheduler
@@ -674,8 +729,7 @@ fn commit_completion(
         EvalCompletedWorkOutcome::Poison(error) => {
             if scheduler.resolve_child_dependency(completion.work.node_id, Err(error.clone()))? {
                 Ok(EvalSessionStep::Progressed)
-            } else if !scheduler.queued_work().is_empty() || !scheduler.in_flight_work().is_empty()
-            {
+            } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
                 Ok(EvalSessionStep::Progressed)
             } else {
                 scheduler
@@ -695,10 +749,39 @@ fn step_after_buffering(
         Some(Ok(value)) => EvalSessionStep::Ready(value.clone()),
         Some(Err(error)) => EvalSessionStep::Poison(error.clone()),
         None if !scheduler.queued_work().is_empty() => EvalSessionStep::Progressed,
+        None => step_without_ready_work(scheduler, completed),
+    }
+}
+
+fn step_without_ready_work(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> EvalSessionStep {
+    match completed {
+        Some(Ok(value)) => EvalSessionStep::Ready(value.clone()),
+        Some(Err(error)) => EvalSessionStep::Poison(error.clone()),
         None => match scheduler.pending_nodes().into_iter().next() {
             Some(pending) => EvalSessionStep::Pending(pending),
-            None if !scheduler.in_flight_work().is_empty() => EvalSessionStep::WaitingOnInFlight,
+            None if scheduler.has_waiting_work() => EvalSessionStep::WaitingOnInFlight,
             None => EvalSessionStep::Idle,
+        },
+    }
+}
+
+fn resolution_without_ready_work(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> Resolution {
+    match completed {
+        Some(Ok(value)) => Resolution::Ready(value.clone()),
+        Some(Err(error)) => Resolution::Poison(error.clone()),
+        None => match scheduler.pending_nodes().into_iter().next() {
+            Some(pending) => Resolution::Pending(pending),
+            None if scheduler.has_waiting_work() => Resolution::Waiting,
+            None => Resolution::Poison(EvalError::new(
+                EvalErrorKind::Internal,
+                "eval session has no ready work and no pending nodes",
+            )),
         },
     }
 }
@@ -1403,6 +1486,17 @@ impl EvalScheduler {
             .collect()
     }
 
+    fn buffered_work(&self) -> Vec<EvalBufferedWork> {
+        self.buffered_completions
+            .iter()
+            .map(|(lease_sequence, completion)| EvalBufferedWork {
+                lease_sequence: *lease_sequence,
+                work: completion.work.clone(),
+                outcome: completion.outcome.clone(),
+            })
+            .collect()
+    }
+
     fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
         self.ready_queue
             .iter()
@@ -1491,6 +1585,10 @@ impl EvalScheduler {
         self.pending_kinds.get(&pending.node_id).copied()
     }
 
+    fn has_waiting_work(&self) -> bool {
+        !self.in_flight_tasks.is_empty() || !self.buffered_completions.is_empty()
+    }
+
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.node_states.get(&node_id)
     }
@@ -1500,11 +1598,23 @@ impl EvalScheduler {
         let mut current = node_id;
         loop {
             let terminal = match self.node_states.get(&current) {
-                Some(EvalNodeState::Runnable { work, pending }) => EvalExplainTerminal::Runnable {
-                    node_id: current,
-                    work: *work,
-                    pending: pending.clone(),
-                },
+                Some(EvalNodeState::Runnable { work, pending }) => {
+                    if let Some(buffered) = self.buffered_completion_for_work(*work) {
+                        EvalExplainTerminal::Buffered {
+                            node_id: current,
+                            work: *work,
+                            pending: pending.clone(),
+                            lease_sequence: buffered.lease_sequence,
+                            outcome: buffered.outcome.clone(),
+                        }
+                    } else {
+                        EvalExplainTerminal::Runnable {
+                            node_id: current,
+                            work: *work,
+                            pending: pending.clone(),
+                        }
+                    }
+                }
                 Some(EvalNodeState::BlockedOnNode { dependency }) => {
                     chain.push(*dependency);
                     current = *dependency;
@@ -1681,6 +1791,12 @@ impl EvalScheduler {
         let _leased = self.take_in_flight_task(work_id, lease_sequence, &completion.work)?;
         self.buffered_completions.insert(lease_sequence, completion);
         Ok(())
+    }
+
+    fn buffered_completion_for_work(&self, work_id: EvalWorkId) -> Option<&EvalWorkCompletion> {
+        self.buffered_completions
+            .values()
+            .find(|completion| completion.work.id == work_id)
     }
 
     fn take_next_committable_buffered_completion(&mut self) -> Option<EvalWorkCompletion> {
