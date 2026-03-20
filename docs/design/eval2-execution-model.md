@@ -216,7 +216,8 @@ The next step beyond that is a resumable session with scheduler-owned state:
   Prepared work and checkpoints share this program instead of cloning raw
   source text or reparsing on handle resolution
 - completion ordering is explicit today: multiple sibling leases are allowed,
-  but completions must be applied in lease order or they are rejected
+  out-of-order arrivals are buffered, and committed work still advances in
+  ascending lease-sequence order
 - lease identity must stay monotonic across `restore()` / `step_back()` so
   rewinding cannot make an old completion look current again
 - completions can be rejected as stale if the leased work is no longer
@@ -224,7 +225,8 @@ The next step beyond that is a resumable session with scheduler-owned state:
 - `apply_completion` is transactional: a failed delta merge must not leave the
   live session partially mutated
 - a session with no ready work and no external pending nodes can still be in a
-  valid waiting state if leased work remains in-flight
+  valid waiting state if leased work remains in-flight, even when later
+  completions have already been buffered behind an earlier missing lease
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -258,9 +260,10 @@ Prepared work is now a real lease, not just a read-only peek plus checkpoint
 restore. Once leased, a work item leaves the ready queue and is visible as
 in-flight until its completion is merged or the session is rewound. The merge
 path is intentionally conservative today: deltas are applied back onto live
-session state, but multiple in-flight completions must still be committed in
-lease order. That keeps sibling fan-out possible without claiming a fully
-commutative parallel scheduler yet.
+session state, buffered completions are committed only when they become the
+earliest outstanding lease, and commit order remains deterministic. That keeps
+sibling fan-out possible without claiming a fully commutative parallel
+scheduler yet.
 
 The current frontier is deliberately uneven:
 
@@ -325,6 +328,8 @@ The current local-resume session is also useful in its own right:
   later without overwriting unrelated live scheduler state, which is the
   missing seam between "single-threaded scheduler today" and "real workers
   later"
+- it can accept legitimate out-of-order sibling completions without exposing
+  them as committed state before earlier leases land
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 

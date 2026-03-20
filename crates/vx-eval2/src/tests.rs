@@ -1642,7 +1642,7 @@ fn apply_completion_is_transactional_when_delta_merge_fails() {
 }
 
 #[test]
-fn out_of_order_sibling_completion_is_rejected_deterministically() {
+fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
     let mut session = EvalSession::new(
         "fn build() { [host_os(), host_os()] }",
         "prepared-out-of-order",
@@ -1666,26 +1666,210 @@ fn out_of_order_sibling_completion_is_rejected_deterministically() {
     );
 
     let first = session.prepare_step().expect("first leased sibling");
+    let first_work = first.work().clone();
     let second = session.prepare_step().expect("second leased sibling");
+    let second_work = second.work().clone();
     let first_completion = first.execute().expect("first completion");
     let second_completion = second.execute().expect("second completion");
 
-    let error = session
-        .apply_completion(second_completion)
-        .expect_err("out-of-order completion should be rejected");
-    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("out-of-order completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+    assert_eq!(session.in_flight_work(), vec![first_work.clone()]);
+    assert!(session.queued_work().is_empty());
+    assert_eq!(
+        session.run().expect("session should still be waiting"),
+        Resolution::Waiting
+    );
     assert!(
-        error.message.contains("out-of-order eval work completion"),
-        "unexpected error message: {}",
-        error.message
+        session
+            .completed_work()
+            .iter()
+            .all(|completed| completed.work.id != second_work.id),
+        "buffered completion must not be visible as committed work yet",
     );
 
     assert_eq!(
         session
             .apply_completion(first_completion)
-            .expect("first completion should still apply"),
+            .expect("first completion should commit and drain"),
         EvalSessionStep::Progressed,
     );
+    assert!(session.in_flight_work().is_empty());
+    assert_eq!(
+        session
+            .completed_work()
+            .iter()
+            .rev()
+            .take(2)
+            .map(|completed| completed.work.id)
+            .collect::<Vec<_>>(),
+        vec![second_work.id, first_work.id],
+    );
+
+    let resolution = session.run().expect("resume queued parent work");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+}
+
+#[test]
+fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os(), host_os()] }",
+        "prepared-buffered-drain",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("first leased sibling");
+    let first_work = first.work().clone();
+    let second = session.prepare_step().expect("second leased sibling");
+    let second_work = second.work().clone();
+    let third = session.prepare_step().expect("third leased sibling");
+    let third_work = third.work().clone();
+
+    let first_completion = first.execute().expect("first completion");
+    let second_completion = second.execute().expect("second completion");
+    let third_completion = third.execute().expect("third completion");
+
+    assert_eq!(
+        session
+            .apply_completion(third_completion)
+            .expect("third completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("second completion should also buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+    assert_eq!(session.in_flight_work(), vec![first_work.clone()]);
+    assert!(session.completed_work().iter().all(|completed| {
+        completed.work.id != second_work.id && completed.work.id != third_work.id
+    }));
+
+    assert_eq!(
+        session
+            .apply_completion(first_completion)
+            .expect("first completion should drain buffered siblings"),
+        EvalSessionStep::Progressed,
+    );
+    assert_eq!(
+        session
+            .completed_work()
+            .iter()
+            .rev()
+            .take(3)
+            .map(|completed| completed.work.id)
+            .collect::<Vec<_>>(),
+        vec![third_work.id, second_work.id, first_work.id],
+    );
+
+    let resolution = session.run().expect("resume queued parent work");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 3);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+}
+
+#[test]
+fn buffered_completion_merge_failure_leaves_live_session_state_unchanged() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os(), host_os()] }",
+        "prepared-buffered-transactional-merge",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let first = session.prepare_step().expect("first leased sibling");
+    let first_work = first.work().clone();
+    let second = session.prepare_step().expect("second leased sibling");
+    let duplicate = session.first_queued_work_for_testing();
+
+    let first_completion = first.execute().expect("first completion");
+    let mut second_completion = second.execute().expect("second completion");
+    second_completion.inject_duplicate_queued_work(duplicate);
+
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("second completion should buffer"),
+        EvalSessionStep::Progressed,
+    );
+
+    let before_graph = session.graph_snapshot();
+    let before_trace = session.trace().clone();
+    let before_completed = session.completed_work().to_vec();
+    let before_work = session.work_records();
+
+    let error = session
+        .apply_completion(first_completion)
+        .expect_err("buffered merge failure should roll back the whole apply");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error
+            .message
+            .contains("already exists during completion merge"),
+        "unexpected error message: {}",
+        error.message
+    );
+    assert_eq!(session.graph_snapshot(), before_graph);
+    assert_eq!(session.trace(), &before_trace);
+    assert_eq!(session.completed_work(), before_completed.as_slice());
+    assert_eq!(session.work_records(), before_work);
+    assert_eq!(session.in_flight_work(), vec![first_work]);
 }
 
 #[test]

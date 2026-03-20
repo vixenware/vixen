@@ -197,6 +197,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     record: ReadyTaskRecord,
 }
 
+#[derive(Debug, Clone)]
 pub struct EvalWorkCompletion {
     lease_sequence: u64,
     work: EvalQueuedWork,
@@ -461,63 +462,39 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completion.lease_sequence,
             &completion.work,
         )?;
-        self.scheduler
-            .assert_completion_order(completion.lease_sequence)?;
         let snapshot = record_history.then(|| self.checkpoint());
         let mut scheduler = self.scheduler.clone();
         let mut trace = self.trace.clone();
         let mut completed_work = self.completed_work.clone();
         let mut completed = self.completed.clone();
 
-        let _leased = scheduler.take_in_flight_task(
-            completion.work.id,
-            completion.lease_sequence,
-            &completion.work,
-        )?;
-        trace.events.extend(completion.delta.trace_events);
-        scheduler.apply_delta(completion.delta.scheduler)?;
-        completed_work.push(EvalCompletedWork {
-            work: completion.work.clone(),
-            outcome: completion.outcome.clone(),
-        });
-        let step = match completion.outcome {
-            EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
-                Ok(EvalSessionStep::Progressed)
+        let step = if scheduler.can_commit_lease_sequence(completion.lease_sequence) {
+            let _leased = scheduler.take_in_flight_task(
+                completion.work.id,
+                completion.lease_sequence,
+                &completion.work,
+            )?;
+            let mut step = commit_completion(
+                &mut scheduler,
+                &mut trace,
+                &mut completed_work,
+                &mut completed,
+                completion,
+            )?;
+            while let Some(buffered) = scheduler.take_next_committable_buffered_completion() {
+                step = commit_completion(
+                    &mut scheduler,
+                    &mut trace,
+                    &mut completed_work,
+                    &mut completed,
+                    buffered,
+                )?;
             }
-            EvalCompletedWorkOutcome::Pending(pending) => Ok(EvalSessionStep::Pending(pending)),
-            EvalCompletedWorkOutcome::Ready(value) => {
-                if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
-                    Ok(EvalSessionStep::Progressed)
-                } else if !scheduler.queued_work().is_empty()
-                    || !scheduler.in_flight_work().is_empty()
-                {
-                    Ok(EvalSessionStep::Progressed)
-                } else {
-                    scheduler
-                        .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
-                    completed = Some(Ok(value.clone()));
-                    Ok(EvalSessionStep::Ready(value))
-                }
-            }
-            EvalCompletedWorkOutcome::Poison(error) => {
-                if scheduler
-                    .resolve_child_dependency(completion.work.node_id, Err(error.clone()))?
-                {
-                    Ok(EvalSessionStep::Progressed)
-                } else if !scheduler.queued_work().is_empty()
-                    || !scheduler.in_flight_work().is_empty()
-                {
-                    Ok(EvalSessionStep::Progressed)
-                } else {
-                    scheduler.record_node_state(
-                        ENTRY_WORK_NODE_ID,
-                        EvalNodeState::Poison(error.clone()),
-                    );
-                    completed = Some(Err(error.clone()));
-                    Ok(EvalSessionStep::Poison(error))
-                }
-            }
-        }?;
+            step
+        } else {
+            scheduler.buffer_completion(completion)?;
+            step_after_buffering(&scheduler, &completed)
+        };
 
         if let Some(snapshot) = snapshot {
             self.history.push(snapshot);
@@ -660,6 +637,69 @@ impl EvalWorkCompletion {
 
     pub fn lease_sequence(&self) -> u64 {
         self.lease_sequence
+    }
+}
+
+fn commit_completion(
+    scheduler: &mut EvalScheduler,
+    trace: &mut EvalTrace,
+    completed_work: &mut Vec<EvalCompletedWork>,
+    completed: &mut Option<Result<Value, EvalError>>,
+    completion: EvalWorkCompletion,
+) -> Result<EvalSessionStep, EvalError> {
+    trace.events.extend(completion.delta.trace_events);
+    scheduler.apply_delta(completion.delta.scheduler)?;
+    completed_work.push(EvalCompletedWork {
+        work: completion.work.clone(),
+        outcome: completion.outcome.clone(),
+    });
+    match completion.outcome {
+        EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
+            Ok(EvalSessionStep::Progressed)
+        }
+        EvalCompletedWorkOutcome::Pending(pending) => Ok(EvalSessionStep::Pending(pending)),
+        EvalCompletedWorkOutcome::Ready(value) => {
+            if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
+                Ok(EvalSessionStep::Progressed)
+            } else if !scheduler.queued_work().is_empty() || !scheduler.in_flight_work().is_empty()
+            {
+                Ok(EvalSessionStep::Progressed)
+            } else {
+                scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                *completed = Some(Ok(value.clone()));
+                Ok(EvalSessionStep::Ready(value))
+            }
+        }
+        EvalCompletedWorkOutcome::Poison(error) => {
+            if scheduler.resolve_child_dependency(completion.work.node_id, Err(error.clone()))? {
+                Ok(EvalSessionStep::Progressed)
+            } else if !scheduler.queued_work().is_empty() || !scheduler.in_flight_work().is_empty()
+            {
+                Ok(EvalSessionStep::Progressed)
+            } else {
+                scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
+                *completed = Some(Err(error.clone()));
+                Ok(EvalSessionStep::Poison(error))
+            }
+        }
+    }
+}
+
+fn step_after_buffering(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> EvalSessionStep {
+    match completed {
+        Some(Ok(value)) => EvalSessionStep::Ready(value.clone()),
+        Some(Err(error)) => EvalSessionStep::Poison(error.clone()),
+        None if !scheduler.queued_work().is_empty() => EvalSessionStep::Progressed,
+        None => match scheduler.pending_nodes().into_iter().next() {
+            Some(pending) => EvalSessionStep::Pending(pending),
+            None if !scheduler.in_flight_work().is_empty() => EvalSessionStep::WaitingOnInFlight,
+            None => EvalSessionStep::Idle,
+        },
     }
 }
 
@@ -906,6 +946,7 @@ struct EvalScheduler {
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
+    buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
     pending_kinds: BTreeMap<u64, PendingKind>,
 }
@@ -926,6 +967,7 @@ impl Default for EvalScheduler {
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             in_flight_tasks: BTreeMap::new(),
+            buffered_completions: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
             pending_kinds: BTreeMap::new(),
         }
@@ -1602,28 +1644,12 @@ impl EvalScheduler {
         }))
     }
 
-    fn assert_completion_order(&self, lease_sequence: u64) -> Result<(), EvalError> {
-        let Some(expected) = self
-            .in_flight_tasks
+    fn can_commit_lease_sequence(&self, lease_sequence: u64) -> bool {
+        self.in_flight_tasks
             .values()
             .map(|record| record.lease_sequence)
             .min()
-        else {
-            return Err(EvalError::new(
-                EvalErrorKind::Internal,
-                "stale eval work completion: no in-flight work remains",
-            ));
-        };
-        if expected != lease_sequence {
-            return Err(EvalError::new(
-                EvalErrorKind::Internal,
-                format!(
-                    "out-of-order eval work completion: expected lease sequence {}, got {}",
-                    expected, lease_sequence
-                ),
-            ));
-        }
-        Ok(())
+            == Some(lease_sequence)
     }
 
     fn take_in_flight_task(
@@ -1638,6 +1664,36 @@ impl EvalScheduler {
             .remove(&work_id)
             .expect("validated in-flight task should exist");
         Ok(record.record)
+    }
+
+    fn buffer_completion(&mut self, completion: EvalWorkCompletion) -> Result<(), EvalError> {
+        let lease_sequence = completion.lease_sequence;
+        let work_id = completion.work.id;
+        if self.buffered_completions.contains_key(&lease_sequence) {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "buffered eval work completion already exists for lease sequence {}",
+                    lease_sequence
+                ),
+            ));
+        }
+        let _leased = self.take_in_flight_task(work_id, lease_sequence, &completion.work)?;
+        self.buffered_completions.insert(lease_sequence, completion);
+        Ok(())
+    }
+
+    fn take_next_committable_buffered_completion(&mut self) -> Option<EvalWorkCompletion> {
+        let (&lease_sequence, _) = self.buffered_completions.first_key_value()?;
+        let next_in_flight = self
+            .in_flight_tasks
+            .values()
+            .map(|record| record.lease_sequence)
+            .min();
+        match next_in_flight {
+            Some(in_flight) if in_flight < lease_sequence => None,
+            _ => self.buffered_completions.remove(&lease_sequence),
+        }
     }
 
     fn validate_in_flight_task(
