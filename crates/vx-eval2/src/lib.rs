@@ -34,6 +34,12 @@ pub use engine::{
 mod result;
 pub use result::{DemandFrame, EvalError, EvalErrorKind, PendingRef, Resolution};
 
+mod slot;
+pub use slot::{
+    SlotAction, SlotId, SlotRecord, SlotRecordMeta, SlotResolution, SlotResolutionKind,
+    SlotResolveRequest, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
+};
+
 mod trace;
 pub use trace::{
     ChannelEvalEventSink, EvalEvent, EvalEventKind, EvalEventSink, EvalExprKind, EvalNodeId,

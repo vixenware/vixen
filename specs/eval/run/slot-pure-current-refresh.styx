@@ -1,0 +1,103 @@
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+invoke {
+  entry build
+
+  slot {
+    id "pure-slot"
+    domain @pure{
+      witness @string"w1"
+      value @u64"1"
+    }
+    action @current
+  }
+}
+
+runs (
+  {
+    expect {
+      result @u64"1"
+      events (
+        @must_emit/@slot_populate{slot "pure-slot"}
+      )
+    }
+  }
+
+  {
+    expect {
+      result @u64"1"
+      events (
+        @must_emit/@slot_reuse{slot "pure-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      slot {
+        domain @pure{
+          witness @string"w2"
+          value @u64"2"
+        }
+      }
+    }
+
+    expect {
+      result @u64"2"
+      events (
+        @must_emit/@slot_rewrite{slot "pure-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      slot {
+        domain @pure{
+          witness @string"w2"
+          value @u64"3"
+        }
+        action @refresh{
+          intent @string"refresh"
+        }
+      }
+    }
+
+    expect {
+      result @u64"3"
+      events (
+        @must_emit/@slot_rewrite{slot "pure-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      slot {
+        domain @pure{
+          witness @string"w2"
+          value @u64"999"
+        }
+        action @current
+      }
+    }
+
+    expect {
+      result @u64"3"
+      events (
+        @must_emit/@slot_reuse{slot "pure-slot"}
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

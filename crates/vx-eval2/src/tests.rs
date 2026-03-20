@@ -1,7 +1,7 @@
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -13,11 +13,181 @@ use crate::{
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
     EvalNodeId, EvalNodeKind, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind,
     EvalWorkState, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace,
-    envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SlotAction, SlotId, SlotResolutionKind,
+    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
+    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
+
+#[test]
+fn current_populates_missing_slot_and_then_reuses_it() {
+    let mut slots = SlotStore::<u64, String, String>::default();
+
+    let initial = slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| Ok::<_, EvalError>(SlotResolved::new(41)),
+        )
+        .expect("populate missing slot");
+    assert_eq!(
+        initial.kind,
+        SlotResolutionKind::Stored {
+            reason: SlotStoreReason::Missing,
+        }
+    );
+    assert_eq!(initial.record.slot_id, SlotId::from("toolchain"));
+    assert_eq!(initial.record.value, 41);
+    assert_eq!(initial.record.meta.write_count, 1);
+    assert_eq!(initial.record.meta.rewrite_count, 0);
+
+    let reused = slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| -> Result<SlotResolved<u64, String>, EvalError> {
+                panic!("reused slot should not resolve again")
+            },
+        )
+        .expect("reuse existing slot");
+    assert_eq!(reused.kind, SlotResolutionKind::Reused);
+    assert_eq!(reused.record.value, 41);
+    assert_eq!(reused.record.meta.write_count, 1);
+    assert_eq!(reused.record.meta.rewrite_count, 0);
+}
+
+#[test]
+fn witness_changes_and_failed_verification_rewrite_in_place() {
+    let mut slots = SlotStore::<u64, String, String>::default();
+
+    slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| Ok::<_, EvalError>(SlotResolved::new(41)),
+        )
+        .expect("populate slot");
+
+    let witness_changed = slots
+        .resolve(
+            "toolchain",
+            "w2".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| Ok::<_, EvalError>(SlotResolved::new(42)),
+        )
+        .expect("rewrite after witness change");
+    assert_eq!(
+        witness_changed.kind,
+        SlotResolutionKind::Stored {
+            reason: SlotStoreReason::WitnessChanged,
+        }
+    );
+    assert_eq!(slots.len(), 1);
+    assert_eq!(witness_changed.record.slot_id, SlotId::from("toolchain"));
+    assert_eq!(witness_changed.record.value, 42);
+    assert_eq!(witness_changed.record.meta.write_count, 2);
+    assert_eq!(witness_changed.record.meta.rewrite_count, 1);
+
+    let claims_invalid = slots
+        .resolve(
+            "toolchain",
+            "w2".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::invalid("claims no longer verify"),
+            |_| Ok::<_, EvalError>(SlotResolved::new(43)),
+        )
+        .expect("rewrite after verification failure");
+    assert_eq!(slots.len(), 1);
+    assert_eq!(claims_invalid.record.slot_id, SlotId::from("toolchain"));
+    assert_eq!(claims_invalid.record.value, 43);
+    assert_eq!(claims_invalid.record.meta.write_count, 3);
+    assert_eq!(claims_invalid.record.meta.rewrite_count, 2);
+    assert_eq!(
+        claims_invalid.record.meta.last_store_reason,
+        SlotStoreReason::ClaimsInvalid {
+            reason: "claims no longer verify".into(),
+        }
+    );
+}
+
+#[test]
+fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
+    let mut slots = SlotStore::<u64, String, String>::default();
+    slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| Ok::<_, EvalError>(SlotResolved::new(41)),
+        )
+        .expect("populate slot");
+
+    let seen_current = Arc::new(Mutex::new(Vec::new()));
+    let seen_current_clone = Arc::clone(&seen_current);
+    let refreshed = slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::Refresh("force-rediscover".to_string()),
+            |_| SlotVerification::Valid,
+            move |request| {
+                seen_current_clone
+                    .lock()
+                    .expect("capture lock poisoned")
+                    .push((
+                        request.current.map(|record| record.value),
+                        request.action.clone(),
+                    ));
+                Ok::<_, EvalError>(SlotResolved::new(99))
+            },
+        )
+        .expect("refresh slot");
+
+    assert_eq!(
+        refreshed.kind,
+        SlotResolutionKind::Stored {
+            reason: SlotStoreReason::Refresh,
+        }
+    );
+    assert_eq!(slots.len(), 1);
+    assert_eq!(refreshed.record.slot_id, SlotId::from("toolchain"));
+    assert_eq!(refreshed.record.value, 99);
+    assert_eq!(refreshed.record.meta.write_count, 2);
+    assert_eq!(refreshed.record.meta.rewrite_count, 1);
+    assert_eq!(
+        seen_current
+            .lock()
+            .expect("capture lock poisoned")
+            .as_slice(),
+        &[(
+            Some(41),
+            SlotAction::Refresh("force-rediscover".to_string())
+        )]
+    );
+
+    let current = slots
+        .resolve(
+            "toolchain",
+            "w1".to_string(),
+            SlotAction::<()>::Current,
+            |_| SlotVerification::Valid,
+            |_| -> Result<SlotResolved<u64, String>, EvalError> {
+                panic!("refreshed slot should reuse its new current value")
+            },
+        )
+        .expect("reuse refreshed slot");
+    assert_eq!(current.kind, SlotResolutionKind::Reused);
+    assert_eq!(current.record.value, 99);
+}
 
 #[test]
 fn scalar_values_can_carry_claims_without_wrapper_enums() {

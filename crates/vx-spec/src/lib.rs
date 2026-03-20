@@ -243,6 +243,8 @@ pub struct InvokeSpec {
     #[facet(default)]
     pub capabilities: Vec<String>,
     #[facet(default)]
+    pub slot: Option<SlotInvokeSpec>,
+    #[facet(default)]
     pub runtime: RuntimeSpec,
 }
 
@@ -273,6 +275,8 @@ pub struct InvokeOverrideSpec {
     pub args: Option<Vec<SpecValue>>,
     #[facet(default)]
     pub capabilities: Option<Vec<String>>,
+    #[facet(default)]
+    pub slot: Option<SlotInvokeOverrideSpec>,
 }
 
 impl InvokeOverrideSpec {
@@ -293,8 +297,85 @@ impl InvokeOverrideSpec {
                 .capabilities
                 .clone()
                 .unwrap_or_else(|| base.capabilities.clone()),
+            slot: resolve_slot_override(base.slot.as_ref(), self.slot.as_ref()),
             runtime: base.runtime.clone(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct SlotInvokeSpec {
+    pub id: String,
+    pub domain: SlotDomainSpec,
+    pub action: SlotActionSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Facet)]
+pub struct SlotInvokeOverrideSpec {
+    #[facet(default)]
+    pub id: Option<String>,
+    #[facet(default)]
+    pub domain: Option<SlotDomainSpec>,
+    #[facet(default)]
+    pub action: Option<SlotActionSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum SlotDomainSpec {
+    Pure(PureSlotSpec),
+    ObservedWhich(ObservedWhichSlotSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct PureSlotSpec {
+    pub witness: SpecValue,
+    pub value: SpecValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ObservedWhichSlotSpec {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum SlotActionSpec {
+    Current,
+    Refresh { intent: SpecValue },
+}
+
+fn resolve_slot_override(
+    base: Option<&SlotInvokeSpec>,
+    override_spec: Option<&SlotInvokeOverrideSpec>,
+) -> Option<SlotInvokeSpec> {
+    match (base, override_spec) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(override_spec)) => Some(SlotInvokeSpec {
+            id: override_spec.id.clone().unwrap_or_default(),
+            domain: override_spec
+                .domain
+                .clone()
+                .expect("slot override must provide a domain when no base slot exists"),
+            action: override_spec
+                .action
+                .clone()
+                .expect("slot override must provide an action when no base slot exists"),
+        }),
+        (Some(base), Some(override_spec)) => Some(SlotInvokeSpec {
+            id: override_spec.id.clone().unwrap_or_else(|| base.id.clone()),
+            domain: override_spec
+                .domain
+                .clone()
+                .unwrap_or_else(|| base.domain.clone()),
+            action: override_spec
+                .action
+                .clone()
+                .unwrap_or_else(|| base.action.clone()),
+        }),
     }
 }
 
@@ -812,6 +893,15 @@ pub struct OrderConstraint {
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum EventPattern {
+    SlotPopulate {
+        slot: String,
+    },
+    SlotReuse {
+        slot: String,
+    },
+    SlotRewrite {
+        slot: String,
+    },
     DiscoverStart {
         executor: String,
     },

@@ -15,8 +15,9 @@ use roam_types::MessageFamily;
 use tempfile::TempDir;
 use vx_eval2::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, ProjectionStep, Provenance, ProvenanceRoot,
-    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourcePoint,
-    SourceSpan, Value, ValueRep, envelope_to_value,
+    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SlotAction,
+    SlotResolutionKind, SlotResolveRequest, SlotResolved, SlotStore, SlotStoreReason,
+    SlotVerification, SourcePoint, SourceSpan, Value, ValueRep, envelope_to_value,
     eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
 };
@@ -28,8 +29,9 @@ use vx_eval2_proto::{
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
     CrossingPattern, EngineExpectation, EngineId, EventPattern, ExternalSpec, HostSpec,
-    ObservationPattern, ObservedPoison, ObservedResult, PlaceSpec, ResolvedSpecRun, ReusePattern,
-    RuntimeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
+    ObservationPattern, ObservedPoison, ObservedResult, ObservedWhichSlotSpec, PlaceSpec,
+    PureSlotSpec, ResolvedSpecRun, ReusePattern, RuntimeSpec, SlotActionSpec, SlotDomainSpec,
+    SlotInvokeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -56,6 +58,22 @@ async fn run_case(
     case: &SpecCase,
     invocations: &[ResolvedSpecRun],
 ) -> Result<Vec<SpecOutcome>, Box<dyn std::error::Error>> {
+    let uses_slots = invocations
+        .iter()
+        .any(|invocation| invocation.invoke.slot.is_some());
+    if uses_slots {
+        if invocations
+            .iter()
+            .any(|invocation| invocation.invoke.slot.is_none())
+        {
+            return Err(std::io::Error::other(
+                "slot fixture cases must declare invoke.slot on every run",
+            )
+            .into());
+        }
+        return run_slot_case(case, invocations);
+    }
+
     let uses_rpc = invocations
         .iter()
         .any(|invocation| invocation.invoke.place.is_some());
@@ -66,6 +84,175 @@ async fn run_case(
             .iter()
             .map(|invocation| run_case_local(case, invocation))
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FixtureSlotVerifierPayload {
+    ObservedWhich { place: String, name: String },
+}
+
+fn run_slot_case(
+    case: &SpecCase,
+    invocations: &[ResolvedSpecRun],
+) -> Result<Vec<SpecOutcome>, Box<dyn std::error::Error>> {
+    let runtime = FixtureRuntime {
+        spec: case.invoke.runtime.clone(),
+    };
+    let mut slots = SlotStore::<Value, SpecValue, FixtureSlotVerifierPayload>::default();
+    invocations
+        .iter()
+        .map(|invocation| run_slot_invocation(case, &runtime, invocation, &mut slots))
+        .collect()
+}
+
+fn run_slot_invocation(
+    case: &SpecCase,
+    runtime: &FixtureRuntime,
+    invocation: &ResolvedSpecRun,
+    slots: &mut SlotStore<Value, SpecValue, FixtureSlotVerifierPayload>,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    let slot = invocation
+        .invoke
+        .slot
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("slot invocation is missing invoke.slot"))?;
+    let slot_action = spec_slot_action_to_eval(&slot.action);
+    let witness = slot_witness(slot, invocation)?;
+    let slot_id = vx_eval2::SlotId::from(slot.id.clone());
+    let previous = slots.get(&slot_id).cloned();
+    let resolution = slots
+        .resolve(
+            slot.id.clone(),
+            witness.clone(),
+            slot_action,
+            |record| verify_slot_record(runtime, invocation, record),
+            |request| resolve_slot(case, runtime, invocation, slot, request),
+        )
+        .map_err(|error| std::io::Error::other(error.message.to_string()))?;
+
+    let mut events = Vec::new();
+    if matches!(slot.domain, SlotDomainSpec::ObservedWhich(_))
+        && matches!(slot.action, SlotActionSpec::Current)
+        && previous
+            .as_ref()
+            .is_some_and(|record| record.witness == witness)
+    {
+        match &resolution.kind {
+            SlotResolutionKind::Reused => events.push(EventPattern::VerifyClaimsOk),
+            SlotResolutionKind::Stored {
+                reason: SlotStoreReason::ClaimsInvalid { .. },
+            } => events.push(EventPattern::VerifyClaimsFail),
+            SlotResolutionKind::Stored { .. } => {}
+        }
+    }
+
+    match &resolution.kind {
+        SlotResolutionKind::Reused => events.push(EventPattern::SlotReuse {
+            slot: slot.id.clone(),
+        }),
+        SlotResolutionKind::Stored {
+            reason: SlotStoreReason::Missing,
+        } => events.push(EventPattern::SlotPopulate {
+            slot: slot.id.clone(),
+        }),
+        SlotResolutionKind::Stored { .. } => events.push(EventPattern::SlotRewrite {
+            slot: slot.id.clone(),
+        }),
+    }
+
+    spec_outcome_from_value(resolution.record.value, events)
+}
+
+fn spec_slot_action_to_eval(action: &SlotActionSpec) -> SlotAction<SpecValue> {
+    match action {
+        SlotActionSpec::Current => SlotAction::Current,
+        SlotActionSpec::Refresh { intent } => SlotAction::Refresh(intent.clone()),
+    }
+}
+
+fn slot_witness(
+    slot: &SlotInvokeSpec,
+    invocation: &ResolvedSpecRun,
+) -> Result<SpecValue, Box<dyn std::error::Error>> {
+    match &slot.domain {
+        SlotDomainSpec::Pure(PureSlotSpec { witness, .. }) => Ok(witness.clone()),
+        SlotDomainSpec::ObservedWhich(ObservedWhichSlotSpec { name }) => {
+            if invocation.invoke.place.is_none() {
+                return Err(std::io::Error::other(format!(
+                    "observed slot {:?} requires invoke.place",
+                    slot.id
+                ))
+                .into());
+            }
+            Ok(SpecValue::String(format!("observed_which:{name}")))
+        }
+    }
+}
+
+fn verify_slot_record(
+    runtime: &FixtureRuntime,
+    invocation: &ResolvedSpecRun,
+    record: &vx_eval2::SlotRecord<Value, SpecValue, FixtureSlotVerifierPayload>,
+) -> SlotVerification {
+    if record.claims.is_empty() {
+        return SlotVerification::Valid;
+    }
+
+    let Some(place) = invocation.invoke.place.as_deref() else {
+        return SlotVerification::invalid("claim-bearing slots require invoke.place");
+    };
+    let verification = verify_claims_against_runtime(&runtime.spec, place, &record.claims);
+    if verification.ok {
+        SlotVerification::Valid
+    } else {
+        SlotVerification::invalid(
+            verification
+                .error
+                .unwrap_or_else(|| "claim verification failed".to_string()),
+        )
+    }
+}
+
+fn resolve_slot(
+    case: &SpecCase,
+    runtime: &FixtureRuntime,
+    invocation: &ResolvedSpecRun,
+    slot: &SlotInvokeSpec,
+    _request: SlotResolveRequest<'_, Value, SpecValue, SpecValue, FixtureSlotVerifierPayload>,
+) -> Result<SlotResolved<Value, FixtureSlotVerifierPayload>, EvalError> {
+    match &slot.domain {
+        SlotDomainSpec::Pure(PureSlotSpec { value, .. }) => Ok(SlotResolved::new(
+            spec_value_to_eval2_value(value.clone()).map_err(|error| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "invalid pure slot value in {}: {error}",
+                        case.path.display()
+                    ),
+                )
+            })?,
+        )),
+        SlotDomainSpec::ObservedWhich(ObservedWhichSlotSpec { name }) => {
+            let place = invocation.invoke.place.as_deref().ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("observed slot {:?} requires invoke.place", slot.id),
+                )
+            })?;
+            let value = runtime.discover_which(
+                place,
+                name,
+                &SourceSpan::synthetic(format!("slot:{}:{}", slot.id, name)),
+            )?;
+            let claims = value.meta.claims.clone();
+            Ok(SlotResolved::new(value)
+                .with_claims(claims)
+                .with_verifier_payload(FixtureSlotVerifierPayload::ObservedWhich {
+                    place: place.to_string(),
+                    name: name.clone(),
+                }))
+        }
     }
 }
 
@@ -185,6 +372,37 @@ impl FixtureRuntime {
                     ),
                 )
             })
+    }
+
+    fn discover_which(
+        &self,
+        place: &str,
+        name: &str,
+        source: &SourceSpan,
+    ) -> Result<Value, EvalError> {
+        let host = self.host(place)?;
+        let Some(found) = host.which.iter().find(|entry| entry.name == name) else {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("host.which could not find {name}"),
+            ));
+        };
+
+        let mut value = Value::string(found.path.clone())
+            .with_provenance(Provenance::host_probe(source.clone(), place, "host_which"))
+            .with_reuse(ReuseClass::Observed)
+            .with_crossing(CrossingPolicy::ByValue)
+            .with_claim(Claim::Which {
+                name: name.to_string(),
+                expected_path: Some(found.path.clone()),
+            });
+        if let Some(bundle_name) = &found.bundle {
+            value = value.with_claim(Claim::Bundle {
+                name: bundle_name.clone(),
+                identity: self.bundle_identity(place, bundle_name)?,
+            });
+        }
+        Ok(value)
     }
 }
 

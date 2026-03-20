@@ -1,0 +1,183 @@
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+invoke {
+  entry build
+  place win
+
+  slot {
+    id "toolchain-slot"
+    domain @observed_which{
+      name "cl.exe"
+    }
+    action @current
+  }
+
+  runtime {
+    places {
+      win {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/14.3/cl.exe"}
+          )
+        }
+      }
+
+      win_same {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/14.3/cl.exe"}
+          )
+        }
+      }
+
+      win_changed {
+        host {
+          os windows
+          arch x86_64
+          which (
+            {name "cl.exe", path "C:/VS/14.4/cl.exe"}
+          )
+        }
+      }
+    }
+  }
+}
+
+runs (
+  {
+    expect {
+      result @string"C:/VS/14.3/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.3/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@slot_populate{slot "toolchain-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_same
+    }
+
+    expect {
+      result @string"C:/VS/14.3/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.3/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@verify_claims_ok
+        @must_emit/@slot_reuse{slot "toolchain-slot"}
+        @before{
+          first @verify_claims_ok
+          then @slot_reuse{slot "toolchain-slot"}
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_changed
+    }
+
+    expect {
+      result @string"C:/VS/14.4/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.4/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@verify_claims_fail
+        @must_emit/@slot_rewrite{slot "toolchain-slot"}
+        @before{
+          first @verify_claims_fail
+          then @slot_rewrite{slot "toolchain-slot"}
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_changed
+      slot {
+        action @refresh{
+          intent @string"force_rediscover"
+        }
+      }
+    }
+
+    expect {
+      result @string"C:/VS/14.4/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.4/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@slot_rewrite{slot "toolchain-slot"}
+        @must_not_emit/@verify_claims_ok
+        @must_not_emit/@verify_claims_fail
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_changed
+      slot {
+        action @current
+      }
+    }
+
+    expect {
+      result @string"C:/VS/14.4/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.4/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@verify_claims_ok
+        @must_emit/@slot_reuse{slot "toolchain-slot"}
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}
