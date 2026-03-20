@@ -277,6 +277,19 @@ That matters for observability. A buffered sibling is no longer an invisible
 gap between "in-flight" and "completed"; it shows up in work records, graph
 snapshots, and node explanation as explicitly buffered work.
 
+The built-in parallel driver also has an explicit wave model now. A session can
+have at most one active leased wave at a time:
+
+- a wave is the current set of leased work items, ordered by lease sequence
+- each leased item is visible as either in-flight or buffered
+- graph snapshots can expose the active wave directly instead of forcing a
+  debugger to infer it from raw work tables
+- the next wave does not start until the current wave has reported all worker
+  outcomes and committed everything that is deterministically committable
+
+This keeps the parallel story inspectable without claiming a more general task
+VM than eval2 actually has.
+
 The current frontier is deliberately uneven:
 
 - block/let sequencing is still mostly continuation-driven
@@ -345,8 +358,47 @@ The current local-resume session is also useful in its own right:
 - it now has a built-in bounded worker loop that can lease ready siblings,
   execute them on worker threads, and still commit their results in lease
   order
+- a worker panic now unwinds through `run_parallel()` instead of silently
+  turning into an infinite wait
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
+
+## Settled scheduler contract
+
+This is now the boundary we intend to keep stable while we go back to semantic
+work.
+
+### Session states
+
+A session can currently be observed in these scheduler states:
+
+- queued work exists and can be leased
+- a leased wave is active, with work visible as in-flight or buffered
+- external pending nodes exist and can later be resolved
+- completed ready or poison result exists
+- idle internal error state if none of the above hold
+
+### Built-in driver guarantees
+
+`run_parallel()` now guarantees:
+
+- it leases at most `max_workers` ready work items for one wave
+- worker execution may finish out of order
+- commit order remains deterministic lease order
+- newly queued resume work waits for the next wave
+- waiting/pending/ready/poison use the same session-state interpretation as the
+  single-threaded driver
+- a worker panic is surfaced by resuming unwind on the caller thread; it is not
+  converted into silent waiting or dropped as hidden scheduler state
+
+### Still intentionally unsupported
+
+The scheduler is still intentionally not:
+
+- a general arbitrary-task VM
+- a commutative merge engine for unrelated worker deltas
+- a live-stepping debugger during an active `run_parallel()` call
+- a durable replay or time-travel format
 
 ## Next slices
 

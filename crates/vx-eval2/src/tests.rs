@@ -1,4 +1,5 @@
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9,10 +10,10 @@ use std::{
 
 use crate::{
     Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalError, EvalErrorKind,
-    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalNodeId, EvalNodeKind, EvalNodeState,
-    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, PendingRef,
-    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
-    RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState, EvalNodeId, EvalNodeKind,
+    EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState,
+    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome,
+    RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
@@ -368,6 +369,23 @@ impl RuntimeHooks for StaggeredRuntime {
                         .with_crossing(CrossingPolicy::ByValue),
                 ))
             }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+struct PanicRuntime;
+
+impl RuntimeHooks for PanicRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        _args: &[Value],
+        _source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (place, callee) {
+            ("win", "panic_now") => panic!("panic runtime hook exploded"),
             _ => Ok(RuntimeCallOutcome::Unsupported),
         }
     }
@@ -1745,6 +1763,7 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
     let second_work = second.work().clone();
     let first_completion = first.execute().expect("first completion");
     let second_completion = second.execute().expect("second completion");
+    let second_wave_id = second_completion.wave_id();
     let second_lease_sequence = second_completion.lease_sequence();
     let second_outcome = second_completion.outcome().clone();
 
@@ -1757,9 +1776,25 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
     assert_eq!(session.in_flight_work(), vec![first_work.clone()]);
     assert!(session.queued_work().is_empty());
     assert_eq!(session.buffered_work().len(), 1);
-    assert_eq!(session.buffered_work()[0].lease_sequence, second_lease_sequence);
+    assert_eq!(session.buffered_work()[0].wave_id, second_wave_id);
+    assert_eq!(
+        session.buffered_work()[0].lease_sequence,
+        second_lease_sequence
+    );
     assert_eq!(session.buffered_work()[0].work, second_work.clone());
     assert_eq!(session.buffered_work()[0].outcome, second_outcome.clone());
+    let active_wave = session
+        .active_wave()
+        .expect("buffered siblings should retain a wave");
+    assert_eq!(active_wave.wave_id, second_wave_id);
+    assert_eq!(active_wave.work.len(), 2);
+    assert_eq!(active_wave.work[0].work.id, first_work.id);
+    assert_eq!(active_wave.work[0].state, EvalLeasedWorkState::InFlight);
+    assert_eq!(active_wave.work[1].work.id, second_work.id);
+    assert_eq!(
+        active_wave.work[1].state,
+        EvalLeasedWorkState::Buffered(second_outcome.clone()),
+    );
     assert!(session.work_records().iter().any(|record| {
         record.work.id == second_work.id
             && record.state == EvalWorkState::Buffered(second_outcome.clone())
@@ -1792,6 +1827,7 @@ fn out_of_order_sibling_completion_is_buffered_until_earlier_lease_commits() {
             .expect("first completion should commit and drain"),
         EvalSessionStep::Progressed,
     );
+    assert!(session.active_wave().is_none());
     assert!(session.buffered_work().is_empty());
     assert!(session.in_flight_work().is_empty());
     assert_eq!(
@@ -1943,6 +1979,7 @@ fn graph_snapshot_reflects_buffered_work() {
     let second = session.prepare_step().expect("second leased sibling");
     let second_work = second.work().clone();
     let second_outcome = second.execute().expect("second completion");
+    let second_wave_id = second_outcome.wave_id();
     let second_lease_sequence = second_outcome.lease_sequence();
     let second_result = second_outcome.outcome().clone();
 
@@ -1954,6 +1991,12 @@ fn graph_snapshot_reflects_buffered_work() {
     );
 
     let snapshot = session.graph_snapshot();
+    let active_wave = snapshot
+        .active_wave
+        .clone()
+        .expect("snapshot should retain the buffered wave");
+    assert_eq!(active_wave.wave_id, second_wave_id);
+    assert_eq!(active_wave.work.len(), 2);
     assert!(snapshot.work.iter().any(|record| {
         record.work.id == second_work.id
             && record.state == EvalWorkState::Buffered(second_result.clone())
@@ -1961,6 +2004,7 @@ fn graph_snapshot_reflects_buffered_work() {
     assert_eq!(
         session.buffered_work(),
         vec![crate::EvalBufferedWork {
+            wave_id: second_wave_id,
             lease_sequence: second_lease_sequence,
             work: second_work,
             outcome: second_result,
@@ -1987,7 +2031,9 @@ fn run_parallel_executes_sibling_frontier_on_worker_threads() {
         "win",
     );
 
-    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let resolution = session
+        .run_parallel(2)
+        .expect("parallel run should succeed");
     let Resolution::Ready(value) = resolution else {
         panic!("expected ready resolution, got {resolution:?}");
     };
@@ -2017,7 +2063,9 @@ fn run_parallel_commits_out_of_order_worker_results_in_lease_order() {
         "win",
     );
 
-    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let resolution = session
+        .run_parallel(2)
+        .expect("parallel run should succeed");
     let Resolution::Ready(value) = resolution else {
         panic!("expected ready resolution, got {resolution:?}");
     };
@@ -2061,7 +2109,9 @@ fn run_parallel_returns_pending_when_external_work_suspends() {
         "win",
     );
 
-    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let resolution = session
+        .run_parallel(2)
+        .expect("parallel run should succeed");
     let Resolution::Pending(pending) = resolution else {
         panic!("expected pending resolution, got {resolution:?}");
     };
@@ -2083,7 +2133,9 @@ fn run_parallel_returns_poison_when_evaluation_fails() {
         "win",
     );
 
-    let resolution = session.run_parallel(2).expect("parallel run should succeed");
+    let resolution = session
+        .run_parallel(2)
+        .expect("parallel run should succeed");
     let Resolution::Poison(error) = resolution else {
         panic!("expected poison resolution, got {resolution:?}");
     };
@@ -2119,15 +2171,102 @@ fn run_parallel_returns_waiting_when_external_in_flight_work_blocks_commit() {
     let first_work = first.work().clone();
 
     assert_eq!(
-        session.run_parallel(1).expect("parallel driver should wait"),
+        session
+            .run_parallel(1)
+            .expect("parallel driver should wait"),
         Resolution::Waiting,
     );
     assert_eq!(session.in_flight_work(), vec![first_work]);
     assert_eq!(session.buffered_work().len(), 1);
+    let active_wave = session
+        .active_wave()
+        .expect("waiting session should expose its wave");
+    assert_eq!(active_wave.work.len(), 2);
     assert!(matches!(
-        session.explain_node(session.buffered_work()[0].work.node_id).terminal,
+        session
+            .explain_node(session.buffered_work()[0].work.node_id)
+            .terminal,
         EvalExplainTerminal::Buffered { .. }
     ));
+}
+
+#[test]
+fn run_parallel_surfaces_worker_panics_instead_of_waiting_forever() {
+    let mut session = EvalSession::new(
+        "fn build() { panic_now() }",
+        "parallel-panic",
+        "build",
+        Vec::new(),
+        &PanicRuntime,
+        "win",
+    );
+
+    let panic = catch_unwind(AssertUnwindSafe(|| session.run_parallel(2)))
+        .expect_err("worker panic should unwind through run_parallel");
+    let message = panic
+        .downcast_ref::<&'static str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .expect("panic payload should be string-like");
+    assert!(
+        message.contains("panic runtime hook exploded"),
+        "unexpected panic payload: {message}",
+    );
+}
+
+#[test]
+fn run_parallel_can_drive_multiple_frontier_waves_to_completion() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        "fn build() { [[host_os(), host_os()], [host_os(), host_os()]] }",
+        "parallel-multi-wave",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(rows) = value.rep else {
+        panic!("expected outer array value");
+    };
+    assert_eq!(rows.len(), 2);
+    for row in rows.iter() {
+        let ValueRep::Array(items) = &row.rep else {
+            panic!("expected nested array row");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.rep == ValueRep::String("windows".into()))
+        );
+    }
+    assert!(
+        session
+            .completed_work()
+            .iter()
+            .filter(|completed| completed.work.kind == EvalWorkKind::ResumePending)
+            .count()
+            >= 2,
+        "multi-wave drive should include resumed parent work",
+    );
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "later waves should still execute sibling runtime calls in parallel",
+    );
+    assert!(session.active_wave().is_none());
+    assert!(session.buffered_work().is_empty());
 }
 
 #[test]

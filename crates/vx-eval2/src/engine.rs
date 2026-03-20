@@ -1,6 +1,8 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
+use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
@@ -50,6 +52,9 @@ pub enum EvalNodeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalWorkId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EvalWaveId(pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalWorkKind {
     StartEntry,
@@ -84,9 +89,29 @@ pub struct EvalCompletedWork {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalBufferedWork {
+    pub wave_id: EvalWaveId,
     pub lease_sequence: u64,
     pub work: EvalQueuedWork,
     pub outcome: EvalCompletedWorkOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalLeasedWorkState {
+    InFlight,
+    Buffered(EvalCompletedWorkOutcome),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalLeasedWork {
+    pub lease_sequence: u64,
+    pub work: EvalQueuedWork,
+    pub state: EvalLeasedWorkState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalActiveWave {
+    pub wave_id: EvalWaveId,
+    pub work: Vec<EvalLeasedWork>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +215,7 @@ pub struct EvalGraphNode {
 pub struct EvalGraphSnapshot {
     pub nodes: Vec<EvalGraphNode>,
     pub work: Vec<EvalWorkRecord>,
+    pub active_wave: Option<EvalActiveWave>,
     pub pending: Vec<PendingRef>,
     pub completed: Option<Result<Value, EvalError>>,
 }
@@ -208,6 +234,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     args: Vec<Value>,
     runtime: &'runtime Runtime,
     place: String,
+    wave_id: EvalWaveId,
     lease_sequence: u64,
     scheduler: EvalScheduler,
     record: ReadyTaskRecord,
@@ -215,6 +242,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
 
 #[derive(Debug, Clone)]
 pub struct EvalWorkCompletion {
+    wave_id: EvalWaveId,
     lease_sequence: u64,
     work: EvalQueuedWork,
     outcome: EvalCompletedWorkOutcome,
@@ -288,7 +316,12 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 EvalSessionStep::WaitingOnInFlight => return Ok(Resolution::Waiting),
                 EvalSessionStep::Ready(value) => return Ok(Resolution::Ready(value)),
                 EvalSessionStep::Poison(error) => return Ok(Resolution::Poison(error)),
-                EvalSessionStep::Idle => return Ok(resolution_without_ready_work(&self.scheduler, &self.completed)),
+                EvalSessionStep::Idle => {
+                    return Ok(resolution_without_ready_work(
+                        &self.scheduler,
+                        &self.completed,
+                    ));
+                }
             }
         }
     }
@@ -301,40 +334,20 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             ));
         }
 
-        if let Some(result) = &self.completed {
-            return Ok(match result {
-                Ok(value) => Resolution::Ready(value.clone()),
-                Err(error) => Resolution::Poison(error.clone()),
-            });
+        if let Some(resolution) = completed_resolution(&self.completed) {
+            return Ok(resolution);
         }
 
         thread::scope(|scope| -> Result<Resolution, EvalError> {
-            let (completion_tx, completion_rx) = mpsc::channel();
-            let mut active_workers = 0usize;
-
             loop {
-                if active_workers == 0 {
-                    while active_workers < max_workers {
-                        let Some(prepared) = self.prepare_step_impl(false)? else {
-                            break;
-                        };
-                        let completion_tx = completion_tx.clone();
-                        scope.spawn(move || {
-                            let _ = completion_tx.send(prepared.execute());
-                        });
-                        active_workers += 1;
-                    }
+                let prepared = self.lease_parallel_wave(max_workers)?;
+                if prepared.is_empty() {
+                    return Ok(resolution_without_ready_work(
+                        &self.scheduler,
+                        &self.completed,
+                    ));
                 }
-
-                if active_workers == 0 {
-                    return Ok(resolution_without_ready_work(&self.scheduler, &self.completed));
-                }
-
-                let completion = completion_rx.recv().expect(
-                    "parallel eval worker channel closed before all leased work completed",
-                )?;
-                active_workers -= 1;
-                let _step = self.apply_completion_impl(completion, false)?;
+                self.execute_parallel_wave(scope, prepared)?;
             }
         })
     }
@@ -397,6 +410,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.in_flight_work()
     }
 
+    pub fn active_wave(&self) -> Option<EvalActiveWave> {
+        self.scheduler.active_wave()
+    }
+
     pub fn buffered_work(&self) -> Vec<EvalBufferedWork> {
         self.scheduler.buffered_work()
     }
@@ -447,11 +464,16 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .scheduler
             .next_lease_sequence
             .max(checkpoint.scheduler.next_lease_sequence);
+        let next_wave_id = self
+            .scheduler
+            .next_wave_id
+            .max(checkpoint.scheduler.next_wave_id);
         let next_lease_namespace = self
             .scheduler
             .next_lease_namespace
             .max(checkpoint.scheduler.next_lease_namespace);
         self.scheduler = checkpoint.scheduler;
+        self.scheduler.next_wave_id = next_wave_id;
         self.scheduler.next_lease_sequence = next_lease_sequence;
         self.scheduler.next_lease_namespace = next_lease_namespace;
         self.trace = checkpoint.trace;
@@ -486,10 +508,61 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args: self.args.clone(),
             runtime: self.runtime,
             place: self.place.clone(),
+            wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
             scheduler: self.scheduler.clone_for_lease(lease.namespace),
             record: lease.record,
         }))
+    }
+
+    fn lease_parallel_wave(
+        &mut self,
+        max_workers: usize,
+    ) -> Result<Vec<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
+        let mut prepared = Vec::new();
+        while prepared.len() < max_workers {
+            let Some(next) = self.prepare_step_impl(false)? else {
+                break;
+            };
+            prepared.push(next);
+        }
+        Ok(prepared)
+    }
+
+    fn execute_parallel_wave<'scope>(
+        &mut self,
+        scope: &'scope thread::Scope<'scope, '_>,
+        prepared: Vec<EvalPreparedWork<'runtime, Runtime>>,
+    ) -> Result<(), EvalError>
+    where
+        'runtime: 'scope,
+    {
+        let expected = prepared.len();
+        let (completion_tx, completion_rx) = mpsc::channel::<ParallelWorkerMessage>();
+
+        for prepared in prepared {
+            let completion_tx = completion_tx.clone();
+            scope.spawn(move || {
+                let message = match catch_unwind(AssertUnwindSafe(|| prepared.execute())) {
+                    Ok(completion) => ParallelWorkerMessage::Completion(completion),
+                    Err(payload) => ParallelWorkerMessage::Panic(payload),
+                };
+                let _ = completion_tx.send(message);
+            });
+        }
+        drop(completion_tx);
+
+        for _ in 0..expected {
+            match completion_rx.recv().expect(
+                "parallel eval wave channel closed before all worker outcomes were reported",
+            ) {
+                ParallelWorkerMessage::Completion(completion) => {
+                    let _step = self.apply_completion_impl(completion?, false)?;
+                }
+                ParallelWorkerMessage::Panic(payload) => resume_unwind(payload),
+            }
+        }
+        Ok(())
     }
 
     pub fn apply_completion(
@@ -542,6 +615,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             scheduler.buffer_completion(completion)?;
             step_after_buffering(&scheduler, &completed)
         };
+        scheduler.clear_active_wave_if_idle();
 
         if let Some(snapshot) = snapshot {
             self.history.push(snapshot);
@@ -631,6 +705,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 })
                 .collect(),
             work: self.work_records(),
+            active_wave: self.active_wave(),
             pending: self.pending_nodes(),
             completed: self.completed.clone(),
         }
@@ -653,6 +728,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             args,
             runtime,
             place,
+            wave_id,
             lease_sequence,
             scheduler,
             record,
@@ -667,6 +743,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             record.clone(),
         )?;
         Ok(EvalWorkCompletion {
+            wave_id,
             lease_sequence,
             work: record.work,
             outcome,
@@ -683,6 +760,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 }
 
 impl EvalWorkCompletion {
+    pub fn wave_id(&self) -> EvalWaveId {
+        self.wave_id
+    }
+
     pub fn work(&self) -> &EvalQueuedWork {
         &self.work
     }
@@ -753,18 +834,29 @@ fn step_after_buffering(
     }
 }
 
+fn completed_resolution(completed: &Option<Result<Value, EvalError>>) -> Option<Resolution> {
+    match completed {
+        Some(Ok(value)) => Some(Resolution::Ready(value.clone())),
+        Some(Err(error)) => Some(Resolution::Poison(error.clone())),
+        None => None,
+    }
+}
+
 fn step_without_ready_work(
     scheduler: &EvalScheduler,
     completed: &Option<Result<Value, EvalError>>,
 ) -> EvalSessionStep {
-    match completed {
-        Some(Ok(value)) => EvalSessionStep::Ready(value.clone()),
-        Some(Err(error)) => EvalSessionStep::Poison(error.clone()),
-        None => match scheduler.pending_nodes().into_iter().next() {
-            Some(pending) => EvalSessionStep::Pending(pending),
-            None if scheduler.has_waiting_work() => EvalSessionStep::WaitingOnInFlight,
-            None => EvalSessionStep::Idle,
-        },
+    if let Some(resolution) = completed_resolution(completed) {
+        return match resolution {
+            Resolution::Ready(value) => EvalSessionStep::Ready(value),
+            Resolution::Poison(error) => EvalSessionStep::Poison(error),
+            Resolution::Pending(_) | Resolution::Waiting => unreachable!(),
+        };
+    }
+    match scheduler.pending_nodes().into_iter().next() {
+        Some(pending) => EvalSessionStep::Pending(pending),
+        None if scheduler.has_waiting_work() => EvalSessionStep::WaitingOnInFlight,
+        None => EvalSessionStep::Idle,
     }
 }
 
@@ -772,17 +864,16 @@ fn resolution_without_ready_work(
     scheduler: &EvalScheduler,
     completed: &Option<Result<Value, EvalError>>,
 ) -> Resolution {
-    match completed {
-        Some(Ok(value)) => Resolution::Ready(value.clone()),
-        Some(Err(error)) => Resolution::Poison(error.clone()),
-        None => match scheduler.pending_nodes().into_iter().next() {
-            Some(pending) => Resolution::Pending(pending),
-            None if scheduler.has_waiting_work() => Resolution::Waiting,
-            None => Resolution::Poison(EvalError::new(
-                EvalErrorKind::Internal,
-                "eval session has no ready work and no pending nodes",
-            )),
-        },
+    if let Some(resolution) = completed_resolution(completed) {
+        return resolution;
+    }
+    match scheduler.pending_nodes().into_iter().next() {
+        Some(pending) => Resolution::Pending(pending),
+        None if scheduler.has_waiting_work() => Resolution::Waiting,
+        None => Resolution::Poison(EvalError::new(
+            EvalErrorKind::Internal,
+            "eval session has no ready work and no pending nodes",
+        )),
     }
 }
 
@@ -1020,8 +1111,10 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
 struct EvalScheduler {
     next_id: u64,
     next_work_id: u64,
+    next_wave_id: u64,
     next_lease_namespace: u64,
     next_lease_sequence: u64,
+    active_wave: Option<EvalWaveId>,
     lease_namespace: Option<LeaseNamespace>,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
     node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
@@ -1041,8 +1134,10 @@ impl Default for EvalScheduler {
         Self {
             next_id: 1,
             next_work_id: 1,
+            next_wave_id: 1,
             next_lease_namespace: 1,
             next_lease_sequence: 1,
+            active_wave: None,
             lease_namespace: None,
             node_states: BTreeMap::new(),
             node_records: BTreeMap::new(),
@@ -1065,6 +1160,7 @@ struct ReadyTaskRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InFlightTaskRecord {
+    wave_id: EvalWaveId,
     lease_sequence: u64,
     record: ReadyTaskRecord,
 }
@@ -1078,9 +1174,15 @@ struct LeaseNamespace {
 
 #[derive(Debug, Clone)]
 struct ReadyTaskLease {
+    wave_id: EvalWaveId,
     lease_sequence: u64,
     namespace: Option<u64>,
     record: ReadyTaskRecord,
+}
+
+enum ParallelWorkerMessage {
+    Completion(Result<EvalWorkCompletion, EvalError>),
+    Panic(Box<dyn Any + Send + 'static>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1486,10 +1588,37 @@ impl EvalScheduler {
             .collect()
     }
 
+    fn active_wave(&self) -> Option<EvalActiveWave> {
+        let wave_id = self.active_wave?;
+        let mut work = self
+            .in_flight_tasks
+            .values()
+            .filter(|record| record.wave_id == wave_id)
+            .map(|record| EvalLeasedWork {
+                lease_sequence: record.lease_sequence,
+                work: record.record.work.clone(),
+                state: EvalLeasedWorkState::InFlight,
+            })
+            .collect::<Vec<_>>();
+        work.extend(
+            self.buffered_completions
+                .values()
+                .filter(|completion| completion.wave_id == wave_id)
+                .map(|completion| EvalLeasedWork {
+                    lease_sequence: completion.lease_sequence,
+                    work: completion.work.clone(),
+                    state: EvalLeasedWorkState::Buffered(completion.outcome.clone()),
+                }),
+        );
+        work.sort_by_key(|record| record.lease_sequence);
+        Some(EvalActiveWave { wave_id, work })
+    }
+
     fn buffered_work(&self) -> Vec<EvalBufferedWork> {
         self.buffered_completions
             .iter()
             .map(|(lease_sequence, completion)| EvalBufferedWork {
+                wave_id: completion.wave_id,
                 lease_sequence: *lease_sequence,
                 work: completion.work.clone(),
                 outcome: completion.outcome.clone(),
@@ -1587,6 +1716,31 @@ impl EvalScheduler {
 
     fn has_waiting_work(&self) -> bool {
         !self.in_flight_tasks.is_empty() || !self.buffered_completions.is_empty()
+    }
+
+    fn next_wave(&mut self) -> EvalWaveId {
+        let wave_id = EvalWaveId(self.next_wave_id);
+        self.next_wave_id += 1;
+        self.active_wave = Some(wave_id);
+        wave_id
+    }
+
+    fn current_wave(&mut self) -> Result<EvalWaveId, EvalError> {
+        if self.has_waiting_work() {
+            return self.active_wave.ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    "eval scheduler lost its active wave while work remained leased",
+                )
+            });
+        }
+        Ok(self.next_wave())
+    }
+
+    fn clear_active_wave_if_idle(&mut self) {
+        if !self.has_waiting_work() {
+            self.active_wave = None;
+        }
     }
 
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
@@ -1731,6 +1885,7 @@ impl EvalScheduler {
                 format!("ready task {work_id:?} was missing from scheduler state"),
             ));
         };
+        let wave_id = self.current_wave()?;
         let lease_sequence = self.next_lease_sequence;
         self.next_lease_sequence += 1;
         let namespace = if self.in_flight_tasks.is_empty() {
@@ -1743,11 +1898,13 @@ impl EvalScheduler {
         self.in_flight_tasks.insert(
             work_id,
             InFlightTaskRecord {
+                wave_id,
                 lease_sequence,
                 record: record.clone(),
             },
         );
         Ok(Some(ReadyTaskLease {
+            wave_id,
             lease_sequence,
             namespace,
             record,
@@ -1808,7 +1965,11 @@ impl EvalScheduler {
             .min();
         match next_in_flight {
             Some(in_flight) if in_flight < lease_sequence => None,
-            _ => self.buffered_completions.remove(&lease_sequence),
+            _ => {
+                let completion = self.buffered_completions.remove(&lease_sequence);
+                self.clear_active_wave_if_idle();
+                completion
+            }
         }
     }
 

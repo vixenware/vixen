@@ -15,13 +15,13 @@ mod program;
 
 mod engine;
 pub use engine::{
-    EvalBufferedWork, EvalCompletedWork, EvalCompletedWorkOutcome, EvalDependencyEdge,
-    EvalExplainTerminal, EvalGraphNode, EvalGraphSnapshot, EvalNodeExplanation, EvalNodeKind,
-    EvalNodeRecord, EvalNodeState, EvalPreparedWork, EvalQueuedWork, EvalRunnableNode, EvalSession,
-    EvalSessionCheckpoint, EvalSessionStep, EvalWorkCompletion, EvalWorkId, EvalWorkKind,
-    EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks, eval_source_entry,
-    eval_source_entry_at_place, eval_source_entry_at_place_with_args,
-    eval_source_entry_at_place_with_args_with_source_id,
+    EvalActiveWave, EvalBufferedWork, EvalCompletedWork, EvalCompletedWorkOutcome,
+    EvalDependencyEdge, EvalExplainTerminal, EvalGraphNode, EvalGraphSnapshot, EvalLeasedWork,
+    EvalLeasedWorkState, EvalNodeExplanation, EvalNodeKind, EvalNodeRecord, EvalNodeState,
+    EvalPreparedWork, EvalQueuedWork, EvalRunnableNode, EvalSession, EvalSessionCheckpoint,
+    EvalSessionStep, EvalWaveId, EvalWorkCompletion, EvalWorkId, EvalWorkKind, EvalWorkRecord,
+    EvalWorkState, RuntimeCallOutcome, RuntimeHooks, eval_source_entry, eval_source_entry_at_place,
+    eval_source_entry_at_place_with_args, eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_at_place_with_args_with_source_id_with_sink,
     eval_source_entry_at_place_with_source_id, eval_source_entry_with_args,
