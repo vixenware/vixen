@@ -199,6 +199,73 @@ fn refresh_forces_recompute_and_exposes_current_value_to_resolver() {
 }
 
 #[test]
+fn same_source_helper_function_is_evaluated() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn helper(value: U64) { value }\nfn build() { helper(41) }",
+        "same-source-helper",
+        "build",
+        &[],
+    )
+    .expect("evaluate same-source helper call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready helper result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
+fn same_source_helpers_can_call_each_other() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn inner(value: U64) { value }\nfn outer() { inner(42) }\nfn build() { outer() }",
+        "same-source-helper-chain",
+        "build",
+        &[],
+    )
+    .expect("evaluate nested helper call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready nested helper result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(42));
+}
+
+#[test]
+fn declaration_without_body_falls_back_to_runtime_hooks() {
+    let mut session = EvalSession::new(
+        "fn host_os(); fn build() { host_os() }",
+        "same-source-runtime-decl",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let resolution = session.run().expect("evaluate runtime-backed declaration");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready runtime-backed result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+}
+
+#[test]
+fn unsupported_call_target_still_errors_clearly() {
+    let error = eval_source_entry_with_args_with_source_id(
+        "fn build() { does_not_exist() }",
+        "unsupported-call-target",
+        "build",
+        &[],
+    )
+    .expect_err("unsupported call target should surface an eval error");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error
+            .message
+            .contains("call target does_not_exist is not supported yet")
+    );
+}
+
+#[test]
 fn slot_runtime_calls_emit_trace_events_with_refresh_intent() {
     #[derive(Clone)]
     struct SlotRuntime {

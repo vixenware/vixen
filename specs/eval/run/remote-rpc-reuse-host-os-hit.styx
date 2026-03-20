@@ -48,7 +48,7 @@ runs (
 
   {
     invoke {
-      place win_same
+      place win
     }
 
     expect {

@@ -2454,11 +2454,46 @@ fn prepare_entry(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let env = bind_arguments(state, &function.parameters, args)?;
+    let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
         body: state.program.resolve_expr(body)?,
         env,
     })
+}
+
+fn prepare_local_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee_name: &str,
+    args: &[Value],
+    parent_id: EvalNodeId,
+) -> Result<Option<PreparedEntry>, EvalError> {
+    let Some(function) = state.program.lookup_function(callee_name)? else {
+        return Ok(None);
+    };
+    let Some(body) = function.body else {
+        return Ok(None);
+    };
+    if function.has_keyword_parameters {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("functions with keyword parameters are not supported yet: {callee_name}"),
+        ));
+    }
+    if function.parameters.len() != args.len() {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!(
+                "function {callee_name} expects {} positional argument(s), got {}",
+                function.parameters.len(),
+                args.len()
+            ),
+        ));
+    }
+    let env = bind_arguments(state, &function.parameters, args, Some(parent_id))?;
+    Ok(Some(PreparedEntry {
+        body: state.program.resolve_expr(body)?,
+        env,
+    }))
 }
 
 fn evaluate_entry_once(
@@ -2475,13 +2510,13 @@ fn bind_arguments(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     parameters: &[CompiledParameter],
     args: &[Value],
+    parent_id: Option<EvalNodeId>,
 ) -> Result<BTreeMap<String, Value>, EvalError> {
     let mut env = BTreeMap::new();
     for (parameter, arg) in parameters.iter().zip(args.iter()) {
         let label = parameter.label.to_string();
         let name_source = state.program.span_for_handle(parameter.name);
         let node_id = state.alloc_node_id();
-        let parent_id = state.current_parent();
         state.emit(
             node_id,
             parent_id,
@@ -2709,6 +2744,10 @@ fn continue_call_from_args(
                 ));
             }
         }
+    }
+    if let Some(prepared) = prepare_local_call(state, &callee_name, &args, node_id)? {
+        let mut env = prepared.env;
+        return eval_dependent_expr(state, node_id, &prepared.body, &mut env);
     }
     state.emit(
         node_id,

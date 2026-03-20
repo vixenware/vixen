@@ -56,7 +56,20 @@ runs (
 
   {
     invoke {
-      place win_changed
+      place win
+      runtime {
+        places {
+          win {
+            host {
+              os windows
+              arch x86_64
+              which (
+                {name "cl.exe", path "C:/VS/14.4/cl.exe"}
+              )
+            }
+          }
+        }
+      }
     }
 
     expect {
@@ -70,7 +83,6 @@ runs (
       reuse @observed
       crossing @by_value
       events (
-        @must_emit/@verify_claims_fail
         @must_emit/@stabilize_miss
         @must_not_emit/@stabilize_hit
       )

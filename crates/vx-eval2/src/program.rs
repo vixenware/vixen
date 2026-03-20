@@ -141,6 +141,14 @@ impl CompiledProgram {
         })
     }
 
+    pub(crate) fn lookup_function(
+        &self,
+        name: &str,
+    ) -> Result<Option<CompiledFunction>, EvalError> {
+        self.ensure_parsed()?;
+        Ok(self.functions.get(name).cloned())
+    }
+
     pub(crate) fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<Expr, EvalError> {
         self.ensure_parsed()?;
         let indexed = self.exprs.get(&handle).ok_or_else(|| {
