@@ -1226,6 +1226,76 @@ fn session_checkpoint_can_restore_graph_and_work_state() {
 }
 
 #[test]
+fn prepared_work_can_execute_on_a_scoped_worker_thread() {
+    let runtime = TestRuntime;
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "prepared-worker",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let prepared = session
+        .prepare_step()
+        .expect("start-entry work should exist");
+    let completion = thread::scope(|scope| {
+        scope
+            .spawn(move || prepared.execute().expect("prepared work should execute"))
+            .join()
+            .expect("worker thread should not panic")
+    });
+    assert_eq!(completion.work().kind, EvalWorkKind::StartEntry);
+    assert_eq!(*completion.step(), EvalSessionStep::Progressed);
+
+    let step = session
+        .apply_completion(completion)
+        .expect("completion should apply");
+    assert_eq!(step, EvalSessionStep::Progressed);
+    assert_eq!(session.completed_work().len(), 1);
+    assert_eq!(
+        session.completed_work()[0].work.kind,
+        EvalWorkKind::StartEntry
+    );
+}
+
+#[test]
+fn stale_prepared_work_completion_is_rejected() {
+    let runtime = TestRuntime;
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "stale-prepared-work",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let completion = session
+        .prepare_step()
+        .expect("start-entry work should exist")
+        .execute()
+        .expect("prepared work should execute");
+    assert_eq!(completion.base_generation(), 0);
+
+    assert_eq!(
+        session.step().expect("inline step should still work"),
+        EvalSessionStep::Progressed
+    );
+
+    let error = session
+        .apply_completion(completion)
+        .expect_err("stale completion should be rejected");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert!(
+        error.message.contains("stale eval work completion"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+#[test]
 fn session_resume_does_not_replay_ready_runtime_calls_before_pending_point() {
     let host_os_calls = Arc::new(AtomicUsize::new(0));
     let host_wait_calls = Arc::new(AtomicUsize::new(0));

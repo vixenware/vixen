@@ -185,6 +185,25 @@ pub struct EvalSessionCheckpoint {
     completed: Option<Result<Value, EvalError>>,
 }
 
+pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
+    source: String,
+    source_id: String,
+    entry: String,
+    args: Vec<Value>,
+    runtime: &'runtime Runtime,
+    place: String,
+    base_generation: u64,
+    checkpoint: EvalSessionCheckpoint,
+    record: ReadyTaskRecord,
+}
+
+pub struct EvalWorkCompletion {
+    base_generation: u64,
+    work: EvalQueuedWork,
+    step: EvalSessionStep,
+    checkpoint: EvalSessionCheckpoint,
+}
+
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     source: String,
     source_id: String,
@@ -197,6 +216,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
     history: Vec<EvalSessionCheckpoint>,
+    generation: u64,
 }
 
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
@@ -222,6 +242,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completed_work: Vec::new(),
             completed: None,
             history: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -259,150 +280,21 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         let snapshot = self.checkpoint();
 
-        let Some(record) = self.scheduler.pop_ready_task() else {
+        let Some(prepared) = self.prepare_step() else {
             return Ok(match self.scheduler.pending_nodes().into_iter().next() {
                 Some(pending) => EvalSessionStep::Pending(pending),
                 None => EvalSessionStep::Idle,
             });
         };
+        let completion = prepared.execute()?;
         self.history.push(snapshot);
-
-        let source = SourceContext::new(self.source_id.clone(), &self.source);
-        let mut state = EvalState::new(
-            &source,
-            self.runtime,
-            &self.place,
-            &mut self.trace,
-            &mut self.scheduler,
-            Some(record.work.id),
-            true,
-        );
-
-        let step = match record.task {
-            ReadyTask::StartEntry => {
-                let prepared = prepare_entry(&mut state, &self.source, &self.entry, &self.args)?;
-                let node_id = state.alloc_node_id();
-                let body_kind = expr_kind(&prepared.body);
-                let body_source = state.source.span_for_node(&prepared.body);
-                state
-                    .scheduler
-                    .record_dependency(ENTRY_WORK_NODE_ID, node_id);
-                state.scheduler.record_node(EvalNodeRecord {
-                    node_id,
-                    parent_id: Some(ENTRY_WORK_NODE_ID),
-                    kind: EvalNodeKind::Expr { kind: body_kind },
-                    source: Some(body_source),
-                });
-                let work = state.scheduler.enqueue_ready_task(
-                    ReadyTask::EvaluateExpr(ScheduledExpr {
-                        expr: prepared.body,
-                        env: prepared.env,
-                    }),
-                    EvalWorkKind::EvaluateExpr,
-                    node_id,
-                    None,
-                );
-                state.scheduler.record_node_state(
-                    node_id,
-                    EvalNodeState::Runnable {
-                        work: work.id,
-                        pending: None,
-                    },
-                );
-                state.scheduler.record_node_state(
-                    ENTRY_WORK_NODE_ID,
-                    EvalNodeState::Runnable {
-                        work: work.id,
-                        pending: None,
-                    },
-                );
-                self.completed_work.push(EvalCompletedWork {
-                    work: record.work,
-                    outcome: EvalCompletedWorkOutcome::Progressed,
-                });
-                return Ok(EvalSessionStep::Progressed);
-            }
-            ReadyTask::EvaluateExpr(scheduled) => {
-                let mut env = scheduled.env;
-                eval_expr_with_node_id(&mut state, record.work.node_id, &scheduled.expr, &mut env)
-            }
-            ReadyTask::Resume(ready) => {
-                resume_suspension(&mut state, ready.suspension, ready.result)
-            }
-        };
-
-        match step {
-            Ok(EvalStep::Ready(value)) => {
-                self.completed_work.push(EvalCompletedWork {
-                    work: record.work.clone(),
-                    outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
-                });
-                if state
-                    .scheduler
-                    .resolve_child_dependency(record.work.node_id, Ok(value.clone()))?
-                {
-                    return Ok(EvalSessionStep::Progressed);
-                }
-                state
-                    .scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
-                self.completed = Some(Ok(value.clone()));
-                Ok(EvalSessionStep::Ready(value))
-            }
-            Ok(EvalStep::Suspended(suspension)) => {
-                let pending = suspension.pending.clone();
-                state.scheduler.register_suspension(suspension);
-                match state.scheduler.pending_kind(&pending) {
-                    Some(PendingKind::External) => {
-                        state.scheduler.record_node_state(
-                            ENTRY_WORK_NODE_ID,
-                            EvalNodeState::Pending(pending.clone()),
-                        );
-                        self.completed_work.push(EvalCompletedWork {
-                            work: record.work,
-                            outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
-                        });
-                        Ok(EvalSessionStep::Pending(pending))
-                    }
-                    Some(PendingKind::ChildDependency { dependency }) => {
-                        state.scheduler.record_node_state(
-                            record.work.node_id,
-                            EvalNodeState::BlockedOnNode { dependency },
-                        );
-                        self.completed_work.push(EvalCompletedWork {
-                            work: record.work,
-                            outcome: EvalCompletedWorkOutcome::BlockedOnNode(dependency),
-                        });
-                        Ok(EvalSessionStep::Progressed)
-                    }
-                    None => Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("pending node {} has no registered kind", pending.node_id),
-                    )),
-                }
-            }
-            Err(error) => {
-                self.completed_work.push(EvalCompletedWork {
-                    work: record.work.clone(),
-                    outcome: EvalCompletedWorkOutcome::Poison(error.clone()),
-                });
-                if state
-                    .scheduler
-                    .resolve_child_dependency(record.work.node_id, Err(error.clone()))?
-                {
-                    return Ok(EvalSessionStep::Progressed);
-                }
-                state
-                    .scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
-                self.completed = Some(Err(error.clone()));
-                Ok(EvalSessionStep::Poison(error))
-            }
-        }
+        self.apply_completion(completion)
     }
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
-        self.scheduler.resolve_pending(pending, Ok(value))
+        self.scheduler.resolve_pending(pending, Ok(value))?;
+        self.generation += 1;
+        Ok(())
     }
 
     pub fn poison_pending(
@@ -410,7 +302,9 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         pending: &PendingRef,
         error: EvalError,
     ) -> Result<(), EvalError> {
-        self.scheduler.resolve_pending(pending, Err(error))
+        self.scheduler.resolve_pending(pending, Err(error))?;
+        self.generation += 1;
+        Ok(())
     }
 
     pub fn pending_nodes(&self) -> Vec<PendingRef> {
@@ -479,6 +373,42 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.trace = checkpoint.trace;
         self.completed_work = checkpoint.completed_work;
         self.completed = checkpoint.completed;
+        self.generation += 1;
+    }
+
+    pub fn prepare_step(&self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
+        if self.completed.is_some() {
+            return None;
+        }
+        let record = self.scheduler.peek_ready_task()?;
+        Some(EvalPreparedWork {
+            source: self.source.clone(),
+            source_id: self.source_id.clone(),
+            entry: self.entry.clone(),
+            args: self.args.clone(),
+            runtime: self.runtime,
+            place: self.place.clone(),
+            base_generation: self.generation,
+            checkpoint: self.checkpoint(),
+            record,
+        })
+    }
+
+    pub fn apply_completion(
+        &mut self,
+        completion: EvalWorkCompletion,
+    ) -> Result<EvalSessionStep, EvalError> {
+        if completion.base_generation != self.generation {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "stale eval work completion: expected generation {}, got {}",
+                    self.generation, completion.base_generation
+                ),
+            ));
+        }
+        self.restore(completion.checkpoint);
+        Ok(completion.step)
     }
 
     pub fn work_records(&self) -> Vec<EvalWorkRecord> {
@@ -543,6 +473,60 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             pending: self.pending_nodes(),
             completed: self.completed.clone(),
         }
+    }
+}
+
+impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
+    pub fn work(&self) -> &EvalQueuedWork {
+        &self.record.work
+    }
+
+    pub fn base_generation(&self) -> u64 {
+        self.base_generation
+    }
+
+    pub fn execute(self) -> Result<EvalWorkCompletion, EvalError> {
+        let EvalPreparedWork {
+            source,
+            source_id,
+            entry,
+            args,
+            runtime,
+            place,
+            base_generation,
+            checkpoint,
+            record,
+        } = self;
+        let (checkpoint, step) = execute_ready_task(
+            &source,
+            &source_id,
+            &entry,
+            &args,
+            runtime,
+            &place,
+            checkpoint,
+            record.clone(),
+        )?;
+        Ok(EvalWorkCompletion {
+            base_generation,
+            work: record.work,
+            step,
+            checkpoint,
+        })
+    }
+}
+
+impl EvalWorkCompletion {
+    pub fn work(&self) -> &EvalQueuedWork {
+        &self.work
+    }
+
+    pub fn step(&self) -> &EvalSessionStep {
+        &self.step
+    }
+
+    pub fn base_generation(&self) -> u64 {
+        self.base_generation
     }
 }
 
@@ -737,7 +721,16 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
     let source = SourceContext::new(source_id, source_text);
-    let mut state = EvalState::new(&source, runtime, place, sink, scheduler, None, false);
+    let mut state = EvalState::new(
+        source_text,
+        &source,
+        runtime,
+        place,
+        sink,
+        scheduler,
+        None,
+        false,
+    );
     match evaluate_entry_once(&mut state, source_text, entry, args)? {
         EvalStep::Ready(value) => Ok(Resolution::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(Resolution::Pending(suspension.pending)),
@@ -750,6 +743,7 @@ struct SourceContext {
 }
 
 struct EvalState<'source, 'scheduler, Runtime, Sink> {
+    source_text: &'source str,
     source: &'source SourceContext,
     runtime: &'source Runtime,
     place: &'source str,
@@ -805,7 +799,7 @@ struct ScheduledResume {
 
 #[derive(Debug, Clone)]
 struct ScheduledExpr {
-    expr: Expr,
+    expr: ExprHandle,
     env: BTreeMap<String, Value>,
 }
 
@@ -821,6 +815,16 @@ struct EvalSuspension {
     resume_node: EvalNodeId,
     pending: PendingRef,
     frames: Vec<ContinuationFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExprHandle {
+    range: TextRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StmtHandle {
+    range: TextRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -854,13 +858,13 @@ enum ContinuationFrame {
         last: Value,
         name: String,
         name_source: SourceSpan,
-        remaining_statements: Vec<Stmt>,
+        remaining_statements: Vec<StmtHandle>,
     },
     BlockAfterExpr {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         scope: BTreeMap<String, Value>,
-        remaining_statements: Vec<Stmt>,
+        remaining_statements: Vec<StmtHandle>,
     },
     CallAfterArg {
         node_id: EvalNodeId,
@@ -868,14 +872,14 @@ enum ContinuationFrame {
         callee_name: String,
         call_source: SourceSpan,
         args: Vec<Value>,
-        remaining_args: Vec<Expr>,
+        remaining_args: Vec<ExprHandle>,
         env: BTreeMap<String, Value>,
     },
     ArrayAfterItem {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,
-        remaining_items: Vec<ArrayItem>,
+        remaining_items: Vec<ExprHandle>,
         env: BTreeMap<String, Value>,
         array_source: SourceSpan,
     },
@@ -889,8 +893,8 @@ enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         entries: Vec<(Value, Value)>,
-        value_expr: Expr,
-        remaining_entries: Vec<(Expr, Expr)>,
+        value_expr: ExprHandle,
+        remaining_entries: Vec<(ExprHandle, ExprHandle)>,
         env: BTreeMap<String, Value>,
         map_source: SourceSpan,
     },
@@ -899,7 +903,7 @@ enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         entries: Vec<(Value, Value)>,
         key: Value,
-        remaining_entries: Vec<(Expr, Expr)>,
+        remaining_entries: Vec<(ExprHandle, ExprHandle)>,
         env: BTreeMap<String, Value>,
         map_source: SourceSpan,
     },
@@ -910,8 +914,8 @@ enum ContinuationFrame {
     IfCondition {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        then_branch: Expr,
-        else_branch: Expr,
+        then_branch: ExprHandle,
+        else_branch: ExprHandle,
         env: BTreeMap<String, Value>,
     },
     StructAfterField {
@@ -920,7 +924,7 @@ enum ContinuationFrame {
         type_name: Arc<str>,
         fields: Vec<(Arc<str>, Value)>,
         name: Arc<str>,
-        remaining_fields: Vec<(Arc<str>, Expr)>,
+        remaining_fields: Vec<(Arc<str>, ExprHandle)>,
         env: BTreeMap<String, Value>,
         struct_source: SourceSpan,
     },
@@ -949,6 +953,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     EvalState<'source, 'scheduler, Runtime, Sink>
 {
     fn new(
+        source_text: &'source str,
         source: &'source SourceContext,
         runtime: &'source Runtime,
         place: &'source str,
@@ -958,6 +963,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         queue_child_work: bool,
     ) -> Self {
         Self {
+            source_text,
             source,
             runtime,
             place,
@@ -1130,6 +1136,60 @@ fn eval_dependent_expr(
     } else {
         state.with_active_node(node_id, |state| eval_child_expr(state, expr, env))
     }
+}
+
+fn expr_handle(expr: &Expr) -> ExprHandle {
+    ExprHandle {
+        range: trimmed_range(expr.syntax()),
+    }
+}
+
+fn stmt_handle(stmt: &Stmt) -> StmtHandle {
+    StmtHandle {
+        range: trimmed_range(stmt.syntax()),
+    }
+}
+
+fn resolve_expr_handle(source_text: &str, handle: ExprHandle) -> Result<Expr, EvalError> {
+    let parse = vx_parser::parse(source_text);
+    if !parse.errors().is_empty() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("parse failed: {:?}", parse.errors()),
+        ));
+    }
+    let root = SourceFile::cast_root(parse.syntax());
+    root.syntax()
+        .descendants()
+        .filter_map(Expr::cast)
+        .find(|expr| trimmed_range(expr.syntax()) == handle.range)
+        .ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("expression at range {:?} was not found", handle.range),
+            )
+        })
+}
+
+fn resolve_stmt_handle(source_text: &str, handle: StmtHandle) -> Result<Stmt, EvalError> {
+    let parse = vx_parser::parse(source_text);
+    if !parse.errors().is_empty() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("parse failed: {:?}", parse.errors()),
+        ));
+    }
+    let root = SourceFile::cast_root(parse.syntax());
+    root.syntax()
+        .descendants()
+        .filter_map(Stmt::cast)
+        .find(|stmt| trimmed_range(stmt.syntax()) == handle.range)
+        .ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("statement at range {:?} was not found", handle.range),
+            )
+        })
 }
 
 impl EvalScheduler {
@@ -1363,9 +1423,9 @@ impl EvalScheduler {
             .insert(suspension.pending.node_id, suspension);
     }
 
-    fn pop_ready_task(&mut self) -> Option<ReadyTaskRecord> {
-        let work_id = self.ready_queue.pop_front()?;
-        self.ready_tasks.remove(&work_id)
+    fn peek_ready_task(&self) -> Option<ReadyTaskRecord> {
+        let work_id = *self.ready_queue.front()?;
+        self.ready_tasks.get(&work_id).cloned()
     }
 
     fn enqueue_ready_task(
@@ -1392,6 +1452,179 @@ impl EvalScheduler {
         );
         work
     }
+}
+
+fn execute_ready_task(
+    source_text: &str,
+    source_id: &str,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+    checkpoint: EvalSessionCheckpoint,
+    record: ReadyTaskRecord,
+) -> Result<(EvalSessionCheckpoint, EvalSessionStep), EvalError> {
+    let EvalSessionCheckpoint {
+        mut scheduler,
+        mut trace,
+        mut completed_work,
+        mut completed,
+    } = checkpoint;
+
+    let source = SourceContext::new(source_id.to_string(), source_text);
+    let mut state = EvalState::new(
+        source_text,
+        &source,
+        runtime,
+        place,
+        &mut trace,
+        &mut scheduler,
+        Some(record.work.id),
+        true,
+    );
+
+    let step = match record.task {
+        ReadyTask::StartEntry => {
+            let prepared = prepare_entry(&mut state, source_text, entry, args)?;
+            let node_id = state.alloc_node_id();
+            let body_kind = expr_kind(&prepared.body);
+            let body_source = state.source.span_for_node(&prepared.body);
+            state
+                .scheduler
+                .record_dependency(ENTRY_WORK_NODE_ID, node_id);
+            state.scheduler.record_node(EvalNodeRecord {
+                node_id,
+                parent_id: Some(ENTRY_WORK_NODE_ID),
+                kind: EvalNodeKind::Expr { kind: body_kind },
+                source: Some(body_source),
+            });
+            let work = state.scheduler.enqueue_ready_task(
+                ReadyTask::EvaluateExpr(ScheduledExpr {
+                    expr: expr_handle(&prepared.body),
+                    env: prepared.env,
+                }),
+                EvalWorkKind::EvaluateExpr,
+                node_id,
+                None,
+            );
+            state.scheduler.record_node_state(
+                node_id,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: None,
+                },
+            );
+            state.scheduler.record_node_state(
+                ENTRY_WORK_NODE_ID,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: None,
+                },
+            );
+            completed_work.push(EvalCompletedWork {
+                work: record.work,
+                outcome: EvalCompletedWorkOutcome::Progressed,
+            });
+            return Ok((
+                EvalSessionCheckpoint {
+                    scheduler,
+                    trace,
+                    completed_work,
+                    completed,
+                },
+                EvalSessionStep::Progressed,
+            ));
+        }
+        ReadyTask::EvaluateExpr(scheduled) => {
+            let mut env = scheduled.env;
+            let expr = resolve_expr_handle(state.source_text, scheduled.expr)?;
+            eval_expr_with_node_id(&mut state, record.work.node_id, &expr, &mut env)
+        }
+        ReadyTask::Resume(ready) => resume_suspension(&mut state, ready.suspension, ready.result),
+    };
+
+    let step = match step {
+        Ok(EvalStep::Ready(value)) => {
+            completed_work.push(EvalCompletedWork {
+                work: record.work.clone(),
+                outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
+            });
+            if state
+                .scheduler
+                .resolve_child_dependency(record.work.node_id, Ok(value.clone()))?
+            {
+                EvalSessionStep::Progressed
+            } else {
+                state
+                    .scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                completed = Some(Ok(value.clone()));
+                EvalSessionStep::Ready(value)
+            }
+        }
+        Ok(EvalStep::Suspended(suspension)) => {
+            let pending = suspension.pending.clone();
+            state.scheduler.register_suspension(suspension);
+            match state.scheduler.pending_kind(&pending) {
+                Some(PendingKind::External) => {
+                    state.scheduler.record_node_state(
+                        ENTRY_WORK_NODE_ID,
+                        EvalNodeState::Pending(pending.clone()),
+                    );
+                    completed_work.push(EvalCompletedWork {
+                        work: record.work,
+                        outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
+                    });
+                    EvalSessionStep::Pending(pending)
+                }
+                Some(PendingKind::ChildDependency { dependency }) => {
+                    state.scheduler.record_node_state(
+                        record.work.node_id,
+                        EvalNodeState::BlockedOnNode { dependency },
+                    );
+                    completed_work.push(EvalCompletedWork {
+                        work: record.work,
+                        outcome: EvalCompletedWorkOutcome::BlockedOnNode(dependency),
+                    });
+                    EvalSessionStep::Progressed
+                }
+                None => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("pending node {} has no registered kind", pending.node_id),
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            completed_work.push(EvalCompletedWork {
+                work: record.work.clone(),
+                outcome: EvalCompletedWorkOutcome::Poison(error.clone()),
+            });
+            if state
+                .scheduler
+                .resolve_child_dependency(record.work.node_id, Err(error.clone()))?
+            {
+                EvalSessionStep::Progressed
+            } else {
+                state
+                    .scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
+                completed = Some(Err(error.clone()));
+                EvalSessionStep::Poison(error)
+            }
+        }
+    };
+
+    Ok((
+        EvalSessionCheckpoint {
+            scheduler,
+            trace,
+            completed_work,
+            completed,
+        },
+        step,
+    ))
 }
 
 impl SourceContext {
@@ -1699,7 +1932,7 @@ fn eval_call(
         callee_name,
         call_source,
         Vec::new(),
-        positional_args,
+        positional_args.iter().map(expr_handle).collect(),
         env.clone(),
     )
 }
@@ -1727,11 +1960,12 @@ fn continue_call_from_args(
     callee_name: String,
     call_source: SourceSpan,
     mut args: Vec<Value>,
-    remaining_args: Vec<Expr>,
+    remaining_args: Vec<ExprHandle>,
     mut env: BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_args.into_iter();
-    while let Some(arg) = remaining.next() {
+    while let Some(arg_handle) = remaining.next() {
+        let arg = resolve_expr_handle(state.source_text, arg_handle)?;
         match eval_dependent_expr(state, node_id, &arg, &mut env)? {
             EvalStep::Ready(value) => args.push(value),
             EvalStep::Suspended(suspension) => {
@@ -1858,7 +2092,7 @@ fn eval_struct_literal(
             let expr = field.expr().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "struct field has no value")
             })?;
-            Ok((name, expr))
+            Ok((name, expr_handle(&expr)))
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     if state.queue_child_work && !remaining_fields.is_empty() {
@@ -1868,7 +2102,7 @@ fn eval_struct_literal(
             .collect::<Vec<_>>();
         let child_nodes = remaining_fields
             .iter()
-            .map(|(_, expr)| queue_child_expr(state, expr, env))
+            .map(|(_, expr)| queue_child_expr_handle(state, *expr, env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -1913,7 +2147,7 @@ fn eval_block(
         parent_id,
         env.clone(),
         Value::unit(),
-        block.statements().collect(),
+        block.statements().map(|stmt| stmt_handle(&stmt)).collect(),
     )
 }
 
@@ -1964,7 +2198,16 @@ fn eval_array(
         node_id,
         parent_id,
         Vec::new(),
-        array.items().collect(),
+        array
+            .items()
+            .map(|item| match item {
+                ArrayItem::Expr(expr) => Ok(expr_handle(&expr)),
+                ArrayItem::Spread(_) => Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "array spread is not supported yet",
+                )),
+            })
+            .collect::<Result<Vec<_>, EvalError>>()?,
         env.clone(),
         state.source.span_for_node(array),
     )
@@ -1990,7 +2233,7 @@ fn eval_map(
             let value_expr = entry
                 .value()
                 .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "map entry has no value"))?;
-            Ok((key_expr, value_expr))
+            Ok((expr_handle(&key_expr), expr_handle(&value_expr)))
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
@@ -2064,12 +2307,18 @@ fn eval_if(
                 ContinuationFrame::IfCondition {
                     node_id,
                     parent_id,
-                    then_branch: if_expr.then_branch().ok_or_else(|| {
-                        EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                    })?,
-                    else_branch: if_expr.else_branch().ok_or_else(|| {
-                        EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                    })?,
+                    then_branch: if_expr
+                        .then_branch()
+                        .ok_or_else(|| {
+                            EvalError::new(EvalErrorKind::Internal, "if branch is missing")
+                        })
+                        .map(|expr| expr_handle(&expr))?,
+                    else_branch: if_expr
+                        .else_branch()
+                        .ok_or_else(|| {
+                            EvalError::new(EvalErrorKind::Internal, "if branch is missing")
+                        })
+                        .map(|expr| expr_handle(&expr))?,
                     env: env.clone(),
                 },
             ));
@@ -2156,10 +2405,11 @@ fn continue_block_statements(
     parent_id: Option<EvalNodeId>,
     mut scope: BTreeMap<String, Value>,
     mut last: Value,
-    statements: Vec<Stmt>,
+    statements: Vec<StmtHandle>,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = statements.into_iter();
-    while let Some(statement) = remaining.next() {
+    while let Some(statement_handle) = remaining.next() {
+        let statement = resolve_stmt_handle(state.source_text, statement_handle)?;
         match statement {
             Stmt::Let(let_stmt) => {
                 let name_token = let_stmt.name().ok_or_else(|| {
@@ -2223,33 +2473,26 @@ fn continue_array_items(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     mut items: Vec<Value>,
-    remaining_items: Vec<ArrayItem>,
+    remaining_items: Vec<ExprHandle>,
     mut env: BTreeMap<String, Value>,
     array_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_items.into_iter();
-    while let Some(item) = remaining.next() {
-        match item {
-            ArrayItem::Expr(expr) => match eval_dependent_expr(state, node_id, &expr, &mut env)? {
-                EvalStep::Ready(value) => items.push(value),
-                EvalStep::Suspended(suspension) => {
-                    return Ok(extend_suspension(
-                        suspension,
-                        ContinuationFrame::ArrayAfterItem {
-                            node_id,
-                            parent_id,
-                            items,
-                            remaining_items: remaining.collect(),
-                            env,
-                            array_source,
-                        },
-                    ));
-                }
-            },
-            ArrayItem::Spread(_) => {
-                return Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    "array spread is not supported yet",
+    while let Some(item_handle) = remaining.next() {
+        let expr = resolve_expr_handle(state.source_text, item_handle)?;
+        match eval_dependent_expr(state, node_id, &expr, &mut env)? {
+            EvalStep::Ready(value) => items.push(value),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayAfterItem {
+                        node_id,
+                        parent_id,
+                        items,
+                        remaining_items: remaining.collect(),
+                        env,
+                        array_source,
+                    },
                 ));
             }
         }
@@ -2264,19 +2507,29 @@ fn queue_child_expr(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
 ) -> EvalNodeId {
+    queue_child_expr_handle(state, expr_handle(expr), env)
+}
+
+fn queue_child_expr_handle(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    expr: ExprHandle,
+    env: &BTreeMap<String, Value>,
+) -> EvalNodeId {
     let child_id = state.alloc_node_id();
-    state.emit_current_dependency(child_id, Some(state.source.span_for_node(expr)));
+    let resolved = resolve_expr_handle(state.source_text, expr)
+        .expect("queued child expression handle should resolve");
+    state.emit_current_dependency(child_id, Some(state.source.span_for_node(&resolved)));
     state.scheduler.record_node(EvalNodeRecord {
         node_id: child_id,
         parent_id: state.current_parent(),
         kind: EvalNodeKind::Expr {
-            kind: expr_kind(expr),
+            kind: expr_kind(&resolved),
         },
-        source: Some(state.source.span_for_node(expr)),
+        source: Some(state.source.span_for_node(&resolved)),
     });
     let work = state.scheduler.enqueue_ready_task(
         ReadyTask::EvaluateExpr(ScheduledExpr {
-            expr: expr.clone(),
+            expr,
             env: env.clone(),
         }),
         EvalWorkKind::EvaluateExpr,
@@ -2312,12 +2565,13 @@ fn continue_map_entries(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     mut entries: Vec<(Value, Value)>,
-    remaining_entries: Vec<(Expr, Expr)>,
+    remaining_entries: Vec<(ExprHandle, ExprHandle)>,
     mut env: BTreeMap<String, Value>,
     map_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_entries.into_iter();
-    while let Some((key_expr, value_expr)) = remaining.next() {
+    while let Some((key_handle, value_handle)) = remaining.next() {
+        let key_expr = resolve_expr_handle(state.source_text, key_handle)?;
         let key = match eval_dependent_expr(state, node_id, &key_expr, &mut env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
@@ -2327,7 +2581,7 @@ fn continue_map_entries(
                         node_id,
                         parent_id,
                         entries,
-                        value_expr,
+                        value_expr: value_handle,
                         remaining_entries: remaining.collect(),
                         env,
                         map_source,
@@ -2335,6 +2589,7 @@ fn continue_map_entries(
                 ));
             }
         };
+        let value_expr = resolve_expr_handle(state.source_text, value_handle)?;
         let value = match eval_dependent_expr(state, node_id, &value_expr, &mut env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
@@ -2368,12 +2623,13 @@ fn continue_struct_fields(
     parent_id: Option<EvalNodeId>,
     type_name: Arc<str>,
     mut fields: Vec<(Arc<str>, Value)>,
-    remaining_fields: Vec<(Arc<str>, Expr)>,
+    remaining_fields: Vec<(Arc<str>, ExprHandle)>,
     mut env: BTreeMap<String, Value>,
     struct_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_fields.into_iter();
-    while let Some((name, expr)) = remaining.next() {
+    while let Some((name, expr_handle)) = remaining.next() {
+        let expr = resolve_expr_handle(state.source_text, expr_handle)?;
         match eval_dependent_expr(state, node_id, &expr, &mut env)? {
             EvalStep::Ready(value) => fields.push((name, value)),
             EvalStep::Suspended(suspension) => {
@@ -2690,6 +2946,7 @@ fn resume_frame(
         } => {
             let result = match input {
                 Ok(key) => {
+                    let value_expr = resolve_expr_handle(state.source_text, value_expr)?;
                     let value = match eval_dependent_expr(state, node_id, &value_expr, &mut env)? {
                         EvalStep::Ready(value) => value,
                         EvalStep::Suspended(suspension) => {
@@ -2779,7 +3036,10 @@ fn resume_frame(
                             "if condition must evaluate to Bool",
                         ));
                     };
-                    let branch = if value { then_branch } else { else_branch };
+                    let branch = resolve_expr_handle(
+                        state.source_text,
+                        if value { then_branch } else { else_branch },
+                    )?;
                     match eval_dependent_expr(state, node_id, &branch, &mut env)? {
                         EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
                         EvalStep::Suspended(suspension) => Ok(extend_suspension(

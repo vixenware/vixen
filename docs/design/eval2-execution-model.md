@@ -196,6 +196,10 @@ The next step beyond that is a resumable session with scheduler-owned state:
   - current pending tokens
 - the session can expose explicit checkpoints so an external debugger can own
   time-travel state instead of relying only on the session's private history
+- the session can prepare one ready work item from its current state, execute it
+  outside the session, and then apply the completion back later
+- completions can be rejected as stale if the session has advanced in the
+  meantime
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -282,6 +286,9 @@ The current local-resume session is also useful in its own right:
   state between steps, without claiming a full durable time-travel format yet
 - it can hand those checkpoints to an external debugger, which keeps the
   door open for time-travel tooling outside the evaluator itself
+- it can hand a prepared work item to a worker thread and apply the completion
+  later, which is the missing seam between "single-threaded scheduler today"
+  and "real workers later"
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 
