@@ -8,10 +8,11 @@ use std::{
 
 use crate::{
     Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalError, EvalErrorKind,
-    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalNodeId, EvalNodeState, EvalSession,
-    EvalSessionStep, EvalTrace, EvalWorkKind, PendingRef, ProjectionStep, Provenance, Resolution,
-    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep,
-    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalNodeId, EvalNodeKind, EvalNodeState,
+    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, PendingRef,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
+    RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -727,6 +728,144 @@ fn session_exposes_dependency_edges_and_blocked_node_explanations() {
 }
 
 #[test]
+fn session_retains_node_records_with_kind_parent_and_source() {
+    let mut session = EvalSession::new(
+        "fn build(value: String) { value }",
+        "session-node-records",
+        "build",
+        vec![Value::string("windows")],
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    let records = session.node_records();
+    assert!(records.iter().any(|record| {
+        record.node_id == EvalNodeId(0)
+            && record.parent_id.is_none()
+            && record.kind == EvalNodeKind::SyntheticRoot
+    }));
+    assert!(records.iter().any(|record| {
+        record.node_id == EvalNodeId(1)
+            && record.parent_id.is_none()
+            && record.kind
+                == EvalNodeKind::ArgumentBinding {
+                    label: "value".into(),
+                }
+            && record
+                .source
+                .as_ref()
+                .map(|source| source.source_id.as_str())
+                == Some("session-node-records")
+    }));
+    assert!(records.iter().any(|record| {
+        record.node_id == EvalNodeId(2)
+            && record.parent_id == Some(EvalNodeId(0))
+            && record.kind
+                == EvalNodeKind::Expr {
+                    kind: crate::EvalExprKind::Block,
+                }
+            && record
+                .source
+                .as_ref()
+                .map(|source| source.source_id.as_str())
+                == Some("session-node-records")
+    }));
+}
+
+#[test]
+fn session_graph_snapshot_tracks_node_and_work_lifecycle() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls,
+        host_wait_calls,
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); os }",
+        "session-graph-snapshot",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root expression step"),
+        EvalSessionStep::Progressed
+    );
+
+    let snapshot = session.graph_snapshot();
+    assert!(snapshot.pending.is_empty());
+    assert!(snapshot.completed.is_none());
+
+    let root_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| {
+            node.record.as_ref().is_some_and(|record| {
+                record.kind
+                    == EvalNodeKind::Expr {
+                        kind: crate::EvalExprKind::Block,
+                    }
+                    && record.parent_id == Some(EvalNodeId(0))
+            })
+        })
+        .expect("root block node should be recorded");
+    let child_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| {
+            node.record.as_ref().is_some_and(|record| {
+                record.kind
+                    == EvalNodeKind::Expr {
+                        kind: crate::EvalExprKind::Call,
+                    }
+                    && record.parent_id == Some(root_node.node_id)
+            })
+        })
+        .expect("child call node should be recorded");
+
+    assert_eq!(
+        root_node.state,
+        Some(EvalNodeState::BlockedOnNode {
+            dependency: child_node.node_id,
+        }),
+    );
+    assert_eq!(root_node.dependencies, vec![child_node.node_id]);
+    assert_eq!(child_node.dependents, vec![root_node.node_id]);
+    assert_eq!(
+        child_node.state,
+        Some(EvalNodeState::Runnable {
+            work: snapshot.work[2].work.id,
+            pending: None,
+        }),
+    );
+
+    assert_eq!(snapshot.work.len(), 3);
+    assert_eq!(snapshot.work[0].work.kind, EvalWorkKind::StartEntry);
+    assert_eq!(
+        snapshot.work[0].state,
+        EvalWorkState::Completed(EvalCompletedWorkOutcome::Progressed)
+    );
+    assert_eq!(snapshot.work[1].work.kind, EvalWorkKind::EvaluateExpr);
+    assert_eq!(
+        snapshot.work[1].state,
+        EvalWorkState::Completed(EvalCompletedWorkOutcome::BlockedOnNode(child_node.node_id)),
+    );
+    assert_eq!(snapshot.work[2].work.kind, EvalWorkKind::EvaluateExpr);
+    assert_eq!(snapshot.work[2].state, EvalWorkState::Queued);
+    assert_eq!(snapshot.work[2].work.node_id, child_node.node_id);
+}
+
+#[test]
 fn session_can_step_back_to_a_prior_scheduler_state() {
     let host_os_calls = Arc::new(AtomicUsize::new(0));
     let host_wait_calls = Arc::new(AtomicUsize::new(0));
@@ -776,7 +915,13 @@ fn session_can_step_back_to_a_prior_scheduler_state() {
             pending: None,
         }),
     );
-    assert!(session.dependency_edges().is_empty());
+    assert_eq!(
+        session.dependency_edges(),
+        &[EvalDependencyEdge {
+            parent: EvalNodeId(0),
+            child: root_node,
+        }]
+    );
     assert_eq!(session.completed_work().len(), 1);
 
     assert!(session.step_back());
@@ -786,6 +931,42 @@ fn session_can_step_back_to_a_prior_scheduler_state() {
     assert_eq!(queued_at_start[0].node_id, EvalNodeId(0));
     assert!(session.completed_work().is_empty());
     assert!(!session.step_back());
+}
+
+#[test]
+fn session_checkpoint_can_restore_graph_and_work_state() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls,
+        host_wait_calls,
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); os }",
+        "session-checkpoint",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    let checkpoint = session.checkpoint();
+    let expected_graph = session.graph_snapshot();
+    let expected_trace = session.trace().clone();
+
+    assert_eq!(
+        session.step().expect("root expression step"),
+        EvalSessionStep::Progressed
+    );
+    assert_ne!(session.graph_snapshot(), expected_graph);
+
+    session.restore(checkpoint);
+    assert_eq!(session.graph_snapshot(), expected_graph);
+    assert_eq!(session.trace(), &expected_trace);
 }
 
 #[test]

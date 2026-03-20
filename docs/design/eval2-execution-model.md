@@ -180,6 +180,14 @@ The next step beyond that is a resumable session with scheduler-owned state:
 - ordinary child expressions can also become queued work in session mode, with
   parent nodes blocked on child-node completion instead of always recursing
   inline
+- the session can retain node records and expose a graph snapshot over:
+  - node record metadata
+  - current node state
+  - dependency edges
+  - queued and completed work
+  - current pending tokens
+- the session can expose explicit checkpoints so an external debugger can own
+  time-travel state instead of relying only on the session's private history
 - suspension stores continuation frames for the active evaluation path
 - resumption continues locally from those frames instead of rerunning the root
 
@@ -250,8 +258,12 @@ The current local-resume session is also useful in its own right:
   raw trace stream
 - it gives the session a small "why am I blocked?" substrate by retaining
   dependency edges and following blocked-on-child chains to their terminal node
+- it can expose the current node/work graph directly instead of forcing a
+  debugger to reconstruct it from trace events
 - it can support backwards stepping by snapshotting scheduler-owned session
   state between steps, without claiming a full durable time-travel format yet
+- it can hand those checkpoints to an external debugger, which keeps the
+  door open for time-travel tooling outside the evaluator itself
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 

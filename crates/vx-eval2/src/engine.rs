@@ -81,10 +81,38 @@ pub struct EvalCompletedWork {
     pub outcome: EvalCompletedWorkOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalWorkState {
+    Queued,
+    Completed(EvalCompletedWorkOutcome),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalWorkRecord {
+    pub work: EvalQueuedWork,
+    pub state: EvalWorkState,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvalDependencyEdge {
     pub parent: EvalNodeId,
     pub child: EvalNodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalNodeKind {
+    SyntheticRoot,
+    ArgumentBinding { label: Arc<str> },
+    Expr { kind: EvalExprKind },
+    PendingToken { description: Arc<str> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalNodeRecord {
+    pub node_id: EvalNodeId,
+    pub parent_id: Option<EvalNodeId>,
+    pub kind: EvalNodeKind,
+    pub source: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +160,31 @@ pub struct EvalRunnableNode {
     pub pending: Option<PendingRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalGraphNode {
+    pub node_id: EvalNodeId,
+    pub record: Option<EvalNodeRecord>,
+    pub state: Option<EvalNodeState>,
+    pub dependencies: Vec<EvalNodeId>,
+    pub dependents: Vec<EvalNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalGraphSnapshot {
+    pub nodes: Vec<EvalGraphNode>,
+    pub work: Vec<EvalWorkRecord>,
+    pub pending: Vec<PendingRef>,
+    pub completed: Option<Result<Value, EvalError>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvalSessionCheckpoint {
+    scheduler: EvalScheduler,
+    trace: EvalTrace,
+    completed_work: Vec<EvalCompletedWork>,
+    completed: Option<Result<Value, EvalError>>,
+}
+
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     source: String,
     source_id: String,
@@ -143,7 +196,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     trace: EvalTrace,
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
-    history: Vec<EvalSessionSnapshot>,
+    history: Vec<EvalSessionCheckpoint>,
 }
 
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
@@ -204,12 +257,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             });
         }
 
-        let snapshot = EvalSessionSnapshot {
-            scheduler: self.scheduler.clone(),
-            trace: self.trace.clone(),
-            completed_work: self.completed_work.clone(),
-            completed: self.completed.clone(),
-        };
+        let snapshot = self.checkpoint();
 
         let Some(record) = self.scheduler.pop_ready_task() else {
             return Ok(match self.scheduler.pending_nodes().into_iter().next() {
@@ -234,6 +282,17 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             ReadyTask::StartEntry => {
                 let prepared = prepare_entry(&mut state, &self.source, &self.entry, &self.args)?;
                 let node_id = state.alloc_node_id();
+                let body_kind = expr_kind(&prepared.body);
+                let body_source = state.source.span_for_node(&prepared.body);
+                state
+                    .scheduler
+                    .record_dependency(ENTRY_WORK_NODE_ID, node_id);
+                state.scheduler.record_node(EvalNodeRecord {
+                    node_id,
+                    parent_id: Some(ENTRY_WORK_NODE_ID),
+                    kind: EvalNodeKind::Expr { kind: body_kind },
+                    source: Some(body_source),
+                });
                 let work = state.scheduler.enqueue_ready_task(
                     ReadyTask::EvaluateExpr(ScheduledExpr {
                         expr: prepared.body,
@@ -366,10 +425,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         let Some(snapshot) = self.history.pop() else {
             return false;
         };
-        self.scheduler = snapshot.scheduler;
-        self.trace = snapshot.trace;
-        self.completed_work = snapshot.completed_work;
-        self.completed = snapshot.completed;
+        self.restore(snapshot);
         true
     }
 
@@ -383,6 +439,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.scheduler.node_state(node_id)
+    }
+
+    pub fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.scheduler.node_record(node_id)
+    }
+
+    pub fn node_records(&self) -> Vec<EvalNodeRecord> {
+        self.scheduler.node_records()
     }
 
     pub fn dependency_edges(&self) -> &[EvalDependencyEdge] {
@@ -399,6 +463,86 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
         &self.completed_work
+    }
+
+    pub fn checkpoint(&self) -> EvalSessionCheckpoint {
+        EvalSessionCheckpoint {
+            scheduler: self.scheduler.clone(),
+            trace: self.trace.clone(),
+            completed_work: self.completed_work.clone(),
+            completed: self.completed.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, checkpoint: EvalSessionCheckpoint) {
+        self.scheduler = checkpoint.scheduler;
+        self.trace = checkpoint.trace;
+        self.completed_work = checkpoint.completed_work;
+        self.completed = checkpoint.completed;
+    }
+
+    pub fn work_records(&self) -> Vec<EvalWorkRecord> {
+        let mut records = self
+            .completed_work
+            .iter()
+            .map(|completed| EvalWorkRecord {
+                work: completed.work.clone(),
+                state: EvalWorkState::Completed(completed.outcome.clone()),
+            })
+            .collect::<Vec<_>>();
+        records.extend(
+            self.scheduler
+                .queued_work()
+                .into_iter()
+                .map(|work| EvalWorkRecord {
+                    work,
+                    state: EvalWorkState::Queued,
+                }),
+        );
+        records.sort_by_key(|record| record.work.id);
+        records
+    }
+
+    pub fn graph_snapshot(&self) -> EvalGraphSnapshot {
+        let mut node_ids = self
+            .scheduler
+            .node_records
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        node_ids.extend(self.scheduler.node_states.keys().copied());
+        for edge in &self.scheduler.dependency_edges {
+            node_ids.push(edge.parent);
+            node_ids.push(edge.child);
+        }
+        node_ids.sort();
+        node_ids.dedup();
+
+        let mut dependencies = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
+        let mut dependents = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
+        for edge in &self.scheduler.dependency_edges {
+            dependencies
+                .entry(edge.parent)
+                .or_default()
+                .push(edge.child);
+            dependents.entry(edge.child).or_default().push(edge.parent);
+        }
+
+        EvalGraphSnapshot {
+            nodes: node_ids
+                .into_iter()
+                .map(|node_id| EvalGraphNode {
+                    node_id,
+                    record: self.scheduler.node_record(node_id).cloned(),
+                    state: self.scheduler.node_state(node_id).cloned(),
+                    dependencies: dependencies.remove(&node_id).unwrap_or_default(),
+                    dependents: dependents.remove(&node_id).unwrap_or_default(),
+                })
+                .collect(),
+            work: self.work_records(),
+            pending: self.pending_nodes(),
+            completed: self.completed.clone(),
+        }
     }
 }
 
@@ -617,18 +761,11 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
 }
 
 #[derive(Debug, Clone)]
-struct EvalSessionSnapshot {
-    scheduler: EvalScheduler,
-    trace: EvalTrace,
-    completed_work: Vec<EvalCompletedWork>,
-    completed: Option<Result<Value, EvalError>>,
-}
-
-#[derive(Debug, Clone)]
 struct EvalScheduler {
     next_id: u64,
     next_work_id: u64,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
+    node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
     dependency_edges: Vec<EvalDependencyEdge>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
@@ -644,6 +781,7 @@ impl Default for EvalScheduler {
             next_id: 1,
             next_work_id: 1,
             node_states: BTreeMap::new(),
+            node_records: BTreeMap::new(),
             dependency_edges: Vec::new(),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
@@ -978,6 +1116,18 @@ impl EvalScheduler {
         &self.dependency_edges
     }
 
+    fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.node_records.get(&node_id)
+    }
+
+    fn node_records(&self) -> Vec<EvalNodeRecord> {
+        self.node_records.values().cloned().collect()
+    }
+
+    fn record_node(&mut self, record: EvalNodeRecord) {
+        self.node_records.entry(record.node_id).or_insert(record);
+    }
+
     fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
         self.dependency_edges
             .push(EvalDependencyEdge { parent, child });
@@ -1004,6 +1154,12 @@ impl EvalScheduler {
     }
 
     fn enqueue_start_entry(&mut self) -> EvalQueuedWork {
+        self.record_node(EvalNodeRecord {
+            node_id: ENTRY_WORK_NODE_ID,
+            parent_id: None,
+            kind: EvalNodeKind::SyntheticRoot,
+            source: None,
+        });
         let work = self.enqueue_ready_task(
             ReadyTask::StartEntry,
             EvalWorkKind::StartEntry,
@@ -1028,9 +1184,16 @@ impl EvalScheduler {
 
     fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
         let pending_id = self.alloc_node_id();
-        let pending = PendingRef::new(pending_id.0, description);
+        let description = description.into();
+        let pending = PendingRef::new(pending_id.0, description.clone());
         self.pending_kinds
             .insert(pending.node_id, PendingKind::External);
+        self.record_node(EvalNodeRecord {
+            node_id: pending_id,
+            parent_id: None,
+            kind: EvalNodeKind::PendingToken { description },
+            source: None,
+        });
         pending
     }
 
@@ -1348,6 +1511,14 @@ fn bind_arguments(
                 label: Arc::from(label.as_str()),
             },
         );
+        state.scheduler.record_node(EvalNodeRecord {
+            node_id,
+            parent_id,
+            kind: EvalNodeKind::ArgumentBinding {
+                label: Arc::from(label.as_str()),
+            },
+            source: Some(state.source.span_for_token(&name)),
+        });
         let bound = arg.clone().with_provenance(Provenance::runtime_input(
             state.source.span_for_token(&name),
             RuntimeInputKind::Argument,
@@ -1374,13 +1545,19 @@ fn eval_expr_with_node_id(
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
     let parent_id = state.current_parent();
+    let kind = expr_kind(expr);
+    let source = state.source.span_for_node(expr);
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id,
+        parent_id,
+        kind: EvalNodeKind::Expr { kind },
+        source: Some(source.clone()),
+    });
     state.emit(
         node_id,
         parent_id,
-        Some(state.source.span_for_node(expr)),
-        EvalEventKind::EnterExpr {
-            kind: expr_kind(expr),
-        },
+        Some(source),
+        EvalEventKind::EnterExpr { kind },
     );
     state.stack.push(node_id);
 
@@ -1438,6 +1615,14 @@ fn eval_child_expr(
     if !state.queue_child_work {
         return eval_expr_with_node_id(state, child_id, expr, env);
     }
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: expr_kind(expr),
+        },
+        source: Some(state.source.span_for_node(expr)),
+    });
     let work = state.scheduler.enqueue_ready_task(
         ReadyTask::EvaluateExpr(ScheduledExpr {
             expr: expr.clone(),
