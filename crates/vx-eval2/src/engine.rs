@@ -143,6 +143,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     trace: EvalTrace,
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
+    history: Vec<EvalSessionSnapshot>,
 }
 
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
@@ -167,6 +168,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             trace: EvalTrace::default(),
             completed_work: Vec::new(),
             completed: None,
+            history: Vec::new(),
         }
     }
 
@@ -202,12 +204,20 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             });
         }
 
+        let snapshot = EvalSessionSnapshot {
+            scheduler: self.scheduler.clone(),
+            trace: self.trace.clone(),
+            completed_work: self.completed_work.clone(),
+            completed: self.completed.clone(),
+        };
+
         let Some(record) = self.scheduler.pop_ready_task() else {
             return Ok(match self.scheduler.pending_nodes().into_iter().next() {
                 Some(pending) => EvalSessionStep::Pending(pending),
                 None => EvalSessionStep::Idle,
             });
         };
+        self.history.push(snapshot);
 
         let source = SourceContext::new(self.source_id.clone(), &self.source);
         let mut state = EvalState::new(
@@ -346,6 +356,21 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn pending_nodes(&self) -> Vec<PendingRef> {
         self.scheduler.pending_nodes()
+    }
+
+    pub fn can_step_back(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    pub fn step_back(&mut self) -> bool {
+        let Some(snapshot) = self.history.pop() else {
+            return false;
+        };
+        self.scheduler = snapshot.scheduler;
+        self.trace = snapshot.trace;
+        self.completed_work = snapshot.completed_work;
+        self.completed = snapshot.completed;
+        true
     }
 
     pub fn queued_work(&self) -> Vec<EvalQueuedWork> {
@@ -591,6 +616,15 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
     stack: Vec<EvalNodeId>,
 }
 
+#[derive(Debug, Clone)]
+struct EvalSessionSnapshot {
+    scheduler: EvalScheduler,
+    trace: EvalTrace,
+    completed_work: Vec<EvalCompletedWork>,
+    completed: Option<Result<Value, EvalError>>,
+}
+
+#[derive(Debug, Clone)]
 struct EvalScheduler {
     next_id: u64,
     next_work_id: u64,

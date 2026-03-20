@@ -727,6 +727,68 @@ fn session_exposes_dependency_edges_and_blocked_node_explanations() {
 }
 
 #[test]
+fn session_can_step_back_to_a_prior_scheduler_state() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls,
+        host_wait_calls,
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); os }",
+        "session-step-back",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    let root_work = session.queued_work();
+    let root_node = root_work[0].node_id;
+
+    assert_eq!(
+        session.step().expect("root expression step"),
+        EvalSessionStep::Progressed
+    );
+    let child_work = session.queued_work();
+    let child_node = child_work[0].node_id;
+    assert_eq!(
+        session.node_state(root_node),
+        Some(&EvalNodeState::BlockedOnNode {
+            dependency: child_node,
+        }),
+    );
+    assert!(session.can_step_back());
+
+    assert!(session.step_back());
+    let queued_after_rewind = session.queued_work();
+    assert_eq!(queued_after_rewind.len(), 1);
+    assert_eq!(queued_after_rewind[0].kind, EvalWorkKind::EvaluateExpr);
+    assert_eq!(queued_after_rewind[0].node_id, root_node);
+    assert_eq!(
+        session.node_state(root_node),
+        Some(&EvalNodeState::Runnable {
+            work: queued_after_rewind[0].id,
+            pending: None,
+        }),
+    );
+    assert!(session.dependency_edges().is_empty());
+    assert_eq!(session.completed_work().len(), 1);
+
+    assert!(session.step_back());
+    let queued_at_start = session.queued_work();
+    assert_eq!(queued_at_start.len(), 1);
+    assert_eq!(queued_at_start[0].kind, EvalWorkKind::StartEntry);
+    assert_eq!(queued_at_start[0].node_id, EvalNodeId(0));
+    assert!(session.completed_work().is_empty());
+    assert!(!session.step_back());
+}
+
+#[test]
 fn session_resume_does_not_replay_ready_runtime_calls_before_pending_point() {
     let host_os_calls = Arc::new(AtomicUsize::new(0));
     let host_wait_calls = Arc::new(AtomicUsize::new(0));
