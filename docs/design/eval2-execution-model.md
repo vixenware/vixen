@@ -286,6 +286,12 @@ have at most one active leased wave at a time:
   debugger to infer it from raw work tables
 - the next wave does not start until the current wave has reported all worker
   outcomes and committed everything that is deterministically committable
+- wave failure is atomic from the live session's point of view:
+  - workers all report their outcome first
+  - if any worker panics, `run_parallel()` resumes unwind on the caller thread
+  - if any worker returns `Err(EvalError)`, `run_parallel()` returns that error
+  - in either failure case, the session rolls back to its pre-wave state
+  - only a fully successful wave is applied back to live session state
 
 This keeps the parallel story inspectable without claiming a more general task
 VM than eval2 actually has.
@@ -360,8 +366,21 @@ The current local-resume session is also useful in its own right:
   order
 - a worker panic now unwinds through `run_parallel()` instead of silently
   turning into an infinite wait
+- a failed parallel wave now rolls back instead of leaving the live session
+  half-committed
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
+
+An opaque branch context also lives in the session-owned kernel now. It is
+semantically inert today, but it already survives:
+
+- checkpoint / restore
+- lease / prepared work execution
+- completion apply
+
+That is the reserved place for later branch-local assumptions. Those are not
+intended to be global joined facts, and they should not require another
+scheduler rewrite just to gain a stable home.
 
 ## Settled scheduler contract
 
@@ -390,6 +409,9 @@ A session can currently be observed in these scheduler states:
   single-threaded driver
 - a worker panic is surfaced by resuming unwind on the caller thread; it is not
   converted into silent waiting or dropped as hidden scheduler state
+- one wave either commits as a unit or leaves the live session untouched
+- branch context survives checkpoint / restore / lease / completion without
+  changing current language semantics
 
 ### Still intentionally unsupported
 

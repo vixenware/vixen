@@ -9,12 +9,12 @@ use std::{
 };
 
 use crate::{
-    Claim, CrossingPolicy, EvalCompletedWorkOutcome, EvalDependencyEdge, EvalError, EvalErrorKind,
-    EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState, EvalNodeId, EvalNodeKind,
-    EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState,
-    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome,
-    RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id_traced,
+    Claim, CrossingPolicy, EvalBranchContext, EvalCompletedWorkOutcome, EvalDependencyEdge,
+    EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
+    EvalNodeId, EvalNodeKind, EvalNodeState, EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind,
+    EvalWorkState, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
+    RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace,
+    envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -382,10 +382,16 @@ impl RuntimeHooks for PanicRuntime {
         place: &str,
         callee: &str,
         _args: &[Value],
-        _source: &SourceSpan,
+        source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
         match (place, callee) {
             ("win", "panic_now") => panic!("panic runtime hook exploded"),
+            ("win", "host_os") => Ok(RuntimeCallOutcome::Ready(
+                Value::string("windows")
+                    .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                    .with_reuse(ReuseClass::Observed)
+                    .with_crossing(CrossingPolicy::ByValue),
+            )),
             _ => Ok(RuntimeCallOutcome::Unsupported),
         }
     }
@@ -2191,15 +2197,83 @@ fn run_parallel_returns_waiting_when_external_in_flight_work_blocks_commit() {
 }
 
 #[test]
+fn run_parallel_leaves_wave_uncommitted_when_one_worker_returns_error() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "parallel-error-wave",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+    session.set_branch_context(EvalBranchContext::new("__test_worker_error__"));
+
+    let before_graph = session.graph_snapshot();
+    let before_work = session.work_records();
+    let before_completed = session.completed_work().to_vec();
+    let before_trace = session.trace().clone();
+    let before_active_wave = session.active_wave();
+    let before_in_flight = session.in_flight_work();
+    let before_buffered = session.buffered_work();
+
+    let error = session
+        .run_parallel(2)
+        .expect_err("wave error should surface");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert_eq!(error.message.as_ref(), "injected test worker error");
+    assert_eq!(session.graph_snapshot(), before_graph);
+    assert_eq!(session.work_records(), before_work);
+    assert_eq!(session.completed_work(), before_completed.as_slice());
+    assert_eq!(session.trace(), &before_trace);
+    assert_eq!(session.active_wave(), before_active_wave);
+    assert_eq!(session.in_flight_work(), before_in_flight);
+    assert_eq!(session.buffered_work(), before_buffered);
+}
+
+#[test]
 fn run_parallel_surfaces_worker_panics_instead_of_waiting_forever() {
     let mut session = EvalSession::new(
-        "fn build() { panic_now() }",
+        "fn build() { [panic_now(), host_os()] }",
         "parallel-panic",
         "build",
         Vec::new(),
         &PanicRuntime,
         "win",
     );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let before_graph = session.graph_snapshot();
+    let before_work = session.work_records();
+    let before_completed = session.completed_work().to_vec();
+    let before_trace = session.trace().clone();
+    let before_active_wave = session.active_wave();
+    let before_in_flight = session.in_flight_work();
+    let before_buffered = session.buffered_work();
 
     let panic = catch_unwind(AssertUnwindSafe(|| session.run_parallel(2)))
         .expect_err("worker panic should unwind through run_parallel");
@@ -2212,6 +2286,147 @@ fn run_parallel_surfaces_worker_panics_instead_of_waiting_forever() {
         message.contains("panic runtime hook exploded"),
         "unexpected panic payload: {message}",
     );
+    assert_eq!(session.graph_snapshot(), before_graph);
+    assert_eq!(session.work_records(), before_work);
+    assert_eq!(session.completed_work(), before_completed.as_slice());
+    assert_eq!(session.trace(), &before_trace);
+    assert_eq!(session.active_wave(), before_active_wave);
+    assert_eq!(session.in_flight_work(), before_in_flight);
+    assert_eq!(session.buffered_work(), before_buffered);
+}
+
+#[test]
+fn failed_wave_completions_do_not_become_usable_on_retry() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "parallel-retry",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+    session.set_branch_context(EvalBranchContext::new("__test_worker_error__"));
+    let before_graph = session.graph_snapshot();
+    let before_work = session.work_records();
+    let before_completed = session.completed_work().to_vec();
+
+    let error = session
+        .run_parallel(2)
+        .expect_err("first wave should fail before commit");
+    assert_eq!(error.kind, EvalErrorKind::Internal);
+    assert_eq!(error.message.as_ref(), "injected test worker error");
+    assert_eq!(session.graph_snapshot(), before_graph);
+    assert_eq!(session.work_records(), before_work);
+    assert_eq!(session.completed_work(), before_completed.as_slice());
+    assert!(session.in_flight_work().is_empty());
+    assert!(session.buffered_work().is_empty());
+    assert!(session.active_wave().is_none());
+    session.set_branch_context(EvalBranchContext::new("retry-ok"));
+
+    let resolution = session
+        .run_parallel(2)
+        .expect("retry should lease fresh work and succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution on retry, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| match &item.rep {
+                ValueRep::String(value) => value.as_ref().to_string(),
+                other => panic!("expected string item, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec!["windows".to_string(), "windows".to_string()],
+    );
+}
+
+#[test]
+fn branch_context_survives_checkpoint_restore() {
+    let mut session = EvalSession::new(
+        "fn build() { host_os() }",
+        "branch-context-checkpoint",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+    let original = EvalBranchContext::new("alpha");
+    session.set_branch_context(original.clone());
+    let checkpoint = session.checkpoint();
+
+    session.set_branch_context(EvalBranchContext::new("beta"));
+    assert_ne!(session.branch_context(), &original);
+
+    session.restore(checkpoint);
+    assert_eq!(session.branch_context(), &original);
+    assert_eq!(session.graph_snapshot().branch_context, original);
+}
+
+#[test]
+fn branch_context_survives_prepare_execute_and_apply_completion() {
+    let mut session = EvalSession::new(
+        "fn build() { host_os() }",
+        "branch-context-prepare",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+    let context = EvalBranchContext::new("branch-a");
+    session.set_branch_context(context.clone());
+
+    let prepared = session
+        .prepare_step()
+        .expect("start-entry work should exist");
+    assert_eq!(prepared.branch_context(), &context);
+    let completion = prepared.execute().expect("prepared work should execute");
+    assert_eq!(completion.branch_context(), &context);
+    let _step = session
+        .apply_completion(completion)
+        .expect("completion should apply");
+    assert_eq!(session.branch_context(), &context);
+    assert_eq!(session.graph_snapshot().branch_context, context);
+}
+
+#[test]
+fn branch_context_does_not_leak_across_unrelated_sessions() {
+    let mut first = EvalSession::new(
+        "fn build() { host_os() }",
+        "branch-context-first",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+    let second = EvalSession::new(
+        "fn build() { host_os() }",
+        "branch-context-second",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let first_context = EvalBranchContext::new("first-branch");
+    first.set_branch_context(first_context.clone());
+    assert_eq!(first.branch_context(), &first_context);
+    assert_eq!(second.branch_context(), &EvalBranchContext::default());
 }
 
 #[test]

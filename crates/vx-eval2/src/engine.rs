@@ -55,6 +55,17 @@ pub struct EvalWorkId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalWaveId(pub u64);
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EvalBranchContext {
+    key: Arc<str>,
+}
+
+impl EvalBranchContext {
+    pub fn new(key: impl Into<Arc<str>>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalWorkKind {
     StartEntry,
@@ -213,6 +224,7 @@ pub struct EvalGraphNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalGraphSnapshot {
+    pub branch_context: EvalBranchContext,
     pub nodes: Vec<EvalGraphNode>,
     pub work: Vec<EvalWorkRecord>,
     pub active_wave: Option<EvalActiveWave>,
@@ -222,6 +234,7 @@ pub struct EvalGraphSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
+    branch_context: EvalBranchContext,
     scheduler: EvalScheduler,
     trace: EvalTrace,
     completed_work: Vec<EvalCompletedWork>,
@@ -234,6 +247,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     args: Vec<Value>,
     runtime: &'runtime Runtime,
     place: String,
+    branch_context: EvalBranchContext,
     wave_id: EvalWaveId,
     lease_sequence: u64,
     scheduler: EvalScheduler,
@@ -242,6 +256,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
 
 #[derive(Debug, Clone)]
 pub struct EvalWorkCompletion {
+    branch_context: EvalBranchContext,
     wave_id: EvalWaveId,
     lease_sequence: u64,
     work: EvalQueuedWork,
@@ -273,6 +288,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     args: Vec<Value>,
     runtime: &'runtime Runtime,
     place: String,
+    branch_context: EvalBranchContext,
     scheduler: EvalScheduler,
     trace: EvalTrace,
     completed_work: Vec<EvalCompletedWork>,
@@ -299,6 +315,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args,
             runtime,
             place: place.into(),
+            branch_context: EvalBranchContext::default(),
             scheduler,
             trace: EvalTrace::default(),
             completed_work: Vec::new(),
@@ -340,6 +357,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         thread::scope(|scope| -> Result<Resolution, EvalError> {
             loop {
+                let wave_checkpoint = self.checkpoint();
                 let prepared = self.lease_parallel_wave(max_workers)?;
                 if prepared.is_empty() {
                     return Ok(resolution_without_ready_work(
@@ -347,7 +365,19 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                         &self.completed,
                     ));
                 }
-                self.execute_parallel_wave(scope, prepared)?;
+                match catch_unwind(AssertUnwindSafe(|| {
+                    self.execute_parallel_wave(scope, prepared)
+                })) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        self.restore(wave_checkpoint);
+                        return Err(error);
+                    }
+                    Err(payload) => {
+                        self.restore(wave_checkpoint);
+                        resume_unwind(payload);
+                    }
+                }
             }
         })
     }
@@ -388,6 +418,15 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn pending_nodes(&self) -> Vec<PendingRef> {
         self.scheduler.pending_nodes()
+    }
+
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
+    pub fn set_branch_context(&mut self, branch_context: EvalBranchContext) {
+        self.branch_context = branch_context;
+        self.generation += 1;
     }
 
     pub fn can_step_back(&self) -> bool {
@@ -452,6 +491,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn checkpoint(&self) -> EvalSessionCheckpoint {
         EvalSessionCheckpoint {
+            branch_context: self.branch_context.clone(),
             scheduler: self.scheduler.clone(),
             trace: self.trace.clone(),
             completed_work: self.completed_work.clone(),
@@ -476,6 +516,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.next_wave_id = next_wave_id;
         self.scheduler.next_lease_sequence = next_lease_sequence;
         self.scheduler.next_lease_namespace = next_lease_namespace;
+        self.branch_context = checkpoint.branch_context;
         self.trace = checkpoint.trace;
         self.completed_work = checkpoint.completed_work;
         self.completed = checkpoint.completed;
@@ -508,6 +549,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args: self.args.clone(),
             runtime: self.runtime,
             place: self.place.clone(),
+            branch_context: self.branch_context.clone(),
             wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
             scheduler: self.scheduler.clone_for_lease(lease.namespace),
@@ -552,16 +594,34 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
         drop(completion_tx);
 
+        let mut completions = Vec::with_capacity(expected);
+        let mut first_error = None;
+        let mut first_panic = None;
         for _ in 0..expected {
             match completion_rx.recv().expect(
                 "parallel eval wave channel closed before all worker outcomes were reported",
             ) {
-                ParallelWorkerMessage::Completion(completion) => {
-                    let _step = self.apply_completion_impl(completion?, false)?;
+                ParallelWorkerMessage::Completion(Ok(completion)) => completions.push(completion),
+                ParallelWorkerMessage::Completion(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
-                ParallelWorkerMessage::Panic(payload) => resume_unwind(payload),
+                ParallelWorkerMessage::Panic(payload) => {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                }
             }
         }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        completions.sort_by_key(EvalWorkCompletion::lease_sequence);
+        let _step = self.apply_completion_batch_impl(completions, false)?;
         Ok(())
     }
 
@@ -572,49 +632,28 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.apply_completion_impl(completion, true)
     }
 
-    fn apply_completion_impl(
+    fn apply_completion_batch_impl(
         &mut self,
-        completion: EvalWorkCompletion,
+        completions: Vec<EvalWorkCompletion>,
         record_history: bool,
     ) -> Result<EvalSessionStep, EvalError> {
-        self.scheduler.validate_in_flight_task(
-            completion.work.id,
-            completion.lease_sequence,
-            &completion.work,
-        )?;
         let snapshot = record_history.then(|| self.checkpoint());
         let mut scheduler = self.scheduler.clone();
         let mut trace = self.trace.clone();
         let mut completed_work = self.completed_work.clone();
         let mut completed = self.completed.clone();
+        let mut step = None;
 
-        let step = if scheduler.can_commit_lease_sequence(completion.lease_sequence) {
-            let _leased = scheduler.take_in_flight_task(
-                completion.work.id,
-                completion.lease_sequence,
-                &completion.work,
-            )?;
-            let mut step = commit_completion(
+        for completion in completions {
+            step = Some(apply_completion_to_state(
                 &mut scheduler,
                 &mut trace,
                 &mut completed_work,
                 &mut completed,
+                &self.branch_context,
                 completion,
-            )?;
-            while let Some(buffered) = scheduler.take_next_committable_buffered_completion() {
-                step = commit_completion(
-                    &mut scheduler,
-                    &mut trace,
-                    &mut completed_work,
-                    &mut completed,
-                    buffered,
-                )?;
-            }
-            step
-        } else {
-            scheduler.buffer_completion(completion)?;
-            step_after_buffering(&scheduler, &completed)
-        };
+            )?);
+        }
         scheduler.clear_active_wave_if_idle();
 
         if let Some(snapshot) = snapshot {
@@ -625,7 +664,15 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.completed_work = completed_work;
         self.completed = completed;
         self.generation += 1;
-        Ok(step)
+        Ok(step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed)))
+    }
+
+    fn apply_completion_impl(
+        &mut self,
+        completion: EvalWorkCompletion,
+        record_history: bool,
+    ) -> Result<EvalSessionStep, EvalError> {
+        self.apply_completion_batch_impl(vec![completion], record_history)
     }
 
     pub fn work_records(&self) -> Vec<EvalWorkRecord> {
@@ -694,6 +741,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
 
         EvalGraphSnapshot {
+            branch_context: self.branch_context.clone(),
             nodes: node_ids
                 .into_iter()
                 .map(|node_id| EvalGraphNode {
@@ -713,6 +761,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 }
 
 impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
     pub fn work(&self) -> &EvalQueuedWork {
         &self.record.work
     }
@@ -728,11 +780,16 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             args,
             runtime,
             place,
+            branch_context,
             wave_id,
             lease_sequence,
             scheduler,
             record,
         } = self;
+        #[cfg(test)]
+        if let Some(error) = injected_worker_error(&branch_context, &record.work) {
+            return Err(error);
+        }
         let (delta, outcome) = execute_ready_task(
             program,
             &entry,
@@ -743,6 +800,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             record.clone(),
         )?;
         Ok(EvalWorkCompletion {
+            branch_context,
             wave_id,
             lease_sequence,
             work: record.work,
@@ -753,6 +811,17 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
 }
 
 #[cfg(test)]
+fn injected_worker_error(
+    branch_context: &EvalBranchContext,
+    work: &EvalQueuedWork,
+) -> Option<EvalError> {
+    (branch_context.key.as_ref() == "__test_worker_error__"
+        && matches!(work.kind, EvalWorkKind::EvaluateExpr)
+        && work.id.0 % 2 == 1)
+        .then(|| EvalError::new(EvalErrorKind::Internal, "injected test worker error"))
+}
+
+#[cfg(test)]
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     pub(crate) fn program_parse_count(&self) -> usize {
         self.program.parse_count()
@@ -760,6 +829,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 }
 
 impl EvalWorkCompletion {
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
     pub fn wave_id(&self) -> EvalWaveId {
         self.wave_id
     }
@@ -774,6 +847,43 @@ impl EvalWorkCompletion {
 
     pub fn lease_sequence(&self) -> u64 {
         self.lease_sequence
+    }
+}
+
+fn apply_completion_to_state(
+    scheduler: &mut EvalScheduler,
+    trace: &mut EvalTrace,
+    completed_work: &mut Vec<EvalCompletedWork>,
+    completed: &mut Option<Result<Value, EvalError>>,
+    branch_context: &EvalBranchContext,
+    completion: EvalWorkCompletion,
+) -> Result<EvalSessionStep, EvalError> {
+    if completion.branch_context != *branch_context {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "stale eval work completion for mismatched branch context",
+        ));
+    }
+    scheduler.validate_in_flight_task(
+        completion.work.id,
+        completion.lease_sequence,
+        &completion.work,
+    )?;
+
+    if scheduler.can_commit_lease_sequence(completion.lease_sequence) {
+        let _leased = scheduler.take_in_flight_task(
+            completion.work.id,
+            completion.lease_sequence,
+            &completion.work,
+        )?;
+        let mut step = commit_completion(scheduler, trace, completed_work, completed, completion)?;
+        while let Some(buffered) = scheduler.take_next_committable_buffered_completion() {
+            step = commit_completion(scheduler, trace, completed_work, completed, buffered)?;
+        }
+        Ok(step)
+    } else {
+        scheduler.buffer_completion(completion)?;
+        Ok(step_after_buffering(scheduler, completed))
     }
 }
 
