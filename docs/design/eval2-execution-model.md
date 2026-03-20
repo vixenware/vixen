@@ -75,9 +75,9 @@ evaluation. This is enough to:
 - attach later explanation data without relying on stack addresses or ad hoc
   logging
 
-These IDs are currently in-memory only. Within one session they are also stable
-across reruns as long as the same evaluation prefix is replayed, but they are
-not yet durable cross-run identities in the cache/debugger sense.
+These IDs are currently in-memory only. Within one session they stay stable
+across suspension and local resumption, but they are not yet durable cross-run
+identities in the cache/debugger sense.
 
 ### Event stream
 
@@ -164,25 +164,26 @@ The evaluator then:
 - registers that pending node in the trace
 - returns `Resolution::Pending(...)`
 
-The next small step beyond that is a resumable session:
+The next step beyond that is a resumable session with scheduler-owned state:
 
 - the session owns pending completions
 - the session owns the current node table
-- resumption works by rerunning from the root with the same deterministic node
-  IDs and substituting completed pending nodes when they are re-encountered
+- the scheduler owns a ready queue and a blocked-pending table
+- the ready queue can drive both a fresh entry evaluation and resumed work
+- suspension stores continuation frames for the active evaluation path
+- resumption continues locally from those frames instead of rerunning the root
 
-This is still not continuations. It is intentionally simpler than that.
-But it already keeps the allocator and identity source inside the evaluator
-rather than inside the runtime hook, and it lets pending nodes actually move
-from suspended to ready or poison.
+This is still not a full continuation machine or a parallel scheduler. It is
+already enough to move pending-node identity, wakeup, and local progress into
+the evaluator rather than the runtime hook.
 
 ## What this does not do yet
 
 This slice does not yet provide:
 
 - a retained dependency graph
-- explicit pending-node scheduling beyond rerun-based session resumption
-- resumable continuations
+- general runnable-node scheduling beyond continuation resumption
+- parked stack frames for arbitrary evaluation sites
 - parallel work stealing
 - reversible execution
 - a stable on-disk trace format
@@ -190,8 +191,9 @@ This slice does not yet provide:
 
 It is still a recursive single-threaded evaluator with a structured event sink.
 Some runtime calls can now surface `Pending`, and a session can later resume
-them by rerunning through the same node table. But there is not yet a scheduler
-that parks and resumes stack frames directly.
+them through a scheduler-owned ready/pending queue and stored continuation
+frames. But there is not yet a general node scheduler that can park and resume
+arbitrary work units independently of the recursive evaluator.
 
 ## Why this is still useful
 
@@ -224,21 +226,22 @@ When we later add:
 we can extend the existing event vocabulary instead of inventing a second
 observability surface from scratch.
 
-The rerun-based session is also useful in its own right:
+The current local-resume session is also useful in its own right:
 
 - it proves that pending node identities are evaluator-owned
 - it proves that results can move from pending to ready or poison
-- it gives the debugger/explainer story a real notion of "same node across
-  runs" before we commit to continuation storage
+- it proves that earlier ready work is not replayed just because a later node
+  suspended
+- it gives the debugger/explainer story a real notion of resumed execution
+  before we commit to a full task VM
 
 ## Next slices
 
 The likely follow-up steps are:
 
-1. add explicit dependency-edge events
+1. retain runnable node records instead of only suspension continuations
 2. separate "runtime call requested" from "runtime result delivered"
-3. introduce scheduler-owned pending nodes, even if the first scheduler stays
-   single-threaded
+3. make the ready queue handle more than resumed runtime-call suspensions
 4. define a replayable trace format for debugger/time-travel work
 
 Only after those are in place should we spend time on debugger UX.

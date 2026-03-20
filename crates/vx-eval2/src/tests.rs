@@ -1,4 +1,10 @@
-use std::thread;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+};
 
 use crate::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalNodeId,
@@ -214,6 +220,81 @@ impl RuntimeHooks for TestRuntime {
     }
 }
 
+struct CountingRuntime {
+    host_os_calls: Arc<AtomicUsize>,
+    host_wait_calls: Arc<AtomicUsize>,
+}
+
+impl RuntimeHooks for CountingRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        _args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (place, callee) {
+            ("win", "host_os") => {
+                self.host_os_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("windows")
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            ("win", "host_wait") => {
+                self.host_wait_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Pending {
+                    description: "waiting for remote host observation".into(),
+                })
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+struct DoublePendingRuntime {
+    host_os_calls: Arc<AtomicUsize>,
+    wait_one_calls: Arc<AtomicUsize>,
+    wait_two_calls: Arc<AtomicUsize>,
+}
+
+impl RuntimeHooks for DoublePendingRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        _args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (place, callee) {
+            ("win", "host_os") => {
+                self.host_os_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("windows")
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            ("win", "wait_one") => {
+                self.wait_one_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Pending {
+                    description: "waiting for first remote result".into(),
+                })
+            }
+            ("win", "wait_two") => {
+                self.wait_two_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(RuntimeCallOutcome::Pending {
+                    description: "waiting for second remote result".into(),
+                })
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
 #[test]
 fn traced_runtime_calls_emit_start_and_finish_events() {
     let (resolution, trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
@@ -394,6 +475,109 @@ fn session_can_resume_pending_runtime_call() {
             .any(|event| matches!(event.kind, EvalEventKind::RegisterPending { .. })),
         "session trace should retain the first suspension",
     );
+}
+
+#[test]
+fn session_resume_does_not_replay_ready_runtime_calls_before_pending_point() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls: host_os_calls.clone(),
+        host_wait_calls: host_wait_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); let wait = host_wait(); os }",
+        "session-local-resume",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let first = session.run().expect("first session run");
+    let Resolution::Pending(pending) = first else {
+        panic!("expected pending resolution, got {first:?}");
+    };
+    assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(host_wait_calls.load(Ordering::SeqCst), 1);
+
+    session
+        .resolve_pending(&pending, Value::string("done"))
+        .expect("resolve pending node");
+
+    let second = session.run().expect("second session run");
+    let Resolution::Ready(value) = second else {
+        panic!("expected ready resolution, got {second:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+    assert_eq!(
+        host_os_calls.load(Ordering::SeqCst),
+        1,
+        "ready runtime calls before the pending point should not rerun",
+    );
+    assert_eq!(
+        host_wait_calls.load(Ordering::SeqCst),
+        1,
+        "the pending runtime call should resume from the resolved value",
+    );
+}
+
+#[test]
+fn session_can_progress_through_multiple_pending_runtime_calls() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let wait_one_calls = Arc::new(AtomicUsize::new(0));
+    let wait_two_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = DoublePendingRuntime {
+        host_os_calls: host_os_calls.clone(),
+        wait_one_calls: wait_one_calls.clone(),
+        wait_two_calls: wait_two_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        "fn build() { let os = host_os(); let first = wait_one(); let second = wait_two(); os }",
+        "session-two-pending",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let first = session.run().expect("first session run");
+    let Resolution::Pending(first_pending) = first else {
+        panic!("expected first pending resolution, got {first:?}");
+    };
+    assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_one_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_two_calls.load(Ordering::SeqCst), 0);
+
+    session
+        .resolve_pending(&first_pending, Value::string("one"))
+        .expect("resolve first pending node");
+
+    let second = session.run().expect("second session run");
+    let Resolution::Pending(second_pending) = second else {
+        panic!("expected second pending resolution, got {second:?}");
+    };
+    assert_ne!(first_pending.node_id, second_pending.node_id);
+    assert_eq!(
+        host_os_calls.load(Ordering::SeqCst),
+        1,
+        "ready work before the first pending point should not replay",
+    );
+    assert_eq!(wait_one_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_two_calls.load(Ordering::SeqCst), 1);
+
+    session
+        .resolve_pending(&second_pending, Value::string("two"))
+        .expect("resolve second pending node");
+
+    let third = session.run().expect("third session run");
+    let Resolution::Ready(value) = third else {
+        panic!("expected ready resolution, got {third:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+    assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_one_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_two_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
