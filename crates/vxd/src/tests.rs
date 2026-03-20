@@ -3264,6 +3264,107 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_exec_reruns_cached_result_when_tracked_directory_changes() {
+    let store = StoreTestEnv::new().await;
+    let initial_root = build_merkle_tree(
+        &store.client,
+        vec![MerkleTreeFile {
+            path: "input.txt".to_string(),
+            kind: DirEntryKind::SmallFile {
+                content_hash: ContentHash(Blake3Hash::from_bytes(b"hello\n")),
+                size: 6,
+                executable: false,
+            },
+        }],
+    )
+    .await
+    .expect("build initial tree")
+    .0;
+    let requests = Arc::new(Mutex::new(Vec::<RunRequest>::new()));
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::DiscoverAndRecordRuns {
+            discover: TransportValue::String("unused".to_string()),
+            requests: Arc::clone(&requests),
+            run_result: RunResult {
+                success: true,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                observer_value: Some(static_tree_output("directory\n")),
+                tracked_observations: vec![RunTrackedObservation::Directory {
+                    path: "src".to_string(),
+                    directory_node: initial_root,
+                }],
+                poison: None,
+                error_kind: None,
+                error: None,
+            },
+        },
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let src = Tree(workspace / @src);
+  exec ["/bin/sh", "-c", "true"] where {
+    executor: executor_class("linux"),
+    mounts: %{ @src => src },
+    observer: (proc, out) => Tree %{
+      @ok.txt => Blob("observer should have been bypassed by fake runner"),
+    },
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+    fs::create_dir_all(workspace.path().join("src")).expect("create src dir");
+    fs::write(workspace.path().join("src/input.txt"), "hello\n").expect("write input");
+
+    let request = BuildRequest::new(workspace_root.to_owned());
+
+    let first = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("first build should succeed");
+    assert!(first.success, "first build failed: {:?}", first.failure);
+
+    fs::write(workspace.path().join("src/extra.txt"), "extra\n").expect("write extra file");
+
+    let second = env
+        .service
+        .do_build(request)
+        .await
+        .expect("second build should succeed");
+    assert!(second.success, "second build failed: {:?}", second.failure);
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(
+        requests.len(),
+        2,
+        "runner should be called again when a tracked directory snapshot changes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
     let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
         FakeRunnerBehavior::PanicOnBoundaryUse,
