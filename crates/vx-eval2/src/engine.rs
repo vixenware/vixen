@@ -10,9 +10,10 @@ use vx_parser::{
 };
 
 use crate::{
-    ByteOffset, ColumnIndex, CrossingPolicy, EvalError, EvalErrorKind, LineIndex, ProjectionStep,
-    Provenance, Resolution, ReuseClass, RuntimeInputKind, SourcePoint, SourceSpan, StructValue,
-    Value, ValueMeta, ValueRep,
+    ByteOffset, ColumnIndex, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind,
+    EvalEventSink, EvalExprKind, EvalNodeId, EvalTrace, LineIndex, NullEvalEventSink,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SourcePoint, SourceSpan,
+    StructValue, Value, ValueMeta, ValueRep,
 };
 
 pub trait RuntimeHooks {
@@ -43,6 +44,14 @@ pub fn eval_source_entry(source: &str, entry: &str) -> Result<Resolution, EvalEr
     eval_source_entry_with_source_id(source, "<memory>", entry)
 }
 
+pub fn eval_source_entry_with_source_id_traced(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+) -> Result<(Resolution, EvalTrace), EvalError> {
+    eval_source_entry_with_args_with_source_id_traced(source, source_id, entry, &[])
+}
+
 pub fn eval_source_entry_with_args(
     source: &str,
     entry: &str,
@@ -65,9 +74,40 @@ pub fn eval_source_entry_with_args_with_source_id(
     entry: &str,
     args: &[Value],
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_args_with_source_id(
-        source, source_id, entry, args, &NoRuntime, "local",
+    let mut sink = NullEvalEventSink;
+    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+        source, source_id, entry, args, &NoRuntime, "local", &mut sink,
     )
+}
+
+pub fn eval_source_entry_with_args_with_source_id_traced(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+) -> Result<(Resolution, EvalTrace), EvalError> {
+    let mut trace = EvalTrace::default();
+    let resolution = eval_source_entry_at_place_with_args_with_source_id_and_sink(
+        source, source_id, entry, args, &NoRuntime, "local", &mut trace,
+    )
+    .unwrap_or_else(Resolution::Poison);
+    Ok((resolution, trace))
+}
+
+pub fn eval_source_entry_at_place_with_args_with_source_id_traced(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+) -> Result<(Resolution, EvalTrace), EvalError> {
+    let mut trace = EvalTrace::default();
+    let resolution = eval_source_entry_at_place_with_args_with_source_id_and_sink(
+        source, source_id, entry, args, runtime, place, &mut trace,
+    )
+    .unwrap_or_else(Resolution::Poison);
+    Ok((resolution, trace))
 }
 
 pub fn eval_source_entry_at_place(
@@ -76,13 +116,15 @@ pub fn eval_source_entry_at_place(
     runtime: &impl RuntimeHooks,
     place: &str,
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_args_with_source_id(
+    let mut sink = NullEvalEventSink;
+    eval_source_entry_at_place_with_args_with_source_id_and_sink(
         source,
         "<memory>",
         entry,
         &[],
         runtime,
         place,
+        &mut sink,
     )
 }
 
@@ -93,13 +135,15 @@ pub fn eval_source_entry_at_place_with_source_id(
     runtime: &impl RuntimeHooks,
     place: &str,
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_args_with_source_id(
+    let mut sink = NullEvalEventSink;
+    eval_source_entry_at_place_with_args_with_source_id_and_sink(
         source,
         source_id,
         entry,
         &[],
         runtime,
         place,
+        &mut sink,
     )
 }
 
@@ -110,8 +154,9 @@ pub fn eval_source_entry_at_place_with_args(
     runtime: &impl RuntimeHooks,
     place: &str,
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_args_with_source_id(
-        source, "<memory>", entry, args, runtime, place,
+    let mut sink = NullEvalEventSink;
+    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+        source, "<memory>", entry, args, runtime, place, &mut sink,
     )
 }
 
@@ -122,6 +167,21 @@ pub fn eval_source_entry_at_place_with_args_with_source_id(
     args: &[Value],
     runtime: &impl RuntimeHooks,
     place: &str,
+) -> Result<Resolution, EvalError> {
+    let mut sink = NullEvalEventSink;
+    eval_source_entry_at_place_with_args_with_source_id_and_sink(
+        source, source_id, entry, args, runtime, place, &mut sink,
+    )
+}
+
+fn eval_source_entry_at_place_with_args_with_source_id_and_sink(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+    sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
     let parse = vx_parser::parse(source);
     if !parse.errors().is_empty() {
@@ -157,15 +217,67 @@ pub fn eval_source_entry_at_place_with_args_with_source_id(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let mut env = bind_arguments(&source, &parameters, args)?;
-    Ok(Resolution::Ready(eval_expr(
-        &source, &body, &mut env, runtime, place,
-    )?))
+    let mut state = EvalState::new(&source, runtime, place, sink);
+    let mut env = bind_arguments(&mut state, &parameters, args)?;
+    Ok(Resolution::Ready(eval_expr(&mut state, &body, &mut env)?))
 }
 
 struct SourceContext {
     source_id: String,
     line_index: ParserLineIndex,
+}
+
+struct EvalState<'a, Runtime, Sink> {
+    source: &'a SourceContext,
+    runtime: &'a Runtime,
+    place: &'a str,
+    sink: &'a mut Sink,
+    next_node_id: u64,
+    stack: Vec<EvalNodeId>,
+}
+
+impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink> {
+    fn new(
+        source: &'a SourceContext,
+        runtime: &'a Runtime,
+        place: &'a str,
+        sink: &'a mut Sink,
+    ) -> Self {
+        Self {
+            source,
+            runtime,
+            place,
+            sink,
+            next_node_id: 1,
+            stack: Vec::new(),
+        }
+    }
+
+    fn alloc_node_id(&mut self) -> EvalNodeId {
+        let node_id = EvalNodeId(self.next_node_id);
+        self.next_node_id += 1;
+        node_id
+    }
+
+    fn current_parent(&self) -> Option<EvalNodeId> {
+        self.stack.last().copied()
+    }
+
+    fn emit(
+        &mut self,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        source: Option<SourceSpan>,
+        kind: EvalEventKind,
+    ) {
+        self.sink.push(EvalEvent {
+            node_id,
+            parent_id,
+            place: Arc::from(self.place),
+            source,
+            kind,
+        });
+    }
 }
 
 impl SourceContext {
@@ -224,7 +336,7 @@ fn find_function(root: &SourceFile, entry: &str) -> Result<FnDecl, EvalError> {
 }
 
 fn bind_arguments(
-    source: &SourceContext,
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     parameters: &[Parameter],
     args: &[Value],
 ) -> Result<BTreeMap<String, Value>, EvalError> {
@@ -237,8 +349,18 @@ fn bind_arguments(
             )
         })?;
         let label = name.text().to_string();
+        let node_id = state.alloc_node_id();
+        let parent_id = state.current_parent();
+        state.emit(
+            node_id,
+            parent_id,
+            Some(state.source.span_for_token(&name)),
+            EvalEventKind::BindArgument {
+                label: Arc::from(label.as_str()),
+            },
+        );
         let bound = arg.clone().with_provenance(Provenance::runtime_input(
-            source.span_for_token(&name),
+            state.source.span_for_token(&name),
             RuntimeInputKind::Argument,
             label.clone(),
         ));
@@ -248,21 +370,31 @@ fn bind_arguments(
 }
 
 fn eval_expr(
-    source: &SourceContext,
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
-    runtime: &impl RuntimeHooks,
-    place: &str,
 ) -> Result<Value, EvalError> {
-    match expr {
+    let node_id = state.alloc_node_id();
+    let parent_id = state.current_parent();
+    state.emit(
+        node_id,
+        parent_id,
+        Some(state.source.span_for_node(expr)),
+        EvalEventKind::EnterExpr {
+            kind: expr_kind(expr),
+        },
+    );
+    state.stack.push(node_id);
+
+    let result = match expr {
         Expr::Block(block) => {
             let mut scope = env.clone();
             let mut last = Value::unit();
             for statement in block.statements() {
                 match statement {
-                    Stmt::Let(let_stmt) => eval_let(source, &let_stmt, &mut scope, runtime, place)?,
+                    Stmt::Let(let_stmt) => eval_let(state, &let_stmt, &mut scope)?,
                     Stmt::Expr(expr) => {
-                        last = eval_expr(source, &expr, &mut scope, runtime, place)?;
+                        last = eval_expr(state, &expr, &mut scope)?;
                     }
                     other => {
                         return Err(EvalError::new(
@@ -274,20 +406,18 @@ fn eval_expr(
             }
             Ok(last)
         }
-        Expr::Literal(literal) => eval_literal(source, literal),
+        Expr::Literal(literal) => eval_literal(state.source, literal),
         Expr::Paren(paren) => match paren.expr() {
-            Some(inner) => eval_expr(source, &inner, env, runtime, place),
+            Some(inner) => eval_expr(state, &inner, env),
             None => Ok(Value::unit()),
         },
         Expr::NameRef(name_ref) => eval_name_ref(name_ref, env),
-        Expr::Call(call) => eval_call(source, call, env, runtime, place),
+        Expr::Call(call) => eval_call(state, call, env),
         Expr::Array(array) => {
             let mut items = Vec::new();
             for item in array.items() {
                 match item {
-                    ArrayItem::Expr(expr) => {
-                        items.push(eval_expr(source, &expr, env, runtime, place)?)
-                    }
+                    ArrayItem::Expr(expr) => items.push(eval_expr(state, &expr, env)?),
                     ArrayItem::Spread(_) => {
                         return Err(EvalError::new(
                             EvalErrorKind::Internal,
@@ -296,7 +426,7 @@ fn eval_expr(
                     }
                 }
             }
-            let provenance = Provenance::literal(source.span_for_node(array));
+            let provenance = Provenance::literal(state.source.span_for_node(array));
             let meta = aggregate_child_meta(provenance, items.iter());
             Ok(Value::array(items).with_meta(meta))
         }
@@ -306,14 +436,14 @@ fn eval_expr(
                 let key_expr = entry.key().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "map entry has no explicit key")
                 })?;
-                let key = eval_expr(source, &key_expr, env, runtime, place)?;
+                let key = eval_expr(state, &key_expr, env)?;
                 let value_expr = entry.value().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "map entry has no value")
                 })?;
-                let value = eval_expr(source, &value_expr, env, runtime, place)?;
+                let value = eval_expr(state, &value_expr, env)?;
                 entries.push((key, value));
             }
-            let provenance = Provenance::literal(source.span_for_node(map));
+            let provenance = Provenance::literal(state.source.span_for_node(map));
             let meta = aggregate_child_meta(
                 provenance,
                 entries.iter().flat_map(|(key, value)| [key, value]),
@@ -322,13 +452,11 @@ fn eval_expr(
         }
         Expr::Fail(fail) => {
             let message = eval_expr(
-                source,
+                state,
                 &fail.message().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
                 })?,
                 env,
-                runtime,
-                place,
             )?;
             let ValueRep::String(message) = message.rep else {
                 return Err(EvalError::new(
@@ -340,13 +468,11 @@ fn eval_expr(
         }
         Expr::If(if_expr) => {
             let condition = eval_expr(
-                source,
+                state,
                 &if_expr.condition().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
                 })?,
                 env,
-                runtime,
-                place,
             )?;
             let ValueRep::Bool(value) = condition.rep else {
                 return Err(EvalError::new(
@@ -360,20 +486,16 @@ fn eval_expr(
                 if_expr.else_branch()
             }
             .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
-            eval_expr(source, &branch, env, runtime, place)
+            eval_expr(state, &branch, env)
         }
-        Expr::StructLiteral(struct_literal) => {
-            eval_struct_literal(source, struct_literal, env, runtime, place)
-        }
+        Expr::StructLiteral(struct_literal) => eval_struct_literal(state, struct_literal, env),
         Expr::Field(field) => {
             let receiver = eval_expr(
-                source,
+                state,
                 &field.receiver().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
                 })?,
                 env,
-                runtime,
-                place,
             )?;
             let field_name = field
                 .field_name()
@@ -405,15 +527,38 @@ fn eval_expr(
             EvalErrorKind::Internal,
             format!("unsupported expression: {other:?}"),
         )),
+    };
+
+    let popped = state.stack.pop();
+    debug_assert_eq!(popped, Some(node_id));
+    match &result {
+        Ok(value) => state.emit(
+            node_id,
+            parent_id,
+            None,
+            EvalEventKind::ExitReady {
+                reuse: value.meta.reuse.clone(),
+                crossing: value.meta.crossing.clone(),
+            },
+        ),
+        Err(error) => state.emit(
+            node_id,
+            parent_id,
+            None,
+            EvalEventKind::ExitPoison {
+                kind: error.kind,
+                message: error.message.clone(),
+            },
+        ),
     }
+
+    result
 }
 
 fn eval_call(
-    source: &SourceContext,
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
     env: &mut BTreeMap<String, Value>,
-    runtime: &impl RuntimeHooks,
-    place: &str,
 ) -> Result<Value, EvalError> {
     let callee = call
         .callee()
@@ -431,12 +576,48 @@ fn eval_call(
     let args = call
         .positional_args()
         .into_iter()
-        .map(|arg| eval_expr(source, &arg, env, runtime, place))
+        .map(|arg| eval_expr(state, &arg, env))
         .collect::<Result<Vec<_>, _>>()?;
-    let call_source = source.span_for_node(call);
-    if let Some(value) = runtime.call(place, &callee_name, &args, &call_source)? {
+    let call_source = state.source.span_for_node(call);
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("call expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    state.emit(
+        node_id,
+        parent_id,
+        Some(call_source.clone()),
+        EvalEventKind::RuntimeCallStarted {
+            callee: Arc::from(callee_name.as_str()),
+            argc: args.len() as u32,
+        },
+    );
+    if let Some(value) = state
+        .runtime
+        .call(state.place, &callee_name, &args, &call_source)?
+    {
+        state.emit(
+            node_id,
+            parent_id,
+            Some(call_source),
+            EvalEventKind::RuntimeCallFinishedReady {
+                reuse: value.meta.reuse.clone(),
+                crossing: value.meta.crossing.clone(),
+            },
+        );
         return Ok(value);
     }
+    state.emit(
+        node_id,
+        parent_id,
+        Some(call_source),
+        EvalEventKind::RuntimeCallFinishedPoison {
+            kind: EvalErrorKind::Internal,
+            message: Arc::from(format!("call target {callee_name} is not supported yet")),
+        },
+    );
     Err(EvalError::new(
         EvalErrorKind::Internal,
         format!("call target {callee_name} is not supported yet"),
@@ -444,27 +625,23 @@ fn eval_call(
 }
 
 fn eval_let(
-    source: &SourceContext,
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     let_stmt: &LetStmt,
     env: &mut BTreeMap<String, Value>,
-    runtime: &impl RuntimeHooks,
-    place: &str,
 ) -> Result<(), EvalError> {
     let name_token = let_stmt
         .name()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "let statement has no name"))?;
     let name = name_token.text().to_string();
     let value = eval_expr(
-        source,
+        state,
         &let_stmt
             .expr()
             .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "let statement has no value"))?,
         env,
-        runtime,
-        place,
     )?
     .with_provenance(Provenance::binding(
-        source.span_for_token(&name_token),
+        state.source.span_for_token(&name_token),
         name.clone(),
     ));
     env.insert(name, value);
@@ -488,11 +665,9 @@ fn eval_name_ref(
 }
 
 fn eval_struct_literal(
-    source: &SourceContext,
+    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
     struct_literal: &StructLiteralExpr,
     env: &mut BTreeMap<String, Value>,
-    runtime: &impl RuntimeHooks,
-    place: &str,
 ) -> Result<Value, EvalError> {
     let type_name = struct_literal
         .name()
@@ -511,19 +686,34 @@ fn eval_struct_literal(
                 })?,
         );
         let value = eval_expr(
-            source,
+            state,
             &field.expr().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "struct field has no value")
             })?,
             env,
-            runtime,
-            place,
         )?;
         fields.push((name, value));
     }
-    let provenance = Provenance::literal(source.span_for_node(struct_literal));
+    let provenance = Provenance::literal(state.source.span_for_node(struct_literal));
     let meta = aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
     Ok(Value::structure(type_name, fields).with_meta(meta))
+}
+
+fn expr_kind(expr: &Expr) -> EvalExprKind {
+    match expr {
+        Expr::Block(_) => EvalExprKind::Block,
+        Expr::Literal(_) => EvalExprKind::Literal,
+        Expr::Paren(_) => EvalExprKind::Paren,
+        Expr::NameRef(_) => EvalExprKind::NameRef,
+        Expr::Call(_) => EvalExprKind::Call,
+        Expr::Array(_) => EvalExprKind::Array,
+        Expr::Map(_) => EvalExprKind::Map,
+        Expr::Fail(_) => EvalExprKind::Fail,
+        Expr::If(_) => EvalExprKind::If,
+        Expr::StructLiteral(_) => EvalExprKind::StructLiteral,
+        Expr::Field(_) => EvalExprKind::Field,
+        _ => EvalExprKind::Unsupported,
+    }
 }
 
 fn aggregate_child_meta<'a>(

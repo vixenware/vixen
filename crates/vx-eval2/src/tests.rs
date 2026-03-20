@@ -1,7 +1,9 @@
 use crate::{
-    Claim, CrossingPolicy, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeInputKind, SourceSpan, Value, ValueRep, envelope_to_value,
-    eval_source_entry_with_args_with_source_id, value_to_envelope,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEventKind, PendingRef, ProjectionStep,
+    Provenance, Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind, SourceSpan, Value,
+    ValueRep, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
+    value_to_envelope,
 };
 
 #[test]
@@ -136,4 +138,155 @@ fn entry_argument_count_mismatch_is_a_type_error() {
             .message
             .contains("expects 1 positional argument(s), got 0")
     );
+}
+
+#[test]
+fn traced_entry_arguments_emit_binding_and_ready_events() {
+    let (resolution, trace) = eval_source_entry_with_args_with_source_id_traced(
+        "fn build(value: String) { value }",
+        "trace-bindings",
+        "build",
+        &[Value::string("forty-two")],
+    )
+    .expect("evaluate traced entry");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("forty-two".into()));
+
+    assert_eq!(
+        trace.events[0].kind,
+        EvalEventKind::BindArgument {
+            label: "value".into(),
+        },
+    );
+    assert_eq!(trace.events[0].node_id.0, 1);
+    assert_eq!(trace.events[0].parent_id, None);
+    assert_eq!(trace.events[0].place.as_ref(), "local");
+    assert_eq!(
+        trace.events[0]
+            .source
+            .as_ref()
+            .map(|source| source.source_id.as_str()),
+        Some("trace-bindings"),
+    );
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::EnterExpr {
+                kind: crate::EvalExprKind::NameRef,
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::ExitReady {
+                reuse: ReuseClass::Stable,
+                crossing: CrossingPolicy::ByValue,
+            }
+    }));
+}
+
+struct TestRuntime;
+
+impl RuntimeHooks for TestRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<Option<Value>, EvalError> {
+        match (place, callee, args) {
+            ("win", "host_os", []) => Ok(Some(
+                Value::string("windows")
+                    .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                    .with_reuse(ReuseClass::Observed)
+                    .with_crossing(CrossingPolicy::ByValue),
+            )),
+            _ => Ok(None),
+        }
+    }
+}
+
+#[test]
+fn traced_runtime_calls_emit_start_and_finish_events() {
+    let (resolution, trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
+        "fn build() { host_os() }",
+        "trace-runtime",
+        "build",
+        &[],
+        &TestRuntime,
+        "win",
+    )
+    .expect("evaluate traced runtime call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::EnterExpr {
+                kind: crate::EvalExprKind::Call,
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::RuntimeCallStarted {
+                callee: "host_os".into(),
+                argc: 0,
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::RuntimeCallFinishedReady {
+                reuse: ReuseClass::Observed,
+                crossing: CrossingPolicy::ByValue,
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::ExitReady {
+                reuse: ReuseClass::Observed,
+                crossing: CrossingPolicy::ByValue,
+            }
+    }));
+    assert!(
+        trace
+            .events
+            .iter()
+            .all(|event| event.place.as_ref() == "win")
+    );
+}
+
+#[test]
+fn traced_fail_expression_emits_poison_exit() {
+    let (resolution, trace) = eval_source_entry_with_args_with_source_id_traced(
+        "fn build() { fail \"boom\" }",
+        "trace-poison",
+        "build",
+        &[],
+    )
+    .expect("evaluate traced failure");
+
+    let Resolution::Poison(error) = resolution else {
+        panic!("expected poison resolution, got {resolution:?}");
+    };
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "boom");
+
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::EnterExpr {
+                kind: crate::EvalExprKind::Fail,
+            }
+    }));
+    assert!(trace.events.iter().any(|event| {
+        event.kind
+            == EvalEventKind::ExitPoison {
+                kind: EvalErrorKind::UserFail,
+                message: "boom".into(),
+            }
+    }));
 }
