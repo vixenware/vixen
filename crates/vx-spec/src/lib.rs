@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use facet::Facet;
-use facet_value::Value as DynamicValue;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -240,7 +239,7 @@ pub struct InvokeSpec {
     #[facet(default)]
     pub replay_place: Option<String>,
     #[facet(default)]
-    pub args: Vec<DynamicValue>,
+    pub args: Vec<SpecValue>,
     #[facet(default)]
     pub capabilities: Vec<String>,
     #[facet(default)]
@@ -271,7 +270,7 @@ pub struct InvokeOverrideSpec {
     #[facet(default)]
     pub replay_place: Option<String>,
     #[facet(default)]
-    pub args: Option<Vec<DynamicValue>>,
+    pub args: Option<Vec<SpecValue>>,
     #[facet(default)]
     pub capabilities: Option<Vec<String>>,
 }

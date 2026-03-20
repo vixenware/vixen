@@ -11,7 +11,7 @@ invoke {
 runs (
   {
     invoke {
-      args ("forty-one")
+      args (@string"forty-one")
     }
 
     expect {
@@ -21,7 +21,7 @@ runs (
 
   {
     invoke {
-      args ("forty-two")
+      args (@string"forty-two")
     }
 
     expect {

@@ -8,7 +8,6 @@ use std::sync::{
 
 use blake3::hash as blake3_hash;
 use camino::Utf8Path;
-use facet_value::Value as DynamicValue;
 use moire::task::FutureExt;
 use roam_core::{BareConduit, acceptor};
 use roam_stream::StreamLink;
@@ -78,7 +77,7 @@ fn run_case_local(
         .args
         .iter()
         .cloned()
-        .map(dynamic_to_eval2_value)
+        .map(spec_value_to_eval2_value)
         .collect::<Result<Vec<_>, _>>()?;
     match eval_source_entry_with_args_with_source_id(
         &case.main_source,
@@ -607,7 +606,7 @@ async fn run_rpc_invocation(
         .args
         .iter()
         .cloned()
-        .map(dynamic_to_eval2_value)
+        .map(spec_value_to_eval2_value)
         .collect::<Result<Vec<_>, _>>()?;
     let arg_envelopes = args
         .iter()
@@ -798,41 +797,40 @@ fn cache_outcome(
     });
 }
 
-fn dynamic_to_eval2_value(value: DynamicValue) -> Result<Value, std::io::Error> {
-    if value.is_null() {
-        return Ok(Value::unit());
+fn spec_value_to_eval2_value(value: SpecValue) -> Result<Value, std::io::Error> {
+    match value {
+        SpecValue::Unit(()) => Ok(Value::unit()),
+        SpecValue::Bool(value) => Ok(Value::bool(value)),
+        SpecValue::U64(value) => Ok(Value::u64(value)),
+        SpecValue::I64(value) => Err(std::io::Error::other(format!(
+            "eval2 fixture args do not support i64 values yet: {value}"
+        ))),
+        SpecValue::F64(value) => Err(std::io::Error::other(format!(
+            "eval2 fixture args do not support f64 values yet: {value}"
+        ))),
+        SpecValue::String(value) => Ok(Value::string(value)),
+        SpecValue::Array(items) => Ok(Value::array(
+            items
+                .into_iter()
+                .map(spec_value_to_eval2_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        SpecValue::Map(entries) => Ok(Value::map(
+            entries
+                .into_iter()
+                .map(|(key, value)| Ok((Value::string(key), spec_value_to_eval2_value(value)?)))
+                .collect::<Result<Vec<_>, std::io::Error>>()?,
+        )),
+        SpecValue::Struct(struct_spec) => Ok(Value::structure(
+            struct_spec.r#type,
+            struct_spec
+                .fields
+                .into_iter()
+                .map(|(name, value)| Ok((name.into(), spec_value_to_eval2_value(value)?)))
+                .collect::<Result<Vec<_>, std::io::Error>>()?,
+        )),
+        SpecValue::External(external) => Ok(Value::external(external.kind, external.descriptor)),
     }
-    if let Some(value) = value.as_bool() {
-        return Ok(Value::bool(value));
-    }
-    if let Some(number) = value.as_number().and_then(|number| number.to_u64()) {
-        return Ok(Value::u64(number));
-    }
-    if let Some(text) = value.as_string() {
-        return Ok(Value::string(text.as_str()));
-    }
-    if let Some(array) = value.as_array() {
-        let items = array
-            .iter()
-            .map(|item| dynamic_to_eval2_value(item.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(Value::array(items));
-    }
-    if let Some(object) = value.as_object() {
-        let entries = object
-            .iter()
-            .map(|(key, value)| {
-                Ok((
-                    Value::string(key.as_str()),
-                    dynamic_to_eval2_value(value.clone())?,
-                ))
-            })
-            .collect::<Result<Vec<_>, std::io::Error>>()?;
-        return Ok(Value::map(entries));
-    }
-    Err(std::io::Error::other(format!(
-        "dynamic argument value is not supported yet: {value:?}"
-    )))
 }
 
 fn verify_claims_against_runtime(

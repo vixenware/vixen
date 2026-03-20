@@ -27,7 +27,7 @@ runs (
   {
     invoke {
       place win
-      args ("cl.exe")
+      args (@string"cl.exe")
     }
 
     expect {
@@ -49,7 +49,7 @@ runs (
   {
     invoke {
       place win
-      args ("link.exe")
+      args (@string"link.exe")
     }
 
     expect {

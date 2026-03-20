@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use facet_value::Value as DynamicValue;
 use vx_eval::{CapabilitySet, Engine, Value, lower_source_file_with_source_id};
 use vx_parser::SourceFile;
 use vx_spec::{
@@ -49,7 +48,7 @@ async fn run_case(
         .args
         .iter()
         .cloned()
-        .map(dynamic_to_eval_value)
+        .map(spec_value_to_eval_value)
         .collect::<Result<Vec<_>, _>>()?;
     match engine.call(&invocation.invoke.entry, args).await {
         Ok(value) => Ok(SpecOutcome::Result(ObservedResult {
@@ -68,43 +67,46 @@ async fn run_case(
     }
 }
 
-fn dynamic_to_eval_value(value: DynamicValue) -> Result<Value, std::io::Error> {
-    if value.is_null() {
-        return Ok(Value::Unit);
+fn spec_value_to_eval_value(value: SpecValue) -> Result<Value, std::io::Error> {
+    match value {
+        SpecValue::Unit(()) => Ok(Value::Unit),
+        SpecValue::Bool(value) => Ok(Value::Bool(value)),
+        SpecValue::U64(value) => Ok(Value::U64(value)),
+        SpecValue::I64(value) => Ok(Value::I64(value)),
+        SpecValue::F64(value) => Ok(Value::F64(value)),
+        SpecValue::String(value) => Ok(Value::String(Arc::from(value))),
+        SpecValue::Array(items) => Ok(Value::Array(
+            items
+                .into_iter()
+                .map(spec_value_to_eval_value)
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+        )),
+        SpecValue::Map(entries) => Ok(Value::Map(vx_eval::MapValue {
+            entries: entries
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok((
+                        Value::String(Arc::from(key)),
+                        spec_value_to_eval_value(value)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, std::io::Error>>()?
+                .into(),
+        })),
+        SpecValue::Struct(struct_spec) => Ok(Value::Struct(vx_eval::StructValue {
+            type_name: Arc::from(struct_spec.r#type),
+            fields: struct_spec
+                .fields
+                .into_iter()
+                .map(|(name, value)| Ok((Arc::from(name), spec_value_to_eval_value(value)?)))
+                .collect::<Result<Vec<_>, std::io::Error>>()?
+                .into(),
+        })),
+        SpecValue::External(external) => Err(std::io::Error::other(format!(
+            "eval1 fixture args do not support external values yet: {external:?}"
+        ))),
     }
-    if let Some(value) = value.as_bool() {
-        return Ok(Value::Bool(value));
-    }
-    if let Some(number) = value.as_number().and_then(|number| number.to_u64()) {
-        return Ok(Value::U64(number));
-    }
-    if let Some(text) = value.as_string() {
-        return Ok(Value::String(Arc::from(text.as_str())));
-    }
-    if let Some(array) = value.as_array() {
-        let items = array
-            .iter()
-            .map(|item| dynamic_to_eval_value(item.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(Value::Array(items.into()));
-    }
-    if let Some(object) = value.as_object() {
-        let entries = object
-            .iter()
-            .map(|(key, value)| {
-                Ok((
-                    Value::String(Arc::from(key.as_str())),
-                    dynamic_to_eval_value(value.clone())?,
-                ))
-            })
-            .collect::<Result<Vec<_>, std::io::Error>>()?;
-        return Ok(Value::Map(vx_eval::MapValue {
-            entries: entries.into(),
-        }));
-    }
-    Err(std::io::Error::other(format!(
-        "dynamic argument value is not supported yet: {value:?}"
-    )))
 }
 
 fn eval_value_to_spec(value: &Value) -> Result<SpecValue, std::io::Error> {

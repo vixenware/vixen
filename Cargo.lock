@@ -4224,7 +4224,6 @@ dependencies = [
  "datatest-stable",
  "facet",
  "facet-styx",
- "facet-value",
  "thiserror 2.0.18",
 ]
 
