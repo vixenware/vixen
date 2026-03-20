@@ -75,8 +75,9 @@ evaluation. This is enough to:
 - attach later explanation data without relying on stack addresses or ad hoc
   logging
 
-These IDs are currently per-evaluation and in-memory only. They are not yet
-cross-run identities.
+These IDs are currently in-memory only. Within one session they are also stable
+across reruns as long as the same evaluation prefix is replayed, but they are
+not yet durable cross-run identities in the cache/debugger sense.
 
 ### Event stream
 
@@ -163,16 +164,24 @@ The evaluator then:
 - registers that pending node in the trace
 - returns `Resolution::Pending(...)`
 
-This is still not a resumable scheduler. It is the smallest "scheduler-owned
-pending node" shape that keeps the allocator and identity source inside the
-evaluator rather than inside the runtime hook.
+The next small step beyond that is a resumable session:
+
+- the session owns pending completions
+- the session owns the current node table
+- resumption works by rerunning from the root with the same deterministic node
+  IDs and substituting completed pending nodes when they are re-encountered
+
+This is still not continuations. It is intentionally simpler than that.
+But it already keeps the allocator and identity source inside the evaluator
+rather than inside the runtime hook, and it lets pending nodes actually move
+from suspended to ready or poison.
 
 ## What this does not do yet
 
 This slice does not yet provide:
 
 - a retained dependency graph
-- explicit pending-node scheduling
+- explicit pending-node scheduling beyond rerun-based session resumption
 - resumable continuations
 - parallel work stealing
 - reversible execution
@@ -180,8 +189,9 @@ This slice does not yet provide:
 - a debugger UI
 
 It is still a recursive single-threaded evaluator with a structured event sink.
-Some runtime calls can now surface `Pending`, but there is not yet a scheduler
-that can later resume those pending nodes.
+Some runtime calls can now surface `Pending`, and a session can later resume
+them by rerunning through the same node table. But there is not yet a scheduler
+that parks and resumes stack frames directly.
 
 ## Why this is still useful
 
@@ -213,6 +223,13 @@ When we later add:
 
 we can extend the existing event vocabulary instead of inventing a second
 observability surface from scratch.
+
+The rerun-based session is also useful in its own right:
+
+- it proves that pending node identities are evaluator-owned
+- it proves that results can move from pending to ready or poison
+- it gives the debugger/explainer story a real notion of "same node across
+  runs" before we commit to continuation storage
 
 ## Next slices
 

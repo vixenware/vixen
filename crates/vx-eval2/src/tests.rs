@@ -1,10 +1,10 @@
 use std::thread;
 
 use crate::{
-    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalTrace,
-    PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome,
-    RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id_traced,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalNodeId,
+    EvalNodeState, EvalSession, EvalTrace, PendingRef, ProjectionStep, Provenance, Resolution,
+    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep,
+    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -341,6 +341,59 @@ fn traced_runtime_calls_can_produce_pending_nodes() {
                 pending: pending.clone(),
             }
     }));
+}
+
+#[test]
+fn session_can_resume_pending_runtime_call() {
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "session-pending",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let first = session.run().expect("first session run");
+    let Resolution::Pending(pending) = first else {
+        panic!("expected pending resolution, got {first:?}");
+    };
+    assert_eq!(session.pending_nodes(), vec![pending.clone()]);
+    assert_eq!(
+        session.node_state(EvalNodeId(1)),
+        Some(&EvalNodeState::Pending(pending.clone()))
+    );
+    assert_eq!(
+        session.node_state(EvalNodeId(pending.node_id)),
+        Some(&EvalNodeState::Pending(pending.clone()))
+    );
+
+    session
+        .resolve_pending(&pending, Value::string("windows"))
+        .expect("resolve pending node");
+
+    let second = session.run().expect("second session run");
+    let Resolution::Ready(value) = second else {
+        panic!("expected ready resolution, got {second:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+    assert!(session.pending_nodes().is_empty());
+    assert_eq!(
+        session.node_state(EvalNodeId(1)),
+        Some(&EvalNodeState::Ready(Value::string("windows")))
+    );
+    assert_eq!(
+        session.node_state(EvalNodeId(pending.node_id)),
+        Some(&EvalNodeState::Ready(Value::string("windows")))
+    );
+    assert!(
+        session
+            .trace()
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EvalEventKind::RegisterPending { .. })),
+        "session trace should retain the first suspension",
+    );
 }
 
 #[test]

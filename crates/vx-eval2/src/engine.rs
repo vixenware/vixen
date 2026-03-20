@@ -33,6 +33,83 @@ pub enum RuntimeCallOutcome {
     Pending { description: Arc<str> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalNodeState {
+    Ready(Value),
+    Pending(PendingRef),
+    Poison(EvalError),
+}
+
+pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
+    source: String,
+    source_id: String,
+    entry: String,
+    args: Vec<Value>,
+    runtime: &'runtime Runtime,
+    place: String,
+    scheduler: EvalScheduler,
+    trace: EvalTrace,
+}
+
+impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
+    pub fn new(
+        source: impl Into<String>,
+        source_id: impl Into<String>,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            source_id: source_id.into(),
+            entry: entry.into(),
+            args,
+            runtime,
+            place: place.into(),
+            scheduler: EvalScheduler::default(),
+            trace: EvalTrace::default(),
+        }
+    }
+
+    pub fn run(&mut self) -> Result<Resolution, EvalError> {
+        eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
+            &self.source,
+            self.source_id.clone(),
+            &self.entry,
+            &self.args,
+            self.runtime,
+            &self.place,
+            &mut self.scheduler,
+            &mut self.trace,
+        )
+    }
+
+    pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
+        self.scheduler.resolve_pending(pending, Ok(value))
+    }
+
+    pub fn poison_pending(
+        &mut self,
+        pending: &PendingRef,
+        error: EvalError,
+    ) -> Result<(), EvalError> {
+        self.scheduler.resolve_pending(pending, Err(error))
+    }
+
+    pub fn pending_nodes(&self) -> Vec<PendingRef> {
+        self.scheduler.pending_nodes()
+    }
+
+    pub fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.scheduler.node_state(node_id)
+    }
+
+    pub fn trace(&self) -> &EvalTrace {
+        &self.trace
+    }
+}
+
 struct NoRuntime;
 
 impl RuntimeHooks for NoRuntime {
@@ -200,6 +277,30 @@ pub fn eval_source_entry_at_place_with_args_with_source_id_with_sink(
     place: &str,
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
+    let mut scheduler = EvalScheduler::default();
+    eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
+        source,
+        source_id,
+        entry,
+        args,
+        runtime,
+        place,
+        &mut scheduler,
+        sink,
+    )
+}
+
+fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+    scheduler: &mut EvalScheduler,
+    sink: &mut impl EvalEventSink,
+) -> Result<Resolution, EvalError> {
+    scheduler.begin_run();
     let parse = vx_parser::parse(source);
     if !parse.errors().is_empty() {
         return Err(EvalError::new(
@@ -234,7 +335,7 @@ pub fn eval_source_entry_at_place_with_args_with_source_id_with_sink(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let mut state = EvalState::new(&source, runtime, place, sink);
+    let mut state = EvalState::new(&source, runtime, place, sink, scheduler);
     let mut env = bind_arguments(&mut state, &parameters, args)?;
     Ok(eval_expr(&mut state, &body, &mut env)?.into_resolution())
 }
@@ -244,18 +345,21 @@ struct SourceContext {
     line_index: ParserLineIndex,
 }
 
-struct EvalState<'a, Runtime, Sink> {
-    source: &'a SourceContext,
-    runtime: &'a Runtime,
-    place: &'a str,
-    sink: &'a mut Sink,
-    scheduler: EvalScheduler,
+struct EvalState<'source, 'scheduler, Runtime, Sink> {
+    source: &'source SourceContext,
+    runtime: &'source Runtime,
+    place: &'source str,
+    sink: &'source mut Sink,
+    scheduler: &'scheduler mut EvalScheduler,
     stack: Vec<EvalNodeId>,
 }
 
 #[derive(Default)]
 struct EvalScheduler {
     next_id: u64,
+    node_states: BTreeMap<EvalNodeId, EvalNodeState>,
+    call_pending: BTreeMap<EvalNodeId, PendingRef>,
+    pending_results: BTreeMap<u64, Result<Value, EvalError>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,29 +368,28 @@ enum EvalStep {
     Pending(PendingRef),
 }
 
-impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink> {
+impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
+    EvalState<'source, 'scheduler, Runtime, Sink>
+{
     fn new(
-        source: &'a SourceContext,
-        runtime: &'a Runtime,
-        place: &'a str,
-        sink: &'a mut Sink,
+        source: &'source SourceContext,
+        runtime: &'source Runtime,
+        place: &'source str,
+        sink: &'source mut Sink,
+        scheduler: &'scheduler mut EvalScheduler,
     ) -> Self {
         Self {
             source,
             runtime,
             place,
             sink,
-            scheduler: EvalScheduler { next_id: 1 },
+            scheduler,
             stack: Vec::new(),
         }
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
         self.scheduler.alloc_node_id()
-    }
-
-    fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
-        self.scheduler.alloc_pending(description)
     }
 
     fn current_parent(&self) -> Option<EvalNodeId> {
@@ -323,6 +426,24 @@ impl<'a, Runtime: RuntimeHooks, Sink: EvalEventSink> EvalState<'a, Runtime, Sink
 }
 
 impl EvalScheduler {
+    fn begin_run(&mut self) {
+        self.next_id = 1;
+        self.node_states.clear();
+        let pending_nodes = self.call_pending.values().cloned().collect::<Vec<_>>();
+        for pending in pending_nodes {
+            let node_id = EvalNodeId(pending.node_id);
+            match self.pending_results.get(&pending.node_id) {
+                Some(Ok(value)) => {
+                    self.record_node_state(node_id, EvalNodeState::Ready(value.clone()))
+                }
+                Some(Err(error)) => {
+                    self.record_node_state(node_id, EvalNodeState::Poison(error.clone()))
+                }
+                None => self.record_node_state(node_id, EvalNodeState::Pending(pending.clone())),
+            }
+        }
+    }
+
     fn alloc_node_id(&mut self) -> EvalNodeId {
         let node_id = EvalNodeId(self.next_id);
         self.next_id += 1;
@@ -332,6 +453,72 @@ impl EvalScheduler {
     fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
         let pending_id = self.alloc_node_id();
         PendingRef::new(pending_id.0, description)
+    }
+
+    fn pending_nodes(&self) -> Vec<PendingRef> {
+        self.call_pending
+            .values()
+            .filter(|pending| !self.pending_results.contains_key(&pending.node_id))
+            .cloned()
+            .collect()
+    }
+
+    fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.node_states.get(&node_id)
+    }
+
+    fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
+        self.node_states.insert(node_id, state);
+    }
+
+    fn resolve_pending(
+        &mut self,
+        pending: &PendingRef,
+        result: Result<Value, EvalError>,
+    ) -> Result<(), EvalError> {
+        let exists = self
+            .call_pending
+            .values()
+            .any(|candidate| candidate.node_id == pending.node_id);
+        if !exists {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("pending node {} is not registered", pending.node_id),
+            ));
+        }
+        let node_id = EvalNodeId(pending.node_id);
+        match &result {
+            Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
+            Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
+        }
+        self.pending_results.insert(pending.node_id, result);
+        Ok(())
+    }
+
+    fn ensure_pending_for_call(
+        &mut self,
+        call_node_id: EvalNodeId,
+        description: impl Into<Arc<str>>,
+    ) -> PendingRef {
+        if let Some(pending) = self.call_pending.get(&call_node_id) {
+            return pending.clone();
+        }
+        let pending = self.alloc_pending(description);
+        self.call_pending.insert(call_node_id, pending.clone());
+        self.record_node_state(
+            EvalNodeId(pending.node_id),
+            EvalNodeState::Pending(pending.clone()),
+        );
+        pending
+    }
+
+    fn completed_for_call(&self, call_node_id: EvalNodeId) -> Option<&Result<Value, EvalError>> {
+        let pending = self.call_pending.get(&call_node_id)?;
+        self.pending_results.get(&pending.node_id)
+    }
+
+    fn pending_for_call(&self, call_node_id: EvalNodeId) -> Option<&PendingRef> {
+        self.call_pending.get(&call_node_id)
     }
 }
 
@@ -400,7 +587,7 @@ fn find_function(root: &SourceFile, entry: &str) -> Result<FnDecl, EvalError> {
 }
 
 fn bind_arguments(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     parameters: &[Parameter],
     args: &[Value],
 ) -> Result<BTreeMap<String, Value>, EvalError> {
@@ -434,7 +621,7 @@ fn bind_arguments(
 }
 
 fn eval_expr(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -443,7 +630,7 @@ fn eval_expr(
 }
 
 fn eval_expr_with_node_id(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
@@ -483,39 +670,54 @@ fn eval_expr_with_node_id(
     let popped = state.stack.pop();
     debug_assert_eq!(popped, Some(node_id));
     match &result {
-        Ok(EvalStep::Ready(value)) => state.emit(
-            node_id,
-            parent_id,
-            None,
-            EvalEventKind::ExitReady {
-                reuse: value.meta.reuse.clone(),
-                crossing: value.meta.crossing.clone(),
-            },
-        ),
-        Ok(EvalStep::Pending(pending)) => state.emit(
-            node_id,
-            parent_id,
-            None,
-            EvalEventKind::ExitPending {
-                pending: pending.clone(),
-            },
-        ),
-        Err(error) => state.emit(
-            node_id,
-            parent_id,
-            None,
-            EvalEventKind::ExitPoison {
-                kind: error.kind,
-                message: error.message.clone(),
-            },
-        ),
+        Ok(EvalStep::Ready(value)) => {
+            state
+                .scheduler
+                .record_node_state(node_id, EvalNodeState::Ready(value.clone()));
+            state.emit(
+                node_id,
+                parent_id,
+                None,
+                EvalEventKind::ExitReady {
+                    reuse: value.meta.reuse.clone(),
+                    crossing: value.meta.crossing.clone(),
+                },
+            );
+        }
+        Ok(EvalStep::Pending(pending)) => {
+            state
+                .scheduler
+                .record_node_state(node_id, EvalNodeState::Pending(pending.clone()));
+            state.emit(
+                node_id,
+                parent_id,
+                None,
+                EvalEventKind::ExitPending {
+                    pending: pending.clone(),
+                },
+            );
+        }
+        Err(error) => {
+            state
+                .scheduler
+                .record_node_state(node_id, EvalNodeState::Poison(error.clone()));
+            state.emit(
+                node_id,
+                parent_id,
+                None,
+                EvalEventKind::ExitPoison {
+                    kind: error.kind,
+                    message: error.message.clone(),
+                },
+            );
+        }
     }
 
     result
 }
 
 fn eval_child_expr(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -525,7 +727,7 @@ fn eval_child_expr(
 }
 
 fn eval_call(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -565,6 +767,45 @@ fn eval_call(
             argc: args.len() as u32,
         },
     );
+    if let Some(resolved) = state.scheduler.completed_for_call(node_id).cloned() {
+        return match resolved {
+            Ok(value) => {
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(call_source),
+                    EvalEventKind::RuntimeCallFinishedReady {
+                        reuse: value.meta.reuse.clone(),
+                        crossing: value.meta.crossing.clone(),
+                    },
+                );
+                Ok(EvalStep::Ready(value))
+            }
+            Err(error) => {
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(call_source),
+                    EvalEventKind::RuntimeCallFinishedPoison {
+                        kind: error.kind,
+                        message: error.message.clone(),
+                    },
+                );
+                Err(error.clone())
+            }
+        };
+    }
+    if let Some(pending) = state.scheduler.pending_for_call(node_id).cloned() {
+        state.emit(
+            node_id,
+            parent_id,
+            Some(call_source),
+            EvalEventKind::RuntimeCallFinishedPending {
+                pending: pending.clone(),
+            },
+        );
+        return Ok(EvalStep::Pending(pending));
+    }
     match state
         .runtime
         .call(state.place, &callee_name, &args, &call_source)?
@@ -582,7 +823,9 @@ fn eval_call(
             Ok(EvalStep::Ready(value))
         }
         RuntimeCallOutcome::Pending { description } => {
-            let pending = state.alloc_pending(description);
+            let pending = state
+                .scheduler
+                .ensure_pending_for_call(node_id, description);
             state.emit(
                 node_id,
                 parent_id,
@@ -620,7 +863,7 @@ fn eval_call(
 }
 
 fn eval_let(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     let_stmt: &LetStmt,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<Option<PendingRef>, EvalError> {
@@ -662,7 +905,7 @@ fn eval_name_ref(
 }
 
 fn eval_struct_literal(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     struct_literal: &StructLiteralExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -702,7 +945,7 @@ fn eval_struct_literal(
 }
 
 fn eval_block(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     block: &BlockExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -731,7 +974,7 @@ fn eval_block(
 }
 
 fn eval_array(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     array: &ArrayExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -756,7 +999,7 @@ fn eval_array(
 }
 
 fn eval_map(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     map: &MapExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -787,7 +1030,7 @@ fn eval_map(
 }
 
 fn eval_fail(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     fail: &FailExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -811,7 +1054,7 @@ fn eval_fail(
 }
 
 fn eval_if(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     if_expr: &IfExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
@@ -841,7 +1084,7 @@ fn eval_if(
 }
 
 fn eval_field(
-    state: &mut EvalState<'_, impl RuntimeHooks, impl EvalEventSink>,
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     field: &FieldExpr,
     env: &mut BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
