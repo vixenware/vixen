@@ -1,0 +1,213 @@
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+invoke {
+  entry build
+
+  slot {
+    id "shared-dep-slot"
+    domain @toy_resolver{
+      witness @string"manifest-v1"
+      requirements {
+        alpha "1"
+        beta "1"
+      }
+    }
+    action @current
+  }
+
+  runtime {
+    package_registry {
+      packages {
+        alpha {
+          versions (
+            {
+              version "1.0.0"
+              deps {
+                common "1"
+              }
+            }
+          )
+        }
+
+        beta {
+          versions (
+            {
+              version "1.0.0"
+              deps {
+                common "1"
+              }
+            }
+          )
+        }
+
+        common {
+          versions (
+            {version "1.0.0"}
+          )
+        }
+      }
+    }
+  }
+}
+
+runs (
+  {
+    expect {
+      result @map{
+        alpha @string"1.0.0"
+        beta @string"1.0.0"
+        common @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_populate{
+          slot "shared-dep-slot"
+          reason @missing
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      runtime {
+        package_registry {
+          packages {
+            alpha {
+              versions (
+                {
+                  version "1.0.0"
+                  deps {
+                    common "1"
+                  }
+                }
+              )
+            }
+
+            beta {
+              versions (
+                {
+                  version "1.0.0"
+                  deps {
+                    common "1"
+                  }
+                }
+                {
+                  version "1.1.0"
+                  deps {
+                    common "1"
+                  }
+                }
+              )
+            }
+
+            common {
+              versions (
+                {version "1.0.0"}
+                {version "1.1.0"}
+              )
+            }
+          }
+        }
+      }
+
+      slot {
+        action @refresh{
+          intent @struct{
+            type UpdatePackage
+            fields {
+              name @string"beta"
+            }
+          }
+        }
+      }
+    }
+
+    expect {
+      result @map{
+        alpha @string"1.0.0"
+        beta @string"1.1.0"
+        common @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_rewrite{
+          slot "shared-dep-slot"
+          reason @refresh{
+            intent @struct{
+              type UpdatePackage
+              fields {
+                name @string"beta"
+              }
+            }
+          }
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      runtime {
+        package_registry {
+          packages {
+            alpha {
+              versions (
+                {
+                  version "1.0.0"
+                  deps {
+                    common "1"
+                  }
+                }
+              )
+            }
+
+            beta {
+              versions (
+                {
+                  version "1.0.0"
+                  deps {
+                    common "1"
+                  }
+                }
+                {
+                  version "1.1.0"
+                  deps {
+                    common "1"
+                  }
+                }
+              )
+            }
+
+            common {
+              versions (
+                {version "1.0.0"}
+                {version "1.1.0"}
+              )
+            }
+          }
+        }
+      }
+    }
+
+    expect {
+      result @map{
+        alpha @string"1.0.0"
+        beta @string"1.1.0"
+        common @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_reuse{slot "shared-dep-slot"}
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

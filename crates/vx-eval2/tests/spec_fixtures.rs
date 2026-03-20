@@ -365,6 +365,13 @@ enum ToyResolverIntent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ToyVersionKey(Vec<u64>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToyResolvedPackage {
+    version: String,
+    constraints: BTreeSet<String>,
+    unlocked: bool,
+}
+
 impl FixtureRuntime {
     fn with_slots(spec: RuntimeSpec, slots: Arc<Mutex<FixtureSlotStore>>) -> Self {
         Self { spec, slots }
@@ -535,7 +542,7 @@ impl FixtureRuntime {
             .map(|current| toy_graph_from_value(&current.value))
             .transpose()?;
         let current_graph = current_graph.unwrap_or_default();
-        let mut graph = BTreeMap::new();
+        let mut selected = BTreeMap::new();
         let mut resolving = BTreeSet::new();
         for (package, constraint) in requirements {
             let unlock_package = match &intent {
@@ -546,12 +553,23 @@ impl FixtureRuntime {
                 package,
                 constraint,
                 &current_graph,
-                &mut graph,
+                &mut selected,
                 &mut resolving,
                 unlock_package,
             )?;
         }
-        Ok(graph)
+
+        let mut reachable = BTreeSet::new();
+        let mut visiting = BTreeSet::new();
+        for package in requirements.keys() {
+            self.collect_toy_reachable_packages(package, &selected, &mut reachable, &mut visiting)?;
+        }
+
+        Ok(selected
+            .into_iter()
+            .filter(|(package, _)| reachable.contains(package))
+            .map(|(package, resolved)| (package, resolved.version))
+            .collect())
     }
 
     fn resolve_toy_package(
@@ -559,22 +577,10 @@ impl FixtureRuntime {
         package: &str,
         constraint: &str,
         current_graph: &BTreeMap<String, String>,
-        graph: &mut BTreeMap<String, String>,
+        selected: &mut BTreeMap<String, ToyResolvedPackage>,
         resolving: &mut BTreeSet<String>,
         unlock_package: bool,
     ) -> Result<(), EvalError> {
-        if let Some(existing) = graph.get(package) {
-            if self.version_satisfies(existing, constraint) {
-                return Ok(());
-            }
-            return Err(EvalError::new(
-                EvalErrorKind::UserFail,
-                format!(
-                    "toy resolver selected {package:?} {existing:?}, which does not satisfy constraint {constraint:?}"
-                ),
-            ));
-        }
-
         if !resolving.insert(package.to_string()) {
             return Err(EvalError::new(
                 EvalErrorKind::UserFail,
@@ -582,36 +588,83 @@ impl FixtureRuntime {
             ));
         }
 
-        let version = if unlock_package {
-            self.latest_matching_version(package, constraint)?
+        let mut constraints = selected
+            .get(package)
+            .map(|resolved| resolved.constraints.clone())
+            .unwrap_or_default();
+        constraints.insert(constraint.to_string());
+        let unlocked = unlock_package
+            || selected
+                .get(package)
+                .is_some_and(|resolved| resolved.unlocked);
+
+        let version = if unlocked {
+            self.latest_matching_version(package, &constraints)?
         } else if let Some(current) = current_graph
             .get(package)
-            .filter(|version| self.version_satisfies(version, constraint))
+            .filter(|version| self.version_satisfies_all(version, &constraints))
         {
             current.clone()
         } else {
-            self.latest_matching_version(package, constraint)?
+            self.latest_matching_version(package, &constraints)?
         };
 
-        graph.insert(package.to_string(), version.clone());
+        selected.insert(
+            package.to_string(),
+            ToyResolvedPackage {
+                version: version.clone(),
+                constraints,
+                unlocked,
+            },
+        );
         for (dep_name, dep_constraint) in self.package_deps(package, &version)? {
             self.resolve_toy_package(
                 dep_name,
                 dep_constraint,
                 current_graph,
-                graph,
+                selected,
                 resolving,
-                unlock_package,
+                unlocked,
             )?;
         }
         resolving.remove(package);
         Ok(())
     }
 
+    fn collect_toy_reachable_packages(
+        &self,
+        package: &str,
+        selected: &BTreeMap<String, ToyResolvedPackage>,
+        reachable: &mut BTreeSet<String>,
+        visiting: &mut BTreeSet<String>,
+    ) -> Result<(), EvalError> {
+        if !reachable.insert(package.to_string()) {
+            return Ok(());
+        }
+        if !visiting.insert(package.to_string()) {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("toy resolver detected a dependency cycle at package {package:?}"),
+            ));
+        }
+
+        let resolved = selected.get(package).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("toy resolver did not select a version for package {package:?}"),
+            )
+        })?;
+        for dep_name in self.package_deps(package, &resolved.version)?.keys() {
+            self.collect_toy_reachable_packages(dep_name, selected, reachable, visiting)?;
+        }
+        visiting.remove(package);
+        Ok(())
+    }
+
     fn latest_matching_version(
         &self,
         package: &str,
-        constraint: &str,
+        constraints: &BTreeSet<String>,
     ) -> Result<String, EvalError> {
         let package_spec = self
             .spec
@@ -627,13 +680,15 @@ impl FixtureRuntime {
         package_spec
             .versions
             .iter()
-            .filter(|version| self.version_satisfies(&version.version, constraint))
+            .filter(|version| self.version_satisfies_all(&version.version, constraints))
             .max_by_key(|version| toy_version_key(&version.version))
             .map(|version| version.version.clone())
             .ok_or_else(|| {
                 EvalError::new(
                     EvalErrorKind::UserFail,
-                    format!("toy registry has no version of {package:?} satisfying {constraint:?}"),
+                    format!(
+                        "toy registry has no version of {package:?} satisfying constraints {constraints:?}"
+                    ),
                 )
             })
     }
@@ -675,6 +730,12 @@ impl FixtureRuntime {
             .split('.')
             .next()
             .is_some_and(|major| major == constraint)
+    }
+
+    fn version_satisfies_all(&self, version: &str, constraints: &BTreeSet<String>) -> bool {
+        constraints
+            .iter()
+            .all(|constraint| self.version_satisfies(version, constraint))
     }
 
     fn slot_current_pure(
@@ -808,6 +869,10 @@ impl FixtureRuntime {
 
 fn hash_string(contents: &str) -> String {
     blake3_hash(contents.as_bytes()).to_hex().to_string()
+}
+
+fn runtime_fingerprint(runtime: &RuntimeSpec) -> String {
+    hash_string(&format!("{runtime:?}"))
 }
 
 fn normalized_slot_witness(value: Value) -> Value {
@@ -1284,7 +1349,8 @@ struct FixtureDaemon {
 
 #[derive(Clone, PartialEq, Eq)]
 struct CachedInvocation {
-    entry: String,
+    program: InvocationProgram,
+    runtime_fingerprint: String,
     args: Vec<ValueEnvelope>,
     outcome: EvalOutcome,
 }
@@ -1458,21 +1524,7 @@ async fn run_rpc_invocation_at_runtime(
     outcome
 }
 
-async fn eval_subgraph(
-    client: &Eval2DaemonClient,
-    case: &SpecCase,
-    invocation: &ResolvedSpecRun,
-    args: &[ValueEnvelope],
-) -> Result<EvalOutcome, Box<dyn std::error::Error>> {
-    let place = invocation
-        .invoke
-        .place
-        .as_deref()
-        .ok_or_else(|| std::io::Error::other("eval2 RPC invocation is missing invoke.place"))?;
-    let program = invocation_program(case, invocation)?;
-    eval_subgraph_at_place(client, place, &program, args).await
-}
-
+#[derive(Clone, PartialEq, Eq)]
 struct InvocationProgram {
     source_id: String,
     source: String,
@@ -1536,14 +1588,14 @@ async fn run_rpc_invocation(
         .map(value_to_envelope)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| std::io::Error::other(format!("invalid invocation args: {error:?}")))?;
-    if invocation.invoke.slot.is_some() {
-        let outcome = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
-        return eval_outcome_to_spec(client, outcome, events).await;
-    }
-    let outcome = if cached_outcome(cached, &invocation.invoke.entry, &arg_envelopes).is_none()
+    let program = invocation_program(case, invocation)?;
+    let runtime_fingerprint = runtime_fingerprint(&invocation.invoke.runtime);
+    let outcome = if invocation.invoke.slot.is_some() {
+        eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?
+    } else if cached_outcome(cached, &program, &runtime_fingerprint, &arg_envelopes).is_none()
         && let Some(replay_place) = invocation.invoke.replay_place.as_deref()
     {
-        let initial = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+        let initial = eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?;
         events.push(EventPattern::StabilizeMiss);
         let claims = match &initial {
             EvalOutcome::Ready(result) => result.meta.claims.clone(),
@@ -1554,7 +1606,8 @@ async fn run_rpc_invocation(
             if matches!(initial, EvalOutcome::Ready(_)) {
                 cache_outcome(
                     cached,
-                    &invocation.invoke.entry,
+                    &program,
+                    &runtime_fingerprint,
                     &arg_envelopes,
                     initial.clone(),
                 );
@@ -1577,21 +1630,22 @@ async fn run_rpc_invocation(
                 events.push(EventPattern::StabilizeHit);
                 cache_outcome(
                     cached,
-                    &invocation.invoke.entry,
+                    &program,
+                    &runtime_fingerprint,
                     &arg_envelopes,
                     initial.clone(),
                 );
                 initial
             } else {
                 events.push(EventPattern::VerifyClaimsFail);
-                let program = invocation_program(case, invocation)?;
                 let fresh =
                     eval_subgraph_at_place(client, replay_place, &program, &arg_envelopes).await?;
                 events.push(EventPattern::StabilizeMiss);
                 if matches!(fresh, EvalOutcome::Ready(_)) {
                     cache_outcome(
                         cached,
-                        &invocation.invoke.entry,
+                        &program,
+                        &runtime_fingerprint,
                         &arg_envelopes,
                         fresh.clone(),
                     );
@@ -1599,7 +1653,8 @@ async fn run_rpc_invocation(
                 fresh
             }
         }
-    } else if let Some(previous) = cached_outcome(cached, &invocation.invoke.entry, &arg_envelopes)
+    } else if let Some(previous) =
+        cached_outcome(cached, &program, &runtime_fingerprint, &arg_envelopes)
     {
         let claims = match &previous {
             EvalOutcome::Ready(result) => result.meta.claims.clone(),
@@ -1626,12 +1681,13 @@ async fn run_rpc_invocation(
                 previous
             } else {
                 events.push(EventPattern::VerifyClaimsFail);
-                let fresh = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+                let fresh = eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?;
                 events.push(EventPattern::StabilizeMiss);
                 if matches!(fresh, EvalOutcome::Ready(_)) {
                     cache_outcome(
                         cached,
-                        &invocation.invoke.entry,
+                        &program,
+                        &runtime_fingerprint,
                         &arg_envelopes,
                         fresh.clone(),
                     );
@@ -1640,12 +1696,13 @@ async fn run_rpc_invocation(
             }
         }
     } else {
-        let fresh = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+        let fresh = eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?;
         events.push(EventPattern::StabilizeMiss);
         if matches!(fresh, EvalOutcome::Ready(_)) {
             cache_outcome(
                 cached,
-                &invocation.invoke.entry,
+                &program,
+                &runtime_fingerprint,
                 &arg_envelopes,
                 fresh.clone(),
             );
@@ -1689,31 +1746,39 @@ async fn run_rpc_invocation(
 
 fn cached_outcome(
     cached: &[CachedInvocation],
-    entry: &str,
+    program: &InvocationProgram,
+    runtime_fingerprint: &str,
     args: &[ValueEnvelope],
 ) -> Option<EvalOutcome> {
     cached
         .iter()
-        .find(|invocation| invocation.entry == entry && invocation.args == args)
+        .find(|invocation| {
+            invocation.program == *program
+                && invocation.runtime_fingerprint == runtime_fingerprint
+                && invocation.args == args
+        })
         .map(|invocation| invocation.outcome.clone())
 }
 
 fn cache_outcome(
     cached: &mut Vec<CachedInvocation>,
-    entry: &str,
+    program: &InvocationProgram,
+    runtime_fingerprint: &str,
     args: &[ValueEnvelope],
     outcome: EvalOutcome,
 ) {
-    if let Some(existing) = cached
-        .iter_mut()
-        .find(|invocation| invocation.entry == entry && invocation.args == args)
-    {
+    if let Some(existing) = cached.iter_mut().find(|invocation| {
+        invocation.program == *program
+            && invocation.runtime_fingerprint == runtime_fingerprint
+            && invocation.args == args
+    }) {
         existing.outcome = outcome;
         return;
     }
 
     cached.push(CachedInvocation {
-        entry: entry.to_string(),
+        program: program.clone(),
+        runtime_fingerprint: runtime_fingerprint.to_string(),
         args: args.to_vec(),
         outcome,
     });
@@ -2264,6 +2329,55 @@ fn case_source_id(case: &SpecCase) -> String {
         .unwrap_or_else(|_| case.path.clone());
     let relative = absolute.strip_prefix(workspace_root).unwrap_or(&absolute);
     format!("{}#main", relative.display())
+}
+
+#[test]
+fn rpc_cache_key_separates_runtime_overrides() {
+    let program = InvocationProgram {
+        source_id: "spec#main".to_string(),
+        source: "fn build() { 1 }\n".to_string(),
+        entry: "build".to_string(),
+    };
+    let args = vec![value_to_envelope(&Value::u64(1)).expect("serialize cache args")];
+    let mut cached = Vec::new();
+
+    let mut runtime_a = RuntimeSpec::default();
+    runtime_a.package_registry.packages.insert(
+        "serde".to_string(),
+        vx_spec::ToyPackageSpec {
+            versions: vec![vx_spec::ToyPackageVersionSpec {
+                version: "1.0.0".to_string(),
+                deps: BTreeMap::new(),
+            }],
+        },
+    );
+    let mut runtime_b = RuntimeSpec::default();
+    runtime_b.package_registry.packages.insert(
+        "serde".to_string(),
+        vx_spec::ToyPackageSpec {
+            versions: vec![vx_spec::ToyPackageVersionSpec {
+                version: "2.0.0".to_string(),
+                deps: BTreeMap::new(),
+            }],
+        },
+    );
+
+    cache_outcome(
+        &mut cached,
+        &program,
+        &runtime_fingerprint(&runtime_a),
+        &args,
+        EvalOutcome::Ready(value_to_envelope(&Value::u64(41)).expect("serialize ready value")),
+    );
+
+    assert!(
+        cached_outcome(&cached, &program, &runtime_fingerprint(&runtime_a), &args).is_some(),
+        "matching runtime override should still hit the RPC cache"
+    );
+    assert!(
+        cached_outcome(&cached, &program, &runtime_fingerprint(&runtime_b), &args).is_none(),
+        "different runtime overrides must not share the same RPC cache entry"
+    );
 }
 
 datatest_stable::harness! {

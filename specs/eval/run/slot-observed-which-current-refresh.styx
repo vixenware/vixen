@@ -145,6 +145,26 @@ runs (
       crossing @by_value
     }
   }
+
+  {
+    invoke {
+      place win_changed
+      verify_place win_same
+      slot {
+        action @current
+      }
+    }
+
+    expect {
+      poison {
+        kind VerificationFailure
+        message_contains "host.which(\"cl.exe\") changed"
+      }
+      events (
+        @must_emit/@verify_claims_fail
+      )
+    }
+  }
 )
 
 expect {
