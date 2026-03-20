@@ -184,6 +184,7 @@ The next step beyond that is a resumable session with scheduler-owned state:
   once:
   - array items
   - call arguments
+  - struct fields
   This is still driven by a single-threaded scheduler today, but it means the
   evaluator can already surface a real runnable frontier instead of discovering
   siblings only one at a time
@@ -229,6 +230,7 @@ The current frontier is deliberately uneven:
 - block/let sequencing is still mostly continuation-driven
 - array items can already become multiple queued sibling work items
 - call arguments can already become multiple queued sibling work items
+- struct fields can already become multiple queued sibling work items
 
 So the scheduler can now observe a little real fan-out, even though the engine
 is not yet a general parallel task VM.

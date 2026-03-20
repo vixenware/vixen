@@ -1037,6 +1037,91 @@ fn session_can_expose_multiple_runnable_call_arguments_at_once() {
 }
 
 #[test]
+fn session_can_expose_multiple_runnable_struct_fields_at_once() {
+    let host_os_calls = Arc::new(AtomicUsize::new(0));
+    let host_wait_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        host_os_calls,
+        host_wait_calls,
+    };
+    let mut session = EvalSession::new(
+        "fn build() { Pair { left: host_os(), right: host_wait() } }",
+        "session-struct-frontier",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("struct literal step"),
+        EvalSessionStep::Progressed
+    );
+
+    let queued = session.queued_work();
+    assert_eq!(queued.len(), 2);
+    assert!(
+        queued
+            .iter()
+            .all(|work| work.kind == EvalWorkKind::EvaluateExpr)
+    );
+
+    let snapshot = session.graph_snapshot();
+    let struct_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| {
+            node.record.as_ref().is_some_and(|record| {
+                record.kind
+                    == EvalNodeKind::Expr {
+                        kind: crate::EvalExprKind::StructLiteral,
+                    }
+            }) && node.dependencies.len() == 2
+        })
+        .expect("struct node should be recorded");
+    let field_call_nodes = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.record.as_ref().is_some_and(|record| {
+                record.parent_id == Some(struct_node.node_id)
+                    && record.kind
+                        == EvalNodeKind::Expr {
+                            kind: crate::EvalExprKind::Call,
+                        }
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(field_call_nodes.len(), 2);
+    assert_eq!(
+        struct_node.dependencies,
+        field_call_nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        struct_node.state,
+        Some(EvalNodeState::BlockedOnNode {
+            dependency: field_call_nodes[0].node_id,
+        }),
+    );
+    assert!(
+        field_call_nodes
+            .iter()
+            .all(|node| matches!(node.state, Some(EvalNodeState::Runnable { .. })))
+    );
+}
+
+#[test]
 fn session_can_step_back_to_a_prior_scheduler_state() {
     let host_os_calls = Arc::new(AtomicUsize::new(0));
     let host_wait_calls = Arc::new(AtomicUsize::new(0));

@@ -924,6 +924,14 @@ enum ContinuationFrame {
         env: BTreeMap<String, Value>,
         struct_source: SourceSpan,
     },
+    StructJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        type_name: Arc<str>,
+        field_names: Vec<Arc<str>>,
+        child_nodes: Vec<EvalNodeId>,
+        struct_source: SourceSpan,
+    },
     FieldReceiver {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -1853,6 +1861,29 @@ fn eval_struct_literal(
             Ok((name, expr))
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
+    if state.queue_child_work && !remaining_fields.is_empty() {
+        let field_names = remaining_fields
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let child_nodes = remaining_fields
+            .iter()
+            .map(|(_, expr)| queue_child_expr(state, expr, env))
+            .collect::<Vec<_>>();
+        return Ok(wait_on_child_dependency(
+            state,
+            node_id,
+            child_nodes[0],
+            vec![ContinuationFrame::StructJoin {
+                node_id,
+                parent_id,
+                type_name,
+                field_names,
+                child_nodes,
+                struct_source,
+            }],
+        ));
+    }
     continue_struct_fields(
         state,
         node_id,
@@ -2784,6 +2815,54 @@ fn resume_frame(
                         env,
                         struct_source,
                     )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::StructJoin {
+            node_id,
+            parent_id,
+            type_name,
+            field_names,
+            child_nodes,
+            struct_source,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut fields = Vec::with_capacity(child_nodes.len());
+                    for (name, child_node) in field_names.iter().zip(child_nodes.iter()) {
+                        match state.scheduler.node_state(*child_node) {
+                            Some(EvalNodeState::Ready(value)) => {
+                                fields.push((name.clone(), value.clone()))
+                            }
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(*child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    frames: vec![ContinuationFrame::StructJoin {
+                                        node_id,
+                                        parent_id,
+                                        type_name,
+                                        field_names: field_names.clone(),
+                                        child_nodes: child_nodes.clone(),
+                                        struct_source: struct_source.clone(),
+                                    }],
+                                }));
+                            }
+                        }
+                    }
+                    let provenance = Provenance::literal(struct_source);
+                    let meta =
+                        aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
+                    Ok(EvalStep::Ready(
+                        Value::structure(type_name, fields).with_meta(meta),
+                    ))
                 }
                 Err(error) => Err(error),
             };
