@@ -1428,6 +1428,21 @@ impl EvalScheduler {
         self.ready_tasks.get(&work_id).cloned()
     }
 
+    fn dequeue_ready_task(&mut self) -> Result<ReadyTaskRecord, EvalError> {
+        let Some(work_id) = self.ready_queue.pop_front() else {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                "ready queue was empty while executing prepared work",
+            ));
+        };
+        self.ready_tasks.remove(&work_id).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("ready task {work_id:?} was missing from scheduler state"),
+            )
+        })
+    }
+
     fn enqueue_ready_task(
         &mut self,
         task: ReadyTask,
@@ -1470,6 +1485,16 @@ fn execute_ready_task(
         mut completed_work,
         mut completed,
     } = checkpoint;
+    let dequeued = scheduler.dequeue_ready_task()?;
+    if dequeued.work != record.work {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "prepared work mismatch: expected {:?}, dequeued {:?}",
+                record.work, dequeued.work
+            ),
+        ));
+    }
 
     let source = SourceContext::new(source_id.to_string(), source_text);
     let mut state = EvalState::new(
@@ -1479,11 +1504,11 @@ fn execute_ready_task(
         place,
         &mut trace,
         &mut scheduler,
-        Some(record.work.id),
+        Some(dequeued.work.id),
         true,
     );
 
-    let step = match record.task {
+    let step = match dequeued.task {
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, source_text, entry, args)?;
             let node_id = state.alloc_node_id();
@@ -1522,7 +1547,7 @@ fn execute_ready_task(
                 },
             );
             completed_work.push(EvalCompletedWork {
-                work: record.work,
+                work: dequeued.work,
                 outcome: EvalCompletedWorkOutcome::Progressed,
             });
             return Ok((
@@ -1538,7 +1563,7 @@ fn execute_ready_task(
         ReadyTask::EvaluateExpr(scheduled) => {
             let mut env = scheduled.env;
             let expr = resolve_expr_handle(state.source_text, scheduled.expr)?;
-            eval_expr_with_node_id(&mut state, record.work.node_id, &expr, &mut env)
+            eval_expr_with_node_id(&mut state, dequeued.work.node_id, &expr, &mut env)
         }
         ReadyTask::Resume(ready) => resume_suspension(&mut state, ready.suspension, ready.result),
     };
@@ -1546,12 +1571,12 @@ fn execute_ready_task(
     let step = match step {
         Ok(EvalStep::Ready(value)) => {
             completed_work.push(EvalCompletedWork {
-                work: record.work.clone(),
+                work: dequeued.work.clone(),
                 outcome: EvalCompletedWorkOutcome::Ready(value.clone()),
             });
             if state
                 .scheduler
-                .resolve_child_dependency(record.work.node_id, Ok(value.clone()))?
+                .resolve_child_dependency(dequeued.work.node_id, Ok(value.clone()))?
             {
                 EvalSessionStep::Progressed
             } else {
@@ -1572,18 +1597,18 @@ fn execute_ready_task(
                         EvalNodeState::Pending(pending.clone()),
                     );
                     completed_work.push(EvalCompletedWork {
-                        work: record.work,
+                        work: dequeued.work,
                         outcome: EvalCompletedWorkOutcome::Pending(pending.clone()),
                     });
                     EvalSessionStep::Pending(pending)
                 }
                 Some(PendingKind::ChildDependency { dependency }) => {
                     state.scheduler.record_node_state(
-                        record.work.node_id,
+                        dequeued.work.node_id,
                         EvalNodeState::BlockedOnNode { dependency },
                     );
                     completed_work.push(EvalCompletedWork {
-                        work: record.work,
+                        work: dequeued.work,
                         outcome: EvalCompletedWorkOutcome::BlockedOnNode(dependency),
                     });
                     EvalSessionStep::Progressed
@@ -1598,12 +1623,12 @@ fn execute_ready_task(
         }
         Err(error) => {
             completed_work.push(EvalCompletedWork {
-                work: record.work.clone(),
+                work: dequeued.work.clone(),
                 outcome: EvalCompletedWorkOutcome::Poison(error.clone()),
             });
             if state
                 .scheduler
-                .resolve_child_dependency(record.work.node_id, Err(error.clone()))?
+                .resolve_child_dependency(dequeued.work.node_id, Err(error.clone()))?
             {
                 EvalSessionStep::Progressed
             } else {

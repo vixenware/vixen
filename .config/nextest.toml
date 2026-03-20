@@ -1,4 +1,16 @@
 # Nextest configuration
 
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.systemd-memory]
+command = { command-line = "scripts/nextest-systemd-run.sh", relative-to = "workspace-root" }
+
 [profile.default]
 slow-timeout = { period = "5s", terminate-after = 6 }
+
+[profile.systemd]
+slow-timeout = { period = "5s", terminate-after = 6 }
+
+[[profile.systemd.scripts]]
+platform = { host = 'cfg(target_os = "linux")' }
+run-wrapper = "systemd-memory"

@@ -1258,6 +1258,9 @@ fn prepared_work_can_execute_on_a_scoped_worker_thread() {
         session.completed_work()[0].work.kind,
         EvalWorkKind::StartEntry
     );
+    let queued = session.queued_work();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].kind, EvalWorkKind::EvaluateExpr);
 }
 
 #[test]

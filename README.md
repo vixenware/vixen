@@ -80,6 +80,16 @@ Ordinary Rust tests still run in nextest:
 cargo nextest run
 ```
 
+If you need to cap per-test memory on Linux, use the wrapper-script profile:
+
+```bash
+cargo nextest run --profile systemd
+export NEXTEST_PROFILE=systemd
+export VX_NEXTEST_MEMORY_MAX=2G
+cargo nextest run
+VX_NEXTEST_MEMORY_MAX=2G cargo nextest run --profile systemd -p vx-eval2 -E 'test(session_) | test(prepared_) | test(stale_)'
+```
+
 Full-stack daemon/VFS scenarios run through `xtask` instead of nextest:
 
 ```bash
