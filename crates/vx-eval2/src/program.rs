@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use vx_parser::{
-    AstNode, Expr, Item, LineIndex as ParserLineIndex, Parse, SourceFile, Stmt, SyntaxNode,
-    SyntaxToken, TextRange, TextSize, parse, trimmed_range,
+    AstNode, Expr, FnDecl, Item, LineIndex as ParserLineIndex, Parse, SourceFile, Stmt,
+    SyntaxNode, SyntaxToken, TextRange, TextSize, parse, trimmed_range,
 };
 
 use crate::{
@@ -82,30 +82,10 @@ impl CompiledProgram {
             let root = SourceFile::cast_root(parse.syntax());
             for item in root.items() {
                 if let Item::FnDecl(function) = item {
-                    let Some(name) = function.name() else {
+                    let Some((name, compiled)) = compile_function_decl(&function) else {
                         continue;
                     };
-                    let parameters = function
-                        .parameters()
-                        .filter_map(|parameter| {
-                            let name = parameter.name()?;
-                            Some(CompiledParameter {
-                                label: Arc::from(name.text()),
-                                name: ProgramNodeHandle::for_token(&name),
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    functions.insert(
-                        name.text().to_string(),
-                        CompiledFunction {
-                            parameters: Arc::from(parameters),
-                            has_keyword_parameters: function.keyword_parameters().next().is_some(),
-                            body: function
-                                .body_expr()
-                                .as_ref()
-                                .map(ProgramNodeHandle::for_node),
-                        },
-                    );
+                    functions.insert(name, compiled);
                 }
             }
             let mut path = Vec::new();
@@ -149,6 +129,14 @@ impl CompiledProgram {
         Ok(self.functions.get(name).cloned())
     }
 
+    pub(crate) fn compile_function_decl(
+        &self,
+        function: &FnDecl,
+    ) -> Result<Option<(Arc<str>, CompiledFunction)>, EvalError> {
+        self.ensure_parsed()?;
+        Ok(compile_function_decl(function).map(|(name, compiled)| (Arc::from(name), compiled)))
+    }
+
     pub(crate) fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<Expr, EvalError> {
         self.ensure_parsed()?;
         let indexed = self.exprs.get(&handle).ok_or_else(|| {
@@ -189,6 +177,10 @@ impl CompiledProgram {
 
     pub(crate) fn span_for_handle(&self, handle: ProgramNodeHandle) -> SourceSpan {
         self.span_for_range(handle.to_range())
+    }
+
+    pub(crate) fn source_id(&self) -> Arc<str> {
+        Arc::clone(&self.source_id)
     }
 
     pub(crate) fn span_for_node<T: AstNode>(&self, node: &T) -> SourceSpan {
@@ -242,6 +234,28 @@ impl CompiledProgram {
             ColumnIndex(position.col),
         )
     }
+}
+
+fn compile_function_decl(function: &FnDecl) -> Option<(String, CompiledFunction)> {
+    let name = function.name()?;
+    let parameters = function
+        .parameters()
+        .filter_map(|parameter| {
+            let name = parameter.name()?;
+            Some(CompiledParameter {
+                label: Arc::from(name.text()),
+                name: ProgramNodeHandle::for_token(&name),
+            })
+        })
+        .collect::<Vec<_>>();
+    Some((
+        name.text().to_string(),
+        CompiledFunction {
+            parameters: Arc::from(parameters),
+            has_keyword_parameters: function.keyword_parameters().next().is_some(),
+            body: function.body_expr().as_ref().map(ProgramNodeHandle::for_node),
+        },
+    ))
 }
 
 fn index_nodes(

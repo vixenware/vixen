@@ -1,8 +1,11 @@
 //! Runtime value payloads.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::{Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta};
+use crate::{
+    Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
+    program::{CompiledParameter, ProgramNodeHandle},
+};
 
 /// A successful runtime value: payload plus orthogonal metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,10 @@ impl Value {
             kind: kind.into(),
             descriptor: descriptor.into(),
         }))
+    }
+
+    pub fn function(function: FunctionRef) -> Self {
+        Self::new(ValueRep::Function(function))
     }
 
     pub fn with_meta(mut self, meta: ValueMeta) -> Self {
@@ -159,8 +166,42 @@ pub struct ExternalValue {
 }
 
 /// Opaque function handle.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionRef {
-    pub module_id: Arc<str>,
-    pub name: Arc<str>,
+    pub(crate) source_id: Arc<str>,
+    pub(crate) name: Arc<str>,
+    pub(crate) parameters: Arc<[CompiledParameter]>,
+    pub(crate) has_keyword_parameters: bool,
+    pub(crate) body: Option<ProgramNodeHandle>,
+    pub(crate) captures: Arc<[(Arc<str>, Value)]>,
+    pub(crate) self_name: Option<Arc<str>>,
+}
+
+impl FunctionRef {
+    pub(crate) fn new(
+        source_id: Arc<str>,
+        name: Arc<str>,
+        parameters: Arc<[CompiledParameter]>,
+        has_keyword_parameters: bool,
+        body: Option<ProgramNodeHandle>,
+        captures: Arc<[(Arc<str>, Value)]>,
+        self_name: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            source_id,
+            name,
+            parameters,
+            has_keyword_parameters,
+            body,
+            captures,
+            self_name,
+        }
+    }
+
+    pub(crate) fn capture_env(&self) -> BTreeMap<String, Value> {
+        self.captures
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect()
+    }
 }

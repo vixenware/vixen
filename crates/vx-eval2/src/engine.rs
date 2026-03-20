@@ -16,6 +16,7 @@ use crate::{
     EvalExprKind, EvalNodeId, EvalTrace, NullEvalEventSink, PendingRef, ProjectionStep, Provenance,
     Resolution, ReuseClass, RuntimeInputKind, SourceSpan, StructValue, Value, ValueMeta, ValueRep,
     program::{CompiledParameter, CompiledProgram, ProgramNodeHandle},
+    FunctionRef,
 };
 
 pub trait RuntimeHooks: Send + Sync {
@@ -1358,7 +1359,7 @@ enum ContinuationFrame {
     CallJoin {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        callee_name: String,
+        callee: Value,
         call_source: SourceSpan,
         child_nodes: Vec<EvalNodeId>,
     },
@@ -1377,10 +1378,18 @@ enum ContinuationFrame {
         scope: BTreeMap<String, Value>,
         remaining_statements: Vec<StmtHandle>,
     },
+    CallAfterCallee {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        call_source: SourceSpan,
+        env: BTreeMap<String, Value>,
+        args: Vec<Value>,
+        remaining_args: Vec<ExprHandle>,
+    },
     CallAfterArg {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        callee_name: String,
+        callee: Value,
         call_source: SourceSpan,
         args: Vec<Value>,
         remaining_args: Vec<ExprHandle>,
@@ -2426,6 +2435,60 @@ struct PreparedEntry {
     env: BTreeMap<String, Value>,
 }
 
+fn function_ref_from_compiled(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    name: Arc<str>,
+    function: crate::program::CompiledFunction,
+    captures: Arc<[(Arc<str>, Value)]>,
+    self_name: Option<Arc<str>>,
+) -> FunctionRef {
+    FunctionRef::new(
+        state.program.source_id(),
+        name,
+        function.parameters,
+        function.has_keyword_parameters,
+        function.body,
+        captures,
+        self_name,
+    )
+}
+
+fn captures_from_scope(scope: &BTreeMap<String, Value>) -> Arc<[(Arc<str>, Value)]> {
+    Arc::from(
+        scope.iter()
+            .map(|(name, value)| (Arc::<str>::from(name.as_str()), value.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn bind_named_function_decl(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    function: &vx_parser::FnDecl,
+    scope: &BTreeMap<String, Value>,
+) -> Result<(String, SourceSpan, Value), EvalError> {
+    let name_token = function
+        .name()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "function declaration has no name"))?;
+    let name = name_token.text().to_string();
+    let name_source = state.program.span_for_token(&name_token);
+    let Some((compiled_name, compiled)) = state.program.compile_function_decl(function)? else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "function declaration could not be compiled",
+        ));
+    };
+    let function = function_ref_from_compiled(
+        state,
+        compiled_name.clone(),
+        compiled,
+        captures_from_scope(scope),
+        Some(compiled_name.clone()),
+    );
+    let value = Value::function(function)
+        .with_provenance(Provenance::binding(name_source.clone(), name.clone()));
+    Ok((name, name_source, value))
+}
+
 fn prepare_entry(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     entry: &str,
@@ -2461,35 +2524,40 @@ fn prepare_entry(
     })
 }
 
-fn prepare_local_call(
+fn prepare_function_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    callee_name: &str,
+    function: &FunctionRef,
     args: &[Value],
-    parent_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
 ) -> Result<Option<PreparedEntry>, EvalError> {
-    let Some(function) = state.program.lookup_function(callee_name)? else {
-        return Ok(None);
-    };
     let Some(body) = function.body else {
         return Ok(None);
     };
     if function.has_keyword_parameters {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
-            format!("functions with keyword parameters are not supported yet: {callee_name}"),
+            format!(
+                "functions with keyword parameters are not supported yet: {}",
+                function.name
+            ),
         ));
     }
     if function.parameters.len() != args.len() {
         return Err(EvalError::new(
             EvalErrorKind::TypeError,
             format!(
-                "function {callee_name} expects {} positional argument(s), got {}",
+                "function {} expects {} positional argument(s), got {}",
+                function.name,
                 function.parameters.len(),
                 args.len()
             ),
         ));
     }
-    let env = bind_arguments(state, &function.parameters, args, Some(parent_id))?;
+    let mut env = function.capture_env();
+    if let Some(self_name) = &function.self_name {
+        env.insert(self_name.to_string(), Value::function(function.clone()));
+    }
+    bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
     Ok(Some(PreparedEntry {
         body: state.program.resolve_expr(body)?,
         env,
@@ -2513,6 +2581,17 @@ fn bind_arguments(
     parent_id: Option<EvalNodeId>,
 ) -> Result<BTreeMap<String, Value>, EvalError> {
     let mut env = BTreeMap::new();
+    bind_arguments_into_env(state, &mut env, parameters, args, parent_id)?;
+    Ok(env)
+}
+
+fn bind_arguments_into_env(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    env: &mut BTreeMap<String, Value>,
+    parameters: &[CompiledParameter],
+    args: &[Value],
+    parent_id: Option<EvalNodeId>,
+) -> Result<(), EvalError> {
     for (parameter, arg) in parameters.iter().zip(args.iter()) {
         let label = parameter.label.to_string();
         let name_source = state.program.span_for_handle(parameter.name);
@@ -2540,7 +2619,7 @@ fn bind_arguments(
         ));
         env.insert(label, bound);
     }
-    Ok(env)
+    Ok(())
 }
 
 fn eval_expr(
@@ -2588,7 +2667,7 @@ fn eval_expr_with_node_id(
             },
             None => Ok(EvalStep::Ready(Value::unit())),
         },
-        Expr::NameRef(name_ref) => eval_name_ref(name_ref, env).map(EvalStep::Ready),
+        Expr::NameRef(name_ref) => eval_name_ref(state, name_ref, env).map(EvalStep::Ready),
         Expr::Call(call) => eval_call(state, call, env),
         Expr::Array(array) => eval_array(state, array, env),
         Expr::Map(map) => eval_map(state, map, env),
@@ -2649,16 +2728,6 @@ fn eval_call(
     let callee = call
         .callee()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let Expr::NameRef(name_ref) = callee else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "only direct name calls are supported yet",
-        ));
-    };
-    let callee_name = name_ref
-        .token()
-        .map(|token| token.text().to_string())
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
     let call_source = state.program.span_for_node(call);
     let node_id = state
         .stack
@@ -2667,29 +2736,57 @@ fn eval_call(
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
-    if state.queue_child_work && !positional_args.is_empty() {
-        let child_nodes = positional_args
-            .iter()
-            .map(|arg| queue_child_expr(state, arg, env))
-            .collect::<Vec<_>>();
-        return Ok(wait_on_child_dependency(
+    if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
+        if state.queue_child_work && !positional_args.is_empty() {
+            let child_nodes = positional_args
+                .iter()
+                .map(|arg| queue_child_expr(state, arg, env))
+                .collect::<Vec<_>>();
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_nodes[0],
+                vec![ContinuationFrame::CallJoin {
+                    node_id,
+                    parent_id,
+                    callee: callee_value,
+                    call_source,
+                    child_nodes,
+                }],
+            ));
+        }
+        return continue_call_from_args(
             state,
             node_id,
-            child_nodes[0],
-            vec![ContinuationFrame::CallJoin {
-                node_id,
-                parent_id,
-                callee_name,
-                call_source,
-                child_nodes,
-            }],
-        ));
+            parent_id,
+            callee_value,
+            call_source,
+            Vec::new(),
+            positional_args.iter().map(expr_handle).collect(),
+            env.clone(),
+        );
     }
+    let callee_value = match eval_call_callee(state, &callee, env)? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Suspended(suspension) => {
+            return Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::CallAfterCallee {
+                    node_id,
+                    parent_id,
+                    call_source,
+                    env: env.clone(),
+                    args: Vec::new(),
+                    remaining_args: positional_args.iter().map(expr_handle).collect(),
+                },
+            ));
+        }
+    };
     continue_call_from_args(
         state,
         node_id,
         parent_id,
-        callee_name,
+        callee_value,
         call_source,
         Vec::new(),
         positional_args.iter().map(expr_handle).collect(),
@@ -2697,27 +2794,88 @@ fn eval_call(
     )
 }
 
+fn immediate_call_callee_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee: &Expr,
+    env: &BTreeMap<String, Value>,
+) -> Result<Option<Value>, EvalError> {
+    let Expr::NameRef(name_ref) = callee else {
+        return Ok(None);
+    };
+    let name_token = name_ref
+        .token()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
+    let name = name_token.text().to_string();
+    if let Some(value) = env.get(&name) {
+        return Ok(Some(value.clone()));
+    }
+    if let Some(function) = state.program.lookup_function(&name)? {
+        return Ok(Some(Value::function(function_ref_from_compiled(
+            state,
+            Arc::from(name.as_str()),
+            function,
+            Arc::from([]),
+            Some(Arc::from(name.as_str())),
+        ))));
+    }
+    Ok(Some(Value::function(FunctionRef::new(
+        state.program.source_id(),
+        Arc::from(name.as_str()),
+        Arc::from([]),
+        false,
+        None,
+        Arc::from([]),
+        Some(Arc::from(name.as_str())),
+    ))))
+}
+
 fn eval_name_ref(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     name_ref: &NameRefExpr,
     env: &BTreeMap<String, Value>,
 ) -> Result<Value, EvalError> {
-    let name = name_ref
+    let name_token = name_ref
         .token()
-        .map(|token| token.text().to_string())
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "name reference has no token"))?;
-    env.get(&name).cloned().ok_or_else(|| {
-        EvalError::new(
-            EvalErrorKind::Internal,
-            format!("name {name} is not bound in this scope"),
-        )
-    })
+    let name = name_token.text().to_string();
+    if let Some(value) = env.get(&name) {
+        return Ok(value.clone());
+    }
+    if let Some(function) = state.program.lookup_function(&name)? {
+        let name_source = state.program.span_for_token(&name_token);
+        let function = function_ref_from_compiled(
+            state,
+            Arc::from(name.as_str()),
+            function,
+            Arc::from([]),
+            Some(Arc::from(name.as_str())),
+        );
+        return Ok(
+            Value::function(function).with_provenance(Provenance::binding(name_source, name))
+        );
+    }
+    Err(EvalError::new(
+        EvalErrorKind::Internal,
+        format!("name {name} is not bound in this scope"),
+    ))
+}
+
+fn eval_call_callee(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee: &Expr,
+    env: &mut BTreeMap<String, Value>,
+) -> Result<EvalStep, EvalError> {
+    if let Some(value) = immediate_call_callee_value(state, callee, env)? {
+        return Ok(EvalStep::Ready(value));
+    }
+    eval_child_expr(state, callee, env)
 }
 
 fn continue_call_from_args(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    callee_name: String,
+    callee: Value,
     call_source: SourceSpan,
     mut args: Vec<Value>,
     remaining_args: Vec<ExprHandle>,
@@ -2735,7 +2893,7 @@ fn continue_call_from_args(
                     ContinuationFrame::CallAfterArg {
                         node_id,
                         parent_id,
-                        callee_name,
+                        callee: callee.clone(),
                         call_source,
                         args,
                         remaining_args,
@@ -2745,10 +2903,17 @@ fn continue_call_from_args(
             }
         }
     }
-    if let Some(prepared) = prepare_local_call(state, &callee_name, &args, node_id)? {
+    let ValueRep::Function(function) = &callee.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "call target must evaluate to a function value",
+        ));
+    };
+    if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
         let mut env = prepared.env;
         return eval_dependent_expr(state, node_id, &prepared.body, &mut env);
     }
+    let callee_name = function.name.to_string();
     state.emit(
         node_id,
         parent_id,
@@ -3222,6 +3387,10 @@ fn continue_block_statements(
                     }
                 }
             }
+            Stmt::FnDecl(function) => {
+                let (name, _name_source, value) = bind_named_function_decl(state, &function, &scope)?;
+                scope.insert(name, value);
+            }
             Stmt::Expr(expr) => match eval_dependent_expr(state, node_id, &expr, &mut scope)? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
@@ -3533,7 +3702,7 @@ fn resume_frame(
         ContinuationFrame::CallJoin {
             node_id,
             parent_id,
-            callee_name,
+            callee,
             call_source,
             child_nodes,
         } => {
@@ -3555,7 +3724,7 @@ fn resume_frame(
                                     frames: vec![ContinuationFrame::CallJoin {
                                         node_id,
                                         parent_id,
-                                        callee_name,
+                                        callee: callee.clone(),
                                         call_source,
                                         child_nodes: child_nodes.clone(),
                                     }],
@@ -3567,11 +3736,36 @@ fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        callee_name,
+                        callee,
                         call_source,
                         args,
                         Vec::new(),
                         BTreeMap::new(),
+                    )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::CallAfterCallee {
+            node_id,
+            parent_id,
+            call_source,
+            env,
+            args,
+            remaining_args,
+        } => {
+            let result = match input {
+                Ok(callee) => {
+                    continue_call_from_args(
+                        state,
+                        node_id,
+                        parent_id,
+                        callee,
+                        call_source,
+                        args,
+                        remaining_args,
+                        env,
                     )
                 }
                 Err(error) => Err(error),
@@ -3628,7 +3822,7 @@ fn resume_frame(
         ContinuationFrame::CallAfterArg {
             node_id,
             parent_id,
-            callee_name,
+            callee,
             call_source,
             mut args,
             remaining_args,
@@ -3641,7 +3835,7 @@ fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        callee_name,
+                        callee,
                         call_source,
                         args,
                         remaining_args,

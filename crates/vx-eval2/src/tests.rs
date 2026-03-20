@@ -215,6 +215,22 @@ fn same_source_helper_function_is_evaluated() {
 }
 
 #[test]
+fn top_level_function_value_can_be_bound_and_called_indirectly() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn helper(value: U64) { value }\nfn build() {\n  let f = helper;\n  f(41)\n}",
+        "same-source-function-value",
+        "build",
+        &[],
+    )
+    .expect("evaluate indirect same-source function call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready indirect helper result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
 fn same_source_helpers_can_call_each_other() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn inner(value: U64) { value }\nfn outer() { inner(42) }\nfn build() { outer() }",
@@ -228,6 +244,54 @@ fn same_source_helpers_can_call_each_other() {
         panic!("expected ready nested helper result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::U64(42));
+}
+
+#[test]
+fn block_local_named_function_can_be_called() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn build() { fn helper(value: U64) { value } helper(42) }",
+        "block-local-helper",
+        "build",
+        &[],
+    )
+    .expect("evaluate block-local helper");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready block-local helper result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(42));
+}
+
+#[test]
+fn block_local_named_function_captures_outer_binding() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn build() {\n  let captured = 41;\n  fn helper() { captured }\n  helper()\n}",
+        "block-local-capture",
+        "build",
+        &[],
+    )
+    .expect("evaluate block-local captured helper");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready block-local captured result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
+fn recursive_named_function_works() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn recurse(flag: Bool) { if flag { recurse(false) } else { 41 } }\nfn build() { recurse(true) }",
+        "recursive-function",
+        "build",
+        &[],
+    )
+    .expect("evaluate recursive function");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready recursive function result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
 }
 
 #[test]

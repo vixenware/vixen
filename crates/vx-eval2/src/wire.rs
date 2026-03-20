@@ -73,7 +73,7 @@ fn value_to_wire_value(value: &Value) -> Result<WireValue, EvalError> {
             EvalErrorKind::Internal,
             format!(
                 "function values are not serializable yet: {}::{}",
-                function.module_id, function.name
+                function.source_id, function.name
             ),
         )),
     }
