@@ -283,6 +283,8 @@ pub struct InvokeOverrideSpec {
     pub capabilities: Option<Vec<String>>,
     #[facet(default)]
     pub slot: Option<SlotInvokeOverrideSpec>,
+    #[facet(default)]
+    pub runtime: Option<RuntimeSpec>,
 }
 
 impl InvokeOverrideSpec {
@@ -315,7 +317,7 @@ impl InvokeOverrideSpec {
                 .clone()
                 .unwrap_or_else(|| base.capabilities.clone()),
             slot,
-            runtime: base.runtime.clone(),
+            runtime: self.runtime.clone().unwrap_or_else(|| base.runtime.clone()),
         })
     }
 }
@@ -343,6 +345,7 @@ pub struct SlotInvokeOverrideSpec {
 pub enum SlotDomainSpec {
     Pure(PureSlotSpec),
     ObservedWhich(ObservedWhichSlotSpec),
+    ToyResolver(ToyResolverSlotSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -354,6 +357,13 @@ pub struct PureSlotSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ObservedWhichSlotSpec {
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct ToyResolverSlotSpec {
+    pub witness: SpecValue,
+    #[facet(default)]
+    pub requirements: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -431,6 +441,27 @@ pub struct RuntimeSpec {
     pub places: BTreeMap<String, PlaceSpec>,
     #[facet(default)]
     pub executors: BTreeMap<String, ExecutorSpec>,
+    #[facet(default)]
+    pub package_registry: ToyPackageRegistrySpec,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct ToyPackageRegistrySpec {
+    #[facet(default)]
+    pub packages: BTreeMap<String, ToyPackageSpec>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct ToyPackageSpec {
+    #[facet(default)]
+    pub versions: Vec<ToyPackageVersionSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ToyPackageVersionSpec {
+    pub version: String,
+    #[facet(default)]
+    pub deps: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]

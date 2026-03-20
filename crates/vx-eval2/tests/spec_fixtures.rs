@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -32,7 +33,7 @@ use vx_spec::{
     CrossingPattern, EngineExpectation, EngineId, EventPattern, ExternalSpec, HostSpec,
     ObservationPattern, ObservedPoison, ObservedResult, PlaceSpec, ResolvedSpecRun, ReusePattern,
     RuntimeSpec, SlotActionSpec, SlotDomainSpec, SlotEventReasonPattern, SpecCase, SpecOutcome,
-    SpecValue, StructSpec,
+    SpecValue, StructSpec, ToyResolverSlotSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -61,14 +62,20 @@ async fn run_case(
 ) -> Result<Vec<SpecOutcome>, Box<dyn std::error::Error>> {
     let uses_rpc = invocations
         .iter()
-        .any(|invocation| invocation.invoke.place.is_some() && invocation.invoke.slot.is_none());
+        .any(|invocation| invocation.invoke.place.is_some());
     if uses_rpc {
         run_case_via_rpc(case, invocations).await
     } else {
-        let runtime = FixtureRuntime::new(case.invoke.runtime.clone());
+        let slots = Arc::new(Mutex::new(FixtureSlotStore::default()));
         invocations
             .iter()
-            .map(|invocation| run_case_local(case, invocation, &runtime))
+            .map(|invocation| {
+                let runtime = FixtureRuntime::with_slots(
+                    invocation.invoke.runtime.clone(),
+                    Arc::clone(&slots),
+                );
+                run_case_local(case, invocation, &runtime)
+            })
             .collect()
     }
 }
@@ -226,8 +233,82 @@ fn synthesize_slot_source(
             string_literal(&spec.name),
             spec_value_to_source_expr(intent)?,
         ),
+        (SlotDomainSpec::ToyResolver(spec), SlotActionSpec::Current) => format!(
+            "slot_current_toy_resolver({}, {}, {})",
+            string_literal(&slot.id),
+            spec_value_to_source_expr(&spec.witness)?,
+            string_string_map_to_source_expr(&spec.requirements),
+        ),
+        (SlotDomainSpec::ToyResolver(spec), SlotActionSpec::Refresh { intent }) => {
+            synthesize_toy_resolver_refresh_source(&slot.id, spec, intent)?
+        }
     };
     Ok(format!("fn build() {{\n  {body}\n}}\n"))
+}
+
+fn synthesize_toy_resolver_refresh_source(
+    slot_id: &str,
+    spec: &ToyResolverSlotSpec,
+    intent: &SpecValue,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match toy_resolver_intent_spec(intent)? {
+        ToyResolverIntentSpec::UpdateAll => Ok(format!(
+            "slot_refresh_toy_resolver_update_all({}, {}, {})",
+            string_literal(slot_id),
+            spec_value_to_source_expr(&spec.witness)?,
+            string_string_map_to_source_expr(&spec.requirements),
+        )),
+        ToyResolverIntentSpec::UpdatePackage { name } => Ok(format!(
+            "slot_refresh_toy_resolver_update_package({}, {}, {}, {})",
+            string_literal(slot_id),
+            spec_value_to_source_expr(&spec.witness)?,
+            string_string_map_to_source_expr(&spec.requirements),
+            string_literal(&name),
+        )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToyResolverIntentSpec {
+    UpdateAll,
+    UpdatePackage { name: String },
+}
+
+fn toy_resolver_intent_spec(
+    intent: &SpecValue,
+) -> Result<ToyResolverIntentSpec, Box<dyn std::error::Error>> {
+    let SpecValue::Struct(struct_spec) = intent else {
+        return Err(
+            std::io::Error::other("toy resolver refresh intent must be a struct value").into(),
+        );
+    };
+    match struct_spec.r#type.as_str() {
+        "UpdateAll" => Ok(ToyResolverIntentSpec::UpdateAll),
+        "UpdatePackage" => {
+            let Some(SpecValue::String(name)) = struct_spec.fields.get("name") else {
+                return Err(std::io::Error::other(
+                    "UpdatePackage intent requires a string field `name`",
+                )
+                .into());
+            };
+            Ok(ToyResolverIntentSpec::UpdatePackage { name: name.clone() })
+        }
+        other => Err(std::io::Error::other(format!(
+            "unsupported toy resolver refresh intent type {other:?}"
+        ))
+        .into()),
+    }
+}
+
+fn string_string_map_to_source_expr(entries: &BTreeMap<String, String>) -> String {
+    format!(
+        "%{{ {} }}",
+        entries
+            .iter()
+            .map(|(key, value)| format!("{} => {}", string_literal(key), string_literal(value)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn spec_value_to_source_expr(value: &SpecValue) -> Result<String, Box<dyn std::error::Error>> {
@@ -275,12 +356,18 @@ struct FixtureRuntime {
 
 type FixtureSlotStore = SlotStore<Value, Value, FixtureSlotVerifierPayload, Value>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToyResolverIntent {
+    UpdateAll,
+    UpdatePackage { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ToyVersionKey(Vec<u64>);
+
 impl FixtureRuntime {
-    fn new(spec: RuntimeSpec) -> Self {
-        Self {
-            spec,
-            slots: Arc::new(Mutex::new(FixtureSlotStore::default())),
-        }
+    fn with_slots(spec: RuntimeSpec, slots: Arc<Mutex<FixtureSlotStore>>) -> Self {
+        Self { spec, slots }
     }
 
     fn place(&self, place: &str) -> Result<&PlaceSpec, EvalError> {
@@ -400,15 +487,209 @@ impl FixtureRuntime {
         Ok(value)
     }
 
+    fn slot_current_toy_resolver(
+        &self,
+        slot_id: &str,
+        witness: Value,
+        requirements: BTreeMap<String, String>,
+    ) -> Result<RuntimeReady, EvalError> {
+        self.resolve_slot(
+            "local",
+            slot_id,
+            normalized_slot_witness(witness),
+            SlotAction::Current,
+            |current| {
+                let graph =
+                    self.resolve_toy_graph(&requirements, current, ToyResolverIntent::UpdateAll)?;
+                Ok(SlotResolved::new(toy_graph_to_value(&graph)))
+            },
+        )
+    }
+
+    fn slot_refresh_toy_resolver(
+        &self,
+        slot_id: &str,
+        witness: Value,
+        requirements: BTreeMap<String, String>,
+        intent: ToyResolverIntent,
+    ) -> Result<RuntimeReady, EvalError> {
+        self.resolve_slot(
+            "local",
+            slot_id,
+            normalized_slot_witness(witness),
+            SlotAction::Refresh(toy_resolver_intent_to_value(&intent)),
+            |current| {
+                let graph = self.resolve_toy_graph(&requirements, current, intent)?;
+                Ok(SlotResolved::new(toy_graph_to_value(&graph)))
+            },
+        )
+    }
+
+    fn resolve_toy_graph(
+        &self,
+        requirements: &BTreeMap<String, String>,
+        current: Option<&vx_eval2::SlotRecord<Value, Value, FixtureSlotVerifierPayload, Value>>,
+        intent: ToyResolverIntent,
+    ) -> Result<BTreeMap<String, String>, EvalError> {
+        let current_graph = current
+            .map(|current| toy_graph_from_value(&current.value))
+            .transpose()?;
+        let current_graph = current_graph.unwrap_or_default();
+        let mut graph = BTreeMap::new();
+        let mut resolving = BTreeSet::new();
+        for (package, constraint) in requirements {
+            let unlock_package = match &intent {
+                ToyResolverIntent::UpdateAll => true,
+                ToyResolverIntent::UpdatePackage { name } => name == package,
+            };
+            self.resolve_toy_package(
+                package,
+                constraint,
+                &current_graph,
+                &mut graph,
+                &mut resolving,
+                unlock_package,
+            )?;
+        }
+        Ok(graph)
+    }
+
+    fn resolve_toy_package(
+        &self,
+        package: &str,
+        constraint: &str,
+        current_graph: &BTreeMap<String, String>,
+        graph: &mut BTreeMap<String, String>,
+        resolving: &mut BTreeSet<String>,
+        unlock_package: bool,
+    ) -> Result<(), EvalError> {
+        if let Some(existing) = graph.get(package) {
+            if self.version_satisfies(existing, constraint) {
+                return Ok(());
+            }
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!(
+                    "toy resolver selected {package:?} {existing:?}, which does not satisfy constraint {constraint:?}"
+                ),
+            ));
+        }
+
+        if !resolving.insert(package.to_string()) {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("toy resolver detected a dependency cycle at package {package:?}"),
+            ));
+        }
+
+        let version = if unlock_package {
+            self.latest_matching_version(package, constraint)?
+        } else if let Some(current) = current_graph
+            .get(package)
+            .filter(|version| self.version_satisfies(version, constraint))
+        {
+            current.clone()
+        } else {
+            self.latest_matching_version(package, constraint)?
+        };
+
+        graph.insert(package.to_string(), version.clone());
+        for (dep_name, dep_constraint) in self.package_deps(package, &version)? {
+            self.resolve_toy_package(
+                dep_name,
+                dep_constraint,
+                current_graph,
+                graph,
+                resolving,
+                unlock_package,
+            )?;
+        }
+        resolving.remove(package);
+        Ok(())
+    }
+
+    fn latest_matching_version(
+        &self,
+        package: &str,
+        constraint: &str,
+    ) -> Result<String, EvalError> {
+        let package_spec = self
+            .spec
+            .package_registry
+            .packages
+            .get(package)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("toy registry does not contain package {package:?}"),
+                )
+            })?;
+        package_spec
+            .versions
+            .iter()
+            .filter(|version| self.version_satisfies(&version.version, constraint))
+            .max_by_key(|version| toy_version_key(&version.version))
+            .map(|version| version.version.clone())
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("toy registry has no version of {package:?} satisfying {constraint:?}"),
+                )
+            })
+    }
+
+    fn package_deps(
+        &self,
+        package: &str,
+        version: &str,
+    ) -> Result<&BTreeMap<String, String>, EvalError> {
+        let package_spec = self
+            .spec
+            .package_registry
+            .packages
+            .get(package)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("toy registry does not contain package {package:?}"),
+                )
+            })?;
+        package_spec
+            .versions
+            .iter()
+            .find(|candidate| candidate.version == version)
+            .map(|candidate| &candidate.deps)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("toy registry does not contain {package:?} version {version:?}"),
+                )
+            })
+    }
+
+    fn version_satisfies(&self, version: &str, constraint: &str) -> bool {
+        if constraint.contains('.') {
+            return version == constraint;
+        }
+        version
+            .split('.')
+            .next()
+            .is_some_and(|major| major == constraint)
+    }
+
     fn slot_current_pure(
         &self,
         slot_id: &str,
         witness: Value,
         value: Value,
     ) -> Result<RuntimeReady, EvalError> {
-        self.resolve_slot("local", slot_id, witness, SlotAction::Current, |_| {
-            Ok(SlotResolved::new(value))
-        })
+        self.resolve_slot(
+            "local",
+            slot_id,
+            normalized_slot_witness(witness),
+            SlotAction::Current,
+            |_| Ok(SlotResolved::new(value)),
+        )
     }
 
     fn slot_refresh_pure(
@@ -421,7 +702,7 @@ impl FixtureRuntime {
         self.resolve_slot(
             "local",
             slot_id,
-            witness,
+            normalized_slot_witness(witness),
             SlotAction::Refresh(intent),
             |_| Ok(SlotResolved::new(value)),
         )
@@ -437,7 +718,7 @@ impl FixtureRuntime {
         self.resolve_slot(
             place,
             slot_id,
-            Value::string(format!("observed_which:{name}")),
+            normalized_slot_witness(Value::string(format!("observed_which:{name}"))),
             SlotAction::Current,
             |_| {
                 let value = self.discover_which(place, name, source)?;
@@ -463,7 +744,7 @@ impl FixtureRuntime {
         self.resolve_slot(
             place,
             slot_id,
-            Value::string(format!("observed_which:{name}")),
+            normalized_slot_witness(Value::string(format!("observed_which:{name}"))),
             SlotAction::Refresh(intent),
             |_| {
                 let value = self.discover_which(place, name, source)?;
@@ -527,6 +808,43 @@ impl FixtureRuntime {
 
 fn hash_string(contents: &str) -> String {
     blake3_hash(contents.as_bytes()).to_hex().to_string()
+}
+
+fn normalized_slot_witness(value: Value) -> Value {
+    match value.rep {
+        ValueRep::Unit => Value::unit(),
+        ValueRep::Bool(value) => Value::bool(value),
+        ValueRep::U64(value) => Value::u64(value),
+        ValueRep::String(value) => Value::string(value),
+        ValueRep::Array(items) => Value::array(
+            items
+                .into_iter()
+                .cloned()
+                .map(normalized_slot_witness)
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::Map(map) => Value::map(
+            map.entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        normalized_slot_witness(key.clone()),
+                        normalized_slot_witness(value.clone()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::Struct(struct_value) => Value::structure(
+            struct_value.type_name,
+            struct_value
+                .fields
+                .into_iter()
+                .map(|(name, value)| (name.clone(), normalized_slot_witness(value.clone())))
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::External(external) => Value::external(external.kind, external.descriptor),
+        ValueRep::Function(function) => Value::new(ValueRep::Function(function)),
+    }
 }
 
 fn opaque_bundle_identity(bundle: &vx_spec::OpaqueBundleSpec) -> String {
@@ -608,6 +926,73 @@ fn expect_string_arg<'a>(callee: &str, value: &'a Value) -> Result<&'a Arc<str>,
     Ok(value)
 }
 
+fn expect_string_map_arg(
+    callee: &str,
+    value: &Value,
+) -> Result<std::collections::BTreeMap<String, String>, EvalError> {
+    let ValueRep::Map(map) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{callee}() map arguments must evaluate to Map"),
+        ));
+    };
+    map.entries
+        .iter()
+        .map(|(key, value)| {
+            let ValueRep::String(key) = &key.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee}() map keys must evaluate to String"),
+                ));
+            };
+            let ValueRep::String(value) = &value.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee}() map values must evaluate to String"),
+                ));
+            };
+            Ok((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn toy_resolver_intent_to_value(intent: &ToyResolverIntent) -> Value {
+    match intent {
+        ToyResolverIntent::UpdateAll => Value::structure("UpdateAll", Vec::new()),
+        ToyResolverIntent::UpdatePackage { name } => Value::structure(
+            "UpdatePackage",
+            vec![("name".into(), Value::string(name.clone()))],
+        ),
+    }
+}
+
+fn toy_graph_to_value(graph: &BTreeMap<String, String>) -> Value {
+    Value::map(
+        graph
+            .iter()
+            .map(|(package, version)| {
+                (
+                    Value::string(package.clone()),
+                    Value::string(version.clone()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn toy_graph_from_value(value: &Value) -> Result<BTreeMap<String, String>, EvalError> {
+    expect_string_map_arg("toy resolver current graph", value)
+}
+
+fn toy_version_key(version: &str) -> ToyVersionKey {
+    ToyVersionKey(
+        version
+            .split('.')
+            .map(|segment| segment.parse::<u64>().unwrap_or(0))
+            .collect(),
+    )
+}
+
 impl RuntimeHooks for FixtureRuntime {
     fn call(
         &self,
@@ -680,6 +1065,62 @@ impl RuntimeHooks for FixtureRuntime {
                         name.as_ref(),
                         args[2].clone(),
                         source,
+                    )?,
+                ))
+            }
+            "slot_current_toy_resolver" => {
+                if args.len() != 3 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "slot_current_toy_resolver() requires slot id, witness, and requirements",
+                    ));
+                }
+                let slot_id = expect_string_arg(callee, &args[0])?;
+                let requirements = expect_string_map_arg(callee, &args[2])?;
+                Ok(RuntimeCallOutcome::ReadyWithEvents(
+                    self.slot_current_toy_resolver(
+                        slot_id.as_ref(),
+                        args[1].clone(),
+                        requirements,
+                    )?,
+                ))
+            }
+            "slot_refresh_toy_resolver_update_all" => {
+                if args.len() != 3 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "slot_refresh_toy_resolver_update_all() requires slot id, witness, and requirements",
+                    ));
+                }
+                let slot_id = expect_string_arg(callee, &args[0])?;
+                let requirements = expect_string_map_arg(callee, &args[2])?;
+                Ok(RuntimeCallOutcome::ReadyWithEvents(
+                    self.slot_refresh_toy_resolver(
+                        slot_id.as_ref(),
+                        args[1].clone(),
+                        requirements,
+                        ToyResolverIntent::UpdateAll,
+                    )?,
+                ))
+            }
+            "slot_refresh_toy_resolver_update_package" => {
+                if args.len() != 4 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "slot_refresh_toy_resolver_update_package() requires slot id, witness, requirements, and package name",
+                    ));
+                }
+                let slot_id = expect_string_arg(callee, &args[0])?;
+                let requirements = expect_string_map_arg(callee, &args[2])?;
+                let package = expect_string_arg(callee, &args[3])?;
+                Ok(RuntimeCallOutcome::ReadyWithEvents(
+                    self.slot_refresh_toy_resolver(
+                        slot_id.as_ref(),
+                        args[1].clone(),
+                        requirements,
+                        ToyResolverIntent::UpdatePackage {
+                            name: package.to_string(),
+                        },
                     )?,
                 ))
             }
@@ -950,7 +1391,7 @@ async fn run_case_via_rpc(
             )
             .into());
         };
-        if !case.invoke.runtime.places.contains_key(place) {
+        if !invocation.invoke.runtime.places.contains_key(place) {
             return Err(std::io::Error::other(format!(
                 "invoke.place {place:?} was not declared under invoke.runtime.places"
             ))
@@ -958,9 +1399,29 @@ async fn run_case_via_rpc(
         }
     }
 
-    let runtime = FixtureRuntime::new(case.invoke.runtime.clone());
+    let slots = Arc::new(Mutex::new(FixtureSlotStore::default()));
     let proxies = ProxyStore::default();
+    let mut cached = Vec::new();
+    let mut outcomes = Vec::with_capacity(invocations.len());
+    for invocation in invocations {
+        let runtime =
+            FixtureRuntime::with_slots(invocation.invoke.runtime.clone(), Arc::clone(&slots));
+        outcomes.push(
+            run_rpc_invocation_at_runtime(case, invocation, runtime, proxies.clone(), &mut cached)
+                .await?,
+        );
+    }
 
+    Ok(outcomes)
+}
+
+async fn run_rpc_invocation_at_runtime(
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+    runtime: FixtureRuntime,
+    proxies: ProxyStore,
+    cached: &mut Vec<CachedInvocation>,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
     let root = TempDir::new()?;
     let root = Utf8Path::from_path(root.path()).ok_or_else(|| {
         std::io::Error::other("temporary directory for eval2 fixture daemon is not valid UTF-8")
@@ -987,18 +1448,14 @@ async fn run_case_via_rpc(
 
     let (caller, session_handle) = connect_session(&endpoint).await?;
     let client = Eval2DaemonClient::new(caller.clone());
-    let mut cached = Vec::new();
-    let mut outcomes = Vec::with_capacity(invocations.len());
-    for invocation in invocations {
-        outcomes.push(run_rpc_invocation(&client, case, invocation, &mut cached).await?);
-    }
+    let outcome = run_rpc_invocation(&client, case, invocation, cached).await;
 
     drop(client);
     drop(caller);
     drop(session_handle);
     accept_task.abort();
 
-    Ok(outcomes)
+    outcome
 }
 
 async fn eval_subgraph(
@@ -1012,14 +1469,31 @@ async fn eval_subgraph(
         .place
         .as_deref()
         .ok_or_else(|| std::io::Error::other("eval2 RPC invocation is missing invoke.place"))?;
-    eval_subgraph_at_place(client, case, &invocation.invoke.entry, place, args).await
+    let program = invocation_program(case, invocation)?;
+    eval_subgraph_at_place(client, place, &program, args).await
+}
+
+struct InvocationProgram {
+    source_id: String,
+    source: String,
+    entry: String,
+}
+
+fn invocation_program(
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+) -> Result<InvocationProgram, Box<dyn std::error::Error>> {
+    Ok(InvocationProgram {
+        source_id: case_source_id(case),
+        source: case_source(case, invocation)?,
+        entry: case_entry_name(invocation).to_string(),
+    })
 }
 
 async fn eval_subgraph_at_place(
     client: &Eval2DaemonClient,
-    case: &SpecCase,
-    entry: &str,
     place: &str,
+    program: &InvocationProgram,
     args: &[ValueEnvelope],
 ) -> Result<EvalOutcome, Box<dyn std::error::Error>> {
     client
@@ -1027,9 +1501,9 @@ async fn eval_subgraph_at_place(
             place: PlaceRef {
                 id: place.to_string(),
             },
-            source_id: case_source_id(case),
-            source: case.main_source.clone(),
-            entry: entry.to_string(),
+            source_id: program.source_id.clone(),
+            source: program.source.clone(),
+            entry: program.entry.clone(),
             args: args.to_vec(),
         })
         .await
@@ -1062,6 +1536,10 @@ async fn run_rpc_invocation(
         .map(value_to_envelope)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| std::io::Error::other(format!("invalid invocation args: {error:?}")))?;
+    if invocation.invoke.slot.is_some() {
+        let outcome = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+        return eval_outcome_to_spec(client, outcome, events).await;
+    }
     let outcome = if cached_outcome(cached, &invocation.invoke.entry, &arg_envelopes).is_none()
         && let Some(replay_place) = invocation.invoke.replay_place.as_deref()
     {
@@ -1106,14 +1584,9 @@ async fn run_rpc_invocation(
                 initial
             } else {
                 events.push(EventPattern::VerifyClaimsFail);
-                let fresh = eval_subgraph_at_place(
-                    client,
-                    case,
-                    &invocation.invoke.entry,
-                    replay_place,
-                    &arg_envelopes,
-                )
-                .await?;
+                let program = invocation_program(case, invocation)?;
+                let fresh =
+                    eval_subgraph_at_place(client, replay_place, &program, &arg_envelopes).await?;
                 events.push(EventPattern::StabilizeMiss);
                 if matches!(fresh, EvalOutcome::Ready(_)) {
                     cache_outcome(

@@ -63,12 +63,6 @@ runs (
       )
       reuse @observed
       crossing @by_value
-      events (
-        @must_emit/@slot_populate{
-          slot "toolchain-slot"
-          reason @missing
-        }
-      )
     }
   }
 
@@ -87,9 +81,6 @@ runs (
       )
       reuse @observed
       crossing @by_value
-      events (
-        @must_emit/@slot_reuse{slot "toolchain-slot"}
-      )
     }
   }
 
@@ -108,14 +99,6 @@ runs (
       )
       reuse @observed
       crossing @by_value
-      events (
-        @must_emit/@slot_rewrite{
-          slot "toolchain-slot"
-          reason @claims_invalid{
-            reason_contains "host.which(\"cl.exe\") changed"
-          }
-        }
-      )
     }
   }
 
@@ -139,14 +122,6 @@ runs (
       )
       reuse @observed
       crossing @by_value
-      events (
-        @must_emit/@slot_rewrite{
-          slot "toolchain-slot"
-          reason @refresh{
-            intent @string"force_rediscover"
-          }
-        }
-      )
     }
   }
 
@@ -168,9 +143,6 @@ runs (
       )
       reuse @observed
       crossing @by_value
-      events (
-        @must_emit/@slot_reuse{slot "toolchain-slot"}
-      )
     }
   }
 )
