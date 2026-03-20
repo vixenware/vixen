@@ -1,20 +1,24 @@
 main <<VX,vx
-fn build() {
-  0
+fn build_current(witness: String, desired: U64) {
+  fn resolve_slot(ctx) {
+    desired
+  }
+
+  slot_current("pure-slot", witness, resolve_slot)
+}
+
+fn build_refresh(witness: String, desired: U64, intent: String) {
+  fn resolve_slot(ctx) {
+    desired
+  }
+
+  slot_refresh("pure-slot", witness, intent, resolve_slot)
 }
 VX
 
 invoke {
-  entry build
-
-  slot {
-    id "pure-slot"
-    domain @pure{
-      witness @string"w1"
-      value @u64"1"
-    }
-    action @current
-  }
+  entry build_current
+  args (@string"w1" @u64"1")
 }
 
 runs (
@@ -31,6 +35,10 @@ runs (
   }
 
   {
+    invoke {
+      args (@string"w1" @u64"999")
+    }
+
     expect {
       result @u64"1"
       events (
@@ -41,12 +49,7 @@ runs (
 
   {
     invoke {
-      slot {
-        domain @pure{
-          witness @string"w2"
-          value @u64"2"
-        }
-      }
+      args (@string"w2" @u64"2")
     }
 
     expect {
@@ -62,15 +65,8 @@ runs (
 
   {
     invoke {
-      slot {
-        domain @pure{
-          witness @string"w2"
-          value @u64"3"
-        }
-        action @refresh{
-          intent @string"refresh"
-        }
-      }
+      entry build_refresh
+      args (@string"w2" @u64"3" @string"refresh")
     }
 
     expect {
@@ -88,13 +84,8 @@ runs (
 
   {
     invoke {
-      slot {
-        domain @pure{
-          witness @string"w2"
-          value @u64"999"
-        }
-        action @current
-      }
+      entry build_current
+      args (@string"w2" @u64"999")
     }
 
     expect {

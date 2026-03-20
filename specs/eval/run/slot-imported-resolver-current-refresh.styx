@@ -1,0 +1,91 @@
+main <<VX,vx
+fn build_current(witness: String) {
+  slot_current("imported-slot", witness, imported_resolve)
+}
+
+fn build_refresh(witness: String, intent: String) {
+  slot_refresh("imported-slot", witness, intent, imported_resolve)
+}
+VX
+
+files {
+  "helpers.vx" <<VX,vx
+fn imported_resolve(ctx) {
+  ctx.witness
+}
+VX
+}
+
+invoke {
+  entry build_current
+  args (@string"v1")
+}
+
+runs (
+  {
+    expect {
+      result @string"v1"
+      events (
+        @must_emit/@slot_populate{
+          slot "imported-slot"
+          reason @missing
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      args (@string"v1")
+    }
+
+    expect {
+      result @string"v1"
+      events (
+        @must_emit/@slot_reuse{slot "imported-slot"}
+      )
+    }
+  }
+
+  {
+    invoke {
+      args (@string"v2")
+    }
+
+    expect {
+      result @string"v2"
+      events (
+        @must_emit/@slot_rewrite{
+          slot "imported-slot"
+          reason @witness_changed
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
+      args (@string"v2" @string"force")
+    }
+
+    expect {
+      result @string"v2"
+      events (
+        @must_emit/@slot_rewrite{
+          slot "imported-slot"
+          reason @refresh{
+            intent @string"force"
+          }
+        }
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

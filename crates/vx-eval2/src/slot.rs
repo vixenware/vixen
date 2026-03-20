@@ -128,6 +128,15 @@ pub enum SlotResolutionKind<Intent> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotDecision<Value, Witness, VerifierPayload, Intent> {
+    Reused(SlotRecord<Value, Witness, VerifierPayload, Intent>),
+    Store {
+        current: Option<SlotRecord<Value, Witness, VerifierPayload, Intent>>,
+        reason: SlotStoreReason<Intent>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotResolution<Value, Witness, VerifierPayload, Intent> {
     pub kind: SlotResolutionKind<Intent>,
     pub record: SlotRecord<Value, Witness, VerifierPayload, Intent>,
@@ -170,6 +179,42 @@ where
         self.records.get(slot_id)
     }
 
+    pub fn decide<Verify>(
+        &self,
+        slot_id: impl Into<SlotId>,
+        witness: &Witness,
+        action: &SlotAction<Intent>,
+        verify: Verify,
+    ) -> SlotDecision<Value, Witness, VerifierPayload, Intent>
+    where
+        Verify: FnOnce(&SlotRecord<Value, Witness, VerifierPayload, Intent>) -> SlotVerification,
+    {
+        let slot_id = slot_id.into();
+        let current = self.records.get(&slot_id).cloned();
+        let store_reason = match (action, current.as_ref()) {
+            (SlotAction::Refresh(intent), _) => Some(SlotStoreReason::Refresh {
+                intent: intent.clone(),
+            }),
+            (SlotAction::Current, None) => Some(SlotStoreReason::Missing),
+            (SlotAction::Current, Some(current)) if current.witness != *witness => {
+                Some(SlotStoreReason::WitnessChanged)
+            }
+            (SlotAction::Current, Some(current)) => match verify(current) {
+                SlotVerification::Valid => None,
+                SlotVerification::Invalid { reason } => {
+                    Some(SlotStoreReason::ClaimsInvalid { reason })
+                }
+            },
+        };
+
+        match store_reason {
+            Some(reason) => SlotDecision::Store { current, reason },
+            None => SlotDecision::Reused(
+                current.expect("slot decision should reuse an existing record"),
+            ),
+        }
+    }
+
     pub fn resolve<Error, Verify, Resolve>(
         &mut self,
         slot_id: impl Into<SlotId>,
@@ -185,55 +230,38 @@ where
         ) -> Result<SlotResolved<Value, VerifierPayload>, Error>,
     {
         let slot_id = slot_id.into();
-        let current = self.records.get(&slot_id).cloned();
-        let store_reason = match (&action, current.as_ref()) {
-            (SlotAction::Refresh(intent), _) => Some(SlotStoreReason::Refresh {
-                intent: intent.clone(),
-            }),
-            (SlotAction::Current, None) => Some(SlotStoreReason::Missing),
-            (SlotAction::Current, Some(current)) if current.witness != witness => {
-                Some(SlotStoreReason::WitnessChanged)
+        match self.decide(slot_id.clone(), &witness, &action, verify) {
+            SlotDecision::Store { current, reason } => {
+                let resolved = resolve(SlotResolveRequest {
+                    witness: &witness,
+                    current: current.as_ref(),
+                    action: &action,
+                })?;
+                let previous_meta = current.as_ref().map(|current| &current.meta);
+                let record = SlotRecord {
+                    slot_id: slot_id.clone(),
+                    value: resolved.value,
+                    witness,
+                    claims: resolved.claims,
+                    verifier_payload: resolved.verifier_payload,
+                    meta: SlotRecordMeta {
+                        write_count: previous_meta.map_or(1, |meta| meta.write_count + 1),
+                        rewrite_count: previous_meta.map_or(0, |meta| {
+                            meta.rewrite_count + u64::from(reason.is_rewrite())
+                        }),
+                        last_store_reason: reason.clone(),
+                    },
+                };
+                self.records.insert(slot_id, record.clone());
+                Ok(SlotResolution {
+                    kind: SlotResolutionKind::Stored { reason },
+                    record,
+                })
             }
-            (SlotAction::Current, Some(current)) => match verify(current) {
-                SlotVerification::Valid => None,
-                SlotVerification::Invalid { reason } => {
-                    Some(SlotStoreReason::ClaimsInvalid { reason })
-                }
-            },
-        };
-
-        if let Some(reason) = store_reason {
-            let resolved = resolve(SlotResolveRequest {
-                witness: &witness,
-                current: current.as_ref(),
-                action: &action,
-            })?;
-            let previous_meta = current.as_ref().map(|current| &current.meta);
-            let record = SlotRecord {
-                slot_id: slot_id.clone(),
-                value: resolved.value,
-                witness,
-                claims: resolved.claims,
-                verifier_payload: resolved.verifier_payload,
-                meta: SlotRecordMeta {
-                    write_count: previous_meta.map_or(1, |meta| meta.write_count + 1),
-                    rewrite_count: previous_meta.map_or(0, |meta| {
-                        meta.rewrite_count + u64::from(reason.is_rewrite())
-                    }),
-                    last_store_reason: reason.clone(),
-                },
-            };
-            self.records.insert(slot_id, record.clone());
-            return Ok(SlotResolution {
-                kind: SlotResolutionKind::Stored { reason },
+            SlotDecision::Reused(record) => Ok(SlotResolution {
+                kind: SlotResolutionKind::Reused,
                 record,
-            });
+            }),
         }
-
-        let record = current.expect("slot resolution should reuse an existing record");
-        Ok(SlotResolution {
-            kind: SlotResolutionKind::Reused,
-            record,
-        })
     }
 }

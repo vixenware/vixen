@@ -15,8 +15,8 @@ use vx_resolve::SourceId;
 use crate::{
     CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalEventSink,
     EvalExprKind, EvalNodeId, EvalTrace, FunctionRef, NullEvalEventSink, PendingRef,
-    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SourceSpan, StructValue,
-    Value, ValueMeta, ValueRep,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SlotAction, SourceSpan,
+    StructValue, Value, ValueMeta, ValueRep,
     program::{CompiledParameter, CompiledProgram, EvalProgram, ProgramNodeHandle},
 };
 
@@ -28,6 +28,33 @@ pub trait RuntimeHooks: Send + Sync {
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError>;
+
+    fn prepare_slot(
+        &self,
+        _place: &str,
+        _slot_id: &str,
+        _witness: &Value,
+        _action: &SlotAction<Value>,
+    ) -> Result<RuntimeSlotPrepare, EvalError> {
+        Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "slot operations are not supported by this runtime",
+        ))
+    }
+
+    fn store_slot(
+        &self,
+        _place: &str,
+        _slot_id: &str,
+        _witness: &Value,
+        _action: &SlotAction<Value>,
+        _resolved: &Value,
+    ) -> Result<RuntimeReady, EvalError> {
+        Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "slot operations are not supported by this runtime",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +69,12 @@ pub enum RuntimeCallOutcome {
     Ready(Value),
     ReadyWithEvents(RuntimeReady),
     Pending { description: Arc<str> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSlotPrepare {
+    Reused(RuntimeReady),
+    Resolve { current: Option<Value> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1390,6 +1423,14 @@ enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         call_source: SourceSpan,
+    },
+    SlotAfterResolver {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        call_source: SourceSpan,
+        slot_id: Arc<str>,
+        witness: Value,
+        action: SlotAction<Value>,
     },
     CallJoin {
         node_id: EvalNodeId,
@@ -2971,6 +3012,174 @@ fn eval_call_callee(
     eval_child_expr(state, callee, env)
 }
 
+fn slot_builtin_action(
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<(Arc<str>, Value, SlotAction<Value>, FunctionRef)>, EvalError> {
+    let (slot_id_index, witness_index, action, resolver_index) = match callee_name {
+        "slot_current" => (0usize, 1usize, SlotAction::Current, 2usize),
+        "slot_refresh" => {
+            if args.len() != 4 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "slot_refresh() requires slot id, witness, intent, and resolver",
+                ));
+            }
+            (0usize, 1usize, SlotAction::Refresh(args[2].clone()), 3usize)
+        }
+        _ => return Ok(None),
+    };
+
+    let expected_len = match callee_name {
+        "slot_current" => 3,
+        "slot_refresh" => 4,
+        _ => unreachable!(),
+    };
+    if args.len() != expected_len {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!(
+                "{callee_name}() requires {} argument(s), got {}",
+                expected_len,
+                args.len()
+            ),
+        ));
+    }
+
+    let ValueRep::String(slot_id) = &args[slot_id_index].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{callee_name}() slot id must evaluate to String"),
+        ));
+    };
+    let ValueRep::Function(resolver) = &args[resolver_index].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{callee_name}() resolver must evaluate to a function value"),
+        ));
+    };
+
+    Ok(Some((
+        slot_id.clone(),
+        args[witness_index].clone(),
+        action,
+        resolver.clone(),
+    )))
+}
+
+fn slot_context_value(
+    slot_id: Arc<str>,
+    witness: Value,
+    action: &SlotAction<Value>,
+    current: Option<Value>,
+) -> Value {
+    let (is_refresh, intent) = match action {
+        SlotAction::Current => (false, Value::unit()),
+        SlotAction::Refresh(intent) => (true, intent.clone()),
+    };
+    let current_present = current.is_some();
+    Value::structure(
+        "SlotContext",
+        vec![
+            (Arc::from("slot_id"), Value::string(slot_id)),
+            (Arc::from("witness"), witness),
+            (Arc::from("has_current"), Value::bool(current_present)),
+            (Arc::from("current"), current.unwrap_or_else(Value::unit)),
+            (Arc::from("is_refresh"), Value::bool(is_refresh)),
+            (Arc::from("intent"), intent),
+        ],
+    )
+}
+
+fn emit_runtime_ready_events(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    source: &SourceSpan,
+    ready: &RuntimeReady,
+) {
+    for event in &ready.events {
+        state.emit(node_id, parent_id, Some(source.clone()), event.clone());
+    }
+}
+
+fn commit_slot_result(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    call_source: &SourceSpan,
+    slot_id: &Arc<str>,
+    witness: &Value,
+    action: &SlotAction<Value>,
+    resolved: &Value,
+) -> Result<EvalStep, EvalError> {
+    let ready =
+        state
+            .runtime
+            .store_slot(state.place, slot_id.as_ref(), witness, action, resolved)?;
+    emit_runtime_ready_events(state, node_id, parent_id, call_source, &ready);
+    Ok(EvalStep::Ready(ready.value))
+}
+
+fn continue_slot_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    call_source: SourceSpan,
+    slot_id: Arc<str>,
+    witness: Value,
+    action: SlotAction<Value>,
+    resolver: FunctionRef,
+) -> Result<EvalStep, EvalError> {
+    match state
+        .runtime
+        .prepare_slot(state.place, slot_id.as_ref(), &witness, &action)?
+    {
+        RuntimeSlotPrepare::Reused(ready) => {
+            emit_runtime_ready_events(state, node_id, parent_id, &call_source, &ready);
+            Ok(EvalStep::Ready(ready.value))
+        }
+        RuntimeSlotPrepare::Resolve { current } => {
+            let resolver_context =
+                slot_context_value(slot_id.clone(), witness.clone(), &action, current);
+            let Some(prepared) =
+                prepare_function_call(state, &resolver, &[resolver_context], Some(node_id))?
+            else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "slot resolver must be a bodyful Vixen function",
+                ));
+            };
+            let mut env = prepared.env;
+            match state.with_source(prepared.source, |state| {
+                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            })? {
+                EvalStep::Ready(value) => commit_slot_result(
+                    state,
+                    node_id,
+                    parent_id,
+                    &call_source,
+                    &slot_id,
+                    &witness,
+                    &action,
+                    &value,
+                ),
+                EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::SlotAfterResolver {
+                        node_id,
+                        parent_id,
+                        call_source,
+                        slot_id,
+                        witness,
+                        action,
+                    },
+                )),
+            }
+        }
+    }
+}
+
 fn continue_call_from_args(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -3015,6 +3224,18 @@ fn continue_call_from_args(
         });
     }
     let callee_name = function.name.to_string();
+    if let Some((slot_id, witness, action, resolver)) = slot_builtin_action(&callee_name, &args)? {
+        return continue_slot_builtin(
+            state,
+            node_id,
+            parent_id,
+            call_source,
+            slot_id,
+            witness,
+            action,
+            resolver,
+        );
+    }
     state.emit(
         node_id,
         parent_id,
@@ -3809,6 +4030,29 @@ fn resume_frame(
                 ResumeOutcome::Continue(Err(error))
             }
         }),
+        ContinuationFrame::SlotAfterResolver {
+            node_id,
+            parent_id,
+            call_source,
+            slot_id,
+            witness,
+            action,
+        } => {
+            let result = match input {
+                Ok(value) => commit_slot_result(
+                    state,
+                    node_id,
+                    parent_id,
+                    &call_source,
+                    &slot_id,
+                    &witness,
+                    &action,
+                    &value,
+                ),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::CallJoin {
             node_id,
             parent_id,

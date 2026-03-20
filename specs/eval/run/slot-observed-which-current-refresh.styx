@@ -1,20 +1,25 @@
 main <<VX,vx
-fn build() {
-  0
+fn build_current(name: String) {
+  fn resolve_slot(ctx) {
+    host_which(ctx.witness)
+  }
+
+  slot_current("toolchain-slot", name, resolve_slot)
+}
+
+fn build_refresh(name: String, intent: String) {
+  fn resolve_slot(ctx) {
+    host_which(ctx.witness)
+  }
+
+  slot_refresh("toolchain-slot", name, intent, resolve_slot)
 }
 VX
 
 invoke {
-  entry build
+  entry build_current
   place win
-
-  slot {
-    id "toolchain-slot"
-    domain @observed_which{
-      name "cl.exe"
-    }
-    action @current
-  }
+  args (@string"cl.exe")
 
   runtime {
     places {
@@ -105,11 +110,8 @@ runs (
   {
     invoke {
       place win_changed
-      slot {
-        action @refresh{
-          intent @string"force_rediscover"
-        }
-      }
+      entry build_refresh
+      args (@string"cl.exe" @string"force_rediscover")
     }
 
     expect {
@@ -128,9 +130,6 @@ runs (
   {
     invoke {
       place win_changed
-      slot {
-        action @current
-      }
     }
 
     expect {
@@ -150,9 +149,6 @@ runs (
     invoke {
       place win_changed
       verify_place win_same
-      slot {
-        action @current
-      }
     }
 
     expect {

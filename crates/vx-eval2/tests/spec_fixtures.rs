@@ -15,13 +15,12 @@ use roam_stream::StreamLink;
 use roam_types::MessageFamily;
 use tempfile::TempDir;
 use vx_eval2::{
-    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEventKind, EvalTrace, ProjectionStep,
-    Provenance, ProvenanceRoot, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
-    RuntimeInputKind, RuntimeReady, SlotAction, SlotEventReason, SlotResolved, SlotStore,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEventKind, EvalProgram, EvalProgramImport,
+    EvalProgramSource, EvalSession, EvalTrace, ProjectionStep, Provenance, ProvenanceRoot,
+    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
+    RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotResolved, SlotStore,
     SlotStoreReason, SlotVerification, SourcePoint, SourceSpan, Value, ValueRep, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id,
-    eval_source_entry_at_place_with_args_with_source_id_traced,
-    eval_source_entry_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
+    eval_source_entry_at_place_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
@@ -80,11 +79,6 @@ async fn run_case(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FixtureSlotVerifierPayload {
-    ObservedWhich { place: String, name: String },
-}
-
 fn run_case_local(
     case: &SpecCase,
     invocation: &ResolvedSpecRun,
@@ -97,31 +91,18 @@ fn run_case_local(
         .cloned()
         .map(spec_value_to_eval2_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let source = case_source(case, invocation)?;
-    let source_id = case_source_id(case);
     let entry = case_entry_name(invocation);
     let place = invocation.invoke.place.as_deref().unwrap_or("local");
 
-    if invocation.invoke.slot.is_some() {
-        match eval_source_entry_at_place_with_args_with_source_id_traced(
-            &source, &source_id, entry, &args, runtime, place,
-        ) {
-            Ok((resolution, trace)) => resolution_to_spec_outcome_with_trace(resolution, &trace),
-            Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
-                kind: format!("{:?}", error.kind),
-                message: error.message.to_string(),
-                events: Vec::new(),
-            })),
-        }
-    } else {
-        match eval_source_entry_with_args_with_source_id(&source, source_id, entry, &args) {
-            Ok(resolution) => resolution_to_spec_outcome(resolution),
-            Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
-                kind: format!("{:?}", error.kind),
-                message: error.message.to_string(),
-                events: Vec::new(),
-            })),
-        }
+    let program = case_program(case, invocation)?;
+    let mut session = EvalSession::new_program(program, entry, args, runtime, place);
+    match session.run() {
+        Ok(resolution) => resolution_to_spec_outcome_with_trace(resolution, session.trace()),
+        Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
+            kind: format!("{:?}", error.kind),
+            message: error.message.to_string(),
+            events: Vec::new(),
+        })),
     }
 }
 
@@ -133,6 +114,34 @@ fn case_source(
         Some(slot) => synthesize_slot_source(slot),
         None => Ok(case.main_source.clone()),
     }
+}
+
+fn case_program(
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+) -> Result<EvalProgram, Box<dyn std::error::Error>> {
+    let main_source = case_source(case, invocation)?;
+    if invocation.invoke.slot.is_some() || case.files.is_empty() {
+        return Ok(EvalProgram::single_source(
+            case_source_id(case),
+            main_source,
+        ));
+    }
+
+    let mut sources = vec![EvalProgramSource::new(case_source_id(case), main_source)];
+    let mut imports = Vec::new();
+    for (index, (path, source_text)) in case.files.iter().enumerate() {
+        sources.push(EvalProgramSource::new(
+            format!("{}#{path}", case.path.display()),
+            source_text.clone(),
+        ));
+        imports.push(EvalProgramImport {
+            from: 0,
+            to: index + 1,
+        });
+    }
+    EvalProgram::new(0, sources, imports)
+        .map_err(|error| std::io::Error::other(error.message.to_string()).into())
 }
 
 fn case_entry_name(invocation: &ResolvedSpecRun) -> &str {
@@ -354,7 +363,7 @@ struct FixtureRuntime {
     slots: Arc<Mutex<FixtureSlotStore>>,
 }
 
-type FixtureSlotStore = SlotStore<Value, Value, FixtureSlotVerifierPayload, Value>;
+type FixtureSlotStore = SlotStore<Value, Value, (), Value>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ToyResolverIntent {
@@ -541,7 +550,7 @@ impl FixtureRuntime {
     fn resolve_toy_graph(
         &self,
         requirements: &BTreeMap<String, String>,
-        current: Option<&vx_eval2::SlotRecord<Value, Value, FixtureSlotVerifierPayload, Value>>,
+        current: Option<&vx_eval2::SlotRecord<Value, Value, (), Value>>,
         intent: ToyResolverIntent,
     ) -> Result<BTreeMap<String, String>, EvalError> {
         let current_graph = current
@@ -787,12 +796,7 @@ impl FixtureRuntime {
             |_| {
                 let value = self.discover_which(place, name, source)?;
                 let claims = value.meta.claims.clone();
-                Ok(SlotResolved::new(value)
-                    .with_claims(claims)
-                    .with_verifier_payload(FixtureSlotVerifierPayload::ObservedWhich {
-                        place: place.to_string(),
-                        name: name.to_string(),
-                    }))
+                Ok(SlotResolved::new(value).with_claims(claims))
             },
         )
     }
@@ -813,12 +817,7 @@ impl FixtureRuntime {
             |_| {
                 let value = self.discover_which(place, name, source)?;
                 let claims = value.meta.claims.clone();
-                Ok(SlotResolved::new(value)
-                    .with_claims(claims)
-                    .with_verifier_payload(FixtureSlotVerifierPayload::ObservedWhich {
-                        place: place.to_string(),
-                        name: name.to_string(),
-                    }))
+                Ok(SlotResolved::new(value).with_claims(claims))
             },
         )
     }
@@ -830,9 +829,8 @@ impl FixtureRuntime {
         witness: Value,
         action: SlotAction<Value>,
         resolve: impl FnOnce(
-            Option<&vx_eval2::SlotRecord<Value, Value, FixtureSlotVerifierPayload, Value>>,
-        )
-            -> Result<SlotResolved<Value, FixtureSlotVerifierPayload>, EvalError>,
+            Option<&vx_eval2::SlotRecord<Value, Value, (), Value>>,
+        ) -> Result<SlotResolved<Value, ()>, EvalError>,
     ) -> Result<RuntimeReady, EvalError> {
         let mut slots = self.slots.lock().expect("slot store lock poisoned");
         let resolution = slots.resolve(
@@ -851,7 +849,7 @@ impl FixtureRuntime {
     fn verify_slot_record(
         &self,
         place: &str,
-        record: &vx_eval2::SlotRecord<Value, Value, FixtureSlotVerifierPayload, Value>,
+        record: &vx_eval2::SlotRecord<Value, Value, (), Value>,
     ) -> SlotVerification {
         if record.claims.is_empty() {
             return SlotVerification::Valid;
@@ -1342,6 +1340,57 @@ impl RuntimeHooks for FixtureRuntime {
             _ => Ok(RuntimeCallOutcome::Unsupported),
         }
     }
+
+    fn prepare_slot(
+        &self,
+        place: &str,
+        slot_id: &str,
+        witness: &Value,
+        action: &SlotAction<Value>,
+    ) -> Result<RuntimeSlotPrepare, EvalError> {
+        let slots = self.slots.lock().expect("slot store lock poisoned");
+        Ok(
+            match slots.decide(
+                slot_id.to_string(),
+                &normalized_slot_witness(witness.clone()),
+                action,
+                |record| self.verify_slot_record(place, record),
+            ) {
+                SlotDecision::Reused(record) => RuntimeSlotPrepare::Reused(RuntimeReady {
+                    value: record.value,
+                    events: vec![slot_resolution_event(
+                        slot_id,
+                        &vx_eval2::SlotResolutionKind::Reused,
+                    )],
+                }),
+                SlotDecision::Store { current, .. } => RuntimeSlotPrepare::Resolve {
+                    current: current.map(|record| record.value),
+                },
+            },
+        )
+    }
+
+    fn store_slot(
+        &self,
+        place: &str,
+        slot_id: &str,
+        witness: &Value,
+        action: &SlotAction<Value>,
+        resolved: &Value,
+    ) -> Result<RuntimeReady, EvalError> {
+        let mut slots = self.slots.lock().expect("slot store lock poisoned");
+        let resolution = slots.resolve(
+            slot_id.to_string(),
+            normalized_slot_witness(witness.clone()),
+            action.clone(),
+            |record| self.verify_slot_record(place, record),
+            |_| Ok(SlotResolved::new(resolved.clone()).with_claims(resolved.meta.claims.clone())),
+        )?;
+        Ok(RuntimeReady {
+            value: resolution.record.value.clone(),
+            events: vec![slot_resolution_event(slot_id, &resolution.kind)],
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -1535,6 +1584,10 @@ struct InvocationProgram {
     entry: String,
 }
 
+fn program_uses_stateful_slots(program: &InvocationProgram) -> bool {
+    program.source.contains("slot_current(") || program.source.contains("slot_refresh(")
+}
+
 fn invocation_program(
     case: &SpecCase,
     invocation: &ResolvedSpecRun,
@@ -1594,7 +1647,7 @@ async fn run_rpc_invocation(
         .map_err(|error| std::io::Error::other(format!("invalid invocation args: {error:?}")))?;
     let program = invocation_program(case, invocation)?;
     let runtime_fingerprint = runtime_fingerprint(&invocation.invoke.runtime);
-    let outcome = if invocation.invoke.slot.is_some() {
+    let outcome = if invocation.invoke.slot.is_some() || program_uses_stateful_slots(&program) {
         eval_subgraph_at_place(client, place, &program, &arg_envelopes).await?
     } else if cached_outcome(
         cached,
@@ -1992,26 +2045,6 @@ fn verify_claims_against_runtime(
     VerifyClaimsResult {
         ok: true,
         error: None,
-    }
-}
-
-fn resolution_to_spec_outcome(
-    resolution: Resolution,
-) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
-    match resolution {
-        Resolution::Ready(value) => spec_outcome_from_value(value, Vec::new()),
-        Resolution::Pending(pending) => Err(std::io::Error::other(format!(
-            "eval2 returned pending at the external boundary: {pending:?}"
-        ))
-        .into()),
-        Resolution::Waiting => {
-            Err(std::io::Error::other("eval2 returned waiting at the external boundary").into())
-        }
-        Resolution::Poison(error) => Ok(SpecOutcome::Poison(ObservedPoison {
-            kind: format!("{:?}", error.kind),
-            message: error.message.to_string(),
-            events: Vec::new(),
-        })),
     }
 }
 

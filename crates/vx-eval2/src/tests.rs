@@ -14,9 +14,11 @@ use crate::{
     EvalNodeId, EvalNodeKind, EvalNodeState, EvalProgram, EvalProgramImport, EvalProgramSource,
     EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, PendingRef,
     ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
-    RuntimeInputKind, RuntimeReady, SlotAction, SlotEventReason, SlotId, SlotResolutionKind,
-    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
-    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    RuntimeInputKind, RuntimeReady, RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason,
+    SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
+    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id,
+    eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -361,6 +363,226 @@ impl RuntimeHooks for UnsupportedRuntime {
     }
 }
 
+#[derive(Clone, Default)]
+struct SlotBuiltinRuntime {
+    slots: Arc<Mutex<SlotStore<Value, Value, (), Value>>>,
+}
+
+impl SlotBuiltinRuntime {
+    fn slot_event_ready(
+        &self,
+        slot_id: &str,
+        resolution: &crate::SlotResolution<Value, Value, (), Value>,
+    ) -> RuntimeReady {
+        let event = match &resolution.kind {
+            SlotResolutionKind::Reused => EvalEventKind::SlotReuse {
+                slot: Arc::from(slot_id),
+            },
+            SlotResolutionKind::Stored {
+                reason: SlotStoreReason::Missing,
+            } => EvalEventKind::SlotPopulate {
+                slot: Arc::from(slot_id),
+                reason: SlotEventReason::Missing,
+            },
+            SlotResolutionKind::Stored { reason } => EvalEventKind::SlotRewrite {
+                slot: Arc::from(slot_id),
+                reason: match reason {
+                    SlotStoreReason::Missing => SlotEventReason::Missing,
+                    SlotStoreReason::WitnessChanged => SlotEventReason::WitnessChanged,
+                    SlotStoreReason::ClaimsInvalid { reason } => SlotEventReason::ClaimsInvalid {
+                        reason: reason.clone(),
+                    },
+                    SlotStoreReason::Refresh { intent } => SlotEventReason::Refresh {
+                        intent: intent.clone(),
+                    },
+                },
+            },
+        };
+        RuntimeReady {
+            value: resolution.record.value.clone(),
+            events: vec![event],
+        }
+    }
+
+    fn verify_slot_record(
+        &self,
+        place: &str,
+        record: &crate::SlotRecord<Value, Value, (), Value>,
+    ) -> SlotVerification {
+        if record.claims.is_empty() {
+            return SlotVerification::Valid;
+        }
+        for claim in &record.claims {
+            match claim {
+                Claim::Which {
+                    name,
+                    expected_path,
+                } => {
+                    let actual = match (place, name.as_str()) {
+                        ("win", "cl.exe") | ("win_same", "cl.exe") => Some("C:/VS/14.3/cl.exe"),
+                        ("win_changed", "cl.exe") => Some("C:/VS/14.4/cl.exe"),
+                        _ => None,
+                    };
+                    match (actual, expected_path.as_deref()) {
+                        (Some(actual), Some(expected)) if actual == expected => {}
+                        (Some(actual), Some(expected)) => {
+                            return SlotVerification::invalid(format!(
+                                "host.which(\"{name}\") changed: expected {expected}, got {actual}"
+                            ));
+                        }
+                        (None, Some(expected)) => {
+                            return SlotVerification::invalid(format!(
+                                "host.which(\"{name}\") changed: expected {expected}, but it is now missing"
+                            ));
+                        }
+                        (Some(actual), None) => {
+                            return SlotVerification::invalid(format!(
+                                "host.which(\"{name}\") changed: expected missing, got {actual}"
+                            ));
+                        }
+                        (None, None) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        SlotVerification::Valid
+    }
+}
+
+impl RuntimeHooks for SlotBuiltinRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &str,
+        args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match (callee, args) {
+            ("host_which", [value]) => {
+                let ValueRep::String(name) = &value.rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "host_which() argument must evaluate to String",
+                    ));
+                };
+                let path = match (place, name.as_ref()) {
+                    ("win", "cl.exe") | ("win_same", "cl.exe") => "C:/VS/14.3/cl.exe",
+                    ("win_changed", "cl.exe") => "C:/VS/14.4/cl.exe",
+                    _ => {
+                        return Ok(RuntimeCallOutcome::Unsupported);
+                    }
+                };
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string(path)
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "host_which",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Which {
+                            name: name.to_string(),
+                            expected_path: Some(path.to_string()),
+                        }),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+
+    fn prepare_slot(
+        &self,
+        place: &str,
+        slot_id: &str,
+        witness: &Value,
+        action: &SlotAction<Value>,
+    ) -> Result<RuntimeSlotPrepare, EvalError> {
+        let slots = self.slots.lock().expect("slot store lock poisoned");
+        Ok(
+            match slots.decide(
+                slot_id.to_string(),
+                &normalized_slot_witness(witness.clone()),
+                action,
+                |record| self.verify_slot_record(place, record),
+            ) {
+                SlotDecision::Reused(record) => RuntimeSlotPrepare::Reused(RuntimeReady {
+                    value: record.value,
+                    events: vec![EvalEventKind::SlotReuse {
+                        slot: Arc::from(slot_id),
+                    }],
+                }),
+                SlotDecision::Store { current, .. } => RuntimeSlotPrepare::Resolve {
+                    current: current.map(|record| record.value),
+                },
+            },
+        )
+    }
+
+    fn store_slot(
+        &self,
+        place: &str,
+        slot_id: &str,
+        witness: &Value,
+        action: &SlotAction<Value>,
+        resolved: &Value,
+    ) -> Result<RuntimeReady, EvalError> {
+        let mut slots = self.slots.lock().expect("slot store lock poisoned");
+        let resolution = slots.resolve(
+            slot_id.to_string(),
+            normalized_slot_witness(witness.clone()),
+            action.clone(),
+            |record| self.verify_slot_record(place, record),
+            |_| {
+                Ok::<_, EvalError>(
+                    SlotResolved::new(resolved.clone()).with_claims(resolved.meta.claims.clone()),
+                )
+            },
+        )?;
+        Ok(self.slot_event_ready(slot_id, &resolution))
+    }
+}
+
+fn normalized_slot_witness(value: Value) -> Value {
+    match value.rep {
+        ValueRep::Unit => Value::unit(),
+        ValueRep::Bool(value) => Value::bool(value),
+        ValueRep::U64(value) => Value::u64(value),
+        ValueRep::String(value) => Value::string(value),
+        ValueRep::Array(items) => Value::array(
+            items
+                .iter()
+                .cloned()
+                .map(normalized_slot_witness)
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::Map(map) => Value::map(
+            map.entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        normalized_slot_witness(key.clone()),
+                        normalized_slot_witness(value.clone()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::Struct(struct_value) => Value::structure(
+            struct_value.type_name.clone(),
+            struct_value
+                .fields
+                .iter()
+                .map(|(name, value)| (name.clone(), normalized_slot_witness(value.clone())))
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::External(external) => {
+            Value::external(external.kind.clone(), external.descriptor.clone())
+        }
+        ValueRep::Function(function) => Value::new(ValueRep::Function(function)),
+    }
+}
+
 #[test]
 fn imported_helper_function_can_be_called() {
     let program = test_program(
@@ -460,113 +682,240 @@ fn unresolved_import_missing_target_still_errors_clearly() {
 }
 
 #[test]
-fn slot_runtime_calls_emit_trace_events_with_refresh_intent() {
-    #[derive(Clone)]
-    struct SlotRuntime {
-        slots: Arc<Mutex<SlotStore<Value, Value, (), Value>>>,
-    }
-
-    impl SlotRuntime {
-        fn new() -> Self {
-            Self {
-                slots: Arc::new(Mutex::new(SlotStore::default())),
-            }
-        }
-    }
-
-    impl RuntimeHooks for SlotRuntime {
-        fn call(
-            &self,
-            _place: &str,
-            callee: &str,
-            args: &[Value],
-            _source: &SourceSpan,
-        ) -> Result<RuntimeCallOutcome, EvalError> {
-            match callee {
-                "slot_current_pure" => {
-                    let ValueRep::String(slot_id) = &args[0].rep else {
-                        panic!("slot id should be a string");
-                    };
-                    let mut slots = self.slots.lock().expect("slot lock poisoned");
-                    let resolution = slots.resolve(
-                        slot_id.to_string(),
-                        args[1].clone(),
-                        SlotAction::Current,
-                        |_| SlotVerification::Valid,
-                        |_| Ok::<_, EvalError>(SlotResolved::new(args[2].clone())),
-                    )?;
-                    let event = match resolution.kind {
-                        SlotResolutionKind::Reused => EvalEventKind::SlotReuse {
-                            slot: slot_id.clone(),
-                        },
-                        SlotResolutionKind::Stored {
-                            reason: SlotStoreReason::Missing,
-                        } => EvalEventKind::SlotPopulate {
-                            slot: slot_id.clone(),
-                            reason: SlotEventReason::Missing,
-                        },
-                        SlotResolutionKind::Stored { reason } => EvalEventKind::SlotRewrite {
-                            slot: slot_id.clone(),
-                            reason: match reason {
-                                SlotStoreReason::WitnessChanged => SlotEventReason::WitnessChanged,
-                                SlotStoreReason::ClaimsInvalid { reason } => {
-                                    SlotEventReason::ClaimsInvalid { reason }
-                                }
-                                SlotStoreReason::Refresh { intent } => {
-                                    SlotEventReason::Refresh { intent }
-                                }
-                                SlotStoreReason::Missing => SlotEventReason::Missing,
-                            },
-                        },
-                    };
-                    Ok(RuntimeCallOutcome::ReadyWithEvents(RuntimeReady {
-                        value: resolution.record.value,
-                        events: vec![event],
-                    }))
-                }
-                "slot_refresh_pure" => {
-                    let ValueRep::String(slot_id) = &args[0].rep else {
-                        panic!("slot id should be a string");
-                    };
-                    let mut slots = self.slots.lock().expect("slot lock poisoned");
-                    let resolution = slots.resolve(
-                        slot_id.to_string(),
-                        args[1].clone(),
-                        SlotAction::Refresh(args[3].clone()),
-                        |_| SlotVerification::Valid,
-                        |_| Ok::<_, EvalError>(SlotResolved::new(args[2].clone())),
-                    )?;
-                    Ok(RuntimeCallOutcome::ReadyWithEvents(RuntimeReady {
-                        value: resolution.record.value,
-                        events: vec![EvalEventKind::SlotRewrite {
-                            slot: slot_id.clone(),
-                            reason: SlotEventReason::Refresh {
-                                intent: match resolution.kind {
-                                    SlotResolutionKind::Stored {
-                                        reason: SlotStoreReason::Refresh { intent },
-                                    } => intent,
-                                    other => panic!("expected refresh store reason, got {other:?}"),
-                                },
-                            },
-                        }],
-                    }))
-                }
-                _ => Ok(RuntimeCallOutcome::Unsupported),
-            }
-        }
-    }
-
-    let runtime = SlotRuntime::new();
+fn authored_vixen_pure_slot_current_and_refresh_work() {
+    let runtime = SlotBuiltinRuntime::default();
     let source = r#"
-fn build() {
-  slot_current_pure("toolchain", "w1", 41)
+fn build_current(witness: String, desired: U64) {
+  fn resolve_slot(ctx) { desired }
+  slot_current("pure-slot", witness, resolve_slot)
+}
+
+fn build_refresh(witness: String, desired: U64, intent: String) {
+  fn resolve_slot(ctx) { desired }
+  slot_refresh("pure-slot", witness, intent, resolve_slot)
+}
+"#;
+
+    let Resolution::Ready(first) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-pure-slot",
+        "build_current",
+        &[Value::string("w1"), Value::u64(1)],
+        &runtime,
+        "local",
+    )
+    .expect("populate authored pure slot") else {
+        panic!("expected ready authored pure slot result");
+    };
+    assert_eq!(first.rep, ValueRep::U64(1));
+
+    let Resolution::Ready(reused) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-pure-slot",
+        "build_current",
+        &[Value::string("w1"), Value::u64(999)],
+        &runtime,
+        "local",
+    )
+    .expect("reuse authored pure slot") else {
+        panic!("expected ready reused authored pure slot result");
+    };
+    assert_eq!(reused.rep, ValueRep::U64(1));
+
+    let Resolution::Ready(rewritten) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-pure-slot",
+        "build_current",
+        &[Value::string("w2"), Value::u64(2)],
+        &runtime,
+        "local",
+    )
+    .expect("rerun authored pure slot after witness change") else {
+        panic!("expected ready witness-changed authored pure slot result");
+    };
+    assert_eq!(rewritten.rep, ValueRep::U64(2));
+
+    let Resolution::Ready(refreshed) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-pure-slot",
+        "build_refresh",
+        &[Value::string("w2"), Value::u64(3), Value::string("refresh")],
+        &runtime,
+        "local",
+    )
+    .expect("refresh authored pure slot") else {
+        panic!("expected ready refreshed authored pure slot result");
+    };
+    assert_eq!(refreshed.rep, ValueRep::U64(3));
+}
+
+#[test]
+fn authored_vixen_observed_slot_current_and_refresh_work() {
+    let runtime = SlotBuiltinRuntime::default();
+    let source = r#"
+fn build_current(name: String) {
+  fn resolve_slot(ctx) { host_which(ctx.witness) }
+  slot_current("toolchain-slot", name, resolve_slot)
+}
+
+fn build_refresh(name: String, intent: String) {
+  fn resolve_slot(ctx) { host_which(ctx.witness) }
+  slot_refresh("toolchain-slot", name, intent, resolve_slot)
+}
+"#;
+
+    let Resolution::Ready(first) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-observed-slot",
+        "build_current",
+        &[Value::string("cl.exe")],
+        &runtime,
+        "win",
+    )
+    .expect("populate authored observed slot") else {
+        panic!("expected ready authored observed slot result");
+    };
+    assert_eq!(first.rep, ValueRep::String("C:/VS/14.3/cl.exe".into()));
+
+    let Resolution::Ready(reused) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-observed-slot",
+        "build_current",
+        &[Value::string("cl.exe")],
+        &runtime,
+        "win_same",
+    )
+    .expect("reuse authored observed slot") else {
+        panic!("expected ready reused observed slot result");
+    };
+    assert_eq!(reused.rep, ValueRep::String("C:/VS/14.3/cl.exe".into()));
+
+    let Resolution::Ready(rewritten) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-observed-slot",
+        "build_current",
+        &[Value::string("cl.exe")],
+        &runtime,
+        "win_changed",
+    )
+    .expect("rerun authored observed slot after verification change") else {
+        panic!("expected ready verification-rerun observed slot result");
+    };
+    assert_eq!(rewritten.rep, ValueRep::String("C:/VS/14.4/cl.exe".into()));
+
+    let Resolution::Ready(refreshed) = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "authored-observed-slot",
+        "build_refresh",
+        &[Value::string("cl.exe"), Value::string("force_rediscover")],
+        &runtime,
+        "win_changed",
+    )
+    .expect("refresh authored observed slot") else {
+        panic!("expected ready refreshed observed slot result");
+    };
+    assert_eq!(refreshed.rep, ValueRep::String("C:/VS/14.4/cl.exe".into()));
+}
+
+#[test]
+fn imported_resolver_helper_can_drive_slot_builtin() {
+    let runtime = SlotBuiltinRuntime::default();
+    let program = EvalProgram::new(
+        0,
+        vec![
+            EvalProgramSource::new(
+                "main.vx",
+                "fn build_current(witness: String) { slot_current(\"imported-slot\", witness, imported_resolve) }",
+            ),
+            EvalProgramSource::new("helpers.vx", "fn imported_resolve(ctx) { ctx.witness }"),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    )
+    .expect("build slot imported resolver program");
+
+    let mut session = EvalSession::new_program(
+        program.clone(),
+        "build_current",
+        vec![Value::string("v1")],
+        &runtime,
+        "local",
+    );
+    let Resolution::Ready(first) = session.run().expect("run imported slot resolver") else {
+        panic!("expected ready imported slot resolver result");
+    };
+    assert_eq!(first.rep, ValueRep::String("v1".into()));
+
+    let mut session = EvalSession::new_program(
+        program,
+        "build_current",
+        vec![Value::string("v2")],
+        &runtime,
+        "local",
+    );
+    let Resolution::Ready(second) = session.run().expect("run imported slot resolver rewrite")
+    else {
+        panic!("expected ready imported slot resolver rewrite result");
+    };
+    assert_eq!(second.rep, ValueRep::String("v2".into()));
+}
+
+#[test]
+fn refresh_rewrites_same_slot_id_not_new_lineage() {
+    let runtime = SlotBuiltinRuntime::default();
+    let source = r#"
+fn build_current(value: U64) {
+  fn resolve_slot(ctx) { value }
+  slot_current("lineage-slot", "stable", resolve_slot)
+}
+
+fn build_refresh(value: U64, intent: String) {
+  fn resolve_slot(ctx) { value }
+  slot_refresh("lineage-slot", "stable", intent, resolve_slot)
+}
+"#;
+
+    let _ = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "slot-lineage",
+        "build_current",
+        &[Value::u64(1)],
+        &runtime,
+        "local",
+    )
+    .expect("populate lineage slot");
+    let _ = eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "slot-lineage",
+        "build_refresh",
+        &[Value::u64(2), Value::string("force")],
+        &runtime,
+        "local",
+    )
+    .expect("refresh lineage slot");
+
+    let slots = runtime.slots.lock().expect("slot store lock poisoned");
+    let record = slots
+        .get(&SlotId::from("lineage-slot"))
+        .expect("lineage slot record should exist");
+    assert_eq!(record.slot_id, SlotId::from("lineage-slot"));
+    assert_eq!(record.meta.write_count, 2);
+    assert_eq!(record.meta.rewrite_count, 1);
+}
+
+#[test]
+fn slot_runtime_calls_emit_trace_events_with_refresh_intent() {
+    let runtime = SlotBuiltinRuntime::default();
+    let source = r#"
+fn build(value: U64) {
+  fn resolve_slot(ctx) { value }
+  slot_current("toolchain", "w1", resolve_slot)
 }
 "#;
     let (initial, initial_trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
         source,
         "slot-trace-current",
         "build",
-        &[],
+        &[Value::u64(41)],
         &runtime,
         "local",
     )
@@ -584,15 +933,16 @@ fn build() {
     }));
 
     let refresh_source = r#"
-fn build() {
-  slot_refresh_pure("toolchain", "w1", 99, "force-rediscover")
+fn build(value: U64) {
+  fn resolve_slot(ctx) { value }
+  slot_refresh("toolchain", "w1", "force-rediscover", resolve_slot)
 }
 "#;
     let (refreshed, refresh_trace) = eval_source_entry_at_place_with_args_with_source_id_traced(
         refresh_source,
         "slot-trace-refresh",
         "build",
-        &[],
+        &[Value::u64(99)],
         &runtime,
         "local",
     )
