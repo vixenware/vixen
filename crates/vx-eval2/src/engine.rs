@@ -40,6 +40,22 @@ pub enum EvalNodeState {
     Poison(EvalError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EvalWorkId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalWorkKind {
+    StartEntry,
+    ResumePending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalQueuedWork {
+    pub id: EvalWorkId,
+    pub kind: EvalWorkKind,
+    pub pending: Option<PendingRef>,
+}
+
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     source: String,
     source_id: String,
@@ -98,8 +114,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             state.scheduler.enqueue_start_entry();
         }
 
-        while let Some(task) = state.scheduler.pop_ready_task() {
-            let step = match task {
+        while let Some(record) = state.scheduler.pop_ready_task() {
+            let step = match record.task {
                 ReadyTask::StartEntry => {
                     evaluate_entry_once(&mut state, &self.source, &self.entry, &self.args)?
                 }
@@ -147,6 +163,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn pending_nodes(&self) -> Vec<PendingRef> {
         self.scheduler.pending_nodes()
+    }
+
+    pub fn queued_work(&self) -> Vec<EvalQueuedWork> {
+        self.scheduler.queued_work()
     }
 
     pub fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
@@ -372,8 +392,10 @@ struct EvalState<'source, 'scheduler, Runtime, Sink> {
 
 struct EvalScheduler {
     next_id: u64,
+    next_work_id: u64,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
-    ready_queue: VecDeque<ReadyTask>,
+    ready_queue: VecDeque<EvalWorkId>,
+    ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     pending_resumes: BTreeMap<u64, EvalSuspension>,
 }
 
@@ -381,11 +403,19 @@ impl Default for EvalScheduler {
     fn default() -> Self {
         Self {
             next_id: 1,
+            next_work_id: 1,
             node_states: BTreeMap::new(),
             ready_queue: VecDeque::new(),
+            ready_tasks: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ReadyTaskRecord {
+    work: EvalQueuedWork,
+    task: ReadyTask,
 }
 
 #[derive(Debug, Clone)]
@@ -678,8 +708,15 @@ fn eval_dependent_expr(
 }
 
 impl EvalScheduler {
-    fn enqueue_start_entry(&mut self) {
-        self.ready_queue.push_back(ReadyTask::StartEntry);
+    fn queued_work(&self) -> Vec<EvalQueuedWork> {
+        self.ready_queue
+            .iter()
+            .filter_map(|id| self.ready_tasks.get(id).map(|record| record.work.clone()))
+            .collect()
+    }
+
+    fn enqueue_start_entry(&mut self) -> EvalQueuedWork {
+        self.enqueue_ready_task(ReadyTask::StartEntry, EvalWorkKind::StartEntry, None)
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
@@ -725,8 +762,11 @@ impl EvalScheduler {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
-        self.ready_queue
-            .push_back(ReadyTask::Resume(ScheduledResume { suspension, result }));
+        self.enqueue_ready_task(
+            ReadyTask::Resume(ScheduledResume { suspension, result }),
+            EvalWorkKind::ResumePending,
+            Some(pending.clone()),
+        );
         Ok(())
     }
 
@@ -735,8 +775,32 @@ impl EvalScheduler {
             .insert(suspension.pending.node_id, suspension);
     }
 
-    fn pop_ready_task(&mut self) -> Option<ReadyTask> {
-        self.ready_queue.pop_front()
+    fn pop_ready_task(&mut self) -> Option<ReadyTaskRecord> {
+        let work_id = self.ready_queue.pop_front()?;
+        self.ready_tasks.remove(&work_id)
+    }
+
+    fn enqueue_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        pending: Option<PendingRef>,
+    ) -> EvalQueuedWork {
+        let work = EvalQueuedWork {
+            id: EvalWorkId(self.next_work_id),
+            kind,
+            pending,
+        };
+        self.next_work_id += 1;
+        self.ready_queue.push_back(work.id);
+        self.ready_tasks.insert(
+            work.id,
+            ReadyTaskRecord {
+                work: work.clone(),
+                task,
+            },
+        );
+        work
     }
 }
 

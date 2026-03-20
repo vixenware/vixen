@@ -8,9 +8,10 @@ use std::{
 
 use crate::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalNodeId,
-    EvalNodeState, EvalSession, EvalTrace, PendingRef, ProjectionStep, Provenance, Resolution,
-    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value, ValueRep,
-    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id_traced,
+    EvalNodeState, EvalSession, EvalTrace, EvalWorkKind, PendingRef, ProjectionStep, Provenance,
+    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, SourceSpan, Value,
+    ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, value_to_envelope,
 };
@@ -520,6 +521,40 @@ fn session_resume_does_not_replay_ready_runtime_calls_before_pending_point() {
         1,
         "the pending runtime call should resume from the resolved value",
     );
+}
+
+#[test]
+fn resolving_pending_node_requeues_resume_work_record() {
+    let mut session = EvalSession::new(
+        "fn build() { host_wait() }",
+        "session-queued-work",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let first = session.run().expect("first session run");
+    let Resolution::Pending(pending) = first else {
+        panic!("expected pending resolution, got {first:?}");
+    };
+    assert!(session.queued_work().is_empty());
+
+    session
+        .resolve_pending(&pending, Value::string("windows"))
+        .expect("resolve pending node");
+
+    let queued = session.queued_work();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].kind, EvalWorkKind::ResumePending);
+    assert_eq!(queued[0].pending.as_ref(), Some(&pending));
+
+    let second = session.run().expect("second session run");
+    let Resolution::Ready(value) = second else {
+        panic!("expected ready resolution, got {second:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("windows".into()));
+    assert!(session.queued_work().is_empty());
 }
 
 #[test]
