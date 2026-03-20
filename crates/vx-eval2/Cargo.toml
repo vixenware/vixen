@@ -18,6 +18,7 @@ vx-eval2-proto.workspace = true
 blake3.workspace = true
 camino.workspace = true
 datatest-stable = "0.3.3"
+facet-value.workspace = true
 moire.workspace = true
 roam-core.workspace = true
 roam-stream.workspace = true

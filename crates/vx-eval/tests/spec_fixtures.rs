@@ -5,8 +5,8 @@ use facet_value::Value as DynamicValue;
 use vx_eval::{CapabilitySet, Engine, Value, lower_source_file_with_source_id};
 use vx_parser::SourceFile;
 use vx_spec::{
-    EngineExpectation, EngineId, ObservedPoison, ObservedResult, SpecCase, SpecOutcome, SpecValue,
-    StructSpec,
+    EngineExpectation, EngineId, ObservedPoison, ObservedResult, ResolvedSpecRun, SpecCase,
+    SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -14,15 +14,28 @@ fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
     match case.expectation_for(EngineId::Eval1) {
         EngineExpectation::Pass => {
             let runtime = tokio::runtime::Runtime::new()?;
-            let outcome = runtime.block_on(run_case(&case))?;
-            case.assert_matches(&outcome)?;
+            for (index, invocation) in case.invocations().iter().enumerate() {
+                let outcome = runtime.block_on(run_case(&case, invocation))?;
+                invocation
+                    .expect
+                    .assert_matches(&outcome)
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "run #{} expectation failed: {error}",
+                            index + 1
+                        ))
+                    })?;
+            }
             Ok(())
         }
         EngineExpectation::Todo | EngineExpectation::Skip => Ok(()),
     }
 }
 
-async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+async fn run_case(
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
     let parse = vx_parser::parse(&case.main_source);
     if !parse.errors().is_empty() {
         return Err(std::io::Error::other(format!("parse errors: {:?}", parse.errors())).into());
@@ -31,14 +44,14 @@ async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Er
     let module = lower_source_file_with_source_id(&root, case.path.display().to_string())
         .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
     let engine = Engine::from_module(&module).with_capabilities(CapabilitySet::TEST_ONLY);
-    let args = case
+    let args = invocation
         .invoke
         .args
         .iter()
         .cloned()
         .map(dynamic_to_eval_value)
         .collect::<Result<Vec<_>, _>>()?;
-    match engine.call(&case.invoke.entry, args).await {
+    match engine.call(&invocation.invoke.entry, args).await {
         Ok(value) => Ok(SpecOutcome::Result(ObservedResult {
             value: eval_value_to_spec(&value)?,
             provenance: None,

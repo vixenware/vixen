@@ -128,6 +128,7 @@ pub struct SpecCase {
     pub main_source: String,
     pub invoke: InvokeSpec,
     pub expect: ExpectSpec,
+    pub runs: Vec<SpecRun>,
     pub files: BTreeMap<String, String>,
 }
 
@@ -140,6 +141,7 @@ impl SpecCase {
             main_source: parsed.main,
             invoke: parsed.invoke,
             expect: parsed.expect,
+            runs: parsed.runs,
             files: parsed.files,
         })
     }
@@ -166,6 +168,7 @@ impl SpecCase {
             main_source: parsed.main,
             invoke: parsed.invoke,
             expect: parsed.expect,
+            runs: parsed.runs,
             files: parsed.files,
         })
     }
@@ -181,6 +184,23 @@ impl SpecCase {
     pub fn assert_matches(&self, outcome: &SpecOutcome) -> Result<(), SpecAssertionError> {
         self.expect.assert_matches(outcome)
     }
+
+    pub fn invocations(&self) -> Vec<ResolvedSpecRun> {
+        if self.runs.is_empty() {
+            return vec![ResolvedSpecRun {
+                invoke: self.invoke.clone(),
+                expect: self.expect.clone(),
+            }];
+        }
+
+        self.runs
+            .iter()
+            .map(|run| ResolvedSpecRun {
+                invoke: run.invoke.resolve_against(&self.invoke),
+                expect: run.expect.clone(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
@@ -188,6 +208,8 @@ pub struct SpecDocument {
     pub main: String,
     pub invoke: InvokeSpec,
     pub expect: ExpectSpec,
+    #[facet(default)]
+    pub runs: Vec<SpecRun>,
     #[facet(default)]
     pub files: BTreeMap<String, String>,
 }
@@ -223,6 +245,58 @@ pub struct InvokeSpec {
     pub capabilities: Vec<String>,
     #[facet(default)]
     pub runtime: RuntimeSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedSpecRun {
+    pub invoke: InvokeSpec,
+    pub expect: ExpectSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct SpecRun {
+    #[facet(default)]
+    pub invoke: InvokeOverrideSpec,
+    pub expect: ExpectSpec,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Facet)]
+pub struct InvokeOverrideSpec {
+    #[facet(default)]
+    pub entry: Option<String>,
+    #[facet(default)]
+    pub place: Option<String>,
+    #[facet(default)]
+    pub verify_place: Option<String>,
+    #[facet(default)]
+    pub replay_place: Option<String>,
+    #[facet(default)]
+    pub args: Option<Vec<DynamicValue>>,
+    #[facet(default)]
+    pub capabilities: Option<Vec<String>>,
+}
+
+impl InvokeOverrideSpec {
+    fn resolve_against(&self, base: &InvokeSpec) -> InvokeSpec {
+        InvokeSpec {
+            entry: self.entry.clone().unwrap_or_else(|| base.entry.clone()),
+            place: self.place.clone().or_else(|| base.place.clone()),
+            verify_place: self
+                .verify_place
+                .clone()
+                .or_else(|| base.verify_place.clone()),
+            replay_place: self
+                .replay_place
+                .clone()
+                .or_else(|| base.replay_place.clone()),
+            args: self.args.clone().unwrap_or_else(|| base.args.clone()),
+            capabilities: self
+                .capabilities
+                .clone()
+                .unwrap_or_else(|| base.capabilities.clone()),
+            runtime: base.runtime.clone(),
+        }
+    }
 }
 
 impl InvokeSpec {

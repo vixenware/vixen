@@ -1,6 +1,7 @@
 use crate::{
     Claim, CrossingPolicy, PendingRef, ProjectionStep, Provenance, Resolution, ReuseClass,
-    RuntimeInputKind, SourceSpan, Value, ValueRep, envelope_to_value, value_to_envelope,
+    RuntimeInputKind, SourceSpan, Value, ValueRep, envelope_to_value,
+    eval_source_entry_with_args_with_source_id, value_to_envelope,
 };
 
 #[test]
@@ -91,4 +92,48 @@ fn wire_round_trip_preserves_value_shape_and_metadata() {
     let decoded = envelope_to_value(encoded).expect("decode value");
 
     assert_eq!(decoded, value);
+}
+
+#[test]
+fn entry_arguments_are_bound_as_runtime_inputs() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        "fn build(value: String) { value }",
+        "entry-args",
+        "build",
+        &[Value::string("forty-two")],
+    )
+    .expect("evaluate entry with args");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("forty-two".into()));
+    assert_eq!(value.meta.provenance.source.source_id, "entry-args");
+    assert_eq!(
+        value.meta.provenance.root,
+        Provenance::runtime_input(
+            value.meta.provenance.source.clone(),
+            RuntimeInputKind::Argument,
+            "value",
+        )
+        .root
+    );
+}
+
+#[test]
+fn entry_argument_count_mismatch_is_a_type_error() {
+    let error = eval_source_entry_with_args_with_source_id(
+        "fn build(value: String) { value }",
+        "arity",
+        "build",
+        &[],
+    )
+    .expect_err("missing arg should fail");
+
+    assert_eq!(error.kind, crate::EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("expects 1 positional argument(s), got 0")
+    );
 }

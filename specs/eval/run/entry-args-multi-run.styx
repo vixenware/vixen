@@ -1,0 +1,38 @@
+main <<VX,vx
+fn build(value: String) {
+  value
+}
+VX
+
+invoke {
+  entry build
+}
+
+runs (
+  {
+    invoke {
+      args ("forty-one")
+    }
+
+    expect {
+      result @string"forty-one"
+    }
+  }
+
+  {
+    invoke {
+      args ("forty-two")
+    }
+
+    expect {
+      result @string"forty-two"
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @pass
+    eval2 @pass
+  }
+}

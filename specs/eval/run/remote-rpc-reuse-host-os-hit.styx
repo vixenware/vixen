@@ -6,8 +6,6 @@ VX
 
 invoke {
   entry build
-  place win
-  replay_place win_same
 
   runtime {
     places {
@@ -26,25 +24,53 @@ invoke {
       }
     }
   }
+
 }
 
-expect {
-  result @string"windows"
-  obligations (
-    @os{value windows}
-  )
-  reuse @observed
-  crossing @by_value
-  events (
-    @must_emit/@stabilize_miss
-    @must_emit/@verify_claims_ok
-    @must_emit/@stabilize_hit
-    @before{
-      first @stabilize_miss
-      then @stabilize_hit
+runs (
+  {
+    invoke {
+      place win
     }
-  )
 
+    expect {
+      result @string"windows"
+      obligations (
+        @os{value windows}
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@stabilize_miss
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_same
+    }
+
+    expect {
+      result @string"windows"
+      obligations (
+        @os{value windows}
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@verify_claims_ok
+        @must_emit/@stabilize_hit
+        @before{
+          first @verify_claims_ok
+          then @stabilize_hit
+        }
+      )
+    }
+  }
+)
+
+expect {
   engines {
     eval1 @skip
     eval2 @pass

@@ -8,6 +8,7 @@ use std::sync::{
 
 use blake3::hash as blake3_hash;
 use camino::Utf8Path;
+use facet_value::Value as DynamicValue;
 use moire::task::FutureExt;
 use roam_core::{BareConduit, acceptor};
 use roam_stream::StreamLink;
@@ -16,8 +17,8 @@ use tempfile::TempDir;
 use vx_eval2::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, ProjectionStep, Provenance, ProvenanceRoot,
     Resolution, ReuseClass, RuntimeHooks, RuntimeInputKind, SourcePoint, SourceSpan, Value,
-    ValueRep, envelope_to_value, eval_source_entry_at_place_with_source_id,
-    eval_source_entry_with_source_id, resolution_to_outcome,
+    ValueRep, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
+    eval_source_entry_with_args_with_source_id, resolution_to_outcome, value_to_envelope,
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
@@ -27,8 +28,8 @@ use vx_eval2_proto::{
 use vx_io::net::{Listener, connect_session, default_local_endpoint, park_session};
 use vx_spec::{
     CrossingPattern, EngineExpectation, EngineId, EventPattern, ExternalSpec, HostSpec,
-    ObservationPattern, ObservedPoison, ObservedResult, PlaceSpec, ReusePattern, RuntimeSpec,
-    SpecCase, SpecOutcome, SpecValue, StructSpec,
+    ObservationPattern, ObservedPoison, ObservedResult, PlaceSpec, ResolvedSpecRun, ReusePattern,
+    RuntimeSpec, SpecCase, SpecOutcome, SpecValue, StructSpec,
 };
 
 fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
@@ -36,26 +37,54 @@ fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
     match case.expectation_for(EngineId::Eval2) {
         EngineExpectation::Pass => {
             let runtime = tokio::runtime::Runtime::new()?;
-            let outcome = runtime.block_on(run_case(&case))?;
-            case.assert_matches(&outcome)?;
+            let invocations = case.invocations();
+            let outcomes = runtime.block_on(run_case(&case, &invocations))?;
+            for (index, (invocation, outcome)) in
+                invocations.iter().zip(outcomes.iter()).enumerate()
+            {
+                invocation.expect.assert_matches(outcome).map_err(|error| {
+                    std::io::Error::other(format!("run #{} expectation failed: {error}", index + 1))
+                })?;
+            }
             Ok(())
         }
         EngineExpectation::Todo | EngineExpectation::Skip => Ok(()),
     }
 }
 
-async fn run_case(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
-    match case.invoke.place.as_deref() {
-        Some(place) => run_case_via_rpc(case, place).await,
-        None => run_case_local(case),
+async fn run_case(
+    case: &SpecCase,
+    invocations: &[ResolvedSpecRun],
+) -> Result<Vec<SpecOutcome>, Box<dyn std::error::Error>> {
+    let uses_rpc = invocations
+        .iter()
+        .any(|invocation| invocation.invoke.place.is_some());
+    if uses_rpc {
+        run_case_via_rpc(case, invocations).await
+    } else {
+        invocations
+            .iter()
+            .map(|invocation| run_case_local(case, invocation))
+            .collect()
     }
 }
 
-fn run_case_local(case: &SpecCase) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
-    match eval_source_entry_with_source_id(
+fn run_case_local(
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    let args = invocation
+        .invoke
+        .args
+        .iter()
+        .cloned()
+        .map(dynamic_to_eval2_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    match eval_source_entry_with_args_with_source_id(
         &case.main_source,
         case_source_id(case),
-        &case.invoke.entry,
+        &invocation.invoke.entry,
+        &args,
     ) {
         Ok(resolution) => resolution_to_spec_outcome(resolution),
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
@@ -362,6 +391,13 @@ struct FixtureDaemon {
     proxies: ProxyStore,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CachedInvocation {
+    entry: String,
+    args: Vec<ValueEnvelope>,
+    outcome: EvalOutcome,
+}
+
 #[derive(Clone, Default)]
 struct ProxyStore {
     next_handle: Arc<AtomicU64>,
@@ -401,10 +437,25 @@ impl Eval2Daemon for FixtureDaemon {
     }
 
     async fn eval_subgraph(&self, request: EvalSubgraphRequest) -> EvalOutcome {
-        match eval_source_entry_at_place_with_source_id(
+        let args = match request
+            .args
+            .into_iter()
+            .map(envelope_to_value)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(args) => args,
+            Err(error) => {
+                return EvalOutcome::Poison {
+                    kind: "Internal".to_string(),
+                    message: format!("invalid eval2 subgraph args: {error:?}"),
+                };
+            }
+        };
+        match eval_source_entry_at_place_with_args_with_source_id(
             &request.source,
             &request.source_id,
             &request.entry,
+            &args,
             &self.runtime,
             &request.place.id,
         ) {
@@ -440,19 +491,21 @@ impl Eval2Daemon for FixtureDaemon {
 
 async fn run_case_via_rpc(
     case: &SpecCase,
-    place: &str,
-) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
-    if !case.invoke.runtime.places.contains_key(place) {
-        return Err(std::io::Error::other(format!(
-            "invoke.place {place:?} was not declared under invoke.runtime.places"
-        ))
-        .into());
-    }
-    if !case.invoke.args.is_empty() {
-        return Err(std::io::Error::other(
-            "eval2 RPC fixture runner does not support invoke.args yet",
-        )
-        .into());
+    invocations: &[ResolvedSpecRun],
+) -> Result<Vec<SpecOutcome>, Box<dyn std::error::Error>> {
+    for invocation in invocations {
+        let Some(place) = invocation.invoke.place.as_deref() else {
+            return Err(std::io::Error::other(
+                "eval2 RPC fixture runs require invoke.place on every run",
+            )
+            .into());
+        };
+        if !case.invoke.runtime.places.contains_key(place) {
+            return Err(std::io::Error::other(format!(
+                "invoke.place {place:?} was not declared under invoke.runtime.places"
+            ))
+            .into());
+        }
     }
 
     let runtime = FixtureRuntime {
@@ -486,23 +539,106 @@ async fn run_case_via_rpc(
 
     let (caller, session_handle) = connect_session(&endpoint).await?;
     let client = Eval2DaemonClient::new(caller.clone());
-    let mut events = Vec::new();
-    let outcome = if let Some(replay_place) = &case.invoke.replay_place {
-        let mut cached = eval_subgraph(&client, case, place).await?;
-        events.push(EventPattern::StabilizeMiss);
+    let mut cached = Vec::new();
+    let mut outcomes = Vec::with_capacity(invocations.len());
+    for invocation in invocations {
+        outcomes.push(run_rpc_invocation(&client, case, invocation, &mut cached).await?);
+    }
 
-        let claims = match &cached {
+    drop(client);
+    drop(caller);
+    drop(session_handle);
+    accept_task.abort();
+
+    Ok(outcomes)
+}
+
+async fn eval_subgraph(
+    client: &Eval2DaemonClient,
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+    args: &[ValueEnvelope],
+) -> Result<EvalOutcome, Box<dyn std::error::Error>> {
+    let place = invocation
+        .invoke
+        .place
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("eval2 RPC invocation is missing invoke.place"))?;
+    eval_subgraph_at_place(client, case, &invocation.invoke.entry, place, args).await
+}
+
+async fn eval_subgraph_at_place(
+    client: &Eval2DaemonClient,
+    case: &SpecCase,
+    entry: &str,
+    place: &str,
+    args: &[ValueEnvelope],
+) -> Result<EvalOutcome, Box<dyn std::error::Error>> {
+    client
+        .eval_subgraph(EvalSubgraphRequest {
+            place: PlaceRef {
+                id: place.to_string(),
+            },
+            source_id: case_source_id(case),
+            source: case.main_source.clone(),
+            entry: entry.to_string(),
+            args: args.to_vec(),
+        })
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!("rpc eval_subgraph failed: {error:?}")).into()
+        })
+}
+
+async fn run_rpc_invocation(
+    client: &Eval2DaemonClient,
+    case: &SpecCase,
+    invocation: &ResolvedSpecRun,
+    cached: &mut Vec<CachedInvocation>,
+) -> Result<SpecOutcome, Box<dyn std::error::Error>> {
+    let mut events = Vec::new();
+    let place = invocation
+        .invoke
+        .place
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("eval2 RPC invocation is missing invoke.place"))?;
+    let args = invocation
+        .invoke
+        .args
+        .iter()
+        .cloned()
+        .map(dynamic_to_eval2_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let arg_envelopes = args
+        .iter()
+        .map(value_to_envelope)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| std::io::Error::other(format!("invalid invocation args: {error:?}")))?;
+    let outcome = if cached_outcome(cached, &invocation.invoke.entry, &arg_envelopes).is_none()
+        && let Some(replay_place) = invocation.invoke.replay_place.as_deref()
+    {
+        let initial = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+        events.push(EventPattern::StabilizeMiss);
+        let claims = match &initial {
             EvalOutcome::Ready(result) => result.meta.claims.clone(),
             EvalOutcome::Poison { .. } => Vec::new(),
         };
         if claims.is_empty() {
             events.push(EventPattern::StabilizeHit);
-            cached
+            if matches!(initial, EvalOutcome::Ready(_)) {
+                cache_outcome(
+                    cached,
+                    &invocation.invoke.entry,
+                    &arg_envelopes,
+                    initial.clone(),
+                );
+            }
+            initial
         } else {
             let verification = client
                 .verify_claims(VerifyClaimsRequest {
                     place: PlaceRef {
-                        id: replay_place.clone(),
+                        id: replay_place.to_string(),
                     },
                     claims,
                 })
@@ -513,84 +649,190 @@ async fn run_case_via_rpc(
             if verification.ok {
                 events.push(EventPattern::VerifyClaimsOk);
                 events.push(EventPattern::StabilizeHit);
-                cached
+                cache_outcome(
+                    cached,
+                    &invocation.invoke.entry,
+                    &arg_envelopes,
+                    initial.clone(),
+                );
+                initial
             } else {
                 events.push(EventPattern::VerifyClaimsFail);
-                cached = eval_subgraph(&client, case, replay_place).await?;
+                let fresh = eval_subgraph_at_place(
+                    client,
+                    case,
+                    &invocation.invoke.entry,
+                    replay_place,
+                    &arg_envelopes,
+                )
+                .await?;
                 events.push(EventPattern::StabilizeMiss);
-                cached
+                if matches!(fresh, EvalOutcome::Ready(_)) {
+                    cache_outcome(
+                        cached,
+                        &invocation.invoke.entry,
+                        &arg_envelopes,
+                        fresh.clone(),
+                    );
+                }
+                fresh
+            }
+        }
+    } else if let Some(previous) = cached_outcome(cached, &invocation.invoke.entry, &arg_envelopes)
+    {
+        let claims = match &previous {
+            EvalOutcome::Ready(result) => result.meta.claims.clone(),
+            EvalOutcome::Poison { .. } => Vec::new(),
+        };
+        if claims.is_empty() {
+            events.push(EventPattern::StabilizeHit);
+            previous
+        } else {
+            let verification = client
+                .verify_claims(VerifyClaimsRequest {
+                    place: PlaceRef {
+                        id: place.to_string(),
+                    },
+                    claims,
+                })
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("rpc verify_claims failed: {error:?}"))
+                })?;
+            if verification.ok {
+                events.push(EventPattern::VerifyClaimsOk);
+                events.push(EventPattern::StabilizeHit);
+                previous
+            } else {
+                events.push(EventPattern::VerifyClaimsFail);
+                let fresh = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+                events.push(EventPattern::StabilizeMiss);
+                if matches!(fresh, EvalOutcome::Ready(_)) {
+                    cache_outcome(
+                        cached,
+                        &invocation.invoke.entry,
+                        &arg_envelopes,
+                        fresh.clone(),
+                    );
+                }
+                fresh
             }
         }
     } else {
-        let outcome = eval_subgraph(&client, case, place).await?;
-        if let Some(verify_place) = &case.invoke.verify_place {
-            let claims = match &outcome {
-                EvalOutcome::Ready(result) => result.meta.claims.clone(),
-                EvalOutcome::Poison { .. } => Vec::new(),
-            };
-            if !claims.is_empty() {
-                let verification = client
-                    .verify_claims(VerifyClaimsRequest {
-                        place: PlaceRef {
-                            id: verify_place.clone(),
-                        },
-                        claims,
-                    })
-                    .await
-                    .map_err(|error| {
-                        std::io::Error::other(format!("rpc verify_claims failed: {error:?}"))
-                    })?;
-                if !verification.ok {
-                    events.push(EventPattern::VerifyClaimsFail);
-                    let spec = Ok(SpecOutcome::Poison(ObservedPoison {
-                        kind: "VerificationFailure".to_string(),
-                        message: verification
-                            .error
-                            .unwrap_or_else(|| "claim verification failed".to_string()),
-                        events,
-                    }));
-
-                    drop(client);
-                    drop(caller);
-                    drop(session_handle);
-                    accept_task.abort();
-                    return spec;
-                }
-                events.push(EventPattern::VerifyClaimsOk);
-            }
+        let fresh = eval_subgraph(client, case, invocation, &arg_envelopes).await?;
+        events.push(EventPattern::StabilizeMiss);
+        if matches!(fresh, EvalOutcome::Ready(_)) {
+            cache_outcome(
+                cached,
+                &invocation.invoke.entry,
+                &arg_envelopes,
+                fresh.clone(),
+            );
         }
-        outcome
+        fresh
     };
 
-    let spec = eval_outcome_to_spec(&client, outcome, events).await;
+    if let Some(verify_place) = &invocation.invoke.verify_place {
+        let claims = match &outcome {
+            EvalOutcome::Ready(result) => result.meta.claims.clone(),
+            EvalOutcome::Poison { .. } => Vec::new(),
+        };
+        if !claims.is_empty() {
+            let verification = client
+                .verify_claims(VerifyClaimsRequest {
+                    place: PlaceRef {
+                        id: verify_place.clone(),
+                    },
+                    claims,
+                })
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("rpc verify_claims failed: {error:?}"))
+                })?;
+            if !verification.ok {
+                events.push(EventPattern::VerifyClaimsFail);
+                return Ok(SpecOutcome::Poison(ObservedPoison {
+                    kind: "VerificationFailure".to_string(),
+                    message: verification
+                        .error
+                        .unwrap_or_else(|| "claim verification failed".to_string()),
+                    events,
+                }));
+            }
+            events.push(EventPattern::VerifyClaimsOk);
+        }
+    }
 
-    drop(client);
-    drop(caller);
-    drop(session_handle);
-    accept_task.abort();
-
-    spec
+    eval_outcome_to_spec(client, outcome, events).await
 }
 
-async fn eval_subgraph(
-    client: &Eval2DaemonClient,
-    case: &SpecCase,
-    place: &str,
-) -> Result<EvalOutcome, Box<dyn std::error::Error>> {
-    client
-        .eval_subgraph(EvalSubgraphRequest {
-            place: PlaceRef {
-                id: place.to_string(),
-            },
-            source_id: case_source_id(case),
-            source: case.main_source.clone(),
-            entry: case.invoke.entry.clone(),
-            args: Vec::new(),
-        })
-        .await
-        .map_err(|error| {
-            std::io::Error::other(format!("rpc eval_subgraph failed: {error:?}")).into()
-        })
+fn cached_outcome(
+    cached: &[CachedInvocation],
+    entry: &str,
+    args: &[ValueEnvelope],
+) -> Option<EvalOutcome> {
+    cached
+        .iter()
+        .find(|invocation| invocation.entry == entry && invocation.args == args)
+        .map(|invocation| invocation.outcome.clone())
+}
+
+fn cache_outcome(
+    cached: &mut Vec<CachedInvocation>,
+    entry: &str,
+    args: &[ValueEnvelope],
+    outcome: EvalOutcome,
+) {
+    if let Some(existing) = cached
+        .iter_mut()
+        .find(|invocation| invocation.entry == entry && invocation.args == args)
+    {
+        existing.outcome = outcome;
+        return;
+    }
+
+    cached.push(CachedInvocation {
+        entry: entry.to_string(),
+        args: args.to_vec(),
+        outcome,
+    });
+}
+
+fn dynamic_to_eval2_value(value: DynamicValue) -> Result<Value, std::io::Error> {
+    if value.is_null() {
+        return Ok(Value::unit());
+    }
+    if let Some(value) = value.as_bool() {
+        return Ok(Value::bool(value));
+    }
+    if let Some(number) = value.as_number().and_then(|number| number.to_u64()) {
+        return Ok(Value::u64(number));
+    }
+    if let Some(text) = value.as_string() {
+        return Ok(Value::string(text.as_str()));
+    }
+    if let Some(array) = value.as_array() {
+        let items = array
+            .iter()
+            .map(|item| dynamic_to_eval2_value(item.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Value::array(items));
+    }
+    if let Some(object) = value.as_object() {
+        let entries = object
+            .iter()
+            .map(|(key, value)| {
+                Ok((
+                    Value::string(key.as_str()),
+                    dynamic_to_eval2_value(value.clone())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+        return Ok(Value::map(entries));
+    }
+    Err(std::io::Error::other(format!(
+        "dynamic argument value is not supported yet: {value:?}"
+    )))
 }
 
 fn verify_claims_against_runtime(

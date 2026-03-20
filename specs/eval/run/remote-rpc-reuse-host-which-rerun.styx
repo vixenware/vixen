@@ -6,8 +6,6 @@ VX
 
 invoke {
   entry build
-  place win
-  replay_place win_changed
 
   runtime {
     places {
@@ -34,22 +32,53 @@ invoke {
   }
 }
 
-expect {
-  result @string"C:/VS/14.4/cl.exe"
-  obligations (
-    @which{
-      name "cl.exe"
-      expected_path "C:/VS/14.4/cl.exe"
+runs (
+  {
+    invoke {
+      place win
     }
-  )
-  reuse @observed
-  crossing @by_value
-  events (
-    @must_emit/@stabilize_miss
-    @must_emit/@verify_claims_fail
-    @must_not_emit/@stabilize_hit
-  )
 
+    expect {
+      result @string"C:/VS/14.3/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.3/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@stabilize_miss
+      )
+    }
+  }
+
+  {
+    invoke {
+      place win_changed
+    }
+
+    expect {
+      result @string"C:/VS/14.4/cl.exe"
+      obligations (
+        @which{
+          name "cl.exe"
+          expected_path "C:/VS/14.4/cl.exe"
+        }
+      )
+      reuse @observed
+      crossing @by_value
+      events (
+        @must_emit/@verify_claims_fail
+        @must_emit/@stabilize_miss
+        @must_not_emit/@stabilize_hit
+      )
+    }
+  }
+)
+
+expect {
   engines {
     eval1 @skip
     eval2 @pass

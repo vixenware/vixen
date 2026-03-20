@@ -3975,6 +3975,7 @@ dependencies = [
  "blake3",
  "camino",
  "datatest-stable",
+ "facet-value",
  "moire",
  "roam-core",
  "roam-stream",

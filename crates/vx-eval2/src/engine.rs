@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use vx_parser::{
     ArrayItem, AstNode, CallExpr, Expr, FnDecl, Item, LetStmt, LineIndex as ParserLineIndex,
-    LiteralExpr, NameRefExpr, SourceFile, Stmt, StructLiteralExpr, SyntaxToken, TextRange,
-    TextSize, trimmed_range,
+    LiteralExpr, NameRefExpr, Parameter, SourceFile, Stmt, StructLiteralExpr, SyntaxToken,
+    TextRange, TextSize, trimmed_range,
 };
 
 use crate::{
     ByteOffset, ColumnIndex, CrossingPolicy, EvalError, EvalErrorKind, LineIndex, ProjectionStep,
-    Provenance, Resolution, ReuseClass, SourcePoint, SourceSpan, StructValue, Value, ValueMeta,
-    ValueRep,
+    Provenance, Resolution, ReuseClass, RuntimeInputKind, SourcePoint, SourceSpan, StructValue,
+    Value, ValueMeta, ValueRep,
 };
 
 pub trait RuntimeHooks {
@@ -43,12 +43,31 @@ pub fn eval_source_entry(source: &str, entry: &str) -> Result<Resolution, EvalEr
     eval_source_entry_with_source_id(source, "<memory>", entry)
 }
 
+pub fn eval_source_entry_with_args(
+    source: &str,
+    entry: &str,
+    args: &[Value],
+) -> Result<Resolution, EvalError> {
+    eval_source_entry_with_args_with_source_id(source, "<memory>", entry, args)
+}
+
 pub fn eval_source_entry_with_source_id(
     source: &str,
     source_id: impl Into<String>,
     entry: &str,
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_source_id(source, source_id, entry, &NoRuntime, "local")
+    eval_source_entry_with_args_with_source_id(source, source_id, entry, &[])
+}
+
+pub fn eval_source_entry_with_args_with_source_id(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
+) -> Result<Resolution, EvalError> {
+    eval_source_entry_at_place_with_args_with_source_id(
+        source, source_id, entry, args, &NoRuntime, "local",
+    )
 }
 
 pub fn eval_source_entry_at_place(
@@ -57,13 +76,50 @@ pub fn eval_source_entry_at_place(
     runtime: &impl RuntimeHooks,
     place: &str,
 ) -> Result<Resolution, EvalError> {
-    eval_source_entry_at_place_with_source_id(source, "<memory>", entry, runtime, place)
+    eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "<memory>",
+        entry,
+        &[],
+        runtime,
+        place,
+    )
 }
 
 pub fn eval_source_entry_at_place_with_source_id(
     source: &str,
     source_id: impl Into<String>,
     entry: &str,
+    runtime: &impl RuntimeHooks,
+    place: &str,
+) -> Result<Resolution, EvalError> {
+    eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        source_id,
+        entry,
+        &[],
+        runtime,
+        place,
+    )
+}
+
+pub fn eval_source_entry_at_place_with_args(
+    source: &str,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+) -> Result<Resolution, EvalError> {
+    eval_source_entry_at_place_with_args_with_source_id(
+        source, "<memory>", entry, args, runtime, place,
+    )
+}
+
+pub fn eval_source_entry_at_place_with_args_with_source_id(
+    source: &str,
+    source_id: impl Into<String>,
+    entry: &str,
+    args: &[Value],
     runtime: &impl RuntimeHooks,
     place: &str,
 ) -> Result<Resolution, EvalError> {
@@ -78,10 +134,21 @@ pub fn eval_source_entry_at_place_with_source_id(
     let source = SourceContext::new(source_id, source);
     let root = SourceFile::cast_root(parse.syntax());
     let function = find_function(&root, entry)?;
-    if function.parameters().next().is_some() || function.keyword_parameters().next().is_some() {
+    if function.keyword_parameters().next().is_some() {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
-            format!("functions with parameters are not supported yet: {entry}"),
+            format!("functions with keyword parameters are not supported yet: {entry}"),
+        ));
+    }
+    let parameters = function.parameters().collect::<Vec<_>>();
+    if parameters.len() != args.len() {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!(
+                "function {entry} expects {} positional argument(s), got {}",
+                parameters.len(),
+                args.len()
+            ),
         ));
     }
     let body = function.body_expr().ok_or_else(|| {
@@ -90,7 +157,7 @@ pub fn eval_source_entry_at_place_with_source_id(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let mut env = BTreeMap::new();
+    let mut env = bind_arguments(&source, &parameters, args)?;
     Ok(Resolution::Ready(eval_expr(
         &source, &body, &mut env, runtime, place,
     )?))
@@ -154,6 +221,30 @@ fn find_function(root: &SourceFile, entry: &str) -> Result<FnDecl, EvalError> {
                 format!("function {entry} was not found"),
             )
         })
+}
+
+fn bind_arguments(
+    source: &SourceContext,
+    parameters: &[Parameter],
+    args: &[Value],
+) -> Result<BTreeMap<String, Value>, EvalError> {
+    let mut env = BTreeMap::new();
+    for (parameter, arg) in parameters.iter().zip(args.iter()) {
+        let name = parameter.name().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "function parameter has no name token",
+            )
+        })?;
+        let label = name.text().to_string();
+        let bound = arg.clone().with_provenance(Provenance::runtime_input(
+            source.span_for_token(&name),
+            RuntimeInputKind::Argument,
+            label.clone(),
+        ));
+        env.insert(label, bound);
+    }
+    Ok(env)
 }
 
 fn eval_expr(
