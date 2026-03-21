@@ -597,6 +597,71 @@ pub(super) fn static_namespace_member_value(
     ))
 }
 
+fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {
+    match (&receiver.rep, field_name) {
+        (ValueRep::String(_), "len") => Some("String.len"),
+        (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
+        (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
+        (ValueRep::Map(_), "get") => Some("Map.get"),
+        (ValueRep::Map(_), "has") => Some("Map.has"),
+        (ValueRep::Struct(StructValue { type_name, .. }), "unwrap_or")
+            if matches!(type_name.as_ref(), "Some" | "None") =>
+        {
+            Some("Option.unwrap_or")
+        }
+        _ => None,
+    }
+}
+
+fn bound_method_value(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    receiver: Value,
+    field_name: &str,
+    field_source: SourceSpan,
+) -> Option<Value> {
+    let method_name = bound_method_name(&receiver, field_name)?;
+    let function = FunctionRef::new(
+        state.program.source_id(state.current_source()),
+        Arc::from(method_name),
+        Arc::from([]),
+        false,
+        None,
+        Arc::from(vec![(Arc::from("self"), receiver)]),
+        None,
+    );
+    Some(
+        Value::function(function)
+            .with_provenance(Provenance::binding(field_source, method_name.to_string())),
+    )
+}
+
+pub(super) fn project_field_or_method_value(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    receiver: Value,
+    field_name: String,
+    field_source: SourceSpan,
+) -> Result<Value, EvalError> {
+    if let Some(value) = bound_method_value(state, receiver.clone(), &field_name, field_source) {
+        return Ok(value);
+    }
+    project_struct_field(receiver, field_name)
+}
+
+fn bound_method_dispatch_args(function: &FunctionRef, args: &[Value]) -> Vec<Value> {
+    let Some((_, receiver)) = function
+        .captures
+        .iter()
+        .find(|(name, _)| name.as_ref() == "self")
+    else {
+        return args.to_vec();
+    };
+
+    let mut dispatch_args = Vec::with_capacity(args.len() + 1);
+    dispatch_args.push(receiver.clone());
+    dispatch_args.extend(args.iter().cloned());
+    dispatch_args
+}
+
 pub(super) fn continue_call_from_args(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -657,6 +722,7 @@ pub(super) fn continue_call_from_args(
             eval_dependent_expr(state, node_id, &prepared.body, &mut env)
         });
     }
+    let args = bound_method_dispatch_args(function, &args);
     let callee_name = function.name.to_string();
     if let Some((slot_id, witness, action, resolver)) = slot_builtin_action(&callee_name, &args)? {
         return continue_slot_builtin(
@@ -1136,17 +1202,20 @@ pub(super) fn eval_field(
                         "field expression has no field name",
                     )
                 })?;
+            let field_source = state.span_for_node(field);
             return Ok(extend_suspension(
                 suspension,
                 ContinuationFrame::FieldReceiver {
                     node_id,
                     parent_id,
                     field_name,
+                    field_source,
                 },
             ));
         }
     };
-    project_struct_field(
+    project_field_or_method_value(
+        state,
         receiver,
         field
             .field_name()
@@ -1157,6 +1226,7 @@ pub(super) fn eval_field(
                     "field expression has no field name",
                 )
             })?,
+        state.span_for_node(field),
     )
     .map(EvalStep::Ready)
 }

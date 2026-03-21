@@ -199,6 +199,7 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         field_name: String,
+        field_source: SourceSpan,
     },
 }
 

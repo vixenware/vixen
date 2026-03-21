@@ -558,6 +558,128 @@ pub(in crate::engine) fn continue_builtin_call(
                 parse_blob_as_value(format, &args[0], &type_args[0], state.program.types())?;
             Ok(ready_builtin_value(value))
         }
+        "String.len" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.len() requires receiver",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.len() receiver must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::u64(text.len() as u64).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "String.starts_with" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.starts_with() requires receiver and prefix",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.starts_with() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::String(prefix) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.starts_with() prefix must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::bool(text.starts_with(prefix.as_ref())).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "String.ends_with" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.ends_with() requires receiver and suffix",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.ends_with() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::String(suffix) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.ends_with() suffix must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::bool(text.ends_with(suffix.as_ref())).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "Map.get" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.get() requires receiver and key",
+                ));
+            }
+            let value = map_lookup_value(
+                &args[0],
+                &args[1],
+                "Map.get() receiver must evaluate to a map",
+            )?
+            .ok_or_else(|| {
+                EvalError::new(EvalErrorKind::TypeError, "Map.get() key was not found")
+            })?;
+            Ok(ready_builtin_value(value))
+        }
+        "Map.has" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.has() requires receiver and key",
+                ));
+            }
+            let present = map_lookup_value(
+                &args[0],
+                &args[1],
+                "Map.has() receiver must evaluate to a map",
+            )?
+            .is_some();
+            Ok(ready_builtin_value(
+                Value::bool(present).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "Option.unwrap_or" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Option.unwrap_or() requires receiver and default value",
+                ));
+            }
+            let ValueRep::Struct(option) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Option.unwrap_or() receiver must evaluate to Option",
+                ));
+            };
+            match option.type_name.as_ref() {
+                "Some" => {
+                    let value = project_struct_field(args[0].clone(), "value".to_string())?;
+                    Ok(ready_builtin_value(value))
+                }
+                "None" => Ok(ready_builtin_value(args[1].clone())),
+                _ => Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Option.unwrap_or() receiver must evaluate to Option",
+                )),
+            }
+        }
         "map_get" => {
             if args.len() != 2 {
                 return Err(EvalError::new(
@@ -565,26 +687,14 @@ pub(in crate::engine) fn continue_builtin_call(
                     "map_get() requires map and key",
                 ));
             }
-            let ValueRep::Map(map) = &args[0].rep else {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    "map_get() first argument must evaluate to a map",
-                ));
-            };
-            let key = &args[1];
-            let mut selected = None;
-            for (entry_key, entry_value) in map.entries.iter() {
-                if values_equal(&entry_key.rep, &key.rep)? {
-                    selected = Some(entry_value.clone());
-                    break;
-                }
-            }
-            let mut value = selected.ok_or_else(|| {
+            let value = map_lookup_value(
+                &args[0],
+                &args[1],
+                "map_get() first argument must evaluate to a map",
+            )?
+            .ok_or_else(|| {
                 EvalError::new(EvalErrorKind::TypeError, "map_get() key was not found")
             })?;
-            if let ValueRep::String(key) = &key.rep {
-                value = value.project(ProjectionStep::MapKey(key.to_string()));
-            }
             Ok(ready_builtin_value(value))
         }
         "map_put" => {
@@ -755,6 +865,32 @@ pub(in crate::engine) fn continue_builtin_call(
         }
         _ => Ok(None),
     }
+}
+
+fn map_lookup_value(
+    map_value: &Value,
+    key: &Value,
+    type_error_message: &str,
+) -> Result<Option<Value>, EvalError> {
+    let ValueRep::Map(map) = &map_value.rep else {
+        return Err(EvalError::new(EvalErrorKind::TypeError, type_error_message));
+    };
+
+    let mut selected = None;
+    for (entry_key, entry_value) in map.entries.iter() {
+        if values_equal(&entry_key.rep, &key.rep)? {
+            selected = Some(entry_value.clone());
+            break;
+        }
+    }
+
+    Ok(selected.map(|value| {
+        if let ValueRep::String(key) = &key.rep {
+            value.project(ProjectionStep::MapKey(key.to_string()))
+        } else {
+            value
+        }
+    }))
 }
 
 pub(in crate::engine) fn slot_context_value(

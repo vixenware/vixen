@@ -1100,6 +1100,121 @@ fn build() {
 }
 
 #[test]
+fn string_len_method_returns_u64_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  name.len()
+}
+"#,
+        "string-len-method-runtime",
+        "build",
+        &[Value::string("serde")],
+    )
+    .expect("evaluate String.len()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.len() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(5));
+}
+
+#[test]
+fn bound_string_method_value_can_be_called() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  let f = name.ends_with;
+  f("de")
+}
+"#,
+        "string-bound-method-value-runtime",
+        "build",
+        &[Value::string("serde")],
+    )
+    .expect("evaluate bound String.ends_with()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready bound method result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn map_has_and_get_methods_work_at_runtime() {
+    let has = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  %{ "left" => 1, "right" => 2 }.has("right")
+}
+"#,
+        "map-has-method-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate Map.has()");
+    let Resolution::Ready(has) = has else {
+        panic!("expected ready Map.has() result, got {has:?}");
+    };
+    assert_eq!(has.rep, ValueRep::Bool(true));
+
+    let get = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let f = %{ "left" => 1, "right" => 2 }.get;
+  f("left")
+}
+"#,
+        "map-get-method-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate bound Map.get()");
+    let Resolution::Ready(get) = get else {
+        panic!("expected ready Map.get() result, got {get:?}");
+    };
+    assert_eq!(get.rep, ValueRep::U64(1));
+}
+
+#[test]
+fn option_unwrap_or_method_works_at_runtime() {
+    let some = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String?) {
+  name.unwrap_or("fallback")
+}
+"#,
+        "option-unwrap-or-some-runtime",
+        "build",
+        &[Value::structure(
+            "Some",
+            vec![(Arc::from("value"), Value::string("serde"))],
+        )],
+    )
+    .expect("evaluate Option.unwrap_or() for Some");
+    let Resolution::Ready(some) = some else {
+        panic!("expected ready Option.unwrap_or() Some result, got {some:?}");
+    };
+    assert_eq!(some.rep, ValueRep::String("serde".into()));
+
+    let none = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String?) {
+  name.unwrap_or("fallback")
+}
+"#,
+        "option-unwrap-or-none-runtime",
+        "build",
+        &[Value::structure("None", Vec::new())],
+    )
+    .expect("evaluate Option.unwrap_or() for None");
+    let Resolution::Ready(none) = none else {
+        panic!("expected ready Option.unwrap_or() None result, got {none:?}");
+    };
+    assert_eq!(none.rep, ValueRep::String("fallback".into()));
+}
+
+#[test]
 fn map_entries_preserves_insertion_order() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
