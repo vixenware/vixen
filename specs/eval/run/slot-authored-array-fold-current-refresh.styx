@@ -1,139 +1,122 @@
 main <<VX,vx
-fn registry_packages() {
-  %{
-    "core" => [
-      %{
-        "version" => "1.0.0",
-        "default" => true,
-        "deps" => [],
-      },
-    ],
-    "logger" => [
-      %{
-        "version" => "1.0.0",
-        "default" => true,
-        "deps" => [
-          %{ "name" => "logger", "version" => "1.0.0" },
-        ],
-      },
-      %{
-        "version" => "1.1.0",
-        "default" => false,
-        "deps" => [],
-      },
-    ],
-    "codec" => [
-      %{
-        "version" => "1.0.0",
-        "default" => true,
-        "deps" => [
-          %{ "name" => "logger", "version" => "1.0.0" },
-        ],
-      },
-      %{
-        "version" => "1.1.0",
-        "default" => false,
-        "deps" => [
-          %{ "name" => "logger", "version" => "1.1.0" },
-        ],
-      },
-    ],
+struct Requirement {
+  version: String,
+}
+
+type Solution = Map[String, String]
+
+fn requirement(version: String) -> Requirement {
+  Requirement {
+    version: version,
   }
 }
 
-fn default_candidate(candidates) {
-  array_find(candidates, ((candidate) => map_get(candidate, "default")))
-}
-
-fn build_default_solution(solution, entry) {
-  let name = map_get(entry, "key");
-  let candidates = map_get(entry, "value");
-  map_put(solution, name, map_get(default_candidate(candidates), "version"))
-}
-
-fn candidate_task(name, candidate) {
-  %{
-    "name" => name,
-    "candidate" => candidate,
-  }
-}
-
-fn apply_dep(solution, dep) {
-  map_put(solution, map_get(dep, "name"), map_get(dep, "version"))
-}
-
-fn apply_candidate(solution, name, candidate) {
-  let rewritten = map_put(solution, name, map_get(candidate, "version"));
-  array_fold(map_get(candidate, "deps"), rewritten, apply_dep)
-}
-
-fn enqueue_dep(queue, registry, dep) {
-  let name = map_get(dep, "name");
-  let version = map_get(dep, "version");
-  let candidate = array_find(
-    map_get(registry, name),
-    ((candidate) => map_get(candidate, "version") == version),
-  );
-  array_push(queue, candidate_task(name, candidate))
-}
-
-fn enqueue_candidate_deps(queue, registry, candidate) {
+fn requirements_allow(requirements: Array[Requirement], version: String) -> Bool {
   array_fold(
-    map_get(candidate, "deps"),
-    queue,
-    ((acc, dep) => enqueue_dep(acc, registry, dep)),
+    requirements,
+    true,
+    ((ok, requirement) => if ok (requirement.version == version) else (false)),
   )
 }
 
-fn enqueue_alternative_candidate(queue, current_version, name, candidate) {
-  if queue == [] (
-    if map_get(candidate, "version") != current_version (
-      array_push(queue, candidate_task(name, candidate))
-    ) else (
-      queue
-    )
-  ) else (
-    queue
+fn merge_solution_entry(solution: Solution, entry) -> Solution {
+  map_put(solution, map_get(entry, "key"), map_get(entry, "value"))
+}
+
+fn merge_solution(left: Solution, right: Solution) -> Solution {
+  array_fold(map_entries(right), left, merge_solution_entry)
+}
+
+fn resolve_logger(ctx) -> Solution {
+  let requirements = ctx.joined;
+  search_assumption(
+    "logger",
+    ["1.1.0", "1.0.0"],
+    (() => {
+      let version = branch_assumption("logger");
+      if requirements_allow(requirements, version) (
+        %{
+          "logger" => version,
+        }
+      ) else (
+        fail Conflict {
+          package: "logger",
+          version: version,
+          joined: requirements,
+        }
+      )
+    }),
   )
 }
 
-fn refresh_queue(registry, current, name) {
-  let current_version = map_get(current, name);
-  array_fold(
-    map_get(registry, name),
-    [],
-    ((queue, candidate) => enqueue_alternative_candidate(queue, current_version, name, candidate)),
-  )
-}
-
-fn process_refresh_queue(registry, solution, queue) {
-  if queue == [] (
-    solution
-  ) else (
-    let task = array_first(queue);
-    let rest = array_rest(queue);
-    let name = map_get(task, "name");
-    let candidate = map_get(task, "candidate");
-    let version = map_get(candidate, "version");
-    if map_get(solution, name) == version (
-      process_refresh_queue(registry, solution, rest)
-    ) else (
-      let rewritten = apply_candidate(solution, name, candidate);
-      let extended = enqueue_candidate_deps(rest, registry, candidate);
-      process_refresh_queue(registry, rewritten, extended)
-    )
-  )
-}
-
-fn resolve_solution(ctx) {
-  let registry = registry_packages();
+fn util_candidates(ctx) -> Array[String] {
   if ctx.is_refresh (
-    let current = ctx.current;
-    let queue = refresh_queue(registry, current, ctx.intent.name);
-    process_refresh_queue(registry, current, queue)
+    if ctx.intent.name == "util" (
+      ["1.1.0", "1.0.0"]
+    ) else (
+      [map_get(ctx.current, "util")]
+    )
   ) else (
-    array_fold(map_entries(registry), %{}, build_default_solution)
+    if ctx.has_current (
+      [map_get(ctx.current, "util")]
+    ) else (
+      ["1.0.0"]
+    )
   )
+}
+
+fn resolve_util(ctx) -> Solution {
+  search_assumption(
+    "util",
+    util_candidates(ctx),
+    (() => %{
+      "util" => branch_assumption("util"),
+    }),
+  )
+}
+
+fn codec_candidates(ctx) -> Array[String] {
+  if ctx.is_refresh (
+    if ctx.intent.name == "codec" (
+      ["1.1.0", "1.0.0"]
+    ) else (
+      [map_get(ctx.current, "codec")]
+    )
+  ) else (
+    if ctx.has_current (
+      [map_get(ctx.current, "codec")]
+    ) else (
+      ["1.0.0"]
+    )
+  )
+}
+
+fn codec_solution(version: String) -> Solution {
+  %{
+    "codec" => version,
+  }
+}
+
+fn resolve_codec(ctx) -> Solution {
+  search_assumption(
+    "codec",
+    codec_candidates(ctx),
+    (() => {
+      let version = branch_assumption("codec");
+      if version == "1.1.0" (
+        let left = keyed("logger", [requirement("1.1.0")], resolve_logger);
+        let right = keyed("logger", [requirement("1.0.0")], resolve_logger);
+        merge_solution(codec_solution(version), merge_solution(left, right))
+      ) else (
+        let logger = keyed("logger", [requirement("1.0.0")], resolve_logger);
+        merge_solution(codec_solution(version), logger)
+      )
+    }),
+  )
+}
+
+fn resolve_solution(ctx) -> Solution {
+  merge_solution(resolve_util(ctx), resolve_codec(ctx))
 }
 
 fn build_current() {
@@ -158,9 +141,9 @@ runs (
   {
     expect {
       result @map{
-        core @string"1.0.0"
-        logger @string"1.0.0"
+        util @string"1.0.0"
         codec @string"1.0.0"
+        logger @string"1.0.0"
       }
       events (
         @must_emit/@slot_populate{
@@ -174,14 +157,14 @@ runs (
   {
     invoke {
       entry build_refresh
-      args (@string"core")
+      args (@string"util")
     }
 
     expect {
       result @map{
-        core @string"1.0.0"
-        logger @string"1.0.0"
+        util @string"1.1.0"
         codec @string"1.0.0"
+        logger @string"1.0.0"
       }
       events (
         @must_emit/@slot_rewrite{
@@ -190,7 +173,7 @@ runs (
             intent @struct{
               type UpdatePackage
               fields {
-                name @string"core"
+                name @string"util"
               }
             }
           }
@@ -207,9 +190,9 @@ runs (
 
     expect {
       result @map{
-        core @string"1.0.0"
-        logger @string"1.1.0"
-        codec @string"1.1.0"
+        util @string"1.1.0"
+        codec @string"1.0.0"
+        logger @string"1.0.0"
       }
       events (
         @must_emit/@slot_rewrite{
@@ -234,9 +217,9 @@ runs (
 
     expect {
       result @map{
-        core @string"1.0.0"
-        logger @string"1.1.0"
-        codec @string"1.1.0"
+        util @string"1.1.0"
+        codec @string"1.0.0"
+        logger @string"1.0.0"
       }
       events (
         @must_emit/@slot_reuse{slot "authored-array-fold-slot"}

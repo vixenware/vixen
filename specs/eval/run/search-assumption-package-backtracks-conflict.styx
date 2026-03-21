@@ -1,79 +1,11 @@
 main <<VX,vx
-struct Dep {
-  name: String,
+struct Requirement {
   version: String,
-}
-
-struct Candidate {
-  version: String,
-  deps: Array[Dep],
 }
 
 type Solution = Map[String, String]
 
-fn registry_packages() {
-  %{
-    "logger" => [
-      Candidate {
-        version: "1.1.0",
-        deps: [],
-      },
-      Candidate {
-        version: "1.0.0",
-        deps: [],
-      },
-    ],
-    "format" => [
-      Candidate {
-        version: "1.0.0",
-        deps: [
-          Dep {
-            name: "logger",
-            version: "1.0.0",
-          },
-        ],
-      },
-    ],
-    "codec" => [
-      Candidate {
-        version: "1.1.0",
-        deps: [
-          Dep {
-            name: "logger",
-            version: "1.1.0",
-          },
-          Dep {
-            name: "format",
-            version: "1.0.0",
-          },
-        ],
-      },
-      Candidate {
-        version: "1.0.0",
-        deps: [
-          Dep {
-            name: "logger",
-            version: "1.0.0",
-          },
-          Dep {
-            name: "format",
-            version: "1.0.0",
-          },
-        ],
-      },
-    ],
-  }
-}
-
-fn candidate_versions(candidates: Array[Candidate]) -> Array[String] {
-  array_fold(candidates, [], ((versions, candidate) => array_push(versions, candidate.version)))
-}
-
-fn find_candidate(candidates: Array[Candidate], version: String) -> Candidate {
-  array_find(candidates, ((candidate) => candidate.version == version))
-}
-
-fn requirements_allow(requirements: Array[Dep], version: String) -> Bool {
+fn requirements_allow(requirements: Array[Requirement], version: String) -> Bool {
   array_fold(
     requirements,
     true,
@@ -89,33 +21,24 @@ fn merge_solution(left: Solution, right: Solution) -> Solution {
   array_fold(map_entries(right), left, merge_solution_entry)
 }
 
-fn resolve_dep(dep: Dep) -> Solution {
-  keyed(dep.name, [dep], resolve_pkg)
+fn requirement(version: String) -> Requirement {
+  Requirement {
+    version: version,
+  }
 }
 
-fn apply_dep(solution: Solution, dep: Dep) -> Solution {
-  merge_solution(solution, resolve_dep(dep))
-}
-
-fn apply_candidate(package: String, candidate: Candidate) -> Solution {
-  let base = map_put(%{}, package, candidate.version);
-  array_fold(candidate.deps, base, apply_dep)
-}
-
-fn resolve_pkg(ctx) -> Solution {
-  let package = ctx.key;
-  let candidates = map_get(registry_packages(), package);
+fn resolve_logger(ctx) -> Solution {
   let requirements = ctx.joined;
   search_assumption(
-    package,
-    candidate_versions(candidates),
+    "logger",
+    ["1.1.0", "1.0.0"],
     (() => {
-      let version = branch_assumption(package);
+      let version = branch_assumption("logger");
       if requirements_allow(requirements, version) (
-        apply_candidate(package, find_candidate(candidates, version))
+        %{ "logger" => version }
       ) else (
         fail Conflict {
-          package: package,
+          package: "logger",
           version: version,
           joined: requirements,
         }
@@ -124,8 +47,32 @@ fn resolve_pkg(ctx) -> Solution {
   )
 }
 
+fn codec_solution(version: String) -> Solution {
+  %{
+    "codec" => version,
+  }
+}
+
+fn resolve_codec(ctx) -> Solution {
+  search_assumption(
+    "codec",
+    ["1.1.0", "1.0.0"],
+    (() => {
+      let version = branch_assumption("codec");
+      if version == "1.1.0" (
+        let left = keyed("logger", [requirement("1.1.0")], resolve_logger);
+        let right = keyed("logger", [requirement("1.0.0")], resolve_logger);
+        merge_solution(codec_solution(version), merge_solution(left, right))
+      ) else (
+        let logger = keyed("logger", [requirement("1.0.0")], resolve_logger);
+        merge_solution(codec_solution(version), logger)
+      )
+    }),
+  )
+}
+
 fn build() -> Solution {
-  keyed("codec", [], resolve_pkg)
+  keyed("codec", [], resolve_codec)
 }
 VX
 
@@ -136,7 +83,6 @@ invoke {
 expect {
   result @map{
     codec @string"1.0.0"
-    format @string"1.0.0"
     logger @string"1.0.0"
   }
 

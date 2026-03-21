@@ -410,6 +410,8 @@ It is now also enough for a first tiny Cargo-shaped authored sketch:
 2. a shared keyed dependency can surface a structured conflict inside one branch
 3. exact search can backtrack from the incompatible newer candidate to an older
    successful one without Rust-side package policy
+4. slot-backed current/refresh can wrap that same authored package resolver, so
+   partial updates no longer need a manual queue-shaped proving ground
 
 This keeps exact search generic and assumption-based without committing to
 `#[choose]` surface syntax prematurely.
@@ -437,6 +439,14 @@ The goal is:
 
 This is the bridge between small authored resolver sketches and real Cargo
 integration.
+
+The first version of that bridge now exists:
+
+1. slot-backed current and refresh can already drive a tiny authored package
+   resolver
+2. keyed demand and exact search now replace the earlier recursive queue sketch
+3. the remaining pressure is no-good learning and wider Cargo semantics, not
+   more imperative worklist surface
 
 ## Phase 7: Cargo Solver MVP
 

@@ -387,6 +387,9 @@ What it does prove:
 - a tiny package-shaped authored resolver can now backtrack from an
   incompatible newer candidate to an older successful one through keyed shared
   dependency conflict, not Rust-side policy
+- slot-backed current/refresh can now drive that same package-shaped resolver,
+  so partial updates and no-op refreshes no longer need an authored recursive
+  queue
 
 What it does not yet prove:
 
