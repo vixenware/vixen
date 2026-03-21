@@ -399,13 +399,15 @@ Eval2 now has a first exact-search seam:
    skipped on later identical searches in the same session
 6. adjacent identical failures can widen from singleton point exclusions into
    one conservative candidate-index range exclusion
+7. fully failing exact searches can now be learned as conservative
+   whole-search no-goods and replayed on later identical searches
 
 This is enough for a first correct exact-search experiment, but it is still
 minimal:
 
 1. no parallel frontier yet
 2. no conflict widening yet
-3. no broader range/volume learning yet
+3. no broader range/volume learning yet beyond identical whole-search reuse
 4. no dominance-order comparison across multiple full solutions yet
 
 It is now also enough for a first tiny Cargo-shaped authored sketch:

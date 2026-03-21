@@ -303,6 +303,16 @@ struct LearnedNoGood {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct LearnedSearchNoGood {
+    branch_context: EvalBranchContext,
+    assumption: Arc<str>,
+    candidates: Arc<[Value]>,
+    start_index: usize,
+    resolver: FunctionRef,
+    error: EvalError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalExplainTerminal {
     Runnable {
         node_id: EvalNodeId,
@@ -389,6 +399,7 @@ pub struct EvalSessionStats {
     pub trace_event_count: usize,
     pub learned_no_good_count: usize,
     pub widened_no_good_count: usize,
+    pub learned_search_no_good_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +454,7 @@ struct EvalSchedulerDelta {
     pending_kinds: Vec<(u64, PendingKind)>,
     retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
     learned_no_goods: Vec<LearnedNoGood>,
+    learned_search_no_goods: Vec<LearnedSearchNoGood>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -458,6 +470,7 @@ struct RecordedSchedulerDelta {
     pending_kinds: BTreeMap<u64, PendingKind>,
     retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
     learned_no_goods: Vec<LearnedNoGood>,
+    learned_search_no_goods: Vec<LearnedSearchNoGood>,
 }
 
 impl RecordedSchedulerDelta {
@@ -483,6 +496,7 @@ impl RecordedSchedulerDelta {
             pending_kinds: self.pending_kinds.into_iter().collect(),
             retained_exprs: self.retained_exprs.into_iter().collect(),
             learned_no_goods: self.learned_no_goods,
+            learned_search_no_goods: self.learned_search_no_goods,
         }
     }
 }
@@ -787,6 +801,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 .iter()
                 .filter(|learned| learned.start_index < learned.end_index)
                 .count(),
+            learned_search_no_good_count: self.scheduler.learned_search_no_goods.len(),
         }
     }
 
@@ -1604,6 +1619,7 @@ struct EvalScheduler {
     pending_kinds: Arc<BTreeMap<u64, PendingKind>>,
     retained_exprs: Arc<BTreeMap<EvalNodeId, RetainedExprTask>>,
     learned_no_goods: Arc<Vec<LearnedNoGood>>,
+    learned_search_no_goods: Arc<Vec<LearnedSearchNoGood>>,
     completed_invalidated: bool,
     recorded_delta: Option<Box<RecordedSchedulerDelta>>,
 }
@@ -1635,6 +1651,7 @@ impl Default for EvalScheduler {
             pending_kinds: Arc::new(BTreeMap::new()),
             retained_exprs: Arc::new(BTreeMap::new()),
             learned_no_goods: Arc::new(Vec::new()),
+            learned_search_no_goods: Arc::new(Vec::new()),
             completed_invalidated: false,
             recorded_delta: None,
         }
@@ -1832,6 +1849,7 @@ enum ContinuationFrame {
         resolver: FunctionRef,
         index: usize,
         attempts: Vec<Value>,
+        root_search_start: Option<usize>,
         prior_branch_context: EvalBranchContext,
     },
     IfCondition {
@@ -2189,6 +2207,7 @@ impl EvalScheduler {
             pending_kinds: Arc::clone(&self.pending_kinds),
             retained_exprs: Arc::clone(&self.retained_exprs),
             learned_no_goods: Arc::clone(&self.learned_no_goods),
+            learned_search_no_goods: Arc::clone(&self.learned_search_no_goods),
             completed_invalidated: false,
             recorded_delta: None,
         }
@@ -2570,6 +2589,34 @@ impl EvalScheduler {
             .map(|found| found.flatten())
     }
 
+    fn learned_search_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        start_index: usize,
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError> {
+        self.learned_search_no_goods
+            .iter()
+            .find_map(|learned| {
+                if learned.branch_context == *branch_context
+                    && learned.assumption == *assumption
+                    && learned.start_index == start_index
+                    && learned.resolver == *resolver
+                {
+                    Some(
+                        candidate_lists_equal(learned.candidates.as_ref(), candidates)
+                            .map(|equal| equal.then(|| learned.error.clone())),
+                    )
+                } else {
+                    None
+                }
+            })
+            .transpose()
+            .map(|found| found.flatten())
+    }
+
     fn covers_learned_no_good(&self, learned: &LearnedNoGood) -> Result<bool, EvalError> {
         Ok(self.learned_no_goods.iter().any(|existing| {
             existing.branch_context == learned.branch_context
@@ -2582,6 +2629,35 @@ impl EvalScheduler {
                 && errors_equal_for_learning(&existing.error, &learned.error)
                     .is_ok_and(|equal| equal)
         }))
+    }
+
+    fn record_learned_search_no_good(
+        &mut self,
+        learned: LearnedSearchNoGood,
+    ) -> Result<(), EvalError> {
+        let learned_search_no_goods = Arc::make_mut(&mut self.learned_search_no_goods);
+        for existing in learned_search_no_goods.iter_mut() {
+            if existing.branch_context == learned.branch_context
+                && existing.assumption == learned.assumption
+                && existing.start_index == learned.start_index
+                && existing.resolver == learned.resolver
+                && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())?
+            {
+                if errors_equal_for_learning(&existing.error, &learned.error)? {
+                    return Ok(());
+                }
+                *existing = learned.clone();
+                if let Some(delta) = self.recorded_delta.as_mut() {
+                    delta.learned_search_no_goods.push(existing.clone());
+                }
+                return Ok(());
+            }
+        }
+        learned_search_no_goods.push(learned.clone());
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta.learned_search_no_goods.push(learned);
+        }
+        Ok(())
     }
 
     fn record_learned_no_good(&mut self, learned: LearnedNoGood) -> Result<(), EvalError> {
@@ -3199,6 +3275,9 @@ impl EvalScheduler {
         for learned in delta.learned_no_goods {
             self.record_learned_no_good(learned)?;
         }
+        for learned in delta.learned_search_no_goods {
+            self.record_learned_search_no_good(learned)?;
+        }
         for record in delta.queued {
             if self.ready_tasks.contains_key(&record.work.id)
                 || self.in_flight_tasks.contains_key(&record.work.id)
@@ -3339,6 +3418,12 @@ impl EvalSchedulerDelta {
             .filter(|learned| !before.learned_no_goods.contains(*learned))
             .cloned()
             .collect();
+        let learned_search_no_goods = after
+            .learned_search_no_goods
+            .iter()
+            .filter(|learned| !before.learned_search_no_goods.contains(*learned))
+            .cloned()
+            .collect();
         Self {
             next_id: after.next_id,
             next_work_id: after.next_work_id,
@@ -3351,6 +3436,7 @@ impl EvalSchedulerDelta {
             pending_kinds,
             retained_exprs,
             learned_no_goods,
+            learned_search_no_goods,
         }
     }
 
@@ -3393,6 +3479,8 @@ impl EvalSchedulerDelta {
         });
         self.learned_no_goods
             .retain(|learned| !before.learned_no_goods.contains(learned));
+        self.learned_search_no_goods
+            .retain(|learned| !before.learned_search_no_goods.contains(learned));
     }
 }
 
@@ -4481,6 +4569,27 @@ fn learn_point_no_good(
     })
 }
 
+fn learn_search_no_good(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    branch_context: &EvalBranchContext,
+    assumption: &Arc<str>,
+    candidates: &[Value],
+    start_index: usize,
+    resolver: &FunctionRef,
+    error: &EvalError,
+) -> Result<(), EvalError> {
+    state
+        .scheduler
+        .record_learned_search_no_good(LearnedSearchNoGood {
+            branch_context: branch_context.clone(),
+            assumption: assumption.clone(),
+            candidates: Arc::from(candidates.to_vec()),
+            start_index,
+            resolver: resolver.clone(),
+            error: error.clone(),
+        })
+}
+
 fn continue_search_assumption_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -4490,8 +4599,21 @@ fn continue_search_assumption_builtin(
     resolver: FunctionRef,
     start_index: usize,
     mut attempts: Vec<Value>,
+    root_search_start: Option<usize>,
 ) -> Result<EvalStep, EvalError> {
     let prior_branch_context = state.branch_context.clone();
+    let fresh_search = attempts.is_empty();
+    if fresh_search
+        && let Some(error) = state.scheduler.learned_search_no_good(
+            &prior_branch_context,
+            &name,
+            &candidates,
+            start_index,
+            &resolver,
+        )?
+    {
+        return Err(error);
+    }
     for index in start_index..candidates.len() {
         let candidate = candidates[index].clone();
         if let Some(error) = state.scheduler.learned_no_good(
@@ -4529,6 +4651,7 @@ fn continue_search_assumption_builtin(
                         resolver,
                         index,
                         attempts,
+                        root_search_start,
                         prior_branch_context,
                     },
                 ));
@@ -4548,7 +4671,19 @@ fn continue_search_assumption_builtin(
             Err(error) => return Err(error),
         }
     }
-    Err(branch_conflict_error(name, attempts))
+    let error = branch_conflict_error(name.clone(), attempts);
+    if let Some(root_search_start) = root_search_start {
+        learn_search_no_good(
+            state,
+            &prior_branch_context,
+            &name,
+            &candidates,
+            root_search_start,
+            &resolver,
+            &error,
+        )?;
+    }
+    Err(error)
 }
 
 fn aggregate_map_entries_meta<'a>(
@@ -5107,6 +5242,7 @@ fn continue_call_from_args(
             resolver,
             0,
             Vec::new(),
+            Some(0),
         );
     }
     if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
@@ -6306,6 +6442,7 @@ fn resume_frame(
             resolver,
             index,
             mut attempts,
+            root_search_start,
             prior_branch_context,
         } => {
             state.branch_context = prior_branch_context.clone();
@@ -6331,6 +6468,7 @@ fn resume_frame(
                         resolver,
                         index + 1,
                         attempts,
+                        root_search_start,
                     );
                     Ok(conclude_resumed_node(state, node_id, parent_id, result))
                 }

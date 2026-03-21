@@ -3239,6 +3239,63 @@ fn build() {
 }
 
 #[test]
+fn search_assumption_reuses_learned_failing_search_volume_within_same_session() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn resolve_inner_candidate() {
+  let version = branch_assumption("version");
+  let _ready = host_wait();
+  fail Conflict {
+    package: "logger",
+    version: version,
+    reason: "locked-by-root",
+  }
+}
+
+fn run_inner() {
+  search_assumption("version", ["1.0.0", "1.1.0"], resolve_inner_candidate)
+}
+
+fn resolve_outer() {
+  with_assumption("outer", "shared", (() => run_inner()))
+}
+
+fn build() {
+  search_assumption("outer", ["a", "b"], resolve_outer)
+}
+"#,
+        "search-assumption-search-volume-no-good",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let mut pending_count = 0;
+    let error = loop {
+        match session.run().expect("run failing nested exact search") {
+            Resolution::Pending(pending) => {
+                pending_count += 1;
+                session
+                    .resolve_pending(&pending, Value::string("ready"))
+                    .expect("resolve pending failing branch");
+            }
+            Resolution::Poison(error) => break error,
+            resolution => panic!("expected pending or poison resolution, got {resolution:?}"),
+        }
+    };
+
+    assert_eq!(pending_count, 2);
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "BranchConflict");
+
+    let stats = session.stats();
+    assert_eq!(stats.learned_search_no_good_count, 2);
+}
+
+#[test]
 fn entry_arguments_are_bound_as_runtime_inputs() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build(value: String) { value }",

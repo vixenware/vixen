@@ -372,13 +372,15 @@ Eval2 now has a first explicit exact-search experiment too:
   skipped on later identical searches in the same session
 - adjacent identical failures can widen from singleton point exclusions into
   one conservative candidate-index range exclusion
+- fully failing exact searches can now be learned as conservative whole-search
+  no-goods and replayed on later identical searches in the same branch context
 
 This is still deliberately minimal:
 
 - exact search is sequential today
 - it uses branch-local assumptions as the primitive instead of new surface
   syntax
-- it still does not yet do branch splitting, broader volume widening, or
+- it still does not yet do branch splitting, broader branch-volume widening, or
   dominance ordering
 
 What it does prove:
@@ -391,6 +393,9 @@ What it does prove:
   later candidates correctly
 - exact failures can become replayable learned facts, and adjacent identical
   failures can coalesce into one reusable range exclusion
+- fully failing exact searches can be replayed as one learned whole-search
+  exclusion instead of re-exploring the same failed volume candidate by
+  candidate
 - a tiny package-shaped authored resolver can now backtrack from an
   incompatible newer candidate to an older successful one through keyed shared
   dependency conflict, not Rust-side policy
