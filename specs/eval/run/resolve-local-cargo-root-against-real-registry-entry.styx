@@ -1,0 +1,92 @@
+main <<VX,vx
+struct Dependencies {
+  flate2: String,
+}
+
+struct Manifest {
+  dependencies: Dependencies,
+}
+
+struct RegistryDep {
+  name: String,
+  req: String,
+  kind: String?,
+}
+
+struct RegistryRelease {
+  name: String,
+  #[rename = "vers"]
+  version: String,
+  deps: Array[RegistryDep],
+  yanked: Bool,
+}
+
+struct RootResolutionSummary {
+  name: String,
+  req: String,
+  candidate: String,
+  satisfies: Bool,
+  first_normal_dep: String,
+}
+
+fn version_satisfies_req(req: String, version: String) {
+  if version == req (
+    true
+  ) else (
+    let pair = version.split_once(".").unwrap_or((version, ""));
+    let (major, _) = pair;
+    major == req
+  )
+}
+
+fn first_normal_dep_name(release: RegistryRelease) {
+  let normal = array_find(
+    release.deps,
+    ((dep) => dep.kind.unwrap_or("normal") == "normal"),
+  );
+  normal.name
+}
+
+fn registry_lookup(name: String) {
+  if name == "flate2" (
+    Json.parse[RegistryRelease](read_file("registry_real/flate2-1.1.9.json"))
+  ) else (
+    fail "unsupported registry lookup"
+  )
+}
+
+fn build() {
+  let manifest = Toml.parse[Manifest](read_file("../../../xtask/Cargo.toml"));
+  let req = manifest.dependencies.flate2;
+  let candidate = registry_lookup("flate2");
+  RootResolutionSummary {
+    name: candidate.name,
+    req: req,
+    candidate: candidate.version,
+    satisfies: version_satisfies_req(req, candidate.version),
+    first_normal_dep: first_normal_dep_name(candidate),
+  }
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @struct{
+    type RootResolutionSummary
+    fields {
+      name @string"flate2"
+      req @string"1"
+      candidate @string"1.1.9"
+      satisfies @bool"true"
+      first_normal_dep @string"cloudflare-zlib-sys"
+    }
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @todo
+  }
+}
