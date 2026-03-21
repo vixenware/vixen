@@ -1552,6 +1552,13 @@ enum ContinuationFrame {
         predicate: FunctionRef,
         index: usize,
     },
+    ArrayFoldAfterStep {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<Value>,
+        step: FunctionRef,
+        index: usize,
+    },
     FieldReceiver {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -3193,6 +3200,57 @@ fn continue_array_find_builtin(
     ))
 }
 
+fn continue_array_fold_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    mut accumulator: Value,
+    step: FunctionRef,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..items.len() {
+        let item = items[index].clone();
+        let Some(prepared) =
+            prepare_function_call(state, &step, &[accumulator.clone(), item], Some(node_id))?
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "array_fold() step must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        accumulator = match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => result,
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayFoldAfterStep {
+                        node_id,
+                        parent_id,
+                        items,
+                        step,
+                        index,
+                    },
+                ));
+            }
+        };
+    }
+    Ok(EvalStep::Ready(accumulator))
+}
+
+fn aggregate_map_entries_meta<'a>(
+    provenance: Provenance,
+    entries: impl IntoIterator<Item = &'a (Value, Value)>,
+) -> ValueMeta {
+    aggregate_child_meta(
+        provenance,
+        entries.into_iter().flat_map(|(key, value)| [key, value]),
+    )
+}
+
 fn continue_builtin_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -3257,7 +3315,14 @@ fn continue_builtin_call(
             if !replaced {
                 entries.push((key.clone(), value.clone()));
             }
-            Ok(ready_builtin_value(Value::map(entries)))
+            let meta = aggregate_map_entries_meta(
+                map.entries.iter().next().map_or_else(
+                    || args[0].meta.provenance.clone(),
+                    |_| args[0].meta.provenance.clone(),
+                ),
+                entries.iter(),
+            );
+            Ok(ready_builtin_value(Value::map(entries).with_meta(meta)))
         }
         "array_find" => {
             if args.len() != 2 {
@@ -3284,6 +3349,36 @@ fn continue_builtin_call(
                 parent_id,
                 items.iter().cloned().collect(),
                 predicate.clone(),
+                0,
+            )
+            .map(Some)
+        }
+        "array_fold" => {
+            if args.len() != 3 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_fold() requires array, initial, and step",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_fold() first argument must evaluate to an array",
+                ));
+            };
+            let ValueRep::Function(step) = &args[2].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_fold() third argument must evaluate to a function value",
+                ));
+            };
+            continue_array_fold_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                args[1].clone(),
+                step.clone(),
                 0,
             )
             .map(Some)
@@ -4161,10 +4256,7 @@ fn continue_map_entries(
         entries.push((key, value));
     }
     let provenance = Provenance::literal(map_source);
-    let meta = aggregate_child_meta(
-        provenance,
-        entries.iter().flat_map(|(key, value)| [key, value]),
-    );
+    let meta = aggregate_map_entries_meta(provenance, entries.iter());
     Ok(EvalStep::Ready(Value::map(entries).with_meta(meta)))
 }
 
@@ -4777,6 +4869,27 @@ fn resume_frame(
                         "array_find() predicate must return Bool",
                     )),
                 },
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayFoldAfterStep {
+            node_id,
+            parent_id,
+            items,
+            step,
+            index,
+        } => {
+            let result = match input {
+                Ok(accumulator) => continue_array_fold_builtin(
+                    state,
+                    node_id,
+                    parent_id,
+                    items,
+                    accumulator,
+                    step,
+                    index + 1,
+                ),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

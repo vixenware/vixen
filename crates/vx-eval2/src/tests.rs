@@ -623,6 +623,137 @@ fn build() {
 }
 
 #[test]
+fn map_put_insert_preserves_observed_claim_metadata() {
+    struct MetadataRuntime;
+
+    impl RuntimeHooks for MetadataRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
+                    Value::string("observed")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "claimed value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Arch {
+                            value: "x86_64".to_string(),
+                        }),
+                )),
+                ("win", "host_blocked_value") => Ok(RuntimeCallOutcome::Ready(Value::external(
+                    "tree",
+                    "/workspace",
+                ))),
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let Resolution::Ready(value) = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_claimed_value();
+
+fn build() {
+  map_put(%{ "seed" => 1 }, "observed", host_claimed_value())
+}
+"#,
+        "map-put-metadata-insert",
+        "build",
+        &[],
+        &MetadataRuntime,
+        "win",
+    )
+    .expect("evaluate metadata-preserving map_put insert") else {
+        panic!("expected ready map_put metadata insert result");
+    };
+
+    assert_eq!(value.meta.reuse, ReuseClass::Observed);
+    assert_eq!(value.meta.crossing, CrossingPolicy::ByValue);
+    assert!(value.meta.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Claim::Arch { value } if value == "x86_64"
+        )
+    }));
+}
+
+#[test]
+fn map_put_replace_preserves_existing_composite_metadata() {
+    struct MetadataRuntime;
+
+    impl RuntimeHooks for MetadataRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
+                    Value::string("observed")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "claimed value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Arch {
+                            value: "x86_64".to_string(),
+                        }),
+                )),
+                ("win", "host_blocked_value") => Ok(RuntimeCallOutcome::Ready(Value::external(
+                    "tree",
+                    "/workspace",
+                ))),
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let Resolution::Ready(value) = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_claimed_value();
+fn host_blocked_value();
+
+fn build() {
+  map_put(
+    %{ "blocked" => host_blocked_value(), "observed" => host_claimed_value() },
+    "observed",
+    host_claimed_value(),
+  )
+}
+"#,
+        "map-put-metadata-replace",
+        "build",
+        &[],
+        &MetadataRuntime,
+        "win",
+    )
+    .expect("evaluate metadata-preserving map_put replacement") else {
+        panic!("expected ready map_put metadata replacement result");
+    };
+
+    assert_eq!(value.meta.reuse, ReuseClass::Live);
+    assert_eq!(value.meta.crossing, CrossingPolicy::Blocked);
+    assert!(value.meta.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Claim::Arch { value } if value == "x86_64"
+        )
+    }));
+}
+
+#[test]
 fn array_find_returns_first_matching_element() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -663,6 +794,75 @@ fn build() {
 
     let Resolution::Ready(value) = resolution else {
         panic!("expected ready array_find closure result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("codec".into()));
+}
+
+#[test]
+fn array_find_resumes_after_suspending_predicate_and_continues_search() {
+    struct FirstPendingBoolRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for FirstPendingBoolRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_wait_bool") => {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for predicate result".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "predicate ready",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = FirstPendingBoolRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn build() {
+  array_find(
+    ["logger", "codec"],
+    ((value) => if host_wait_bool() ( value == "codec" ) else ( false )),
+  )
+}
+"#,
+        "array-find-pending",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start suspended array_find") else {
+        panic!("expected pending array_find");
+    };
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve suspended predicate");
+
+    let Resolution::Ready(value) = session.run().expect("resume suspended array_find") else {
+        panic!("expected ready array_find after resume");
     };
     assert_eq!(value.rep, ValueRep::String("codec".into()));
 }
@@ -753,6 +953,184 @@ fn build() {
             .message
             .contains("array_find() predicate must return Bool")
     );
+}
+
+#[test]
+fn array_fold_builds_map_left_to_right() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_fold(
+    ["codec", "logger"],
+    %{ "seed" => "seed" },
+    ((acc, item) => map_put(acc, item, item)),
+  )
+}
+"#,
+        "array-fold-left-to-right",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_fold");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_fold result, got {resolution:?}");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!("expected array_fold to return a map, got {:?}", value.rep);
+    };
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].0.rep, ValueRep::String("seed".into()));
+    assert_eq!(entries[1].0.rep, ValueRep::String("codec".into()));
+    assert_eq!(entries[2].0.rep, ValueRep::String("logger".into()));
+}
+
+#[test]
+fn array_fold_step_closure_captures_outer_binding() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let version = "1.1.0";
+  array_fold(
+    ["codec", "logger"],
+    %{ "seed" => "seed" },
+    ((acc, item) => map_put(acc, item, version)),
+  )
+}
+"#,
+        "array-fold-captured-closure",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_fold captured closure");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_fold closure result, got {resolution:?}");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!("expected array_fold to return a map, got {:?}", value.rep);
+    };
+    assert_eq!(entries[1].1.rep, ValueRep::String("1.1.0".into()));
+    assert_eq!(entries[2].1.rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
+fn array_fold_requires_array_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_fold("not an array", %{ "seed" => "seed" }, ((acc, item) => acc))
+}
+"#,
+        "array-fold-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_fold non-array first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_fold() first argument must evaluate to an array")
+    );
+}
+
+#[test]
+fn array_fold_requires_function_as_third_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_fold(["codec"], %{ "seed" => "seed" }, "not a function")
+}
+"#,
+        "array-fold-third-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_fold non-function third argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_fold() third argument must evaluate to a function value")
+    );
+}
+
+#[test]
+fn array_fold_resumes_after_suspending_step_function() {
+    struct FirstPendingBoolRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for FirstPendingBoolRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_wait_bool") => {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for fold step".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "fold step ready",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = FirstPendingBoolRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn build() {
+  array_fold(
+    ["codec"],
+    %{ "seed" => "seed" },
+    ((acc, item) => if host_wait_bool() ( map_put(acc, item, item) ) else ( acc )),
+  )
+}
+"#,
+        "array-fold-pending",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start suspended array_fold") else {
+        panic!("expected pending array_fold");
+    };
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve suspended fold step");
+
+    let Resolution::Ready(value) = session.run().expect("resume suspended array_fold") else {
+        panic!("expected ready array_fold after resume");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!("expected array_fold to return a map, got {:?}", value.rep);
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].0.rep, ValueRep::String("codec".into()));
+    assert_eq!(entries[1].1.rep, ValueRep::String("codec".into()));
 }
 
 #[test]
