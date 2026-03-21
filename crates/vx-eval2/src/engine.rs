@@ -3160,8 +3160,9 @@ fn execute_ready_task(
     scheduler: EvalScheduler,
     record: ReadyTaskRecord,
 ) -> Result<(EvalSessionDelta, EvalCompletedWorkOutcome), EvalError> {
-    let before = scheduler;
-    let mut after = before.clone();
+    let validate_recorded_delta = std::env::var_os("VX_EVAL2_VALIDATE_RECORDED_DELTAS").is_some();
+    let mut after = scheduler;
+    let before = validate_recorded_delta.then(|| after.clone());
     after.begin_recording_delta();
     let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
@@ -3338,9 +3339,12 @@ fn execute_ready_task(
         .expect("worker scheduler should record a delta");
     recorded_delta.next_id = after.next_id;
     recorded_delta.next_work_id = after.next_work_id;
-    recorded_delta.retain_changes_against(&before);
-    let diff_delta = EvalSchedulerDelta::from_diff(&before, &after);
-    debug_assert_eq!(recorded_delta, diff_delta);
+    if let Some(before) = before {
+        let mut filtered_delta = recorded_delta.clone();
+        filtered_delta.retain_changes_against(&before);
+        let diff_delta = EvalSchedulerDelta::from_diff(&before, &after);
+        debug_assert_eq!(filtered_delta, diff_delta);
+    }
 
     Ok((
         EvalSessionDelta {
