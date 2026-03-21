@@ -1,0 +1,874 @@
+use super::*;
+
+pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
+    program: Arc<CompiledProgram>,
+    entry: String,
+    args: Vec<Value>,
+    runtime: &'runtime Runtime,
+    place: String,
+    branch_context: EvalBranchContext,
+    scheduler: EvalScheduler,
+    trace: EvalTrace,
+    completed_work: Vec<EvalCompletedWork>,
+    completed: Option<Result<Value, EvalError>>,
+    history: Vec<EvalSessionCheckpoint>,
+    generation: u64,
+}
+
+impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
+    pub fn new(
+        source: impl Into<String>,
+        source_id: impl Into<String>,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+    ) -> Self {
+        let mut scheduler = EvalScheduler::default();
+        let branch_context = EvalBranchContext::default();
+        scheduler.enqueue_start_entry(branch_context.clone());
+        let program = Arc::new(CompiledProgram::new(source_id, source));
+        Self::new_with_program(
+            program,
+            entry,
+            args,
+            runtime,
+            place,
+            scheduler,
+            branch_context,
+        )
+    }
+
+    pub fn new_program(
+        program: EvalProgram,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+    ) -> Self {
+        let mut scheduler = EvalScheduler::default();
+        let branch_context = EvalBranchContext::default();
+        scheduler.enqueue_start_entry(branch_context.clone());
+        let program = Arc::new(CompiledProgram::from_eval_program(program));
+        Self::new_with_program(
+            program,
+            entry,
+            args,
+            runtime,
+            place,
+            scheduler,
+            branch_context,
+        )
+    }
+
+    fn new_with_program(
+        program: Arc<CompiledProgram>,
+        entry: impl Into<String>,
+        args: Vec<Value>,
+        runtime: &'runtime Runtime,
+        place: impl Into<String>,
+        scheduler: EvalScheduler,
+        branch_context: EvalBranchContext,
+    ) -> Self {
+        Self {
+            program,
+            entry: entry.into(),
+            args,
+            runtime,
+            place: place.into(),
+            branch_context,
+            scheduler,
+            trace: EvalTrace::default(),
+            completed_work: Vec::new(),
+            completed: None,
+            history: Vec::new(),
+            generation: 0,
+        }
+    }
+
+    pub fn run(&mut self) -> Result<Resolution, EvalError> {
+        loop {
+            match self.drive_step_without_history()? {
+                EvalSessionStep::Progressed => {}
+                EvalSessionStep::Pending(pending) => return Ok(Resolution::Pending(pending)),
+                EvalSessionStep::WaitingOnInFlight => return Ok(Resolution::Waiting),
+                EvalSessionStep::Ready(value) => return Ok(Resolution::Ready(value)),
+                EvalSessionStep::Poison(error) => return Ok(Resolution::Poison(error)),
+                EvalSessionStep::Idle => {
+                    return Ok(resolution_without_ready_work(
+                        &self.scheduler,
+                        &self.completed,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn drive_step_without_history(&mut self) -> Result<EvalSessionStep, EvalError> {
+        if let Some(result) = &self.completed {
+            return Ok(match result {
+                Ok(value) => EvalSessionStep::Ready(value.clone()),
+                Err(error) => EvalSessionStep::Poison(error.clone()),
+            });
+        }
+
+        let Some(prepared) = self.prepare_step_impl(false)? else {
+            return Ok(step_without_ready_work(&self.scheduler, &self.completed));
+        };
+        let completion = prepared.execute()?;
+        self.apply_completion_impl(completion, false)
+    }
+
+    pub fn run_parallel(&mut self, max_workers: usize) -> Result<Resolution, EvalError> {
+        if max_workers == 0 {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                "parallel eval requires at least one worker",
+            ));
+        }
+
+        if let Some(resolution) = completed_resolution(&self.completed) {
+            return Ok(resolution);
+        }
+
+        thread::scope(|scope| -> Result<Resolution, EvalError> {
+            loop {
+                let wave_checkpoint = self.checkpoint();
+                let prepared = self.lease_parallel_wave(max_workers)?;
+                if prepared.is_empty() {
+                    return Ok(resolution_without_ready_work(
+                        &self.scheduler,
+                        &self.completed,
+                    ));
+                }
+                match catch_unwind(AssertUnwindSafe(|| {
+                    self.execute_parallel_wave(scope, prepared)
+                })) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        self.restore(wave_checkpoint);
+                        return Err(error);
+                    }
+                    Err(payload) => {
+                        self.restore(wave_checkpoint);
+                        resume_unwind(payload);
+                    }
+                }
+            }
+        })
+    }
+
+    pub fn step(&mut self) -> Result<EvalSessionStep, EvalError> {
+        if let Some(result) = &self.completed {
+            return Ok(match result {
+                Ok(value) => EvalSessionStep::Ready(value.clone()),
+                Err(error) => EvalSessionStep::Poison(error.clone()),
+            });
+        }
+
+        let snapshot = self.checkpoint();
+
+        let Some(prepared) = self.prepare_step_impl(false)? else {
+            return Ok(step_without_ready_work(&self.scheduler, &self.completed));
+        };
+        let completion = prepared.execute()?;
+        match self.apply_completion_impl(completion, false) {
+            Ok(step) => {
+                self.history.push(snapshot);
+                Ok(step)
+            }
+            Err(error) => {
+                self.restore(snapshot);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
+        self.scheduler.resolve_pending(pending, Ok(value))?;
+        self.generation += 1;
+        Ok(())
+    }
+
+    pub fn poison_pending(
+        &mut self,
+        pending: &PendingRef,
+        error: EvalError,
+    ) -> Result<(), EvalError> {
+        self.scheduler.resolve_pending(pending, Err(error))?;
+        self.generation += 1;
+        Ok(())
+    }
+
+    pub fn pending_nodes(&self) -> Vec<PendingRef> {
+        self.scheduler.pending_nodes()
+    }
+
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
+    pub fn set_branch_context(&mut self, branch_context: EvalBranchContext) {
+        let previous = self.branch_context.clone();
+        self.branch_context = branch_context;
+        self.scheduler
+            .replace_queued_branch_context(&previous, &self.branch_context);
+        self.generation += 1;
+    }
+
+    pub fn can_step_back(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    pub fn step_back(&mut self) -> bool {
+        let Some(snapshot) = self.history.pop() else {
+            return false;
+        };
+        self.restore(snapshot);
+        true
+    }
+
+    pub fn queued_work(&self) -> Vec<EvalQueuedWork> {
+        self.scheduler.queued_work()
+    }
+
+    pub fn in_flight_work(&self) -> Vec<EvalQueuedWork> {
+        self.scheduler.in_flight_work()
+    }
+
+    pub fn active_wave(&self) -> Option<EvalActiveWave> {
+        self.scheduler.active_wave()
+    }
+
+    pub fn buffered_work(&self) -> Vec<EvalBufferedWork> {
+        self.scheduler.buffered_work()
+    }
+
+    pub fn runnable_nodes(&self) -> Vec<EvalRunnableNode> {
+        self.scheduler.runnable_nodes()
+    }
+
+    pub fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.scheduler.node_state(node_id)
+    }
+
+    pub fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.scheduler.node_record(node_id)
+    }
+
+    pub fn node_records(&self) -> Vec<EvalNodeRecord> {
+        self.scheduler.node_records()
+    }
+
+    pub fn dependency_edges(&self) -> &[EvalDependencyEdge] {
+        self.scheduler.dependency_edges()
+    }
+
+    pub fn explain_node(&self, node_id: EvalNodeId) -> EvalNodeExplanation {
+        self.scheduler.explain_node(node_id)
+    }
+
+    pub fn trace(&self) -> &EvalTrace {
+        &self.trace
+    }
+
+    pub fn stats(&self) -> EvalSessionStats {
+        let mut graph_nodes = self.scheduler.node_record_ids();
+        graph_nodes.extend(self.scheduler.node_state_ids());
+        graph_nodes.extend(self.scheduler.keyed_nodes.keys().copied());
+        for edge in self.scheduler.dependency_edges.iter() {
+            graph_nodes.insert(edge.parent);
+            graph_nodes.insert(edge.child);
+        }
+
+        EvalSessionStats {
+            graph_node_count: graph_nodes.len(),
+            node_record_count: self.scheduler.node_record_count(),
+            node_state_count: self.scheduler.node_state_count(),
+            keyed_node_count: self.scheduler.keyed_nodes.len(),
+            dependency_edge_count: self.scheduler.dependency_edges.len(),
+            queued_work_count: self.scheduler.ready_queue.len(),
+            in_flight_work_count: self.scheduler.in_flight_tasks.len(),
+            buffered_work_count: self.scheduler.buffered_completions.len(),
+            pending_count: self.scheduler.pending_nodes().len(),
+            completed_work_count: self.completed_work.len(),
+            trace_event_count: self.trace.events.len(),
+            learned_no_good_count: self.scheduler.learned_no_goods.len(),
+            widened_no_good_count: self
+                .scheduler
+                .learned_no_goods
+                .iter()
+                .filter(|learned| learned.start_index < learned.end_index)
+                .count(),
+            learned_search_no_good_count: self.scheduler.learned_search_no_goods.len(),
+        }
+    }
+
+    pub fn completed_work(&self) -> &[EvalCompletedWork] {
+        &self.completed_work
+    }
+
+    pub fn checkpoint(&self) -> EvalSessionCheckpoint {
+        EvalSessionCheckpoint {
+            branch_context: self.branch_context.clone(),
+            scheduler: self.scheduler.clone(),
+            trace_len: self.trace.events.len(),
+            completed_work_len: self.completed_work.len(),
+            completed: self.completed.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, checkpoint: EvalSessionCheckpoint) {
+        let next_lease_sequence = self
+            .scheduler
+            .next_lease_sequence
+            .max(checkpoint.scheduler.next_lease_sequence);
+        let next_wave_id = self
+            .scheduler
+            .next_wave_id
+            .max(checkpoint.scheduler.next_wave_id);
+        let next_lease_namespace = self
+            .scheduler
+            .next_lease_namespace
+            .max(checkpoint.scheduler.next_lease_namespace);
+        self.scheduler = checkpoint.scheduler;
+        self.scheduler.next_wave_id = next_wave_id;
+        self.scheduler.next_lease_sequence = next_lease_sequence;
+        self.scheduler.next_lease_namespace = next_lease_namespace;
+        self.branch_context = checkpoint.branch_context;
+        self.trace.events.truncate(checkpoint.trace_len);
+        self.completed_work.truncate(checkpoint.completed_work_len);
+        self.completed = checkpoint.completed;
+        self.generation += 1;
+    }
+
+    pub fn prepare_step(&mut self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
+        self.prepare_step_impl(true)
+            .expect("leasing prepared work should not fail")
+    }
+
+    fn prepare_step_impl(
+        &mut self,
+        record_history: bool,
+    ) -> Result<Option<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
+        if self.completed.is_some() {
+            return Ok(None);
+        }
+        let snapshot = record_history.then(|| self.checkpoint());
+        let Some(lease) = self.scheduler.lease_ready_task()? else {
+            return Ok(None);
+        };
+        if let Some(snapshot) = snapshot {
+            self.history.push(snapshot);
+        }
+        self.generation += 1;
+        Ok(Some(EvalPreparedWork {
+            program: Arc::clone(&self.program),
+            entry: self.entry.clone(),
+            args: self.args.clone(),
+            runtime: self.runtime,
+            place: self.place.clone(),
+            branch_context: lease.record.branch_context.clone(),
+            wave_id: lease.wave_id,
+            lease_sequence: lease.lease_sequence,
+            scheduler: self.scheduler.clone_for_lease(lease.namespace),
+            record: lease.record,
+        }))
+    }
+
+    fn lease_parallel_wave(
+        &mut self,
+        max_workers: usize,
+    ) -> Result<Vec<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
+        let mut prepared = Vec::new();
+        while prepared.len() < max_workers {
+            let Some(next) = self.prepare_step_impl(false)? else {
+                break;
+            };
+            prepared.push(next);
+        }
+        Ok(prepared)
+    }
+
+    fn execute_parallel_wave<'scope>(
+        &mut self,
+        scope: &'scope thread::Scope<'scope, '_>,
+        prepared: Vec<EvalPreparedWork<'runtime, Runtime>>,
+    ) -> Result<(), EvalError>
+    where
+        'runtime: 'scope,
+    {
+        let expected = prepared.len();
+        let (completion_tx, completion_rx) = mpsc::channel::<ParallelWorkerMessage>();
+
+        for prepared in prepared {
+            let completion_tx = completion_tx.clone();
+            scope.spawn(move || {
+                let message = match catch_unwind(AssertUnwindSafe(|| prepared.execute())) {
+                    Ok(completion) => ParallelWorkerMessage::Completion(completion),
+                    Err(payload) => ParallelWorkerMessage::Panic(payload),
+                };
+                let _ = completion_tx.send(message);
+            });
+        }
+        drop(completion_tx);
+
+        let mut completions = Vec::with_capacity(expected);
+        let mut first_error = None;
+        let mut first_panic = None;
+        for _ in 0..expected {
+            match completion_rx.recv().expect(
+                "parallel eval wave channel closed before all worker outcomes were reported",
+            ) {
+                ParallelWorkerMessage::Completion(Ok(completion)) => completions.push(completion),
+                ParallelWorkerMessage::Completion(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                ParallelWorkerMessage::Panic(payload) => {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        completions.sort_by_key(EvalWorkCompletion::lease_sequence);
+        let _step = self.apply_completion_batch_impl(completions, false)?;
+        Ok(())
+    }
+
+    pub fn apply_completion(
+        &mut self,
+        completion: EvalWorkCompletion,
+    ) -> Result<EvalSessionStep, EvalError> {
+        self.apply_completion_impl(completion, true)
+    }
+
+    fn apply_completion_batch_impl(
+        &mut self,
+        completions: Vec<EvalWorkCompletion>,
+        record_history: bool,
+    ) -> Result<EvalSessionStep, EvalError> {
+        if !record_history {
+            let mut step = None;
+            for completion in completions {
+                step = Some(apply_completion_to_state(
+                    &mut self.scheduler,
+                    &mut self.trace,
+                    &mut self.completed_work,
+                    &mut self.completed,
+                    completion,
+                )?);
+            }
+            self.scheduler.clear_active_wave_if_idle();
+            self.generation += 1;
+            return Ok(
+                step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed))
+            );
+        }
+
+        let snapshot = record_history.then(|| self.checkpoint());
+        let mut scheduler = self.scheduler.clone();
+        let mut trace = self.trace.clone();
+        let mut completed_work = self.completed_work.clone();
+        let mut completed = self.completed.clone();
+        let mut step = None;
+
+        for completion in completions {
+            step = Some(apply_completion_to_state(
+                &mut scheduler,
+                &mut trace,
+                &mut completed_work,
+                &mut completed,
+                completion,
+            )?);
+        }
+        scheduler.clear_active_wave_if_idle();
+
+        if let Some(snapshot) = snapshot {
+            self.history.push(snapshot);
+        }
+        self.scheduler = scheduler;
+        self.trace = trace;
+        self.completed_work = completed_work;
+        self.completed = completed;
+        self.generation += 1;
+        Ok(step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed)))
+    }
+
+    fn apply_completion_impl(
+        &mut self,
+        completion: EvalWorkCompletion,
+        record_history: bool,
+    ) -> Result<EvalSessionStep, EvalError> {
+        self.apply_completion_batch_impl(vec![completion], record_history)
+    }
+
+    pub fn work_records(&self) -> Vec<EvalWorkRecord> {
+        let mut records = self
+            .completed_work
+            .iter()
+            .map(|completed| EvalWorkRecord {
+                work: completed.work.clone(),
+                state: EvalWorkState::Completed(completed.outcome.clone()),
+            })
+            .collect::<Vec<_>>();
+        records.extend(
+            self.scheduler
+                .queued_work()
+                .into_iter()
+                .map(|work| EvalWorkRecord {
+                    work,
+                    state: EvalWorkState::Queued,
+                }),
+        );
+        records.extend(
+            self.scheduler
+                .in_flight_work()
+                .into_iter()
+                .map(|work| EvalWorkRecord {
+                    work,
+                    state: EvalWorkState::InFlight,
+                }),
+        );
+        records.extend(
+            self.scheduler
+                .buffered_work()
+                .into_iter()
+                .map(|buffered| EvalWorkRecord {
+                    work: buffered.work,
+                    state: EvalWorkState::Buffered(buffered.outcome),
+                }),
+        );
+        records.sort_by_key(|record| record.work.id);
+        records
+    }
+
+    pub fn graph_snapshot(&self) -> EvalGraphSnapshot {
+        let mut node_ids = self
+            .scheduler
+            .node_record_ids()
+            .into_iter()
+            .collect::<Vec<_>>();
+        node_ids.extend(self.scheduler.node_state_ids());
+        node_ids.extend(self.scheduler.keyed_nodes.keys().copied());
+        for edge in self.scheduler.dependency_edges.iter() {
+            node_ids.push(edge.parent);
+            node_ids.push(edge.child);
+        }
+        node_ids.sort();
+        node_ids.dedup();
+
+        let mut dependencies = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
+        let mut dependents = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
+        for edge in self.scheduler.dependency_edges.iter() {
+            dependencies
+                .entry(edge.parent)
+                .or_default()
+                .push(edge.child);
+            dependents.entry(edge.child).or_default().push(edge.parent);
+        }
+        let mut keyed_nodes = self
+            .scheduler
+            .keyed_nodes
+            .iter()
+            .map(|(node_id, memo)| (*node_id, memo.public()))
+            .collect::<BTreeMap<_, _>>();
+
+        EvalGraphSnapshot {
+            branch_context: self.branch_context.clone(),
+            nodes: node_ids
+                .into_iter()
+                .map(|node_id| EvalGraphNode {
+                    node_id,
+                    record: self.scheduler.node_record(node_id).cloned(),
+                    keyed: keyed_nodes.remove(&node_id),
+                    state: self.scheduler.node_state(node_id).cloned(),
+                    dependencies: dependencies.remove(&node_id).unwrap_or_default(),
+                    dependents: dependents.remove(&node_id).unwrap_or_default(),
+                })
+                .collect(),
+            work: self.work_records(),
+            active_wave: self.active_wave(),
+            pending: self.pending_nodes(),
+            completed: self.completed.clone(),
+        }
+    }
+}
+
+impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
+    pub fn work(&self) -> &EvalQueuedWork {
+        &self.record.work
+    }
+
+    pub fn lease_sequence(&self) -> u64 {
+        self.lease_sequence
+    }
+
+    pub fn execute(self) -> Result<EvalWorkCompletion, EvalError> {
+        let EvalPreparedWork {
+            program,
+            entry,
+            args,
+            runtime,
+            place,
+            branch_context,
+            wave_id,
+            lease_sequence,
+            scheduler,
+            record,
+        } = self;
+        #[cfg(test)]
+        if let Some(error) = injected_worker_error(&branch_context, &record.work) {
+            return Err(error);
+        }
+        let (delta, outcome) = execute_ready_task(
+            program,
+            &entry,
+            &args,
+            runtime,
+            &place,
+            scheduler,
+            record.clone(),
+        )?;
+        Ok(EvalWorkCompletion {
+            branch_context,
+            wave_id,
+            lease_sequence,
+            work: record.work,
+            outcome,
+            delta,
+        })
+    }
+}
+
+#[cfg(test)]
+fn injected_worker_error(
+    branch_context: &EvalBranchContext,
+    work: &EvalQueuedWork,
+) -> Option<EvalError> {
+    (branch_context.key.as_ref() == "__test_worker_error__"
+        && matches!(work.kind, EvalWorkKind::EvaluateExpr)
+        && work.id.0 % 2 == 1)
+        .then(|| EvalError::new(EvalErrorKind::Internal, "injected test worker error"))
+}
+
+#[cfg(test)]
+impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
+    pub(crate) fn program_parse_count(&self) -> usize {
+        self.program.parse_count()
+    }
+}
+
+impl EvalWorkCompletion {
+    pub fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
+    pub fn wave_id(&self) -> EvalWaveId {
+        self.wave_id
+    }
+
+    pub fn work(&self) -> &EvalQueuedWork {
+        &self.work
+    }
+
+    pub fn outcome(&self) -> &EvalCompletedWorkOutcome {
+        &self.outcome
+    }
+
+    pub fn lease_sequence(&self) -> u64 {
+        self.lease_sequence
+    }
+}
+
+fn apply_completion_to_state(
+    scheduler: &mut EvalScheduler,
+    trace: &mut EvalTrace,
+    completed_work: &mut Vec<EvalCompletedWork>,
+    completed: &mut Option<Result<Value, EvalError>>,
+    completion: EvalWorkCompletion,
+) -> Result<EvalSessionStep, EvalError> {
+    scheduler.validate_in_flight_task(
+        completion.work.id,
+        completion.lease_sequence,
+        &completion.work,
+    )?;
+
+    if scheduler.can_commit_lease_sequence(completion.lease_sequence) {
+        let _leased = scheduler.take_in_flight_task(
+            completion.work.id,
+            completion.lease_sequence,
+            &completion.work,
+        )?;
+        let mut step = commit_completion(scheduler, trace, completed_work, completed, completion)?;
+        while let Some(buffered) = scheduler.take_next_committable_buffered_completion() {
+            step = commit_completion(scheduler, trace, completed_work, completed, buffered)?;
+        }
+        Ok(step)
+    } else {
+        scheduler.buffer_completion(completion)?;
+        Ok(step_after_buffering(scheduler, completed))
+    }
+}
+
+fn commit_completion(
+    scheduler: &mut EvalScheduler,
+    trace: &mut EvalTrace,
+    completed_work: &mut Vec<EvalCompletedWork>,
+    completed: &mut Option<Result<Value, EvalError>>,
+    completion: EvalWorkCompletion,
+) -> Result<EvalSessionStep, EvalError> {
+    if completion_targets_superseded_work(scheduler, &completion.work) {
+        completed_work.push(EvalCompletedWork {
+            work: completion.work,
+            outcome: completion.outcome,
+        });
+        return Ok(EvalSessionStep::Progressed);
+    }
+    trace.events.extend(completion.delta.trace_events);
+    let completed_invalidated = completion.delta.completed_invalidated;
+    scheduler.apply_delta(completion.delta.scheduler)?;
+    if completed_invalidated {
+        *completed = None;
+    }
+    let keyed_stale = matches!(
+        completion.outcome,
+        EvalCompletedWorkOutcome::Ready(_) | EvalCompletedWorkOutcome::Poison(_)
+    ) && scheduler.finalize_keyed_completion(completion.work.node_id)?;
+    completed_work.push(EvalCompletedWork {
+        work: completion.work.clone(),
+        outcome: completion.outcome.clone(),
+    });
+    if keyed_stale {
+        return Ok(EvalSessionStep::Progressed);
+    }
+    match completion.outcome {
+        EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
+            Ok(EvalSessionStep::Progressed)
+        }
+        EvalCompletedWorkOutcome::Pending(pending) => Ok(EvalSessionStep::Pending(pending)),
+        EvalCompletedWorkOutcome::Ready(value) => {
+            if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
+                Ok(EvalSessionStep::Progressed)
+            } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
+                Ok(EvalSessionStep::Progressed)
+            } else {
+                scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                *completed = Some(Ok(value.clone()));
+                Ok(EvalSessionStep::Ready(value))
+            }
+        }
+        EvalCompletedWorkOutcome::Poison(error) => {
+            if scheduler.resolve_child_dependency(completion.work.node_id, Err(error.clone()))? {
+                Ok(EvalSessionStep::Progressed)
+            } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
+                Ok(EvalSessionStep::Progressed)
+            } else {
+                scheduler
+                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
+                *completed = Some(Err(error.clone()));
+                Ok(EvalSessionStep::Poison(error))
+            }
+        }
+    }
+}
+
+fn step_after_buffering(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> EvalSessionStep {
+    match completed {
+        Some(Ok(value)) => EvalSessionStep::Ready(value.clone()),
+        Some(Err(error)) => EvalSessionStep::Poison(error.clone()),
+        None if !scheduler.queued_work().is_empty() => EvalSessionStep::Progressed,
+        None => step_without_ready_work(scheduler, completed),
+    }
+}
+
+fn completion_targets_superseded_work(scheduler: &EvalScheduler, work: &EvalQueuedWork) -> bool {
+    matches!(
+        scheduler.node_state(work.node_id),
+        Some(EvalNodeState::Runnable {
+            work: current_work,
+            ..
+        }) if *current_work != work.id
+    )
+}
+
+fn completed_resolution(completed: &Option<Result<Value, EvalError>>) -> Option<Resolution> {
+    match completed {
+        Some(Ok(value)) => Some(Resolution::Ready(value.clone())),
+        Some(Err(error)) => Some(Resolution::Poison(error.clone())),
+        None => None,
+    }
+}
+
+fn step_without_ready_work(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> EvalSessionStep {
+    if let Some(resolution) = completed_resolution(completed) {
+        return match resolution {
+            Resolution::Ready(value) => EvalSessionStep::Ready(value),
+            Resolution::Poison(error) => EvalSessionStep::Poison(error),
+            Resolution::Pending(_) | Resolution::Waiting => unreachable!(),
+        };
+    }
+    match scheduler.pending_nodes().into_iter().next() {
+        Some(pending) => EvalSessionStep::Pending(pending),
+        None if scheduler.has_waiting_work() => EvalSessionStep::WaitingOnInFlight,
+        None => EvalSessionStep::Idle,
+    }
+}
+
+fn resolution_without_ready_work(
+    scheduler: &EvalScheduler,
+    completed: &Option<Result<Value, EvalError>>,
+) -> Resolution {
+    if let Some(resolution) = completed_resolution(completed) {
+        return resolution;
+    }
+    match scheduler.pending_nodes().into_iter().next() {
+        Some(pending) => Resolution::Pending(pending),
+        None if scheduler.has_waiting_work() => Resolution::Waiting,
+        None => Resolution::Poison(EvalError::new(
+            EvalErrorKind::Internal,
+            "eval session has no ready work and no pending nodes",
+        )),
+    }
+}
+
+#[cfg(test)]
+impl EvalWorkCompletion {
+    pub(crate) fn inject_duplicate_queued_work(&mut self, record: EvalQueuedWork) {
+        self.delta.scheduler.queued.push(ReadyTaskRecord {
+            work: record.clone(),
+            task: ReadyTask::StartEntry,
+            branch_context: EvalBranchContext::default(),
+        });
+    }
+}
+
+#[cfg(test)]
+impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
+    pub(crate) fn first_queued_work_for_testing(&self) -> EvalQueuedWork {
+        self.scheduler
+            .queued_work()
+            .into_iter()
+            .next()
+            .expect("session should have queued work for duplicate-merge testing")
+    }
+}
