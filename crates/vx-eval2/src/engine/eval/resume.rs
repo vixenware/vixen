@@ -390,6 +390,89 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::InterpolatedStringAfterExpr {
+            node_id,
+            parent_id,
+            mut segments,
+            remaining_parts,
+            env,
+            string_source,
+        } => {
+            let result = match input {
+                Ok(value) => {
+                    segments.push(interpolation_segment_text(&value)?);
+                    continue_interpolated_string_parts(
+                        state,
+                        node_id,
+                        parent_id,
+                        segments,
+                        remaining_parts,
+                        env,
+                        string_source,
+                    )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::InterpolatedStringJoin {
+            node_id,
+            parent_id,
+            parts,
+            expr_nodes,
+            string_source,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut segments = Vec::with_capacity(parts.len());
+                    let mut expr_index = 0usize;
+                    for part in &parts {
+                        match part {
+                            InterpolatedPart::Text(text) => segments.push(text.to_string()),
+                            InterpolatedPart::Expr(_) => {
+                                let child_node = *expr_nodes.get(expr_index).expect(
+                                    "interpolated string expr node count should match parts",
+                                );
+                                expr_index += 1;
+                                match state.scheduler.node_state(child_node) {
+                                    Some(EvalNodeState::Ready(value)) => {
+                                        segments.push(interpolation_segment_text(value)?);
+                                    }
+                                    Some(EvalNodeState::Poison(error)) => {
+                                        return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                                    }
+                                    _ => {
+                                        let pending = state
+                                            .scheduler
+                                            .alloc_child_dependency_pending(child_node);
+                                        return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                            resume_node: node_id,
+                                            pending,
+                                            branch_context: state.branch_context.clone(),
+                                            frames: vec![
+                                                ContinuationFrame::InterpolatedStringJoin {
+                                                    node_id,
+                                                    parent_id,
+                                                    parts: parts.clone(),
+                                                    expr_nodes: expr_nodes.clone(),
+                                                    string_source: string_source.clone(),
+                                                },
+                                            ],
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(EvalStep::Ready(ready_interpolated_string_value(
+                        segments,
+                        string_source,
+                    )))
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::RangeAfterStart {
             node_id,
             parent_id,

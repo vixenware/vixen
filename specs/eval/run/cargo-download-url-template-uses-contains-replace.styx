@@ -1,0 +1,69 @@
+main <<VX,vx
+struct SparseConfig {
+  dl: String,
+}
+
+fn sparse_prefix(name: String) -> String (
+  let len = name.len();
+  if len == 1 (
+    "1"
+  ) else (
+    if len == 2 (
+      "2"
+    ) else (
+      if len == 3 (
+        `3/{name.slice(0..1)}`
+      ) else (
+        `{name.slice(0..2)}/{name.slice(2..4)}`
+      )
+    )
+  )
+)
+
+fn crate_download_url(config: SparseConfig, name: String, version: String, checksum: String) -> String (
+  let prefix = sparse_prefix(name);
+  let lowerprefix = sparse_prefix(name.to_lower());
+  let template = config.dl;
+
+  if (
+    template.contains("{crate}") ||
+    template.contains("{version}") ||
+    template.contains("{prefix}") ||
+    template.contains("{lowerprefix}") ||
+    template.contains("{sha256-checksum}")
+  ) (
+    template
+      .replace("{crate}", name)
+      .replace("{version}", version)
+      .replace("{prefix}", prefix)
+      .replace("{lowerprefix}", lowerprefix)
+      .replace("{sha256-checksum}", checksum)
+  ) else (
+    `{template}/{name}/{version}/download`
+  )
+)
+
+fn build() {
+  crate_download_url(
+    SparseConfig {
+      dl: "https://cache.example/{lowerprefix}/{crate}/{version}/{sha256-checksum}",
+    },
+    "flate2",
+    "1.1.9",
+    "deadbeef",
+  )
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @string"https://cache.example/fl/at/flate2/1.1.9/deadbeef"
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

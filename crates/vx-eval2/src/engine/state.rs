@@ -32,6 +32,12 @@ pub(super) struct StmtHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum InterpolatedPart {
+    Text(Arc<str>),
+    Expr(ExprHandle),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LetPattern {
     Binding { name: String, source: SourceSpan },
     Wildcard,
@@ -126,6 +132,21 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         child_nodes: Vec<EvalNodeId>,
         tuple_source: SourceSpan,
+    },
+    InterpolatedStringAfterExpr {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        segments: Vec<String>,
+        remaining_parts: Vec<InterpolatedPart>,
+        env: EvalEnv,
+        string_source: SourceSpan,
+    },
+    InterpolatedStringJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        parts: Vec<InterpolatedPart>,
+        expr_nodes: Vec<EvalNodeId>,
+        string_source: SourceSpan,
     },
     RangeAfterStart {
         node_id: EvalNodeId,

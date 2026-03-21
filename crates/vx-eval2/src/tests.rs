@@ -1244,6 +1244,157 @@ fn build(name: String) {
 }
 
 #[test]
+fn string_contains_method_reports_presence_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  name.contains("ate")
+}
+"#,
+        "string-contains-method-runtime",
+        "build",
+        &[Value::string("flate2")],
+    )
+    .expect("evaluate String.contains()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.contains() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn logical_or_short_circuits_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  true || fail("rhs should not run")
+}
+"#,
+        "logical-or-short-circuit-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate || short-circuit");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready || result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn logical_and_short_circuits_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  false && fail("rhs should not run")
+}
+"#,
+        "logical-and-short-circuit-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate && short-circuit");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready && result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(false));
+}
+
+#[test]
+fn string_lines_method_splits_newlines_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(text: String) {
+  text.lines()
+}
+"#,
+        "string-lines-method-runtime",
+        "build",
+        &[Value::string("one\ntwo")],
+    )
+    .expect("evaluate String.lines()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.lines() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from String.lines(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("one".into()));
+    assert_eq!(items[1].rep, ValueRep::String("two".into()));
+}
+
+#[test]
+fn string_replace_method_rewrites_all_occurrences_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(template: String) {
+  template.replace("{crate}", "flate2")
+}
+"#,
+        "string-replace-method-runtime",
+        "build",
+        &[Value::string("https://x/{crate}/{crate}")],
+    )
+    .expect("evaluate String.replace()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.replace() result, got {resolution:?}");
+    };
+    assert_eq!(
+        value.rep,
+        ValueRep::String("https://x/flate2/flate2".into())
+    );
+}
+
+#[test]
+fn string_to_lower_method_lowercases_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  name.to_lower()
+}
+"#,
+        "string-to-lower-method-runtime",
+        "build",
+        &[Value::string("FlAtE2")],
+    )
+    .expect("evaluate String.to_lower()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.to_lower() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("flate2".into()));
+}
+
+#[test]
+fn interpolated_string_evaluates_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  `https://index.crates.io/{name.to_lower()}`
+}
+"#,
+        "interpolated-string-runtime",
+        "build",
+        &[Value::string("FlAtE2")],
+    )
+    .expect("evaluate interpolated string");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready interpolated string result, got {resolution:?}");
+    };
+    assert_eq!(
+        value.rep,
+        ValueRep::String("https://index.crates.io/flate2".into())
+    );
+}
+
+#[test]
 fn bound_string_method_value_can_be_called() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

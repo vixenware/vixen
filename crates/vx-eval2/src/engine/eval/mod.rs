@@ -339,6 +339,9 @@ pub(super) fn eval_expr_with_node_id(
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
         Expr::Binary(binary) => eval_binary(state, binary, env),
+        Expr::InterpolatedString(interpolated) => {
+            eval_interpolated_string(state, interpolated, env)
+        }
         Expr::StructLiteral(struct_literal) => eval_struct_literal(state, struct_literal, env),
         Expr::Field(field) => eval_field(state, field, env),
         other => Err(EvalError::new(
@@ -604,6 +607,10 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "len") => Some("String.len"),
         (ValueRep::String(_), "split_once") => Some("String.split_once"),
         (ValueRep::String(_), "slice") => Some("String.slice"),
+        (ValueRep::String(_), "contains") => Some("String.contains"),
+        (ValueRep::String(_), "lines") => Some("String.lines"),
+        (ValueRep::String(_), "replace") => Some("String.replace"),
+        (ValueRep::String(_), "to_lower") => Some("String.to_lower"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Map(_), "get") => Some("Map.get"),
@@ -1068,6 +1075,73 @@ pub(super) fn eval_tuple(
         items.iter().map(|item| state.expr_handle(item)).collect(),
         env.clone(),
         state.span_for_node(tuple),
+    )
+}
+
+pub(super) fn eval_interpolated_string(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    interpolated: &InterpolatedStringExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("interpolated string should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let string_source = state.span_for_node(interpolated);
+    let parts = interpolated
+        .parts()
+        .map(|part| match part {
+            StringPart::Text(token) => Ok(InterpolatedPart::Text(Arc::from(token.text()))),
+            StringPart::Interpolation(interpolation) => {
+                let expr = interpolation.expr().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "string interpolation has no embedded expression",
+                    )
+                })?;
+                Ok(InterpolatedPart::Expr(state.expr_handle(&expr)))
+            }
+        })
+        .collect::<Result<Vec<_>, EvalError>>()?;
+
+    if state.queue_child_work {
+        let expr_nodes = parts
+            .iter()
+            .filter_map(|part| match part {
+                InterpolatedPart::Text(_) => None,
+                InterpolatedPart::Expr(expr) => Some(queue_child_expr_handle(state, *expr, env)),
+            })
+            .collect::<Vec<_>>();
+        if let Some(child_id) = expr_nodes.first().copied() {
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_id,
+                vec![ContinuationFrame::InterpolatedStringJoin {
+                    node_id,
+                    parent_id,
+                    parts,
+                    expr_nodes,
+                    string_source,
+                }],
+            ));
+        }
+        return Ok(EvalStep::Ready(ready_interpolated_string_value(
+            Vec::new(),
+            string_source,
+        )));
+    }
+
+    continue_interpolated_string_parts(
+        state,
+        node_id,
+        parent_id,
+        Vec::new(),
+        parts,
+        env.clone(),
+        string_source,
     )
 }
 
@@ -1588,6 +1662,45 @@ pub(super) fn continue_range_end(
     )?))
 }
 
+pub(super) fn continue_interpolated_string_parts(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut segments: Vec<String>,
+    remaining_parts: Vec<InterpolatedPart>,
+    mut env: EvalEnv,
+    string_source: SourceSpan,
+) -> Result<EvalStep, EvalError> {
+    let mut remaining = remaining_parts.into_iter();
+    while let Some(part) = remaining.next() {
+        match part {
+            InterpolatedPart::Text(text) => segments.push(text.to_string()),
+            InterpolatedPart::Expr(expr) => {
+                match eval_dependent_expr_handle(state, node_id, expr, &mut env)? {
+                    EvalStep::Ready(value) => segments.push(interpolation_segment_text(&value)?),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::InterpolatedStringAfterExpr {
+                                node_id,
+                                parent_id,
+                                segments,
+                                remaining_parts: remaining.collect(),
+                                env,
+                                string_source,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(EvalStep::Ready(ready_interpolated_string_value(
+        segments,
+        string_source,
+    )))
+}
+
 fn build_range_value(
     start: Option<Value>,
     end: Option<Value>,
@@ -1622,6 +1735,29 @@ fn ready_range_value(
     let provenance = Provenance::literal(range_source);
     range.with_meta(ValueMeta::new(
         provenance,
+        ReuseClass::Stable,
+        CrossingPolicy::ByValue,
+    ))
+}
+
+fn interpolation_segment_text(value: &Value) -> Result<String, EvalError> {
+    match &value.rep {
+        ValueRep::String(text) => Ok(text.to_string()),
+        ValueRep::Bool(value) => Ok(value.to_string()),
+        ValueRep::U64(value) => Ok(value.to_string()),
+        other => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!(
+                "interpolated string expressions must evaluate to String/Bool/U64, got {other:?}"
+            ),
+        )),
+    }
+}
+
+fn ready_interpolated_string_value(segments: Vec<String>, string_source: SourceSpan) -> Value {
+    let value = Value::string(segments.concat());
+    value.with_meta(ValueMeta::new(
+        Provenance::literal(string_source),
         ReuseClass::Stable,
         CrossingPolicy::ByValue,
     ))
@@ -1906,6 +2042,7 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
         Expr::Binary(_) => EvalExprKind::Binary,
+        Expr::InterpolatedString(_) => EvalExprKind::InterpolatedString,
         Expr::StructLiteral(_) => EvalExprKind::StructLiteral,
         Expr::Field(_) => EvalExprKind::Field,
         _ => EvalExprKind::Unsupported,
@@ -1918,7 +2055,12 @@ pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalErr
         .children_with_tokens()
         .filter_map(|child| child.into_token())
         .map(|token| token.kind())
-        .find(|kind| matches!(kind, SyntaxKind::EQ2 | SyntaxKind::BANG_EQ))
+        .find(|kind| {
+            matches!(
+                kind,
+                SyntaxKind::AMP2 | SyntaxKind::PIPE2 | SyntaxKind::EQ2 | SyntaxKind::BANG_EQ
+            )
+        })
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
 }
 
@@ -1931,6 +2073,10 @@ pub(super) fn continue_binary_rhs(
     rhs: ExprHandle,
     mut env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    if let Some(short_circuit) = short_circuit_binary(&lhs, operator)? {
+        return Ok(EvalStep::Ready(short_circuit));
+    }
+
     match eval_dependent_expr_handle(state, node_id, rhs, &mut env)? {
         EvalStep::Ready(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
@@ -1952,12 +2098,66 @@ pub(super) fn apply_binary_operator(
 ) -> Result<Value, EvalError> {
     let equals = values_equal(&lhs.rep, &rhs.rep)?;
     match operator {
+        SyntaxKind::AMP2 => {
+            let ValueRep::Bool(lhs) = lhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "left operand of && must be Bool",
+                ));
+            };
+            let ValueRep::Bool(rhs) = rhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "right operand of && must be Bool",
+                ));
+            };
+            Ok(Value::bool(lhs && rhs))
+        }
+        SyntaxKind::PIPE2 => {
+            let ValueRep::Bool(lhs) = lhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "left operand of || must be Bool",
+                ));
+            };
+            let ValueRep::Bool(rhs) = rhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "right operand of || must be Bool",
+                ));
+            };
+            Ok(Value::bool(lhs || rhs))
+        }
         SyntaxKind::EQ2 => Ok(Value::bool(equals)),
         SyntaxKind::BANG_EQ => Ok(Value::bool(!equals)),
         _ => Err(EvalError::new(
             EvalErrorKind::Internal,
             format!("binary operator {operator:?} is not supported yet"),
         )),
+    }
+}
+
+fn short_circuit_binary(lhs: &Value, operator: SyntaxKind) -> Result<Option<Value>, EvalError> {
+    match operator {
+        SyntaxKind::AMP2 => {
+            let ValueRep::Bool(lhs) = &lhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "left operand of && must be Bool",
+                ));
+            };
+            Ok((!*lhs).then(|| Value::bool(false)))
+        }
+        SyntaxKind::PIPE2 => {
+            let ValueRep::Bool(lhs) = &lhs.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "left operand of || must be Bool",
+                ));
+            };
+            Ok((*lhs).then(|| Value::bool(true)))
+        }
+        _ => Ok(None),
     }
 }
 

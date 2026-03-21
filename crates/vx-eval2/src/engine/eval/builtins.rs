@@ -674,6 +674,113 @@ pub(in crate::engine) fn continue_builtin_call(
                 args[0].meta.provenance.project(ProjectionStep::Path(path)),
             )))
         }
+        "String.contains" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.contains() requires receiver and needle",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.contains() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::String(needle) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.contains() needle must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::bool(text.contains(needle.as_ref())).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "String.lines" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.lines() requires receiver",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.lines() receiver must evaluate to String",
+                ));
+            };
+            let items = text
+                .lines()
+                .enumerate()
+                .map(|(index, line)| {
+                    Value::string(line).with_provenance(
+                        args[0]
+                            .meta
+                            .provenance
+                            .project(ProjectionStep::Index(index as u64)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let meta = aggregate_child_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
+        }
+        "String.replace" => {
+            if args.len() != 3 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.replace() requires receiver, old, and new",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.replace() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::String(old) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.replace() old must evaluate to String",
+                ));
+            };
+            let ValueRep::String(new) = &args[2].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.replace() new must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::string(text.replace(old.as_ref(), new.as_ref())).with_provenance(
+                    args[0]
+                        .meta
+                        .provenance
+                        .project(ProjectionStep::Path(format!("replace({old},{new})"))),
+                ),
+            ))
+        }
+        "String.to_lower" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.to_lower() requires receiver",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.to_lower() receiver must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::string(text.to_lowercase()).with_provenance(
+                    args[0]
+                        .meta
+                        .provenance
+                        .project(ProjectionStep::Path("to_lower()".to_string())),
+                ),
+            ))
+        }
         "String.starts_with" => {
             if args.len() != 2 {
                 return Err(EvalError::new(

@@ -1,0 +1,40 @@
+main <<VX,vx
+fn sparse_index_url(name: String) -> String (
+  let lower = name.to_lower();
+  let len = lower.len();
+
+  let rel =
+    if len == 1 (
+      `1/{lower}`
+    ) else (
+      if len == 2 (
+        `2/{lower}`
+      ) else (
+        if len == 3 (
+          `3/{lower.slice(0..1)}/{lower}`
+        ) else (
+          `{lower.slice(0..2)}/{lower.slice(2..4)}/{lower}`
+        )
+      )
+    );
+
+  `https://index.crates.io/{rel}`
+)
+
+fn build() {
+  sparse_index_url("FlAtE2")
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @string"https://index.crates.io/fl/at/flate2"
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

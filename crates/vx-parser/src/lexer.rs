@@ -134,14 +134,14 @@ impl<'a> Lexer<'a> {
             self.modes.pop();
             return SyntaxKind::BACKTICK;
         }
-        if self.starts_with("${") {
-            self.pos += 2;
+        if self.current_char() == Some('{') {
+            self.bump_char();
             self.modes.push(Mode::TemplateExpr { brace_depth: 0 });
             return SyntaxKind::INTERP_START;
         }
 
         while let Some(ch) = self.current_char() {
-            if ch == '`' || self.starts_with("${") {
+            if ch == '`' || ch == '{' {
                 break;
             }
             if ch == '\\' {
