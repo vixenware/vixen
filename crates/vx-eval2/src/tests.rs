@@ -484,6 +484,33 @@ fn build(blob: Blob) {
 }
 
 #[test]
+fn json_parse_honors_field_rename_annotations() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Release {
+  #[rename = "vers"]
+  version: String,
+}
+
+fn build(blob: Blob) {
+  Json.parse[Release](blob)
+}
+"#,
+            "json-parse-field-rename",
+            "build",
+            &[Value::external("Blob", r#"{"vers":"1.0.228"}"#)],
+        )
+        .expect("evaluate Json.parse with field rename"),
+    );
+
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String(Arc::from("1.0.228"))
+    );
+}
+
+#[test]
 fn toml_parse_decodes_struct_from_blob_argument() {
     let value = expect_ready(
         eval_source_entry_with_args_with_source_id(
@@ -513,6 +540,41 @@ fn build(blob: Blob) {
         ValueRep::String(Arc::from("demo"))
     );
     assert_eq!(struct_field(&value, "port").rep, ValueRep::U64(8080));
+}
+
+#[test]
+fn toml_parse_honors_kebab_case_rename_all() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+#[rename_all = "kebab-case"]
+struct Package {
+  rust_version: String,
+  default_features: Bool,
+}
+
+fn build(blob: Blob) {
+  Toml.parse[Package](blob)
+}
+"#,
+            "toml-parse-rename-all",
+            "build",
+            &[Value::external(
+                "Blob",
+                "rust-version = \"1.56\"\ndefault-features = false\n",
+            )],
+        )
+        .expect("evaluate Toml.parse with rename_all"),
+    );
+
+    assert_eq!(
+        struct_field(&value, "rust_version").rep,
+        ValueRep::String(Arc::from("1.56"))
+    );
+    assert_eq!(
+        struct_field(&value, "default_features").rep,
+        ValueRep::Bool(false)
+    );
 }
 
 #[test]

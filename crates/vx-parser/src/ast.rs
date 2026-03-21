@@ -93,6 +93,9 @@ ast_node!(NewtypeDecl, SyntaxKind::NEWTYPE_DECL);
 ast_node!(TypeAliasDecl, SyntaxKind::TYPE_ALIAS_DECL);
 ast_node!(NamespaceDecl, SyntaxKind::NAMESPACE_DECL);
 ast_node!(NamespaceBody, SyntaxKind::NAMESPACE_BODY);
+ast_node!(AttributeList, SyntaxKind::ATTRIBUTE_LIST);
+ast_node!(Attribute, SyntaxKind::ATTRIBUTE);
+ast_node!(AttributeEntry, SyntaxKind::ATTRIBUTE_ENTRY);
 ast_node!(FieldDecl, SyntaxKind::FIELD_DECL);
 ast_node!(VariantDecl, SyntaxKind::VARIANT_DECL);
 ast_node!(Parameter, SyntaxKind::PARAMETER);
@@ -593,6 +596,10 @@ impl Item {
 }
 
 impl FnDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| {
             matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
@@ -644,6 +651,10 @@ impl FnDecl {
 }
 
 impl StructDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
@@ -654,6 +665,10 @@ impl StructDecl {
 }
 
 impl EnumDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
@@ -664,6 +679,10 @@ impl EnumDecl {
 }
 
 impl NewtypeDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
@@ -674,6 +693,10 @@ impl NewtypeDecl {
 }
 
 impl TypeAliasDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
@@ -703,7 +726,45 @@ impl NamespaceBody {
     }
 }
 
+impl AttributeList {
+    pub fn attributes(&self) -> AstChildren<Attribute> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl Attribute {
+    pub fn entries(&self) -> AstChildren<AttributeEntry> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl AttributeEntry {
+    pub fn key(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn value_expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+
+    pub fn string_value(&self) -> Option<String> {
+        let Expr::Literal(literal) = self.value_expr()? else {
+            return None;
+        };
+        let token = literal.token()?;
+        if token.kind() != SyntaxKind::STRING {
+            return None;
+        }
+        let text = token.text();
+        Some(text[1..text.len() - 1].to_string())
+    }
+}
+
 impl FieldDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
     }
@@ -714,6 +775,10 @@ impl FieldDecl {
 }
 
 impl VariantDecl {
+    pub fn attributes(&self) -> Option<AttributeList> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }

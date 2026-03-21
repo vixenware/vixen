@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 
 use vx_parser::{
-    AstNode, EnumDecl, FnDecl, Item, NamespaceDecl, NewtypeDecl, SourceFile, StructDecl,
-    SyntaxKind, Type, TypeAliasDecl,
+    AstNode, AttributeList, EnumDecl, FieldDecl, FnDecl, Item, NamespaceDecl, NewtypeDecl,
+    SourceFile, StructDecl, SyntaxKind, Type, TypeAliasDecl,
 };
 use vx_types::{
-    AliasDef, EnumDef, FieldDef, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef,
-    StructDef, Ty, TypeDef, TypeEnv, TypeId,
+    AliasDef, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, FieldDef, FnSig,
+    KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef, StructDef, Ty, TypeDef, TypeEnv, TypeId,
 };
 
 use crate::{DefSite, Definition, SourceFileRef, SourceId};
@@ -79,6 +79,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                                 name: name.clone(),
                                 parent_enum: None,
                                 type_params,
+                                attrs: collect_container_attrs(decl.attributes()),
                                 fields: Vec::new(), // filled in second pass
                             }),
                         );
@@ -103,6 +104,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                             TypeDef::Enum(EnumDef {
                                 name: name.clone(),
                                 type_params,
+                                attrs: collect_container_attrs(decl.attributes()),
                                 variants: Vec::new(), // filled in second pass
                             }),
                         );
@@ -224,6 +226,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                                         Some(FieldDef {
                                             name,
                                             ty,
+                                            attrs: collect_field_attrs(&f),
                                             has_default: false,
                                             name_range,
                                         })
@@ -236,6 +239,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                                         name: vname.clone(),
                                         parent_enum: Some(enum_id),
                                         type_params: type_params.clone(),
+                                        attrs: collect_container_attrs(variant.attributes()),
                                         fields,
                                     }),
                                 );
@@ -405,11 +409,59 @@ fn collect_fields(
             Some(FieldDef {
                 name,
                 ty,
+                attrs: collect_field_attrs(&f),
                 has_default,
                 name_range,
             })
         })
         .collect()
+}
+
+fn collect_container_attrs(attributes: Option<AttributeList>) -> DeserContainerAttrs {
+    let mut attrs = DeserContainerAttrs::default();
+    let Some(attributes) = attributes else {
+        return attrs;
+    };
+    for attribute in attributes.attributes() {
+        for entry in attribute.entries() {
+            let Some(key) = entry.key() else {
+                continue;
+            };
+            match key.text() {
+                "rename" => attrs.rename = entry.string_value(),
+                "rename_all" => {
+                    attrs.rename_all = entry.string_value().and_then(|value| match value.as_str() {
+                        "snake_case" => Some(DeserRenameRule::SnakeCase),
+                        "camelCase" => Some(DeserRenameRule::CamelCase),
+                        "PascalCase" => Some(DeserRenameRule::PascalCase),
+                        "kebab-case" => Some(DeserRenameRule::KebabCase),
+                        "SCREAMING_SNAKE_CASE" => Some(DeserRenameRule::ScreamingSnakeCase),
+                        _ => None,
+                    })
+                }
+                _ => {}
+            }
+        }
+    }
+    attrs
+}
+
+fn collect_field_attrs(field: &FieldDecl) -> DeserFieldAttrs {
+    let mut attrs = DeserFieldAttrs::default();
+    let Some(attribute_list) = field.attributes() else {
+        return attrs;
+    };
+    for attribute in attribute_list.attributes() {
+        for entry in attribute.entries() {
+            let Some(key) = entry.key() else {
+                continue;
+            };
+            if key.text() == "rename" {
+                attrs.rename = entry.string_value();
+            }
+        }
+    }
+    attrs
 }
 
 fn collect_fn_sig(

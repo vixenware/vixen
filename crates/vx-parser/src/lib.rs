@@ -3,18 +3,18 @@
 mod ast;
 pub use ast::{
     Arg, ArgList, ArrayExpr, ArrayItem, ArrayPattern, ArrayRestPattern, AssignStmt, AstChildren,
-    AstNode, AtPattern, BinaryExpr, BindingPattern, BlockExpr, CallArgExpr, CallExpr,
-    CallKeywordArg, ClosureExpr, ClosureParamClause, CompoundUpdateStmt, ElseClause, EnumDecl,
-    Expr, FailExpr, FallibleExpr, FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr, FnDecl,
-    FunctionType, IfExpr, ImportExpr, IndexExpr, InterpolatedStringExpr, InvokeExpr, Item,
-    KeywordParameter, LetStmt, LiteralExpr, LiteralPattern, MapEntry, MapExpr, MatchArm, MatchExpr,
-    NameRefExpr, NamespaceBody, NamespaceDecl, NewtypeDecl, OptionalType, OrPattern, Parameter,
-    ParenPattern, ParenType, PartialAppExpr, PathLiteralExpr, Pattern, PrefixExpr, RangeExpr,
-    RecordExpr, ReturnStmt, ReturnType, SlotType, SourceFile, SpreadExpr, Stmt,
-    StringInterpolation, StringPart, StructDecl, StructLiteralExpr, StructLiteralField,
-    StructPattern, StructPatternField, SumType, TupleExpr, TuplePattern, TupleType, Type,
-    TypeAliasDecl, TypeArgs, TypeOpExpr, TypePath, UnitPattern, VariantDecl, VariantPattern,
-    WhereExpr, WildcardPattern, WithExpr, doc_comment,
+    AstNode, AtPattern, Attribute, AttributeEntry, AttributeList, BinaryExpr, BindingPattern,
+    BlockExpr, CallArgExpr, CallExpr, CallKeywordArg, ClosureExpr, ClosureParamClause,
+    CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FailExpr, FallibleExpr, FieldAssignStmt,
+    FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr, ImportExpr, IndexExpr,
+    InterpolatedStringExpr, InvokeExpr, Item, KeywordParameter, LetStmt, LiteralExpr,
+    LiteralPattern, MapEntry, MapExpr, MatchArm, MatchExpr, NameRefExpr, NamespaceBody,
+    NamespaceDecl, NewtypeDecl, OptionalType, OrPattern, Parameter, ParenPattern, ParenType,
+    PartialAppExpr, PathLiteralExpr, Pattern, PrefixExpr, RangeExpr, RecordExpr, ReturnStmt,
+    ReturnType, SlotType, SourceFile, SpreadExpr, Stmt, StringInterpolation, StringPart,
+    StructDecl, StructLiteralExpr, StructLiteralField, StructPattern, StructPatternField, SumType,
+    TupleExpr, TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs, TypeOpExpr, TypePath,
+    UnitPattern, VariantDecl, VariantPattern, WhereExpr, WildcardPattern, WithExpr, doc_comment,
 };
 
 mod fmt;

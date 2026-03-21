@@ -1689,6 +1689,7 @@ impl<'a> ExprTyper<'a> {
                 .map(|field| vx_types::FieldDef {
                     name: field.name.clone(),
                     ty: substitute_type_params(&field.ty, &[(*inner.clone())]),
+                    attrs: field.attrs.clone(),
                     has_default: field.has_default,
                     name_range: field.name_range,
                 })

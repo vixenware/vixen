@@ -3,7 +3,8 @@ use std::sync::Arc;
 use facet_value::Value as FacetValue;
 use vx_resolve::TypeCollection;
 use vx_types::{
-    AliasTy, EnumDef, EnumTy, NewtypeTy, OpaqueTy, Scalar, StructDef, StructTy, Ty, TypeDef, TypeId,
+    AliasTy, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, EnumTy, NewtypeTy,
+    OpaqueTy, Scalar, StructDef, StructTy, Ty, TypeDef, TypeId,
 };
 
 use crate::{
@@ -214,8 +215,9 @@ impl DecodeContext<'_> {
         let mut fields = Vec::with_capacity(def.fields.len());
         for field in &def.fields {
             let field_ty = substitute_type_params(&field.ty, &struct_ty.type_args);
-            let field_provenance = provenance.project(ProjectionStep::Field(field.name.clone()));
-            let decoded = match object.get(&field.name) {
+            let decoded_name = decoded_field_name(def, field);
+            let field_provenance = provenance.project(ProjectionStep::Field(decoded_name.clone()));
+            let decoded = match object.get(&decoded_name) {
                 Some(field_value) => self.decode_value(field_value, &field_ty, field_provenance)?,
                 None if matches!(field_ty, Ty::Optional(_)) => {
                     Value::structure("None", Vec::new()).with_meta(self.leaf_meta(field_provenance))
@@ -394,6 +396,98 @@ impl DecodeContext<'_> {
         }
         meta
     }
+}
+
+fn decoded_field_name(container: &StructDef, field: &vx_types::FieldDef) -> String {
+    field
+        .attrs
+        .rename
+        .clone()
+        .unwrap_or_else(|| renamed_identifier(&field.name, &container.attrs, &field.attrs))
+}
+
+fn renamed_identifier(
+    fallback: &str,
+    container_attrs: &DeserContainerAttrs,
+    _field_attrs: &DeserFieldAttrs,
+) -> String {
+    container_attrs
+        .rename_all
+        .map(|rule| apply_rename_rule(fallback, rule))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn apply_rename_rule(name: &str, rule: DeserRenameRule) -> String {
+    let words = split_identifier_words(name);
+    match rule {
+        DeserRenameRule::SnakeCase => words.join("_"),
+        DeserRenameRule::KebabCase => words.join("-"),
+        DeserRenameRule::ScreamingSnakeCase => words
+            .iter()
+            .map(|word| word.to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .join("_"),
+        DeserRenameRule::CamelCase => {
+            let mut iter = words.into_iter();
+            let Some(first) = iter.next() else {
+                return String::new();
+            };
+            let mut output = first;
+            for word in iter {
+                output.push_str(&uppercase_first(&word));
+            }
+            output
+        }
+        DeserRenameRule::PascalCase => words
+            .into_iter()
+            .map(|word| uppercase_first(&word))
+            .collect::<String>(),
+    }
+}
+
+fn split_identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let chars = name.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if matches!(ch, '_' | '-' | ' ') {
+            if !current.is_empty() {
+                words.push(current);
+                current = String::new();
+            }
+            continue;
+        }
+        let next = chars.get(index + 1).copied();
+        let is_upper = ch.is_ascii_uppercase();
+        let previous_is_word = current
+            .chars()
+            .last()
+            .map(|prev| prev.is_ascii_lowercase() || prev.is_ascii_digit())
+            .unwrap_or(false);
+        let next_is_lower = next
+            .map(|value| value.is_ascii_lowercase())
+            .unwrap_or(false);
+        if is_upper && !current.is_empty() && (previous_is_word || next_is_lower) {
+            words.push(current);
+            current = String::new();
+        }
+        current.push(ch.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn uppercase_first(word: &str) -> String {
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut output = String::new();
+    output.push(first.to_ascii_uppercase());
+    output.extend(chars);
+    output
 }
 
 fn blob_text(blob: &Value, format: StructuredFormat) -> Result<String, EvalError> {

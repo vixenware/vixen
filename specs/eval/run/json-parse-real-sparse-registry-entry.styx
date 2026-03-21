@@ -11,7 +11,8 @@ struct RegistryDep {
 
 struct RegistryRelease {
   name: String,
-  vers: String,
+  #[rename = "vers"]
+  version: String,
   deps: Array[RegistryDep],
   cksum: String,
   features: Map[String, Array[String]],
@@ -22,7 +23,7 @@ struct RegistryRelease {
 
 struct ReleaseSummary {
   name: String,
-  vers: String,
+  version: String,
   first_dep: String,
   derive_feature: Array[String],
   rust_version: String?,
@@ -33,7 +34,7 @@ fn build() {
   let first_dep = array_first(release.deps);
   ReleaseSummary {
     name: release.name,
-    vers: release.vers,
+    version: release.version,
     first_dep: first_dep.name,
     derive_feature: map_get(release.features, "derive"),
     rust_version: release.rust_version,
@@ -50,7 +51,7 @@ expect {
     type ReleaseSummary
     fields {
       name @string"serde"
-      vers @string"1.0.228"
+      version @string"1.0.228"
       first_dep @string"serde_core"
       derive_feature @array(
         @string"serde_derive"

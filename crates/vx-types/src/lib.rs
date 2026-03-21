@@ -172,6 +172,7 @@ pub struct StructDef {
     /// The TypeId of the parent enum, if this struct is an enum variant.
     pub parent_enum: Option<TypeId>,
     pub type_params: Vec<String>,
+    pub attrs: DeserContainerAttrs,
     pub fields: Vec<FieldDef>,
 }
 
@@ -180,6 +181,7 @@ pub struct StructDef {
 pub struct FieldDef {
     pub name: String,
     pub ty: Ty,
+    pub attrs: DeserFieldAttrs,
     pub has_default: bool,
     /// Text range of the field name token in source (for go-to-definition).
     pub name_range: rowan::TextRange,
@@ -190,9 +192,30 @@ pub struct FieldDef {
 pub struct EnumDef {
     pub name: String,
     pub type_params: Vec<String>,
+    pub attrs: DeserContainerAttrs,
     /// Each variant is a struct — its TypeId points to a StructDef
     /// whose `parent_enum` is this enum's TypeId.
     pub variants: Vec<TypeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeserRenameRule {
+    SnakeCase,
+    CamelCase,
+    PascalCase,
+    KebabCase,
+    ScreamingSnakeCase,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeserContainerAttrs {
+    pub rename: Option<String>,
+    pub rename_all: Option<DeserRenameRule>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeserFieldAttrs {
+    pub rename: Option<String>,
 }
 
 /// A newtype definition.
@@ -744,16 +767,19 @@ mod tests {
                 name: "Point".to_owned(),
                 parent_enum: None,
                 type_params: vec![],
+                attrs: DeserContainerAttrs::default(),
                 fields: vec![
                     FieldDef {
                         name: "x".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
+                        attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         name_range: Default::default(),
                     },
                     FieldDef {
                         name: "y".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
+                        attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         name_range: Default::default(),
                     },
@@ -807,6 +833,7 @@ mod tests {
             TypeDef::Enum(EnumDef {
                 name: "Shape".to_owned(),
                 type_params: vec![],
+                attrs: DeserContainerAttrs::default(),
                 variants: vec![], // filled in after variants are registered
             }),
         );
@@ -817,9 +844,11 @@ mod tests {
                 name: "Circle".to_owned(),
                 parent_enum: Some(shape_id),
                 type_params: vec![],
+                attrs: DeserContainerAttrs::default(),
                 fields: vec![FieldDef {
                     name: "radius".to_owned(),
                     ty: Ty::Scalar(Scalar::F64),
+                    attrs: DeserFieldAttrs::default(),
                     has_default: false,
                     name_range: Default::default(),
                 }],
@@ -832,16 +861,19 @@ mod tests {
                 name: "Rect".to_owned(),
                 parent_enum: Some(shape_id),
                 type_params: vec![],
+                attrs: DeserContainerAttrs::default(),
                 fields: vec![
                     FieldDef {
                         name: "width".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
+                        attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         name_range: Default::default(),
                     },
                     FieldDef {
                         name: "height".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
+                        attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         name_range: Default::default(),
                     },
