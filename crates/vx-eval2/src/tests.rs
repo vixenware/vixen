@@ -679,6 +679,295 @@ fn build() {
 }
 
 #[test]
+fn array_first_returns_first_element() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_first(["left", "right"])
+}
+"#,
+        "array-first",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_first");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_first result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("left".into()));
+}
+
+#[test]
+fn array_first_requires_array_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_first("not an array")
+}
+"#,
+        "array-first-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_first non-array first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_first() first argument must evaluate to an array")
+    );
+}
+
+#[test]
+fn array_first_returns_clear_error_for_empty_array() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_first([])
+}
+"#,
+        "array-first-empty",
+        "build",
+        &[],
+    )
+    .expect_err("array_first empty array should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(error.message.contains("array_first() array was empty"));
+}
+
+#[test]
+fn array_rest_returns_tail_preserving_order() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_rest(["seed", "codec", "logger"])
+}
+"#,
+        "array-rest-tail",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_rest");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_rest result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!(
+            "expected array_rest to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("codec".into()));
+    assert_eq!(items[1].rep, ValueRep::String("logger".into()));
+}
+
+#[test]
+fn array_rest_requires_array_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_rest("not an array")
+}
+"#,
+        "array-rest-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_rest non-array first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_rest() first argument must evaluate to an array")
+    );
+}
+
+#[test]
+fn array_rest_aggregates_metadata_from_remaining_contents() {
+    struct MetadataRuntime;
+
+    impl RuntimeHooks for MetadataRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
+                    Value::string("observed")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "claimed value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Arch {
+                            value: "x86_64".to_string(),
+                        }),
+                )),
+                ("win", "host_blocked_value") => Ok(RuntimeCallOutcome::Ready(Value::external(
+                    "tree",
+                    "/workspace",
+                ))),
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let Resolution::Ready(value) = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_claimed_value();
+fn host_blocked_value();
+
+fn build() {
+  array_rest([host_blocked_value(), host_claimed_value()])
+}
+"#,
+        "array-rest-metadata",
+        "build",
+        &[],
+        &MetadataRuntime,
+        "win",
+    )
+    .expect("evaluate metadata-preserving array_rest") else {
+        panic!("expected ready array_rest metadata result");
+    };
+
+    assert_eq!(value.meta.reuse, ReuseClass::Observed);
+    assert_eq!(value.meta.crossing, CrossingPolicy::ByValue);
+    assert!(value.meta.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Claim::Arch { value } if value == "x86_64"
+        )
+    }));
+}
+
+#[test]
+fn array_push_appends_item() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_push(["seed", "codec"], "logger")
+}
+"#,
+        "array-push-append",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_push");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_push result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!(
+            "expected array_push to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].rep, ValueRep::String("seed".into()));
+    assert_eq!(items[1].rep, ValueRep::String("codec".into()));
+    assert_eq!(items[2].rep, ValueRep::String("logger".into()));
+}
+
+#[test]
+fn array_push_requires_array_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_push("not an array", "logger")
+}
+"#,
+        "array-push-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_push non-array first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_push() first argument must evaluate to an array")
+    );
+}
+
+#[test]
+fn array_push_aggregates_metadata_from_contents() {
+    struct MetadataRuntime;
+
+    impl RuntimeHooks for MetadataRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
+                    Value::string("observed")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "claimed value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Arch {
+                            value: "x86_64".to_string(),
+                        }),
+                )),
+                ("win", "host_blocked_value") => Ok(RuntimeCallOutcome::Ready(Value::external(
+                    "tree",
+                    "/workspace",
+                ))),
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let Resolution::Ready(value) = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_claimed_value();
+fn host_blocked_value();
+
+fn build() {
+  array_push([host_blocked_value()], host_claimed_value())
+}
+"#,
+        "array-push-metadata",
+        "build",
+        &[],
+        &MetadataRuntime,
+        "win",
+    )
+    .expect("evaluate metadata-preserving array_push") else {
+        panic!("expected ready array_push metadata result");
+    };
+
+    assert_eq!(value.meta.reuse, ReuseClass::Live);
+    assert_eq!(value.meta.crossing, CrossingPolicy::Blocked);
+    assert!(value.meta.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Claim::Arch { value } if value == "x86_64"
+        )
+    }));
+}
+
+#[test]
 fn map_put_replaces_existing_entry() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

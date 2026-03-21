@@ -1,6 +1,13 @@
 main <<VX,vx
 fn registry_packages() {
   %{
+    "core" => [
+      %{
+        "version" => "1.0.0",
+        "default" => true,
+        "deps" => [],
+      },
+    ],
     "logger" => [
       %{
         "version" => "1.0.0",
@@ -8,6 +15,11 @@ fn registry_packages() {
         "deps" => [
           %{ "name" => "logger", "version" => "1.0.0" },
         ],
+      },
+      %{
+        "version" => "1.1.0",
+        "default" => false,
+        "deps" => [],
       },
     ],
     "codec" => [
@@ -39,6 +51,13 @@ fn build_default_solution(solution, entry) {
   map_put(solution, name, map_get(default_candidate(candidates), "version"))
 }
 
+fn candidate_task(name, candidate) {
+  %{
+    "name" => name,
+    "candidate" => candidate,
+  }
+}
+
 fn apply_dep(solution, dep) {
   map_put(solution, map_get(dep, "name"), map_get(dep, "version"))
 }
@@ -48,17 +67,70 @@ fn apply_candidate(solution, name, candidate) {
   array_fold(map_get(candidate, "deps"), rewritten, apply_dep)
 }
 
+fn enqueue_dep(queue, registry, dep) {
+  let name = map_get(dep, "name");
+  let version = map_get(dep, "version");
+  let candidate = array_find(
+    map_get(registry, name),
+    ((candidate) => map_get(candidate, "version") == version),
+  );
+  array_push(queue, candidate_task(name, candidate))
+}
+
+fn enqueue_candidate_deps(queue, registry, candidate) {
+  array_fold(
+    map_get(candidate, "deps"),
+    queue,
+    ((acc, dep) => enqueue_dep(acc, registry, dep)),
+  )
+}
+
+fn enqueue_alternative_candidate(queue, current_version, name, candidate) {
+  if queue == [] (
+    if map_get(candidate, "version") != current_version (
+      array_push(queue, candidate_task(name, candidate))
+    ) else (
+      queue
+    )
+  ) else (
+    queue
+  )
+}
+
+fn refresh_queue(registry, current, name) {
+  let current_version = map_get(current, name);
+  array_fold(
+    map_get(registry, name),
+    [],
+    ((queue, candidate) => enqueue_alternative_candidate(queue, current_version, name, candidate)),
+  )
+}
+
+fn process_refresh_queue(registry, solution, queue) {
+  if queue == [] (
+    solution
+  ) else (
+    let task = array_first(queue);
+    let rest = array_rest(queue);
+    let name = map_get(task, "name");
+    let candidate = map_get(task, "candidate");
+    let version = map_get(candidate, "version");
+    if map_get(solution, name) == version (
+      process_refresh_queue(registry, solution, rest)
+    ) else (
+      let rewritten = apply_candidate(solution, name, candidate);
+      let extended = enqueue_candidate_deps(rest, registry, candidate);
+      process_refresh_queue(registry, rewritten, extended)
+    )
+  )
+}
+
 fn resolve_solution(ctx) {
   let registry = registry_packages();
   if ctx.is_refresh (
     let current = ctx.current;
-    let name = ctx.intent.name;
-    let current_version = map_get(current, name);
-    let next = array_find(
-      map_get(registry, name),
-      ((candidate) => map_get(candidate, "version") != current_version),
-    );
-    apply_candidate(current, name, next)
+    let queue = refresh_queue(registry, current, ctx.intent.name);
+    process_refresh_queue(registry, current, queue)
   ) else (
     array_fold(map_entries(registry), %{}, build_default_solution)
   )
@@ -86,6 +158,7 @@ runs (
   {
     expect {
       result @map{
+        core @string"1.0.0"
         logger @string"1.0.0"
         codec @string"1.0.0"
       }
@@ -101,11 +174,40 @@ runs (
   {
     invoke {
       entry build_refresh
+      args (@string"core")
+    }
+
+    expect {
+      result @map{
+        core @string"1.0.0"
+        logger @string"1.0.0"
+        codec @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_rewrite{
+          slot "authored-array-fold-slot"
+          reason @refresh{
+            intent @struct{
+              type UpdatePackage
+              fields {
+                name @string"core"
+              }
+            }
+          }
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
       args (@string"codec")
     }
 
     expect {
       result @map{
+        core @string"1.0.0"
         logger @string"1.1.0"
         codec @string"1.1.0"
       }
@@ -132,6 +234,7 @@ runs (
 
     expect {
       result @map{
+        core @string"1.0.0"
         logger @string"1.1.0"
         codec @string"1.1.0"
       }

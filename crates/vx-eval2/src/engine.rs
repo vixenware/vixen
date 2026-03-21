@@ -3251,6 +3251,13 @@ fn aggregate_map_entries_meta<'a>(
     )
 }
 
+fn aggregate_array_items_meta<'a>(
+    provenance: Provenance,
+    items: impl IntoIterator<Item = &'a Value>,
+) -> ValueMeta {
+    aggregate_child_meta(provenance, items)
+}
+
 fn map_entry_value(map_provenance: &Provenance, index: usize, key: &Value, value: &Value) -> Value {
     let entry_provenance = map_provenance.project(ProjectionStep::Index(index as u64));
     let entry_fields = vec![
@@ -3350,6 +3357,59 @@ fn continue_builtin_call(
                 })
                 .collect::<Vec<_>>();
             let meta = aggregate_child_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
+        }
+        "array_first" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_first() requires array",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_first() first argument must evaluate to an array",
+                ));
+            };
+            let value = items.first().cloned().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::TypeError, "array_first() array was empty")
+            })?;
+            Ok(ready_builtin_value(value.project(ProjectionStep::Index(0))))
+        }
+        "array_rest" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_rest() requires array",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_rest() first argument must evaluate to an array",
+                ));
+            };
+            let items = items.iter().skip(1).cloned().collect::<Vec<_>>();
+            let meta = aggregate_array_items_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
+        }
+        "array_push" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_push() requires array and item",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_push() first argument must evaluate to an array",
+                ));
+            };
+            let mut items = items.iter().cloned().collect::<Vec<_>>();
+            items.push(args[1].clone());
+            let meta = aggregate_array_items_meta(args[0].meta.provenance.clone(), items.iter());
             Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
         }
         "array_find" => {
