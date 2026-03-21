@@ -17,6 +17,7 @@ pub enum EvalExprKind {
     NameRef,
     Call,
     Array,
+    Tuple,
     Map,
     Fail,
     If,

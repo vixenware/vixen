@@ -8,7 +8,8 @@ use std::thread;
 
 use vx_parser::{
     ArrayExpr, ArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr,
-    FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr, SyntaxKind,
+    FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Pattern, Stmt, StructLiteralExpr,
+    SyntaxKind, TupleExpr,
 };
 use vx_resolve::SourceId;
 use vx_types::Ty;

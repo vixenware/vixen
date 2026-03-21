@@ -87,6 +87,6 @@ expect {
 
   engines {
     eval1 @skip
-    eval2 @todo
+    eval2 @pass
   }
 }

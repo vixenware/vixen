@@ -32,6 +32,14 @@ pub(super) struct StmtHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LetPattern {
+    Binding { name: String, source: SourceSpan },
+    Wildcard,
+    Tuple(Vec<LetPattern>),
+    Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -63,8 +71,7 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         scope: EvalEnv,
         last: Value,
-        name: String,
-        name_source: SourceSpan,
+        pattern: LetPattern,
         remaining_statements: Vec<StmtHandle>,
     },
     BlockAfterExpr {
@@ -105,6 +112,20 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         child_nodes: Vec<EvalNodeId>,
         array_source: SourceSpan,
+    },
+    TupleAfterItem {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<Value>,
+        remaining_items: Vec<ExprHandle>,
+        env: EvalEnv,
+        tuple_source: SourceSpan,
+    },
+    TupleJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        child_nodes: Vec<EvalNodeId>,
+        tuple_source: SourceSpan,
     },
     MapAfterKey {
         node_id: EvalNodeId,

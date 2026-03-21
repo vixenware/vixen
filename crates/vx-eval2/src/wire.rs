@@ -51,6 +51,12 @@ fn value_to_wire_value(value: &Value) -> Result<WireValue, EvalError> {
                 .map(value_to_envelope)
                 .collect::<Result<_, _>>()?,
         )),
+        ValueRep::Tuple(items) => Ok(WireValue::Tuple(
+            items
+                .iter()
+                .map(value_to_envelope)
+                .collect::<Result<_, _>>()?,
+        )),
         ValueRep::Map(map) => Ok(WireValue::Map(
             map.entries
                 .iter()
@@ -91,6 +97,12 @@ fn wire_value_to_value_rep(value: WireValue) -> Result<ValueRep, EvalError> {
         )),
         WireValue::String(value) => Ok(ValueRep::String(Arc::from(value))),
         WireValue::Array(items) => Ok(ValueRep::Array(Arc::from(
+            items
+                .into_iter()
+                .map(envelope_to_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        WireValue::Tuple(items) => Ok(ValueRep::Tuple(Arc::from(
             items
                 .into_iter()
                 .map(envelope_to_value)

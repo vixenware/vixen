@@ -929,6 +929,13 @@ fn normalized_slot_witness(value: Value) -> Value {
                 .map(normalized_slot_witness)
                 .collect::<Vec<_>>(),
         ),
+        ValueRep::Tuple(items) => Value::tuple(
+            items
+                .into_iter()
+                .cloned()
+                .map(normalized_slot_witness)
+                .collect::<Vec<_>>(),
+        ),
         ValueRep::Map(map) => Value::map(
             map.entries
                 .into_iter()

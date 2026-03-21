@@ -333,6 +333,7 @@ pub(super) fn eval_expr_with_node_id(
         Expr::NameRef(name_ref) => eval_name_ref(state, name_ref, env).map(EvalStep::Ready),
         Expr::Call(call) => eval_call(state, call, env),
         Expr::Array(array) => eval_array(state, array, env),
+        Expr::Tuple(tuple) => eval_tuple(state, tuple, env),
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
@@ -600,6 +601,7 @@ pub(super) fn static_namespace_member_value(
 fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {
     match (&receiver.rep, field_name) {
         (ValueRep::String(_), "len") => Some("String.len"),
+        (ValueRep::String(_), "split_once") => Some("String.split_once"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Map(_), "get") => Some("Map.get"),
@@ -1021,6 +1023,52 @@ pub(super) fn eval_array(
     )
 }
 
+pub(super) fn eval_tuple(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    tuple: &TupleExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("tuple should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let items = tuple.items().collect::<Vec<_>>();
+    if state.queue_child_work {
+        let child_nodes = items
+            .iter()
+            .map(|item| queue_child_expr(state, item, env))
+            .collect::<Vec<_>>();
+        if child_nodes.is_empty() {
+            let provenance = Provenance::literal(state.span_for_node(tuple));
+            return Ok(EvalStep::Ready(Value::tuple(Vec::new()).with_meta(
+                ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
+            )));
+        }
+        return Ok(wait_on_child_dependency(
+            state,
+            node_id,
+            child_nodes[0],
+            vec![ContinuationFrame::TupleJoin {
+                node_id,
+                parent_id,
+                child_nodes,
+                tuple_source: state.span_for_node(tuple),
+            }],
+        ));
+    }
+    continue_tuple_items(
+        state,
+        node_id,
+        parent_id,
+        Vec::new(),
+        items.iter().map(|item| state.expr_handle(item)).collect(),
+        env.clone(),
+        state.span_for_node(tuple),
+    )
+}
+
 pub(super) fn eval_map(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     map: &MapExpr,
@@ -1095,6 +1143,7 @@ pub(super) fn user_fail_error(value: Value) -> EvalError {
         ValueRep::Bool(_) => EvalError::new(EvalErrorKind::UserFail, "Bool").with_detail(value),
         ValueRep::U64(_) => EvalError::new(EvalErrorKind::UserFail, "U64").with_detail(value),
         ValueRep::Array(_) => EvalError::new(EvalErrorKind::UserFail, "Array").with_detail(value),
+        ValueRep::Tuple(_) => EvalError::new(EvalErrorKind::UserFail, "Tuple").with_detail(value),
         ValueRep::Map(_) => EvalError::new(EvalErrorKind::UserFail, "Map").with_detail(value),
         ValueRep::External(external) => {
             EvalError::new(EvalErrorKind::UserFail, external.kind.clone()).with_detail(value)
@@ -1285,13 +1334,12 @@ pub(super) fn continue_block_statements(
         let statement = state.program.resolve_stmt(statement_handle.key)?;
         match statement {
             Stmt::Let(let_stmt) => {
-                let name_token = let_stmt.name().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "let statement has no name")
+                let pattern = let_stmt.pattern().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "let statement has no pattern")
                 })?;
-                let name = name_token.text().to_string();
-                let name_source = state.with_source(statement_handle.key.source(), |state| {
-                    state.span_for_token(&name_token)
-                });
+                let let_pattern = state.with_source(statement_handle.key.source(), |state| {
+                    let_pattern_from_ast(state, &pattern)
+                })?;
                 let expr = let_stmt.expr().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "let statement has no value")
                 })?;
@@ -1299,10 +1347,7 @@ pub(super) fn continue_block_statements(
                     eval_dependent_expr(state, node_id, &expr, &mut scope)
                 })? {
                     EvalStep::Ready(value) => {
-                        env_mut(&mut scope).insert(
-                            name.clone(),
-                            value.with_provenance(Provenance::binding(name_source.clone(), name)),
-                        );
+                        bind_let_pattern(&mut scope, &let_pattern, value)?;
                     }
                     EvalStep::Suspended(suspension) => {
                         return Ok(extend_suspension(
@@ -1312,8 +1357,7 @@ pub(super) fn continue_block_statements(
                                 parent_id,
                                 scope,
                                 last,
-                                name,
-                                name_source,
+                                pattern: let_pattern,
                                 remaining_statements: remaining.collect(),
                             },
                         ));
@@ -1385,6 +1429,124 @@ pub(super) fn continue_array_items(
     let provenance = Provenance::literal(array_source);
     let meta = aggregate_child_meta(provenance, items.iter());
     Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+}
+
+pub(super) fn continue_tuple_items(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut items: Vec<Value>,
+    remaining_items: Vec<ExprHandle>,
+    mut env: EvalEnv,
+    tuple_source: SourceSpan,
+) -> Result<EvalStep, EvalError> {
+    let mut remaining = remaining_items.into_iter();
+    while let Some(item_handle) = remaining.next() {
+        match eval_dependent_expr_handle(state, node_id, item_handle, &mut env)? {
+            EvalStep::Ready(value) => items.push(value),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::TupleAfterItem {
+                        node_id,
+                        parent_id,
+                        items,
+                        remaining_items: remaining.collect(),
+                        env,
+                        tuple_source,
+                    },
+                ));
+            }
+        }
+    }
+    let provenance = Provenance::literal(tuple_source);
+    let meta = aggregate_child_meta(provenance, items.iter());
+    Ok(EvalStep::Ready(Value::tuple(items).with_meta(meta)))
+}
+
+pub(super) fn let_pattern_from_ast(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    pattern: &Pattern,
+) -> Result<LetPattern, EvalError> {
+    match pattern {
+        Pattern::Binding(binding) => {
+            let name_token = binding.name().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "binding pattern has no name")
+            })?;
+            let name = name_token.text().to_string();
+            Ok(LetPattern::Binding {
+                name,
+                source: state.span_for_token(&name_token),
+            })
+        }
+        Pattern::Wildcard(_) => Ok(LetPattern::Wildcard),
+        Pattern::Paren(paren) => {
+            let inner = paren.inner().ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    "paren pattern has no inner pattern",
+                )
+            })?;
+            let_pattern_from_ast(state, &inner)
+        }
+        Pattern::Unit(_) => Ok(LetPattern::Unit),
+        Pattern::Tuple(tuple) => Ok(LetPattern::Tuple(
+            tuple
+                .items()
+                .map(|item| let_pattern_from_ast(state, &item))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        other => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("unsupported let pattern: {other:?}"),
+        )),
+    }
+}
+
+pub(super) fn bind_let_pattern(
+    scope: &mut EvalEnv,
+    pattern: &LetPattern,
+    value: Value,
+) -> Result<(), EvalError> {
+    match pattern {
+        LetPattern::Binding { name, source } => {
+            env_mut(scope).insert(
+                name.clone(),
+                value.with_provenance(Provenance::binding(source.clone(), name.clone())),
+            );
+            Ok(())
+        }
+        LetPattern::Wildcard => Ok(()),
+        LetPattern::Unit => match value.rep {
+            ValueRep::Unit => Ok(()),
+            _ => Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "unit pattern requires unit value",
+            )),
+        },
+        LetPattern::Tuple(patterns) => {
+            let ValueRep::Tuple(items) = value.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "tuple pattern requires tuple value",
+                ));
+            };
+            if patterns.len() != items.len() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!(
+                        "tuple pattern expects {} element(s), got {}",
+                        patterns.len(),
+                        items.len()
+                    ),
+                ));
+            }
+            for (pattern, item) in patterns.iter().zip(items.iter().cloned()) {
+                bind_let_pattern(scope, pattern, item)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 pub(super) fn queue_child_expr(
@@ -1575,6 +1737,7 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::NameRef(_) => EvalExprKind::NameRef,
         Expr::Call(_) => EvalExprKind::Call,
         Expr::Array(_) => EvalExprKind::Array,
+        Expr::Tuple(_) => EvalExprKind::Tuple,
         Expr::Map(_) => EvalExprKind::Map,
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
@@ -1641,6 +1804,16 @@ pub(super) fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalE
         (ValueRep::U64(lhs), ValueRep::U64(rhs)) => Ok(lhs == rhs),
         (ValueRep::String(lhs), ValueRep::String(rhs)) => Ok(lhs == rhs),
         (ValueRep::Array(lhs), ValueRep::Array(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            lhs.iter()
+                .zip(rhs.iter())
+                .try_fold(true, |equal, (lhs, rhs)| {
+                    Ok(equal && values_equal(&lhs.rep, &rhs.rep)?)
+                })
+        }
+        (ValueRep::Tuple(lhs), ValueRep::Tuple(rhs)) => {
             if lhs.len() != rhs.len() {
                 return Ok(false);
             }

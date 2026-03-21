@@ -58,6 +58,15 @@ fn map_string_entry<'a>(value: &'a Value, key: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("expected key {key:?} in {map:?}"))
 }
 
+fn tuple_item(value: &Value, index: usize) -> &Value {
+    let ValueRep::Tuple(items) = &value.rep else {
+        panic!("expected tuple value, got {value:?}");
+    };
+    items
+        .get(index)
+        .unwrap_or_else(|| panic!("expected tuple index {index} in {items:?}"))
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -1120,6 +1129,71 @@ fn build(name: String) {
 }
 
 #[test]
+fn tuple_literal_evaluates_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  ("serde", 5)
+}
+"#,
+        "tuple-literal-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate tuple literal");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready tuple result, got {resolution:?}");
+    };
+    assert_eq!(tuple_item(&value, 0).rep, ValueRep::String("serde".into()));
+    assert_eq!(tuple_item(&value, 1).rep, ValueRep::U64(5));
+}
+
+#[test]
+fn tuple_let_destructuring_binds_elements_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let (dep, feat) = ("serde?", "json");
+  (dep.ends_with("?"), feat.len())
+}
+"#,
+        "tuple-let-destructuring-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate tuple let destructuring");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready tuple destructuring result, got {resolution:?}");
+    };
+    assert_eq!(tuple_item(&value, 0).rep, ValueRep::Bool(true));
+    assert_eq!(tuple_item(&value, 1).rep, ValueRep::U64(4));
+}
+
+#[test]
+fn string_split_once_method_returns_optional_tuple_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  name.split_once("/")
+}
+"#,
+        "string-split-once-method-runtime",
+        "build",
+        &[Value::string("serde/json")],
+    )
+    .expect("evaluate String.split_once()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.split_once() result, got {resolution:?}");
+    };
+    let tuple = struct_field(&value, "value");
+    assert_eq!(tuple_item(tuple, 0).rep, ValueRep::String("serde".into()));
+    assert_eq!(tuple_item(tuple, 1).rep, ValueRep::String("json".into()));
+}
+
+#[test]
 fn bound_string_method_value_can_be_called() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1212,6 +1286,15 @@ fn build(name: String?) {
         panic!("expected ready Option.unwrap_or() None result, got {none:?}");
     };
     assert_eq!(none.rep, ValueRep::String("fallback".into()));
+}
+
+#[test]
+fn wire_round_trip_preserves_tuple_shape_and_metadata() {
+    let value =
+        Value::tuple(vec![Value::string("serde"), Value::u64(5)]).with_reuse(ReuseClass::Observed);
+    let envelope = value_to_envelope(&value).expect("encode tuple to envelope");
+    let decoded = envelope_to_value(envelope).expect("decode tuple from envelope");
+    assert_eq!(decoded, value);
 }
 
 #[test]
@@ -2897,6 +2980,13 @@ fn normalized_slot_witness(value: Value) -> Value {
         ValueRep::U64(value) => Value::u64(value),
         ValueRep::String(value) => Value::string(value),
         ValueRep::Array(items) => Value::array(
+            items
+                .iter()
+                .cloned()
+                .map(normalized_slot_witness)
+                .collect::<Vec<_>>(),
+        ),
+        ValueRep::Tuple(items) => Value::tuple(
             items
                 .iter()
                 .cloned()

@@ -575,6 +575,47 @@ pub(in crate::engine) fn continue_builtin_call(
                 Value::u64(text.len() as u64).with_meta(args[0].meta.clone()),
             ))
         }
+        "String.split_once" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.split_once() requires receiver and separator",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.split_once() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::String(separator) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.split_once() separator must evaluate to String",
+                ));
+            };
+            let value = match text.split_once(separator.as_ref()) {
+                Some((left, right)) => {
+                    let left = Value::string(left)
+                        .with_provenance(args[0].meta.provenance.project(ProjectionStep::Index(0)));
+                    let right = Value::string(right)
+                        .with_provenance(args[0].meta.provenance.project(ProjectionStep::Index(1)));
+                    let tuple = Value::tuple(vec![left.clone(), right.clone()]).with_meta(
+                        aggregate_child_meta(
+                            args[0].meta.provenance.clone(),
+                            [&left, &right].into_iter(),
+                        ),
+                    );
+                    let meta = aggregate_child_meta(
+                        args[0].meta.provenance.clone(),
+                        std::iter::once(&tuple),
+                    );
+                    Value::structure("Some", vec![(Arc::from("value"), tuple)]).with_meta(meta)
+                }
+                None => Value::structure("None", Vec::new()).with_meta(args[0].meta.clone()),
+            };
+            Ok(ready_builtin_value(value))
+        }
         "String.starts_with" => {
             if args.len() != 2 {
                 return Err(EvalError::new(

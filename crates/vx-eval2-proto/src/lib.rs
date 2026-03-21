@@ -1,6 +1,6 @@
 use facet::Facet;
 
-pub const EVAL2_PROTOCOL_VERSION: u32 = 2;
+pub const EVAL2_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 pub struct Eval2Version {
@@ -290,6 +290,7 @@ pub enum WireValue {
     I64(i64),
     String(String),
     Array(Vec<ValueEnvelope>),
+    Tuple(Vec<ValueEnvelope>),
     Map(Vec<(ValueEnvelope, ValueEnvelope)>),
     Struct(StructValue),
     External { kind: String, descriptor: String },

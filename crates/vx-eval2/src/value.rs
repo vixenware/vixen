@@ -42,6 +42,10 @@ impl Value {
         Self::new(ValueRep::Array(Arc::from(items.into())))
     }
 
+    pub fn tuple(items: impl Into<Vec<Value>>) -> Self {
+        Self::new(ValueRep::Tuple(Arc::from(items.into())))
+    }
+
     pub fn map(entries: impl Into<Vec<(Value, Value)>>) -> Self {
         Self::new(ValueRep::Map(MapValue {
             entries: Arc::from(entries.into()),
@@ -115,6 +119,7 @@ pub enum ValueRep {
     U64(u64),
     String(Arc<str>),
     Array(Arc<[Value]>),
+    Tuple(Arc<[Value]>),
     Map(MapValue),
     Struct(StructValue),
     External(ExternalValue),
@@ -129,6 +134,7 @@ impl ValueRep {
             | Self::U64(_)
             | Self::String(_)
             | Self::Array(_)
+            | Self::Tuple(_)
             | Self::Map(_)
             | Self::Struct(_)
             | Self::Function(_) => ValueMeta::new(

@@ -193,16 +193,12 @@ pub(in crate::engine) fn resume_frame(
             parent_id,
             mut scope,
             last,
-            name,
-            name_source,
+            pattern,
             remaining_statements,
         } => {
             let result = match input {
                 Ok(value) => {
-                    env_mut(&mut scope).insert(
-                        name.clone(),
-                        value.with_provenance(Provenance::binding(name_source, name)),
-                    );
+                    bind_let_pattern(&mut scope, &pattern, value)?;
                     continue_block_statements(
                         state,
                         node_id,
@@ -324,6 +320,71 @@ pub(in crate::engine) fn resume_frame(
                     let provenance = Provenance::literal(array_source);
                     let meta = aggregate_child_meta(provenance, items.iter());
                     Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::TupleAfterItem {
+            node_id,
+            parent_id,
+            mut items,
+            remaining_items,
+            env,
+            tuple_source,
+        } => {
+            let result = match input {
+                Ok(value) => {
+                    items.push(value);
+                    continue_tuple_items(
+                        state,
+                        node_id,
+                        parent_id,
+                        items,
+                        remaining_items,
+                        env,
+                        tuple_source,
+                    )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::TupleJoin {
+            node_id,
+            parent_id,
+            child_nodes,
+            tuple_source,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut items = Vec::with_capacity(child_nodes.len());
+                    for child_node in &child_nodes {
+                        match state.scheduler.node_state(*child_node) {
+                            Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(*child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    branch_context: state.branch_context.clone(),
+                                    frames: vec![ContinuationFrame::TupleJoin {
+                                        node_id,
+                                        parent_id,
+                                        child_nodes: child_nodes.clone(),
+                                        tuple_source: tuple_source.clone(),
+                                    }],
+                                }));
+                            }
+                        }
+                    }
+                    let provenance = Provenance::literal(tuple_source);
+                    let meta = aggregate_child_meta(provenance, items.iter());
+                    Ok(EvalStep::Ready(Value::tuple(items).with_meta(meta)))
                 }
                 Err(error) => Err(error),
             };
