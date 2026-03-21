@@ -1966,6 +1966,32 @@ fn run_program(program: EvalProgram) -> Resolution {
     session.run().expect("run eval program")
 }
 
+#[test]
+fn session_stats_report_current_graph_and_work_counts() {
+    let runtime = UnsupportedRuntime;
+    let program =
+        EvalProgram::single_source("session-stats", "fn build() { let answer = 41; answer }");
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+    let Resolution::Ready(value) = session.run().expect("run stats session") else {
+        panic!("expected ready stats session result");
+    };
+    assert_eq!(value.rep, ValueRep::U64(41));
+
+    let stats = session.stats();
+    assert!(stats.graph_node_count >= 2);
+    assert_eq!(stats.node_record_count, session.node_records().len());
+    assert_eq!(
+        stats.dependency_edge_count,
+        session.dependency_edges().len()
+    );
+    assert_eq!(stats.completed_work_count, session.completed_work().len());
+    assert_eq!(stats.trace_event_count, session.trace().events.len());
+    assert_eq!(stats.queued_work_count, session.queued_work().len());
+    assert_eq!(stats.in_flight_work_count, session.in_flight_work().len());
+    assert_eq!(stats.buffered_work_count, session.buffered_work().len());
+    assert_eq!(stats.pending_count, session.pending_nodes().len());
+}
+
 struct UnsupportedRuntime;
 
 impl RuntimeHooks for UnsupportedRuntime {

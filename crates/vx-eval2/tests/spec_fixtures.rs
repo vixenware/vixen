@@ -98,7 +98,28 @@ fn run_case_local(
     let program = case_program(case, invocation)?;
     let mut session = EvalSession::new_program(program, entry, args, runtime, place);
     match session.run() {
-        Ok(resolution) => resolution_to_spec_outcome_with_trace(resolution, session.trace()),
+        Ok(resolution) => {
+            if std::env::var_os("VX_EVAL2_PRINT_STATS").is_some() {
+                let stats = session.stats();
+                eprintln!(
+                    "vx-eval2 stats case={} entry={} graph_nodes={} node_records={} node_states={} keyed_nodes={} deps={} queued={} in_flight={} buffered={} pending={} completed={} trace_events={}",
+                    case.path.display(),
+                    entry,
+                    stats.graph_node_count,
+                    stats.node_record_count,
+                    stats.node_state_count,
+                    stats.keyed_node_count,
+                    stats.dependency_edge_count,
+                    stats.queued_work_count,
+                    stats.in_flight_work_count,
+                    stats.buffered_work_count,
+                    stats.pending_count,
+                    stats.completed_work_count,
+                    stats.trace_event_count,
+                );
+            }
+            resolution_to_spec_outcome_with_trace(resolution, session.trace())
+        }
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),

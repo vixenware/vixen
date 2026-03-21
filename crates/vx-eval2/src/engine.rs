@@ -1,7 +1,7 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -363,6 +363,21 @@ pub struct EvalGraphSnapshot {
     pub completed: Option<Result<Value, EvalError>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSessionStats {
+    pub graph_node_count: usize,
+    pub node_record_count: usize,
+    pub node_state_count: usize,
+    pub keyed_node_count: usize,
+    pub dependency_edge_count: usize,
+    pub queued_work_count: usize,
+    pub in_flight_work_count: usize,
+    pub buffered_work_count: usize,
+    pub pending_count: usize,
+    pub completed_work_count: usize,
+    pub trace_event_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
     branch_context: EvalBranchContext,
@@ -402,7 +417,7 @@ struct EvalSessionDelta {
     completed_invalidated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EvalSchedulerDelta {
     next_id: u64,
     next_work_id: u64,
@@ -414,6 +429,46 @@ struct EvalSchedulerDelta {
     pending_resumes: Vec<(u64, EvalSuspension)>,
     pending_kinds: Vec<(u64, PendingKind)>,
     retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordedSchedulerDelta {
+    next_id: u64,
+    next_work_id: u64,
+    node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
+    keyed_nodes: BTreeMap<EvalNodeId, KeyedNodeMemo>,
+    node_states: BTreeMap<EvalNodeId, EvalNodeState>,
+    dependency_edges: Vec<EvalDependencyEdge>,
+    queued: Vec<ReadyTaskRecord>,
+    pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
+    pending_kinds: BTreeMap<u64, PendingKind>,
+    retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
+}
+
+impl RecordedSchedulerDelta {
+    fn into_delta(self) -> EvalSchedulerDelta {
+        let pending_resumes = self
+            .pending_resumes
+            .into_iter()
+            .flat_map(|(pending_id, suspensions)| {
+                suspensions
+                    .into_iter()
+                    .map(move |suspension| (pending_id, suspension))
+            })
+            .collect();
+        EvalSchedulerDelta {
+            next_id: self.next_id,
+            next_work_id: self.next_work_id,
+            node_records: self.node_records.into_values().collect(),
+            keyed_nodes: self.keyed_nodes.into_values().collect(),
+            node_states: self.node_states.into_iter().collect(),
+            dependency_edges: self.dependency_edges,
+            queued: self.queued,
+            pending_resumes,
+            pending_kinds: self.pending_kinds.into_iter().collect(),
+            retained_exprs: self.retained_exprs.into_iter().collect(),
+        }
+    }
 }
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
@@ -663,6 +718,35 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn trace(&self) -> &EvalTrace {
         &self.trace
+    }
+
+    pub fn stats(&self) -> EvalSessionStats {
+        let mut graph_nodes = self
+            .scheduler
+            .node_records
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        graph_nodes.extend(self.scheduler.node_states.keys().copied());
+        graph_nodes.extend(self.scheduler.keyed_nodes.keys().copied());
+        for edge in &self.scheduler.dependency_edges {
+            graph_nodes.insert(edge.parent);
+            graph_nodes.insert(edge.child);
+        }
+
+        EvalSessionStats {
+            graph_node_count: graph_nodes.len(),
+            node_record_count: self.scheduler.node_records.len(),
+            node_state_count: self.scheduler.node_states.len(),
+            keyed_node_count: self.scheduler.keyed_nodes.len(),
+            dependency_edge_count: self.scheduler.dependency_edges.len(),
+            queued_work_count: self.scheduler.ready_queue.len(),
+            in_flight_work_count: self.scheduler.in_flight_tasks.len(),
+            buffered_work_count: self.scheduler.buffered_completions.len(),
+            pending_count: self.scheduler.pending_nodes().len(),
+            completed_work_count: self.completed_work.len(),
+            trace_event_count: self.trace.events.len(),
+        }
     }
 
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
@@ -1459,6 +1543,7 @@ struct EvalScheduler {
     pending_kinds: BTreeMap<u64, PendingKind>,
     retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
     completed_invalidated: bool,
+    recorded_delta: Option<Box<RecordedSchedulerDelta>>,
 }
 
 const ENTRY_WORK_NODE_ID: EvalNodeId = EvalNodeId(0);
@@ -1485,6 +1570,7 @@ impl Default for EvalScheduler {
             pending_kinds: BTreeMap::new(),
             retained_exprs: BTreeMap::new(),
             completed_invalidated: false,
+            recorded_delta: None,
         }
     }
 }
@@ -2009,6 +2095,29 @@ impl EvalScheduler {
         cloned
     }
 
+    fn begin_recording_delta(&mut self) {
+        self.recorded_delta = Some(Box::default());
+    }
+
+    fn take_recorded_delta(&mut self) -> Option<EvalSchedulerDelta> {
+        self.recorded_delta.take().map(|delta| delta.into_delta())
+    }
+
+    fn record_allocated_ids(&mut self) {
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta.next_id = self.next_id;
+            delta.next_work_id = self.next_work_id;
+        }
+    }
+
+    fn record_keyed_node_delta(&mut self, node_id: EvalNodeId) {
+        if let Some(delta) = self.recorded_delta.as_mut()
+            && let Some(keyed) = self.keyed_nodes.get(&node_id)
+        {
+            delta.keyed_nodes.insert(node_id, keyed.clone());
+        }
+    }
+
     fn dependency_edges(&self) -> &[EvalDependencyEdge] {
         &self.dependency_edges
     }
@@ -2022,12 +2131,21 @@ impl EvalScheduler {
     }
 
     fn record_node(&mut self, record: EvalNodeRecord) {
-        self.node_records.entry(record.node_id).or_insert(record);
+        let node_id = record.node_id;
+        if let Entry::Vacant(entry) = self.node_records.entry(node_id) {
+            entry.insert(record.clone());
+            if let Some(delta) = self.recorded_delta.as_mut() {
+                delta.node_records.insert(node_id, record);
+            }
+        }
     }
 
     fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
-        self.dependency_edges
-            .push(EvalDependencyEdge { parent, child });
+        let edge = EvalDependencyEdge { parent, child };
+        self.dependency_edges.push(edge.clone());
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta.dependency_edges.push(edge);
+        }
     }
 
     fn queued_work(&self) -> Vec<EvalQueuedWork> {
@@ -2120,7 +2238,7 @@ impl EvalScheduler {
     }
 
     fn alloc_node_id(&mut self) -> EvalNodeId {
-        if let Some(namespace) = &mut self.lease_namespace {
+        let node_id = if let Some(namespace) = &mut self.lease_namespace {
             let node_id = EvalNodeId(lease_scoped_id(namespace.id, namespace.next_node_local));
             namespace.next_node_local += 1;
             node_id
@@ -2128,7 +2246,9 @@ impl EvalScheduler {
             let node_id = EvalNodeId(self.next_id);
             self.next_id += 1;
             node_id
-        }
+        };
+        self.record_allocated_ids();
+        node_id
     }
 
     fn alloc_pending(&mut self, description: impl Into<Arc<str>>) -> PendingRef {
@@ -2137,6 +2257,11 @@ impl EvalScheduler {
         let pending = PendingRef::new(pending_id.0, description.clone());
         self.pending_kinds
             .insert(pending.node_id, PendingKind::External);
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta
+                .pending_kinds
+                .insert(pending.node_id, PendingKind::External);
+        }
         self.record_node(EvalNodeRecord {
             node_id: pending_id,
             parent_id: None,
@@ -2150,6 +2275,11 @@ impl EvalScheduler {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
         self.pending_kinds
             .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta
+                .pending_kinds
+                .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+        }
         pending
     }
 
@@ -2262,6 +2392,14 @@ impl EvalScheduler {
                 scheduled,
                 branch_context,
             });
+        if let Some(delta) = self.recorded_delta.as_mut()
+            && let Some(retained) = self.retained_exprs.get(&node_id)
+        {
+            delta
+                .retained_exprs
+                .entry(node_id)
+                .or_insert(retained.clone());
+        }
     }
 
     fn enqueue_expr_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
@@ -2379,6 +2517,7 @@ impl EvalScheduler {
             .expect("keyed node must still exist");
         keyed.active_revision = Some(keyed.revision);
         keyed.evaluated_revision = None;
+        self.record_keyed_node_delta(node_id);
         Ok(())
     }
 
@@ -2415,6 +2554,7 @@ impl EvalScheduler {
                     }
                     _ => {}
                 }
+                self.record_keyed_node_delta(node_id);
             }
             return Ok(node_id);
         }
@@ -2443,6 +2583,7 @@ impl EvalScheduler {
                 last_update: EvalKeyedNodeUpdateReason::Created,
             },
         );
+        self.record_keyed_node_delta(node_id);
         self.enqueue_keyed_work(node_id)?;
         Ok(node_id)
     }
@@ -2468,6 +2609,7 @@ impl EvalScheduler {
             .expect("keyed node must exist");
         memo.evaluated_revision = Some(active_revision);
         memo.active_revision = None;
+        self.record_keyed_node_delta(node_id);
         Ok(false)
     }
 
@@ -2522,7 +2664,10 @@ impl EvalScheduler {
     }
 
     fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
-        self.node_states.insert(node_id, state);
+        self.node_states.insert(node_id, state.clone());
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta.node_states.insert(node_id, state);
+        }
     }
 
     fn resolve_pending(
@@ -2621,7 +2766,14 @@ impl EvalScheduler {
         self.pending_resumes
             .entry(suspension.pending.node_id)
             .or_default()
-            .push(suspension);
+            .push(suspension.clone());
+        if let Some(delta) = self.recorded_delta.as_mut() {
+            delta
+                .pending_resumes
+                .entry(suspension.pending.node_id)
+                .or_default()
+                .push(suspension);
+        }
     }
 
     fn lease_ready_task(&mut self) -> Result<Option<ReadyTaskLease>, EvalError> {
@@ -2858,6 +3010,7 @@ impl EvalScheduler {
             node_id,
             pending,
         };
+        self.record_allocated_ids();
         self.ready_queue.push_back(work.id);
         self.ready_tasks.insert(
             work.id,
@@ -2867,6 +3020,11 @@ impl EvalScheduler {
                 branch_context,
             },
         );
+        if let Some(delta) = self.recorded_delta.as_mut()
+            && let Some(record) = self.ready_tasks.get(&work.id)
+        {
+            delta.queued.push(record.clone());
+        }
         work
     }
 }
@@ -2952,6 +3110,45 @@ impl EvalSchedulerDelta {
             retained_exprs,
         }
     }
+
+    fn retain_changes_against(&mut self, before: &EvalScheduler) {
+        self.node_records.retain(|record| {
+            !matches!(
+                before.node_records.get(&record.node_id),
+                Some(existing) if existing == record
+            )
+        });
+        self.node_states.retain(|(node_id, state)| {
+            !matches!(
+                before.node_states.get(node_id),
+                Some(existing) if existing == state
+            )
+        });
+        self.keyed_nodes.retain(|keyed| {
+            !matches!(
+                before.keyed_nodes.get(&keyed.node_id),
+                Some(existing) if existing == keyed
+            )
+        });
+        self.pending_kinds.retain(|(pending_id, kind)| {
+            !matches!(
+                before.pending_kinds.get(pending_id),
+                Some(existing) if existing == kind
+            )
+        });
+        self.pending_resumes.retain(|(pending_id, suspension)| {
+            !before
+                .pending_resumes
+                .get(pending_id)
+                .is_some_and(|existing| existing.contains(suspension))
+        });
+        self.retained_exprs.retain(|(node_id, retained)| {
+            !matches!(
+                before.retained_exprs.get(node_id),
+                Some(existing) if existing == retained
+            )
+        });
+    }
 }
 
 fn execute_ready_task(
@@ -2965,6 +3162,7 @@ fn execute_ready_task(
 ) -> Result<(EvalSessionDelta, EvalCompletedWorkOutcome), EvalError> {
     let before = scheduler;
     let mut after = before.clone();
+    after.begin_recording_delta();
     let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
         program.as_ref(),
@@ -3135,9 +3333,18 @@ fn execute_ready_task(
         }
     };
 
+    let mut recorded_delta = after
+        .take_recorded_delta()
+        .expect("worker scheduler should record a delta");
+    recorded_delta.next_id = after.next_id;
+    recorded_delta.next_work_id = after.next_work_id;
+    recorded_delta.retain_changes_against(&before);
+    let diff_delta = EvalSchedulerDelta::from_diff(&before, &after);
+    debug_assert_eq!(recorded_delta, diff_delta);
+
     Ok((
         EvalSessionDelta {
-            scheduler: EvalSchedulerDelta::from_diff(&before, &after),
+            scheduler: recorded_delta,
             trace_events: trace.events,
             completed_invalidated: after.completed_invalidated,
         },
