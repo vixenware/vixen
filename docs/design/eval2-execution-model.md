@@ -279,16 +279,19 @@ What this cut does prove:
   fixture policy
 - the node/work/session model can expose keyed demand as first-class
   debugger-visible state
+- retained expr/keyed dependents can now be replayed when joined input widens,
+  including cases where an earlier keyed result has already been consumed by a
+  completed intermediate expression
+- stale superseded work is discarded at commit time instead of being allowed to
+  overwrite a newer invalidating replay
 
 What it does not yet prove:
 
-- general dependent invalidation after a keyed node has already been consumed
 - user-defined join semantics per value type
 - parallel-safe keyed widening across independently executing workers
 
 So the next solver-shaped pressure is no longer "more worklist helpers". It is:
 
-- make keyed invalidation/re-evaluation honest
 - add branch-local assumption semantics
 
 ## First structured-conflict seam
@@ -381,6 +384,9 @@ What it does prove:
   collapsing to text
 - pending/resume paths can continue an in-flight branch and still move on to
   later candidates correctly
+- a tiny package-shaped authored resolver can now backtrack from an
+  incompatible newer candidate to an older successful one through keyed shared
+  dependency conflict, not Rust-side policy
 
 What it does not yet prove:
 

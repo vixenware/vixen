@@ -1,7 +1,7 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
 use std::any::Any;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -399,6 +399,7 @@ pub struct EvalWorkCompletion {
 struct EvalSessionDelta {
     scheduler: EvalSchedulerDelta,
     trace_events: Vec<EvalEvent>,
+    completed_invalidated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +413,7 @@ struct EvalSchedulerDelta {
     queued: Vec<ReadyTaskRecord>,
     pending_resumes: Vec<(u64, EvalSuspension)>,
     pending_kinds: Vec<(u64, PendingKind)>,
+    retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
 }
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
@@ -1072,8 +1074,19 @@ fn commit_completion(
     completed: &mut Option<Result<Value, EvalError>>,
     completion: EvalWorkCompletion,
 ) -> Result<EvalSessionStep, EvalError> {
+    if completion_targets_superseded_work(scheduler, &completion.work) {
+        completed_work.push(EvalCompletedWork {
+            work: completion.work,
+            outcome: completion.outcome,
+        });
+        return Ok(EvalSessionStep::Progressed);
+    }
     trace.events.extend(completion.delta.trace_events);
+    let completed_invalidated = completion.delta.completed_invalidated;
     scheduler.apply_delta(completion.delta.scheduler)?;
+    if completed_invalidated {
+        *completed = None;
+    }
     let keyed_stale = matches!(
         completion.outcome,
         EvalCompletedWorkOutcome::Ready(_) | EvalCompletedWorkOutcome::Poison(_)
@@ -1127,6 +1140,16 @@ fn step_after_buffering(
         None if !scheduler.queued_work().is_empty() => EvalSessionStep::Progressed,
         None => step_without_ready_work(scheduler, completed),
     }
+}
+
+fn completion_targets_superseded_work(scheduler: &EvalScheduler, work: &EvalQueuedWork) -> bool {
+    matches!(
+        scheduler.node_state(work.node_id),
+        Some(EvalNodeState::Runnable {
+            work: current_work,
+            ..
+        }) if *current_work != work.id
+    )
 }
 
 fn completed_resolution(completed: &Option<Result<Value, EvalError>>) -> Option<Resolution> {
@@ -1434,6 +1457,8 @@ struct EvalScheduler {
     buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
     pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
     pending_kinds: BTreeMap<u64, PendingKind>,
+    retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
+    completed_invalidated: bool,
 }
 
 const ENTRY_WORK_NODE_ID: EvalNodeId = EvalNodeId(0);
@@ -1458,8 +1483,16 @@ impl Default for EvalScheduler {
             buffered_completions: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
             pending_kinds: BTreeMap::new(),
+            retained_exprs: BTreeMap::new(),
+            completed_invalidated: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetainedExprTask {
+    scheduled: ScheduledExpr,
+    branch_context: EvalBranchContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2217,6 +2250,106 @@ impl EvalScheduler {
         self.ready_tasks.contains_key(&work_id)
     }
 
+    fn remember_expr_task(
+        &mut self,
+        node_id: EvalNodeId,
+        scheduled: ScheduledExpr,
+        branch_context: EvalBranchContext,
+    ) {
+        self.retained_exprs
+            .entry(node_id)
+            .or_insert(RetainedExprTask {
+                scheduled,
+                branch_context,
+            });
+    }
+
+    fn enqueue_expr_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+        let retained = self.retained_exprs.get(&node_id).cloned().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("expression node {:?} has no retained replay task", node_id),
+            )
+        })?;
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateExpr(retained.scheduled),
+            EvalWorkKind::EvaluateExpr,
+            node_id,
+            None,
+            retained.branch_context,
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        if self
+            .node_records
+            .get(&node_id)
+            .and_then(|record| record.parent_id)
+            == Some(ENTRY_WORK_NODE_ID)
+        {
+            self.record_node_state(
+                ENTRY_WORK_NODE_ID,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn dependent_nodes(&self, dependency: EvalNodeId) -> Vec<EvalNodeId> {
+        self.dependency_edges
+            .iter()
+            .filter_map(|edge| (edge.child == dependency).then_some(edge.parent))
+            .collect()
+    }
+
+    fn invalidate_completed_dependents(
+        &mut self,
+        dependency: EvalNodeId,
+    ) -> Result<bool, EvalError> {
+        let mut invalidated = false;
+        let mut stack = self.dependent_nodes(dependency);
+        let mut seen = BTreeSet::new();
+        while let Some(node_id) = stack.pop() {
+            if !seen.insert(node_id) {
+                continue;
+            }
+            let state = self.node_state(node_id).cloned();
+            let reran = match state {
+                Some(EvalNodeState::Ready(_))
+                | Some(EvalNodeState::Poison(_))
+                | Some(EvalNodeState::Runnable { .. })
+                | Some(EvalNodeState::BlockedOnNode { .. })
+                | Some(EvalNodeState::Pending(_))
+                | None => {
+                    if self.keyed_nodes.contains_key(&node_id) {
+                        self.enqueue_keyed_work(node_id)?;
+                        true
+                    } else if self.retained_exprs.contains_key(&node_id) {
+                        self.enqueue_expr_work(node_id)?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if reran {
+                invalidated = true;
+                stack.extend(self.dependent_nodes(node_id));
+            }
+        }
+        if invalidated {
+            self.completed_invalidated = true;
+        }
+        Ok(invalidated)
+    }
+
     fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
         let branch_context = if let Some(memo) = self.keyed_nodes.get(&node_id) {
             memo.branch_context.clone()
@@ -2278,6 +2411,7 @@ impl EvalScheduler {
                     }
                     Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_)) | None => {
                         self.enqueue_keyed_work(node_id)?;
+                        let _ = self.invalidate_completed_dependents(node_id)?;
                     }
                     _ => {}
                 }
@@ -2667,6 +2801,23 @@ impl EvalScheduler {
         for (node_id, state) in delta.node_states {
             self.node_states.insert(node_id, state);
         }
+        for (node_id, retained) in delta.retained_exprs {
+            match self.retained_exprs.get(&node_id) {
+                Some(existing) if existing != &retained => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!(
+                            "retained expression task {:?} diverged during completion merge",
+                            node_id
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.retained_exprs.insert(node_id, retained);
+                }
+            }
+        }
         for record in delta.queued {
             if self.ready_tasks.contains_key(&record.work.id)
                 || self.in_flight_tasks.contains_key(&record.work.id)
@@ -2780,6 +2931,14 @@ impl EvalSchedulerDelta {
                     .then(|| (*pending_id, *kind))
             })
             .collect();
+        let retained_exprs = after
+            .retained_exprs
+            .iter()
+            .filter_map(|(node_id, retained)| {
+                (!matches!(before.retained_exprs.get(node_id), Some(existing) if existing == retained))
+                    .then(|| (*node_id, retained.clone()))
+            })
+            .collect();
         Self {
             next_id: after.next_id,
             next_work_id: after.next_work_id,
@@ -2790,6 +2949,7 @@ impl EvalSchedulerDelta {
             queued,
             pending_resumes,
             pending_kinds,
+            retained_exprs,
         }
     }
 }
@@ -2835,13 +2995,19 @@ fn execute_ready_task(
                 kind: EvalNodeKind::Expr { kind: body_kind },
                 source: Some(body_source),
             });
+            let scheduled = ScheduledExpr {
+                expr: ExprHandle {
+                    key: ProgramNodeHandle::for_node(prepared.source, &prepared.body),
+                },
+                env: prepared.env,
+            };
+            state.scheduler.remember_expr_task(
+                node_id,
+                scheduled.clone(),
+                state.branch_context.clone(),
+            );
             let work = state.scheduler.enqueue_ready_task(
-                ReadyTask::EvaluateExpr(ScheduledExpr {
-                    expr: ExprHandle {
-                        key: ProgramNodeHandle::for_node(prepared.source, &prepared.body),
-                    },
-                    env: prepared.env,
-                }),
+                ReadyTask::EvaluateExpr(scheduled),
                 EvalWorkKind::EvaluateExpr,
                 node_id,
                 None,
@@ -2973,6 +3139,7 @@ fn execute_ready_task(
         EvalSessionDelta {
             scheduler: EvalSchedulerDelta::from_diff(&before, &after),
             trace_events: trace.events,
+            completed_invalidated: after.completed_invalidated,
         },
         outcome,
     ))
@@ -4334,6 +4501,20 @@ fn continue_call_from_args(
     remaining_args: Vec<ExprHandle>,
     mut env: BTreeMap<String, Value>,
 ) -> Result<EvalStep, EvalError> {
+    if state.current_parent() != Some(node_id) {
+        return state.with_active_node(node_id, |state| {
+            continue_call_from_args(
+                state,
+                node_id,
+                parent_id,
+                callee,
+                call_source,
+                args,
+                remaining_args,
+                env,
+            )
+        });
+    }
     let mut remaining = remaining_args.into_iter();
     while let Some(arg_handle) = remaining.next() {
         match eval_dependent_expr_handle(state, node_id, arg_handle, &mut env)? {
@@ -5048,11 +5229,15 @@ fn queue_child_expr_handle(
         },
         source: Some(resolved_source),
     });
+    let scheduled = ScheduledExpr {
+        expr,
+        env: env.clone(),
+    };
+    state
+        .scheduler
+        .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
     let work = state.scheduler.enqueue_ready_task(
-        ReadyTask::EvaluateExpr(ScheduledExpr {
-            expr,
-            env: env.clone(),
-        }),
+        ReadyTask::EvaluateExpr(scheduled),
         EvalWorkKind::EvaluateExpr,
         child_id,
         None,

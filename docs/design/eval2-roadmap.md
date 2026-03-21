@@ -286,9 +286,21 @@ Eval2 now has a first provisional seam here:
 2. repeated demand converges on that node inside one session
 3. keyed nodes are visible in graph snapshots/debug state
 
-That is useful, but it is not the end-state yet. In particular, dependent
-invalidation after a keyed result has already been consumed still needs to be
-made honest.
+That is useful, but it is not the end-state yet.
+
+Eval2 now has a first honest invalidation seam here too:
+
+1. retained expr/keyed dependents can be replayed when joined input widens
+2. already-consumed intermediate expressions can be recomputed against the
+   widened canonical keyed node
+3. stale superseded work is discarded instead of being allowed to overwrite the
+   newer replay
+
+What is still ahead:
+
+1. user-defined key/join semantics beyond the MVP array/equality rules
+2. parallel-safe widening across independently executing workers
+3. learned no-goods and search-frontier reuse on top of the keyed graph
 
 ### 5.2 Joinable Inputs
 
@@ -365,7 +377,6 @@ What is still missing:
 1. runtime-owned branch splitting / search frontier management
 2. exact search over alternatives
 3. branch-local conflict widening and no-good learning
-4. honest dependent invalidation after already-consumed keyed results
 
 This still corresponds to the "branch-local assumptions" section in
 [parallel-solver.md](/Users/amos/bearcove/vixen/docs/design/parallel-solver.md).
@@ -392,6 +403,13 @@ minimal:
 2. no learned no-goods yet
 3. no conflict widening yet
 4. no dominance-order comparison across multiple full solutions yet
+
+It is now also enough for a first tiny Cargo-shaped authored sketch:
+
+1. a package resolver can branch over candidate versions in Vixen code
+2. a shared keyed dependency can surface a structured conflict inside one branch
+3. exact search can backtrack from the incompatible newer candidate to an older
+   successful one without Rust-side package policy
 
 This keeps exact search generic and assumption-based without committing to
 `#[choose]` surface syntax prematurely.

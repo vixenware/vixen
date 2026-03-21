@@ -1659,6 +1659,69 @@ fn build() {
 }
 
 #[test]
+fn keyed_widening_replays_completed_dependent_exprs() {
+    let mut session = EvalSession::new(
+        r#"
+fn resolve_pkg(ctx) {
+  ctx.joined
+}
+
+fn build() {
+  let first = [keyed("logger", ["1.0.0"], resolve_pkg)];
+  let second = keyed("logger", ["1.1.0"], resolve_pkg);
+  [first, second]
+}
+"#,
+        "keyed-dependent-invalidation",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("evaluate keyed widening with completed dependents")
+    else {
+        panic!("expected ready keyed dependent invalidation result");
+    };
+    let ValueRep::Array(rows) = &value.rep else {
+        panic!(
+            "expected keyed dependent build to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(rows.len(), 2);
+
+    let ValueRep::Array(first_items) = &rows[0].rep else {
+        panic!(
+            "expected first dependent result to be an array, got {:?}",
+            rows[0].rep
+        );
+    };
+    assert_eq!(first_items.len(), 1);
+    let ValueRep::Array(first_joined) = &first_items[0].rep else {
+        panic!(
+            "expected first dependent inner result to be an array, got {:?}",
+            first_items[0].rep
+        );
+    };
+    assert_eq!(first_joined.len(), 2);
+    assert_eq!(first_joined[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(first_joined[1].rep, ValueRep::String("1.1.0".into()));
+
+    let ValueRep::Array(second_items) = &rows[1].rep else {
+        panic!(
+            "expected second keyed result to be an array, got {:?}",
+            rows[1].rep
+        );
+    };
+    assert_eq!(second_items.len(), 2);
+    assert_eq!(second_items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(second_items[1].rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
 fn keyed_demands_resume_cleanly_after_pending_resolution() {
     struct FirstPendingBoolRuntime {
         calls: Arc<AtomicUsize>,
