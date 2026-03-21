@@ -338,6 +338,7 @@ pub(super) fn eval_expr_with_node_id(
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
+        Expr::Prefix(prefix) => eval_prefix(state, prefix, env),
         Expr::Binary(binary) => eval_binary(state, binary, env),
         Expr::InterpolatedString(interpolated) => {
             eval_interpolated_string(state, interpolated, env)
@@ -604,7 +605,11 @@ pub(super) fn static_namespace_member_value(
 
 fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {
     match (&receiver.rep, field_name) {
+        (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Blob" => {
+            Some("Blob.utf8")
+        }
         (ValueRep::String(_), "len") => Some("String.len"),
+        (ValueRep::String(_), "is_empty") => Some("String.is_empty"),
         (ValueRep::String(_), "split_once") => Some("String.split_once"),
         (ValueRep::String(_), "slice") => Some("String.slice"),
         (ValueRep::String(_), "contains") => Some("String.contains"),
@@ -613,6 +618,9 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "to_lower") => Some("String.to_lower"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
+        (ValueRep::Array(_), "filter") => Some("Array.filter"),
+        (ValueRep::Array(_), "map") => Some("Array.map"),
+        (ValueRep::Array(_), "to_array") => Some("Array.to_array"),
         (ValueRep::Map(_), "get") => Some("Map.get"),
         (ValueRep::Map(_), "has") => Some("Map.has"),
         (ValueRep::Struct(StructValue { type_name, .. }), "unwrap_or")
@@ -1482,6 +1490,39 @@ pub(super) fn eval_binary(
     }
 }
 
+pub(super) fn eval_prefix(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prefix: &PrefixExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("prefix expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let operand = prefix.expr().ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "prefix expression has no operand")
+    })?;
+    let operator = prefix
+        .operator_token()
+        .map(|token| token.kind())
+        .ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
+        })?;
+    match eval_child_expr(state, &operand, env)? {
+        EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
+        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::PrefixOperand {
+                node_id,
+                parent_id,
+                operator,
+            },
+        )),
+    }
+}
+
 pub(super) fn continue_block_statements(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -2041,6 +2082,7 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Map(_) => EvalExprKind::Map,
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
+        Expr::Prefix(_) => EvalExprKind::Prefix,
         Expr::Binary(_) => EvalExprKind::Binary,
         Expr::InterpolatedString(_) => EvalExprKind::InterpolatedString,
         Expr::StructLiteral(_) => EvalExprKind::StructLiteral,
@@ -2158,6 +2200,27 @@ fn short_circuit_binary(lhs: &Value, operator: SyntaxKind) -> Result<Option<Valu
             Ok((*lhs).then(|| Value::bool(true)))
         }
         _ => Ok(None),
+    }
+}
+
+pub(super) fn apply_prefix_operator(
+    operator: SyntaxKind,
+    operand: Value,
+) -> Result<Value, EvalError> {
+    match operator {
+        SyntaxKind::BANG => {
+            let ValueRep::Bool(value) = operand.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "operand of ! must be Bool",
+                ));
+            };
+            Ok(Value::bool(!value).with_meta(operand.meta))
+        }
+        _ => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("prefix operator {operator:?} is not supported yet"),
+        )),
     }
 }
 

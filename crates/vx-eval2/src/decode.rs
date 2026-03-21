@@ -667,9 +667,13 @@ fn blob_text(blob: &Value, format: StructuredFormat) -> Result<String, EvalError
         ValueRep::External(external) if external.kind.as_ref() == "Blob" => {
             Ok(external.descriptor.to_string())
         }
+        ValueRep::String(text) => Ok(text.to_string()),
         _ => Err(EvalError::new(
             EvalErrorKind::TypeError,
-            format!("{} requires a Blob argument", format.display_name()),
+            format!(
+                "{} requires a Blob or String argument",
+                format.display_name()
+            ),
         )),
     }
 }

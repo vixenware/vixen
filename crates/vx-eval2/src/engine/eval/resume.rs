@@ -761,6 +761,17 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::PrefixOperand {
+            node_id,
+            parent_id,
+            operator,
+        } => {
+            let result = match input {
+                Ok(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::BinaryLhs {
             node_id,
             parent_id,
@@ -911,6 +922,75 @@ pub(in crate::engine) fn resume_frame(
                     step,
                     index + 1,
                 ),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayFilterAfterPredicate {
+            node_id,
+            parent_id,
+            items,
+            predicate,
+            mut kept,
+            index,
+        } => {
+            let result = match input {
+                Ok(result) => match result.rep {
+                    ValueRep::Bool(true) => {
+                        kept.push(
+                            items[index]
+                                .clone()
+                                .project(ProjectionStep::Index(index as u64)),
+                        );
+                        continue_array_filter_builtin(
+                            state,
+                            node_id,
+                            parent_id,
+                            items,
+                            predicate,
+                            kept,
+                            index + 1,
+                        )
+                    }
+                    ValueRep::Bool(false) => continue_array_filter_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        kept,
+                        index + 1,
+                    ),
+                    _ => Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.filter() predicate must return Bool",
+                    )),
+                },
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayMapAfterMapper {
+            node_id,
+            parent_id,
+            items,
+            mapper,
+            mut mapped,
+            index,
+        } => {
+            let result = match input {
+                Ok(value) => {
+                    mapped.push(value);
+                    continue_array_map_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        items,
+                        mapper,
+                        mapped,
+                        index + 1,
+                    )
+                }
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

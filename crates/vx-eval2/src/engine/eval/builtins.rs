@@ -267,6 +267,107 @@ pub(in crate::engine) fn continue_array_fold_builtin(
     Ok(EvalStep::Ready(accumulator))
 }
 
+pub(in crate::engine) fn continue_array_filter_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    predicate: FunctionRef,
+    mut kept: Vec<Value>,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..items.len() {
+        let item = items[index].clone();
+        let Some(prepared) =
+            prepare_function_call(state, &predicate, &[item.clone()], Some(node_id))?
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Array.filter() predicate must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => match result.rep {
+                ValueRep::Bool(true) => {
+                    kept.push(item.project(ProjectionStep::Index(index as u64)));
+                }
+                ValueRep::Bool(false) => {}
+                _ => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.filter() predicate must return Bool",
+                    ));
+                }
+            },
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayFilterAfterPredicate {
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        kept,
+                        index,
+                    },
+                ));
+            }
+        }
+    }
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<array-filter>")),
+        kept.iter(),
+    );
+    Ok(EvalStep::Ready(Value::array(kept).with_meta(meta)))
+}
+
+pub(in crate::engine) fn continue_array_map_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    mapper: FunctionRef,
+    mut mapped: Vec<Value>,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..items.len() {
+        let item = items[index].clone();
+        let Some(prepared) = prepare_function_call(state, &mapper, &[item], Some(node_id))? else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Array.map() mapper must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => mapped.push(result),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayMapAfterMapper {
+                        node_id,
+                        parent_id,
+                        items,
+                        mapper,
+                        mapped,
+                        index,
+                    },
+                ));
+            }
+        }
+    }
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<array-map>")),
+        mapped.iter(),
+    );
+    Ok(EvalStep::Ready(Value::array(mapped).with_meta(meta)))
+}
+
 pub(in crate::engine) fn branch_attempt_value(candidate: Value, error: EvalError) -> Value {
     let conflict = error
         .detail
@@ -540,7 +641,7 @@ pub(in crate::engine) fn continue_builtin_call(
             if args.len() != 1 {
                 return Err(EvalError::new(
                     EvalErrorKind::TypeError,
-                    format!("{callee_name}() requires one Blob argument"),
+                    format!("{callee_name}() requires one Blob or String argument"),
                 ));
             }
             if type_args.len() != 1 {
@@ -558,6 +659,29 @@ pub(in crate::engine) fn continue_builtin_call(
                 parse_blob_as_value(format, &args[0], &type_args[0], state.program.types())?;
             Ok(ready_builtin_value(value))
         }
+        "Blob.utf8" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob.utf8() requires receiver",
+                ));
+            }
+            let ValueRep::External(external) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob.utf8() receiver must evaluate to Blob",
+                ));
+            };
+            if external.kind.as_ref() != "Blob" {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob.utf8() receiver must evaluate to Blob",
+                ));
+            }
+            Ok(ready_builtin_value(
+                Value::string(external.descriptor.clone()).with_meta(args[0].meta.clone()),
+            ))
+        }
         "String.len" => {
             if args.len() != 1 {
                 return Err(EvalError::new(
@@ -573,6 +697,23 @@ pub(in crate::engine) fn continue_builtin_call(
             };
             Ok(ready_builtin_value(
                 Value::u64(text.len() as u64).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "String.is_empty" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.is_empty() requires receiver",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.is_empty() receiver must evaluate to String",
+                ));
+            };
+            Ok(ready_builtin_value(
+                Value::bool(text.is_empty()).with_meta(args[0].meta.clone()),
             ))
         }
         "String.split_once" => {
@@ -885,6 +1026,81 @@ pub(in crate::engine) fn continue_builtin_call(
                     "Option.unwrap_or() receiver must evaluate to Option",
                 )),
             }
+        }
+        "Array.filter" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter() requires receiver and predicate",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(predicate) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter() predicate must evaluate to a function value",
+                ));
+            };
+            continue_array_filter_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                predicate.clone(),
+                Vec::new(),
+                0,
+            )
+            .map(Some)
+        }
+        "Array.map" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.map() requires receiver and mapper",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.map() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(mapper) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.map() mapper must evaluate to a function value",
+                ));
+            };
+            continue_array_map_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                mapper.clone(),
+                Vec::new(),
+                0,
+            )
+            .map(Some)
+        }
+        "Array.to_array" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.to_array() requires receiver",
+                ));
+            }
+            let ValueRep::Array(_) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.to_array() receiver must evaluate to Array",
+                ));
+            };
+            Ok(ready_builtin_value(args[0].clone()))
         }
         "map_get" => {
             if args.len() != 2 {

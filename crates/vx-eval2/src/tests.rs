@@ -1244,6 +1244,54 @@ fn build(name: String) {
 }
 
 #[test]
+fn blob_utf8_method_returns_string_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(blob: Blob) {
+  blob.utf8()
+}
+"#,
+        "blob-utf8-method-runtime",
+        "build",
+        &[Value::external("Blob", "{\"name\":\"flate2\"}")],
+    )
+    .expect("evaluate Blob.utf8()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Blob.utf8() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("{\"name\":\"flate2\"}".into()));
+}
+
+#[test]
+fn json_parse_accepts_string_argument_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Release {
+  #[rename = "vers"]
+  version: String,
+}
+
+fn build(text: String) {
+  Json.parse[Release](text)
+}
+"#,
+        "json-parse-string-argument-runtime",
+        "build",
+        &[Value::string(r#"{"vers":"1.1.9"}"#)],
+    )
+    .expect("evaluate Json.parse from String");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Json.parse String result, got {resolution:?}");
+    };
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String("1.1.9".into())
+    );
+}
+
+#[test]
 fn string_contains_method_reports_presence_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1259,6 +1307,46 @@ fn build(name: String) {
 
     let Resolution::Ready(value) = resolution else {
         panic!("expected ready String.contains() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn string_is_empty_method_reports_empty_strings_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(text: String) {
+  text.is_empty()
+}
+"#,
+        "string-is-empty-method-runtime",
+        "build",
+        &[Value::string("")],
+    )
+    .expect("evaluate String.is_empty()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.is_empty() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn prefix_bang_negates_bool_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  !false
+}
+"#,
+        "prefix-bang-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate ! prefix");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready ! result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::Bool(true));
 }
@@ -1301,6 +1389,91 @@ fn build() {
         panic!("expected ready && result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::Bool(false));
+}
+
+#[test]
+fn array_filter_method_selects_matching_items_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.filter((item) => item.contains("at"))
+}
+"#,
+        "array-filter-method-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("flate2"),
+            Value::string("serde"),
+            Value::string("wat"),
+        ])],
+    )
+    .expect("evaluate Array.filter()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.filter() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Array.filter(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("wat".into()));
+}
+
+#[test]
+fn array_map_method_transforms_items_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.map((item) => item.to_lower())
+}
+"#,
+        "array-map-method-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+        ])],
+    )
+    .expect("evaluate Array.map()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.map() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Array.map(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("serde".into()));
+}
+
+#[test]
+fn array_to_array_method_returns_receiver_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.to_array()
+}
+"#,
+        "array-to-array-method-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("flate2"),
+            Value::string("serde"),
+        ])],
+    )
+    .expect("evaluate Array.to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.to_array() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Array.to_array(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("serde".into()));
 }
 
 #[test]

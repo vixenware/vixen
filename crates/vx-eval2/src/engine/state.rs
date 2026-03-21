@@ -215,6 +215,11 @@ pub(super) enum ContinuationFrame {
         else_branch: ExprHandle,
         env: EvalEnv,
     },
+    PrefixOperand {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        operator: SyntaxKind,
+    },
     BinaryLhs {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -258,6 +263,22 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,
         step: FunctionRef,
+        index: usize,
+    },
+    ArrayFilterAfterPredicate {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<Value>,
+        predicate: FunctionRef,
+        kept: Vec<Value>,
+        index: usize,
+    },
+    ArrayMapAfterMapper {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<Value>,
+        mapper: FunctionRef,
+        mapped: Vec<Value>,
         index: usize,
     },
     FieldReceiver {

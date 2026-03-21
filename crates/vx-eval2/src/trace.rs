@@ -23,6 +23,7 @@ pub enum EvalExprKind {
     Fail,
     If,
     Binary,
+    Prefix,
     InterpolatedString,
     StructLiteral,
     Field,
