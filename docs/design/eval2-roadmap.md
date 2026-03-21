@@ -280,6 +280,16 @@ We need a language-level way to state:
 This corresponds to `#[key]` in
 [parallel-solver.md](/Users/amos/bearcove/vixen/docs/design/parallel-solver.md).
 
+Eval2 now has a first provisional seam here:
+
+1. `keyed(key, joined, resolver)` creates a canonical keyed node
+2. repeated demand converges on that node inside one session
+3. keyed nodes are visible in graph snapshots/debug state
+
+That is useful, but it is not the end-state yet. In particular, dependent
+invalidation after a keyed result has already been consumed still needs to be
+made honest.
+
 ### 5.2 Joinable Inputs
 
 We need monotone widening, not imperative fixpoint loops.
@@ -297,6 +307,12 @@ The first implementation can be small:
 1. keyed memoization
 2. join-on-collision
 3. re-evaluate affected nodes when joined inputs widen
+
+The current MVP join surface is intentionally narrower than the target:
+
+1. array inputs widen by ordered dedup-union
+2. scalar inputs currently require equality
+3. user-defined join semantics per value type are still ahead
 
 That is already useful beyond Cargo:
 

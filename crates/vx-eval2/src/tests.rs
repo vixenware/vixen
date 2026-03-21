@@ -10,14 +10,14 @@ use std::{
 
 use crate::{
     Claim, CrossingPolicy, EvalBranchContext, EvalCompletedWorkOutcome, EvalDependencyEdge,
-    EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
-    EvalNodeId, EvalNodeKind, EvalNodeState, EvalProgram, EvalProgramImport, EvalProgramSource,
-    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, MapValue, PendingRef,
-    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
-    RuntimeInputKind, RuntimeReady, RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason,
-    SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
-    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
-    eval_source_entry_at_place_with_args_with_source_id,
+    EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal,
+    EvalKeyedNodeUpdateReason, EvalLeasedWorkState, EvalNodeId, EvalNodeKind, EvalNodeState,
+    EvalProgram, EvalProgramImport, EvalProgramSource, EvalSession, EvalSessionStep, EvalTrace,
+    EvalWorkKind, EvalWorkState, MapValue, PendingRef, ProjectionStep, Provenance, Resolution,
+    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
+    RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotId, SlotResolutionKind,
+    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
+    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, resolution_to_outcome, value_to_envelope,
@@ -1588,6 +1588,174 @@ fn build() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].0.rep, ValueRep::String("codec".into()));
     assert_eq!(entries[1].1.rep, ValueRep::String("codec".into()));
+}
+
+#[test]
+fn keyed_demands_join_array_inputs_and_share_one_canonical_node() {
+    let mut session = EvalSession::new(
+        r#"
+fn resolve_pkg(ctx) {
+  ctx.joined
+}
+
+fn build() {
+  [
+    keyed("logger", ["1.0.0"], resolve_pkg),
+    keyed("logger", ["1.1.0"], resolve_pkg),
+  ]
+}
+"#,
+        "keyed-join-basic",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    let Resolution::Ready(value) = session.run().expect("evaluate keyed joined demands") else {
+        panic!("expected ready keyed result");
+    };
+    let ValueRep::Array(rows) = &value.rep else {
+        panic!(
+            "expected keyed build to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(rows.len(), 2);
+    for row in rows.iter() {
+        let ValueRep::Array(items) = &row.rep else {
+            panic!(
+                "expected each keyed result to be an array, got {:?}",
+                row.rep
+            );
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+        assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+    }
+
+    let snapshot = session.graph_snapshot();
+    let keyed_nodes = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.keyed.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_nodes.len(), 1);
+    let keyed = keyed_nodes[0];
+    assert_eq!(keyed.resolver_name.as_ref(), "resolve_pkg");
+    assert_eq!(keyed.last_update, EvalKeyedNodeUpdateReason::JoinedWidened);
+    assert_eq!(keyed.revision, 2);
+    assert_eq!(keyed.evaluated_revision, Some(2));
+    let ValueRep::Array(items) = &keyed.joined.rep else {
+        panic!(
+            "expected keyed joined input to be an array, got {:?}",
+            keyed.joined.rep
+        );
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
+fn keyed_demands_resume_cleanly_after_pending_resolution() {
+    struct FirstPendingBoolRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for FirstPendingBoolRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_wait_bool") => {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for keyed resolver".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "keyed resolver ready",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = FirstPendingBoolRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn resolve_pkg(ctx) {
+  let _ready = host_wait_bool();
+  ctx.joined
+}
+
+fn build() {
+  [
+    keyed("logger", ["1.0.0"], resolve_pkg),
+    keyed("logger", ["1.1.0"], resolve_pkg),
+  ]
+}
+"#,
+        "keyed-join-pending",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start pending keyed demand") else {
+        panic!("expected pending keyed demand");
+    };
+    let snapshot = session.graph_snapshot();
+    let keyed = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.keyed.as_ref())
+        .next()
+        .expect("expected one keyed node in snapshot");
+    assert_eq!(keyed.revision, 2);
+    assert_eq!(keyed.active_revision, Some(2));
+
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve keyed pending runtime call");
+
+    let Resolution::Ready(value) = session.run().expect("resume keyed demand") else {
+        panic!("expected ready keyed demand after resume");
+    };
+    let ValueRep::Array(rows) = &value.rep else {
+        panic!(
+            "expected keyed build to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(rows.len(), 2);
+    for row in rows.iter() {
+        let ValueRep::Array(items) = &row.rep else {
+            panic!(
+                "expected each keyed result to be an array, got {:?}",
+                row.rep
+            );
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+        assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+    }
 }
 
 #[test]

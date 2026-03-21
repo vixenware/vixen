@@ -253,25 +253,46 @@ The remote daemon boundary is still stricter:
 That rule is intentional for now. The wire format still transports evaluator
 results, not executable closures.
 
-## Next authored resolver gap
+## First convergent-demand seam
 
-After slots, authored functions, closures, structs, fields, maps, simple
-authored equality, `map_get`, `map_put`, `map_entries`, `array_first`,
-`array_rest`, `array_push`, `array_find`, and `array_fold`, eval2 can now
-express a tiny slot-backed resolver selection, targeted map rewrite, and
-recursive no-op-safe refresh queue entirely in Vixen source.
+Eval2 now has a first explicit convergent-demand experiment:
 
-The remaining generic substrate gap is now narrower and more explicit:
+- `keyed(key, joined, resolver)` creates a canonical keyed node
+- repeated demand for the same key/resolver pair converges on that node
+- the current joined-input MVP is ordered dedup-union for array inputs
+- keyed nodes show up in graph snapshots with:
+  - key
+  - current joined input
+  - revision
+  - last update reason
 
-- richer collection transform / broader query building blocks over authored
-  data
-- enough selection/update surface to express non-trivial dependency walks
-  without falling back to Rust-side toy helpers
+That is the first real step away from authored manual worklists and toward the
+model described in `parallel-solver.md`.
 
-This does not require Cargo semantics, solver primitives, or a scheduler
-redesign. It does mean the next follow-on cut should identify the smallest
-authorable data-manipulation surface that lets resolver logic stay in Vixen
-instead of Rust.
+It is still intentionally incomplete.
+
+What this cut does prove:
+
+- authored Vixen can describe canonical demand instead of manually shuffling a
+  queue
+- joined input widening can happen at the evaluator level instead of in Rust
+  fixture policy
+- the node/work/session model can expose keyed demand as first-class
+  debugger-visible state
+
+What it does not yet prove:
+
+- general dependent invalidation after a keyed node has already been consumed
+- user-defined join semantics per value type
+- structured conflict capture
+- branch-local assumptions
+- parallel-safe keyed widening across independently executing workers
+
+So the next solver-shaped pressure is no longer "more worklist helpers". It is:
+
+- make keyed invalidation/re-evaluation honest
+- add structured conflicts
+- then add branch-local assumption semantics
 
 ## What this does not do yet
 

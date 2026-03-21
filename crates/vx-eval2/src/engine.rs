@@ -112,6 +112,7 @@ impl EvalBranchContext {
 pub enum EvalWorkKind {
     StartEntry,
     EvaluateExpr,
+    EvaluateKeyed,
     ResumePending,
 }
 
@@ -192,6 +193,7 @@ pub enum EvalNodeKind {
     SyntheticRoot,
     ArgumentBinding { label: Arc<str> },
     Expr { kind: EvalExprKind },
+    Keyed { resolver: Arc<str>, key: Value },
     PendingToken { description: Arc<str> },
 }
 
@@ -201,6 +203,51 @@ pub struct EvalNodeRecord {
     pub parent_id: Option<EvalNodeId>,
     pub kind: EvalNodeKind,
     pub source: Option<SourceSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalKeyedNodeUpdateReason {
+    Created,
+    JoinedWidened,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalKeyedNode {
+    pub node_id: EvalNodeId,
+    pub resolver_name: Arc<str>,
+    pub key: Value,
+    pub joined: Value,
+    pub revision: u64,
+    pub active_revision: Option<u64>,
+    pub evaluated_revision: Option<u64>,
+    pub last_update: EvalKeyedNodeUpdateReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyedNodeMemo {
+    node_id: EvalNodeId,
+    resolver: FunctionRef,
+    key: Value,
+    joined: Value,
+    revision: u64,
+    active_revision: Option<u64>,
+    evaluated_revision: Option<u64>,
+    last_update: EvalKeyedNodeUpdateReason,
+}
+
+impl KeyedNodeMemo {
+    fn public(&self) -> EvalKeyedNode {
+        EvalKeyedNode {
+            node_id: self.node_id,
+            resolver_name: self.resolver.name.clone(),
+            key: self.key.clone(),
+            joined: self.joined.clone(),
+            revision: self.revision,
+            active_revision: self.active_revision,
+            evaluated_revision: self.evaluated_revision,
+            last_update: self.last_update.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +306,7 @@ pub struct EvalRunnableNode {
 pub struct EvalGraphNode {
     pub node_id: EvalNodeId,
     pub record: Option<EvalNodeRecord>,
+    pub keyed: Option<EvalKeyedNode>,
     pub state: Option<EvalNodeState>,
     pub dependencies: Vec<EvalNodeId>,
     pub dependents: Vec<EvalNodeId>,
@@ -317,6 +365,7 @@ struct EvalSchedulerDelta {
     next_id: u64,
     next_work_id: u64,
     node_records: Vec<EvalNodeRecord>,
+    keyed_nodes: Vec<KeyedNodeMemo>,
     node_states: Vec<(EvalNodeId, EvalNodeState)>,
     dependency_edges: Vec<EvalDependencyEdge>,
     queued: Vec<ReadyTaskRecord>,
@@ -789,6 +838,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .copied()
             .collect::<Vec<_>>();
         node_ids.extend(self.scheduler.node_states.keys().copied());
+        node_ids.extend(self.scheduler.keyed_nodes.keys().copied());
         for edge in &self.scheduler.dependency_edges {
             node_ids.push(edge.parent);
             node_ids.push(edge.child);
@@ -805,6 +855,12 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 .push(edge.child);
             dependents.entry(edge.child).or_default().push(edge.parent);
         }
+        let mut keyed_nodes = self
+            .scheduler
+            .keyed_nodes
+            .iter()
+            .map(|(node_id, memo)| (*node_id, memo.public()))
+            .collect::<BTreeMap<_, _>>();
 
         EvalGraphSnapshot {
             branch_context: self.branch_context.clone(),
@@ -813,6 +869,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 .map(|node_id| EvalGraphNode {
                     node_id,
                     record: self.scheduler.node_record(node_id).cloned(),
+                    keyed: keyed_nodes.remove(&node_id),
                     state: self.scheduler.node_state(node_id).cloned(),
                     dependencies: dependencies.remove(&node_id).unwrap_or_default(),
                     dependents: dependents.remove(&node_id).unwrap_or_default(),
@@ -962,10 +1019,17 @@ fn commit_completion(
 ) -> Result<EvalSessionStep, EvalError> {
     trace.events.extend(completion.delta.trace_events);
     scheduler.apply_delta(completion.delta.scheduler)?;
+    let keyed_stale = matches!(
+        completion.outcome,
+        EvalCompletedWorkOutcome::Ready(_) | EvalCompletedWorkOutcome::Poison(_)
+    ) && scheduler.finalize_keyed_completion(completion.work.node_id)?;
     completed_work.push(EvalCompletedWork {
         work: completion.work.clone(),
         outcome: completion.outcome.clone(),
     });
+    if keyed_stale {
+        return Ok(EvalSessionStep::Progressed);
+    }
     match completion.outcome {
         EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
             Ok(EvalSessionStep::Progressed)
@@ -1304,12 +1368,13 @@ struct EvalScheduler {
     lease_namespace: Option<LeaseNamespace>,
     node_states: BTreeMap<EvalNodeId, EvalNodeState>,
     node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
+    keyed_nodes: BTreeMap<EvalNodeId, KeyedNodeMemo>,
     dependency_edges: Vec<EvalDependencyEdge>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
     buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
-    pending_resumes: BTreeMap<u64, EvalSuspension>,
+    pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
     pending_kinds: BTreeMap<u64, PendingKind>,
 }
 
@@ -1327,6 +1392,7 @@ impl Default for EvalScheduler {
             lease_namespace: None,
             node_states: BTreeMap::new(),
             node_records: BTreeMap::new(),
+            keyed_nodes: BTreeMap::new(),
             dependency_edges: Vec::new(),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
@@ -1387,6 +1453,7 @@ struct ScheduledExpr {
 enum ReadyTask {
     StartEntry,
     EvaluateExpr(ScheduledExpr),
+    EvaluateKeyed(EvalNodeId),
     Resume(ScheduledResume),
 }
 
@@ -1962,14 +2029,14 @@ impl EvalScheduler {
     fn pending_nodes(&self) -> Vec<PendingRef> {
         self.pending_resumes
             .values()
-            .filter(|suspension| {
+            .filter_map(|suspensions| {
+                let suspension = suspensions.first()?;
                 matches!(
                     self.pending_kinds.get(&suspension.pending.node_id),
                     Some(PendingKind::External)
                 )
+                .then(|| suspension.pending.clone())
             })
-            .map(|suspension| &suspension.pending)
-            .cloned()
             .collect()
     }
 
@@ -2008,6 +2075,162 @@ impl EvalScheduler {
 
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.node_states.get(&node_id)
+    }
+
+    fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
+        self.keyed_nodes.get(&node_id)
+    }
+
+    fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
+        self.keyed_nodes.get_mut(&node_id)
+    }
+
+    fn find_keyed_node(
+        &self,
+        resolver: &FunctionRef,
+        key: &Value,
+    ) -> Result<Option<EvalNodeId>, EvalError> {
+        self.keyed_nodes
+            .iter()
+            .find_map(|(node_id, memo)| {
+                if memo.resolver == *resolver {
+                    Some(
+                        values_equal(&memo.key.rep, &key.rep)
+                            .map(|equal| equal.then_some(*node_id)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .transpose()
+            .map(|found| found.flatten())
+    }
+
+    fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
+        self.ready_tasks.contains_key(&work_id)
+    }
+
+    fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+        if !self.keyed_nodes.contains_key(&node_id) {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("keyed node {:?} is not registered", node_id),
+            ));
+        }
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateKeyed(node_id),
+            EvalWorkKind::EvaluateKeyed,
+            node_id,
+            None,
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        let keyed = self
+            .keyed_nodes
+            .get_mut(&node_id)
+            .expect("keyed node must still exist");
+        keyed.active_revision = Some(keyed.revision);
+        keyed.evaluated_revision = None;
+        Ok(())
+    }
+
+    fn demand_keyed_node(
+        &mut self,
+        resolver: FunctionRef,
+        key: Value,
+        joined: Value,
+        source: SourceSpan,
+    ) -> Result<EvalNodeId, EvalError> {
+        if let Some(node_id) = self.find_keyed_node(&resolver, &key)? {
+            let mut widened = false;
+            {
+                let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
+                let (next_joined, did_widen) = join_keyed_input(&memo.joined, &joined)?;
+                if did_widen {
+                    memo.joined = next_joined;
+                    memo.revision += 1;
+                    memo.last_update = EvalKeyedNodeUpdateReason::JoinedWidened;
+                    widened = true;
+                }
+            }
+
+            if widened {
+                match self.node_state(node_id).cloned() {
+                    Some(EvalNodeState::Runnable { work, .. }) if self.work_is_queued(work) => {
+                        let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
+                        memo.active_revision = Some(memo.revision);
+                    }
+                    Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_)) | None => {
+                        self.enqueue_keyed_work(node_id)?;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(node_id);
+        }
+
+        let node_id = self.alloc_node_id();
+        self.record_node(EvalNodeRecord {
+            node_id,
+            parent_id: None,
+            kind: EvalNodeKind::Keyed {
+                resolver: resolver.name.clone(),
+                key: key.clone(),
+            },
+            source: Some(source),
+        });
+        self.keyed_nodes.insert(
+            node_id,
+            KeyedNodeMemo {
+                node_id,
+                resolver,
+                key,
+                joined,
+                revision: 1,
+                active_revision: None,
+                evaluated_revision: None,
+                last_update: EvalKeyedNodeUpdateReason::Created,
+            },
+        );
+        self.enqueue_keyed_work(node_id)?;
+        Ok(node_id)
+    }
+
+    fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError> {
+        let Some((active_revision, current_revision)) = self
+            .keyed_nodes
+            .get(&node_id)
+            .map(|memo| (memo.active_revision, memo.revision))
+        else {
+            return Ok(false);
+        };
+        let Some(active_revision) = active_revision else {
+            return Ok(false);
+        };
+        if active_revision < current_revision {
+            self.enqueue_keyed_work(node_id)?;
+            return Ok(true);
+        }
+        let memo = self
+            .keyed_nodes
+            .get_mut(&node_id)
+            .expect("keyed node must exist");
+        memo.evaluated_revision = Some(active_revision);
+        memo.active_revision = None;
+        Ok(false)
+    }
+
+    fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>> {
+        match self.node_state(node_id)? {
+            EvalNodeState::Ready(value) => Some(Ok(value.clone())),
+            EvalNodeState::Poison(error) => Some(Err(error.clone())),
+            _ => None,
+        }
     }
 
     fn explain_node(&self, node_id: EvalNodeId) -> EvalNodeExplanation {
@@ -2103,39 +2326,54 @@ impl EvalScheduler {
         pending_id: u64,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
-        let Some(suspension) = self.pending_resumes.remove(&pending_id) else {
+        let Some(suspensions) = self.pending_resumes.remove(&pending_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 format!("pending node {pending_id} is not registered"),
             ));
         };
+        let Some(pending) = suspensions
+            .first()
+            .map(|suspension| suspension.pending.clone())
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("pending node {pending_id} had no registered suspensions"),
+            ));
+        };
         self.pending_kinds.remove(&pending_id);
-        let pending = suspension.pending.clone();
         let node_id = EvalNodeId(pending.node_id);
-        let resume_node = suspension.resume_node;
         match &result {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
-        let work = self.enqueue_ready_task(
-            ReadyTask::Resume(ScheduledResume { suspension, result }),
-            EvalWorkKind::ResumePending,
-            resume_node,
-            Some(pending.clone()),
-        );
-        self.record_node_state(
-            resume_node,
-            EvalNodeState::Runnable {
-                work: work.id,
-                pending: Some(pending.clone()),
-            },
-        );
+        for suspension in suspensions {
+            let resume_node = suspension.resume_node;
+            let work = self.enqueue_ready_task(
+                ReadyTask::Resume(ScheduledResume {
+                    suspension,
+                    result: result.clone(),
+                }),
+                EvalWorkKind::ResumePending,
+                resume_node,
+                Some(pending.clone()),
+            );
+            self.record_node_state(
+                resume_node,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: Some(pending.clone()),
+                },
+            );
+        }
         Ok(())
     }
 
     fn register_suspension(&mut self, suspension: EvalSuspension) {
         self.pending_resumes
-            .insert(suspension.pending.node_id, suspension);
+            .entry(suspension.pending.node_id)
+            .or_default()
+            .push(suspension);
     }
 
     fn lease_ready_task(&mut self) -> Result<Option<ReadyTaskLease>, EvalError> {
@@ -2280,6 +2518,14 @@ impl EvalScheduler {
                 }
             }
         }
+        for keyed in delta.keyed_nodes {
+            match self.keyed_nodes.get_mut(&keyed.node_id) {
+                Some(existing) => merge_keyed_node(existing, keyed)?,
+                None => {
+                    self.keyed_nodes.insert(keyed.node_id, keyed);
+                }
+            }
+        }
         self.dependency_edges.extend(delta.dependency_edges);
         for (pending_id, kind) in delta.pending_kinds {
             match self.pending_kinds.get(&pending_id) {
@@ -2299,20 +2545,9 @@ impl EvalScheduler {
             }
         }
         for (pending_id, suspension) in delta.pending_resumes {
-            match self.pending_resumes.get(&pending_id) {
-                Some(existing) if existing != &suspension => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!(
-                            "pending resume {} diverged during completion merge",
-                            pending_id
-                        ),
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    self.pending_resumes.insert(pending_id, suspension);
-                }
+            let suspensions = self.pending_resumes.entry(pending_id).or_default();
+            if !suspensions.contains(&suspension) {
+                suspensions.push(suspension);
             }
         }
         for (node_id, state) in delta.node_states {
@@ -2392,6 +2627,14 @@ impl EvalSchedulerDelta {
                     .then(|| (*node_id, state.clone()))
             })
             .collect();
+        let keyed_nodes = after
+            .keyed_nodes
+            .iter()
+            .filter_map(|(node_id, keyed)| {
+                (!matches!(before.keyed_nodes.get(node_id), Some(existing) if existing == keyed))
+                    .then(|| keyed.clone())
+            })
+            .collect();
         let dependency_edges = after.dependency_edges[before.dependency_edges.len()..].to_vec();
         let queued = after
             .ready_queue
@@ -2402,9 +2645,15 @@ impl EvalSchedulerDelta {
         let pending_resumes = after
             .pending_resumes
             .iter()
-            .filter_map(|(pending_id, suspension)| {
-                (!matches!(before.pending_resumes.get(pending_id), Some(existing) if existing == suspension))
-                    .then(|| (*pending_id, suspension.clone()))
+            .flat_map(|(pending_id, suspensions)| {
+                let before_suspensions = before.pending_resumes.get(pending_id);
+                suspensions
+                    .iter()
+                    .filter(move |suspension| {
+                        !before_suspensions.is_some_and(|existing| existing.contains(suspension))
+                    })
+                    .cloned()
+                    .map(|suspension| (*pending_id, suspension))
             })
             .collect();
         let pending_kinds = after
@@ -2419,6 +2668,7 @@ impl EvalSchedulerDelta {
             next_id: after.next_id,
             next_work_id: after.next_work_id,
             node_records,
+            keyed_nodes,
             node_states,
             dependency_edges,
             queued,
@@ -2516,6 +2766,42 @@ fn execute_ready_task(
                         Some(PendingKind::ChildDependency { dependency }) => {
                             state.scheduler.record_node_state(
                                 record.work.node_id,
+                                EvalNodeState::BlockedOnNode { dependency },
+                            );
+                            EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                        }
+                        None => {
+                            return Err(EvalError::new(
+                                EvalErrorKind::Internal,
+                                format!("pending node {} has no registered kind", pending.node_id),
+                            ));
+                        }
+                    }
+                }
+                Err(error) => EvalCompletedWorkOutcome::Poison(error),
+            }
+        }
+        ReadyTask::EvaluateKeyed(node_id) => {
+            let prepared = prepare_keyed_call(&mut state, node_id)?;
+            let mut env = prepared.env;
+            match state.with_source(prepared.source, |state| {
+                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            }) {
+                Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
+                Ok(EvalStep::Suspended(suspension)) => {
+                    let pending = suspension.pending.clone();
+                    state.scheduler.register_suspension(suspension);
+                    match state.scheduler.pending_kind(&pending) {
+                        Some(PendingKind::External) => {
+                            state.scheduler.record_node_state(
+                                node_id,
+                                EvalNodeState::Pending(pending.clone()),
+                            );
+                            EvalCompletedWorkOutcome::Pending(pending)
+                        }
+                        Some(PendingKind::ChildDependency { dependency }) => {
+                            state.scheduler.record_node_state(
+                                node_id,
                                 EvalNodeState::BlockedOnNode { dependency },
                             );
                             EvalCompletedWorkOutcome::BlockedOnNode(dependency)
@@ -2756,6 +3042,40 @@ fn prepare_function_call(
         body: state.program.resolve_expr(body)?,
         env,
     }))
+}
+
+fn keyed_context_value(key: Value, joined: Value) -> Value {
+    let fields = vec![(Arc::from("key"), key), (Arc::from("joined"), joined)];
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<keyed-context>")),
+        fields.iter().map(|(_, value)| value),
+    );
+    Value::structure("KeyedContext", fields).with_meta(meta)
+}
+
+fn prepare_keyed_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+) -> Result<PreparedEntry, EvalError> {
+    let (resolver, key, joined) = {
+        let memo = state.scheduler.keyed_node(node_id).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("keyed node {:?} is not registered", node_id),
+            )
+        })?;
+        (memo.resolver.clone(), memo.key.clone(), memo.joined.clone())
+    };
+    let resolver_context = keyed_context_value(key, joined);
+    let Some(prepared) =
+        prepare_function_call(state, &resolver, &[resolver_context], Some(node_id))?
+    else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "keyed() resolver must be a bodyful Vixen function",
+        ));
+    };
+    Ok(prepared)
 }
 
 fn evaluate_entry_once(
@@ -3137,6 +3457,28 @@ fn slot_builtin_action(
         action,
         resolver.clone(),
     )))
+}
+
+fn keyed_builtin_action(
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<(Value, Value, FunctionRef)>, EvalError> {
+    if callee_name != "keyed" {
+        return Ok(None);
+    }
+    if args.len() != 3 {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "keyed() requires key, joined input, and resolver",
+        ));
+    }
+    let ValueRep::Function(resolver) = &args[2].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "keyed() resolver must evaluate to a function value",
+        ));
+    };
+    Ok(Some((args[0].clone(), args[1].clone(), resolver.clone())))
 }
 
 fn ready_builtin_value(value: Value) -> Option<EvalStep> {
@@ -3588,6 +3930,67 @@ fn continue_slot_builtin(
     }
 }
 
+fn continue_keyed_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    _parent_id: Option<EvalNodeId>,
+    call_source: SourceSpan,
+    key: Value,
+    joined: Value,
+    resolver: FunctionRef,
+) -> Result<EvalStep, EvalError> {
+    let keyed_node_id =
+        state
+            .scheduler
+            .demand_keyed_node(resolver, key, joined, call_source.clone())?;
+    state.emit_current_dependency(keyed_node_id, Some(call_source.clone()));
+
+    if let Some(result) = state.scheduler.keyed_resolution(keyed_node_id) {
+        return result.map(EvalStep::Ready);
+    }
+
+    if !state.queue_child_work {
+        let prepared = prepare_keyed_call(state, keyed_node_id)?;
+        let mut env = prepared.env;
+        return match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, keyed_node_id, &prepared.body, &mut env)
+        }) {
+            Ok(EvalStep::Ready(value)) => {
+                state
+                    .scheduler
+                    .record_node_state(keyed_node_id, EvalNodeState::Ready(value.clone()));
+                let _ = state.scheduler.finalize_keyed_completion(keyed_node_id)?;
+                Ok(EvalStep::Ready(value))
+            }
+            Ok(EvalStep::Suspended(suspension)) => {
+                let pending = suspension.pending.clone();
+                state.scheduler.register_suspension(suspension);
+                state
+                    .scheduler
+                    .record_node_state(keyed_node_id, EvalNodeState::Pending(pending.clone()));
+                Ok(EvalStep::Suspended(EvalSuspension {
+                    resume_node: node_id,
+                    pending,
+                    frames: Vec::new(),
+                }))
+            }
+            Err(error) => {
+                state
+                    .scheduler
+                    .record_node_state(keyed_node_id, EvalNodeState::Poison(error.clone()));
+                Err(error)
+            }
+        };
+    }
+
+    Ok(wait_on_child_dependency(
+        state,
+        node_id,
+        keyed_node_id,
+        Vec::new(),
+    ))
+}
+
 fn continue_call_from_args(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -3641,6 +4044,17 @@ fn continue_call_from_args(
             slot_id,
             witness,
             action,
+            resolver,
+        );
+    }
+    if let Some((key, joined, resolver)) = keyed_builtin_action(&callee_name, &args)? {
+        return continue_keyed_builtin(
+            state,
+            node_id,
+            parent_id,
+            call_source,
+            key,
+            joined,
             resolver,
         );
     }
@@ -4411,6 +4825,12 @@ fn resume_suspension(
     result: Result<Value, EvalError>,
 ) -> Result<EvalStep, EvalError> {
     let mut current = result;
+    let resume_node = suspension.resume_node;
+    let parent_id = state
+        .scheduler
+        .node_records
+        .get(&resume_node)
+        .and_then(|record| record.parent_id);
     let frames = suspension.frames;
     let mut index = 0;
     while index < frames.len() {
@@ -4424,6 +4844,12 @@ fn resume_suspension(
             }
         }
         index += 1;
+    }
+    if frames.is_empty() {
+        match &current {
+            Ok(value) => record_ready_step(state, resume_node, parent_id, value),
+            Err(error) => record_poison_step(state, resume_node, parent_id, error),
+        }
     }
     match current {
         Ok(value) => Ok(EvalStep::Ready(value)),
@@ -5123,6 +5549,85 @@ fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalError> {
         )),
         _ => Ok(false),
     }
+}
+
+fn join_keyed_input(existing: &Value, incoming: &Value) -> Result<(Value, bool), EvalError> {
+    match (&existing.rep, &incoming.rep) {
+        (ValueRep::Array(existing_items), ValueRep::Array(incoming_items)) => {
+            let mut items = existing_items.iter().cloned().collect::<Vec<_>>();
+            let mut widened = false;
+            for item in incoming_items.iter() {
+                let mut already_present = false;
+                for existing in &items {
+                    if values_equal(&existing.rep, &item.rep)? {
+                        already_present = true;
+                        break;
+                    }
+                }
+                if !already_present {
+                    items.push(item.clone());
+                    widened = true;
+                }
+            }
+            let meta = aggregate_array_items_meta(existing.meta.provenance.clone(), items.iter());
+            Ok((Value::array(items).with_meta(meta), widened))
+        }
+        _ => {
+            let equal = values_equal(&existing.rep, &incoming.rep)?;
+            if equal {
+                Ok((existing.clone(), false))
+            } else {
+                Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "keyed() joined input must widen monotonically",
+                ))
+            }
+        }
+    }
+}
+
+fn merge_keyed_node(
+    existing: &mut KeyedNodeMemo,
+    incoming: KeyedNodeMemo,
+) -> Result<(), EvalError> {
+    if existing.resolver != incoming.resolver {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "keyed node {:?} diverged during completion merge",
+                incoming.node_id
+            ),
+        ));
+    }
+    if !values_equal(&existing.key.rep, &incoming.key.rep)? {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "keyed node {:?} changed key during completion merge",
+                incoming.node_id
+            ),
+        ));
+    }
+    let incoming_revision = incoming.revision;
+    let (joined, _) = join_keyed_input(&existing.joined, &incoming.joined)?;
+    existing.joined = joined;
+    if incoming_revision >= existing.revision {
+        existing.last_update = incoming.last_update;
+    }
+    existing.revision = existing.revision.max(incoming_revision);
+    existing.active_revision = match (existing.active_revision, incoming.active_revision) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left @ Some(_), None) => left,
+        (None, right @ Some(_)) => right,
+        (None, None) => None,
+    };
+    existing.evaluated_revision = match (existing.evaluated_revision, incoming.evaluated_revision) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left @ Some(_), None) => left,
+        (None, right @ Some(_)) => right,
+        (None, None) => None,
+    };
+    Ok(())
 }
 
 fn aggregate_child_meta<'a>(
