@@ -623,6 +623,139 @@ fn build() {
 }
 
 #[test]
+fn array_find_returns_first_matching_element() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn is_codec(value: String) {
+  value == "codec"
+}
+
+fn build() {
+  array_find(["logger", "codec", "codec"], is_codec)
+}
+"#,
+        "array-find-first-match",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_find first match");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_find result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("codec".into()));
+}
+
+#[test]
+fn array_find_closure_predicate_captures_outer_binding() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  let target = "codec";
+  array_find(["logger", "codec", "codec"], ((value) => value == target))
+}
+"#,
+        "array-find-captured-closure",
+        "build",
+        &[],
+    )
+    .expect("evaluate array_find captured closure");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array_find closure result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("codec".into()));
+}
+
+#[test]
+fn array_find_returns_clear_error_for_no_match() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_find([1, 2], ((value) => value == 9))
+}
+"#,
+        "array-find-no-match",
+        "build",
+        &[],
+    )
+    .expect_err("array_find no match should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_find() found no matching element")
+    );
+}
+
+#[test]
+fn array_find_requires_array_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_find("not an array", ((value) => true))
+}
+"#,
+        "array-find-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_find non-array first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_find() first argument must evaluate to an array")
+    );
+}
+
+#[test]
+fn array_find_requires_function_as_second_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_find([1, 2], "not a function")
+}
+"#,
+        "array-find-second-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("array_find non-function second argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_find() second argument must evaluate to a function value")
+    );
+}
+
+#[test]
+fn array_find_requires_bool_predicate_results() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  array_find([1], ((value) => value))
+}
+"#,
+        "array-find-predicate-bool",
+        "build",
+        &[],
+    )
+    .expect_err("array_find non-bool predicate should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("array_find() predicate must return Bool")
+    );
+}
+
+#[test]
 fn function_values_do_not_support_authored_equality() {
     let error = eval_source_entry_with_args_with_source_id(
         r#"

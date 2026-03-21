@@ -1545,6 +1545,13 @@ enum ContinuationFrame {
         child_nodes: Vec<EvalNodeId>,
         struct_source: SourceSpan,
     },
+    ArrayFindAfterPredicate {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<Value>,
+        predicate: FunctionRef,
+        index: usize,
+    },
     FieldReceiver {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -3125,7 +3132,74 @@ fn slot_builtin_action(
     )))
 }
 
-fn eval_builtin_call(callee_name: &str, args: &[Value]) -> Result<Option<Value>, EvalError> {
+fn ready_builtin_value(value: Value) -> Option<EvalStep> {
+    Some(EvalStep::Ready(value))
+}
+
+fn continue_array_find_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    predicate: FunctionRef,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..items.len() {
+        let item = items[index].clone();
+        let Some(prepared) =
+            prepare_function_call(state, &predicate, &[item.clone()], Some(node_id))?
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "array_find() predicate must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        let matched = match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => result,
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayFindAfterPredicate {
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        index,
+                    },
+                ));
+            }
+        };
+        match matched.rep {
+            ValueRep::Bool(true) => {
+                return Ok(EvalStep::Ready(
+                    item.project(ProjectionStep::Index(index as u64)),
+                ));
+            }
+            ValueRep::Bool(false) => {}
+            _ => {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_find() predicate must return Bool",
+                ));
+            }
+        }
+    }
+    Err(EvalError::new(
+        EvalErrorKind::TypeError,
+        "array_find() found no matching element",
+    ))
+}
+
+fn continue_builtin_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<EvalStep>, EvalError> {
     match callee_name {
         "map_get" => {
             if args.len() != 2 {
@@ -3154,7 +3228,7 @@ fn eval_builtin_call(callee_name: &str, args: &[Value]) -> Result<Option<Value>,
             if let ValueRep::String(key) = &key.rep {
                 value = value.project(ProjectionStep::MapKey(key.to_string()));
             }
-            Ok(Some(value))
+            Ok(ready_builtin_value(value))
         }
         "map_put" => {
             if args.len() != 3 {
@@ -3183,7 +3257,36 @@ fn eval_builtin_call(callee_name: &str, args: &[Value]) -> Result<Option<Value>,
             if !replaced {
                 entries.push((key.clone(), value.clone()));
             }
-            Ok(Some(Value::map(entries)))
+            Ok(ready_builtin_value(Value::map(entries)))
+        }
+        "array_find" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_find() requires array and predicate",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_find() first argument must evaluate to an array",
+                ));
+            };
+            let ValueRep::Function(predicate) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "array_find() second argument must evaluate to a function value",
+                ));
+            };
+            continue_array_find_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                predicate.clone(),
+                0,
+            )
+            .map(Some)
         }
         _ => Ok(None),
     }
@@ -3358,8 +3461,8 @@ fn continue_call_from_args(
             resolver,
         );
     }
-    if let Some(value) = eval_builtin_call(&callee_name, &args)? {
-        return Ok(EvalStep::Ready(value));
+    if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
+        return Ok(step);
     }
     state.emit(
         node_id,
@@ -4643,6 +4746,37 @@ fn resume_frame(
                         Value::structure(type_name, fields).with_meta(meta),
                     ))
                 }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayFindAfterPredicate {
+            node_id,
+            parent_id,
+            items,
+            predicate,
+            index,
+        } => {
+            let result = match input {
+                Ok(result) => match result.rep {
+                    ValueRep::Bool(true) => Ok(EvalStep::Ready(
+                        items[index]
+                            .clone()
+                            .project(ProjectionStep::Index(index as u64)),
+                    )),
+                    ValueRep::Bool(false) => continue_array_find_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        index + 1,
+                    ),
+                    _ => Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "array_find() predicate must return Bool",
+                    )),
+                },
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
