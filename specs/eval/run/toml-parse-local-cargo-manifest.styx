@@ -1,0 +1,38 @@
+main <<VX,vx
+struct Package {
+  name: String,
+  version: String,
+  edition: String,
+  publish: Bool,
+}
+
+struct Manifest {
+  package: Package,
+}
+
+fn build() {
+  let manifest = Toml.parse[Manifest](read_file("../../../xtask/Cargo.toml"));
+  manifest.package
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @struct{
+    type Package
+    fields {
+      name @string"xtask"
+      version @string"0.1.0"
+      edition @string"2024"
+      publish @bool"false"
+    }
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

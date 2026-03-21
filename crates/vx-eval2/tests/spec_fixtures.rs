@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
     Arc, Mutex,
@@ -73,6 +73,7 @@ async fn run_case(
                 let runtime = FixtureRuntime::with_slots(
                     invocation.invoke.runtime.clone(),
                     Arc::clone(&slots),
+                    case.dir.clone(),
                 );
                 run_case_local(case, invocation, &runtime)
             })
@@ -387,6 +388,7 @@ fn string_literal(value: &str) -> String {
 struct FixtureRuntime {
     spec: RuntimeSpec,
     slots: Arc<Mutex<FixtureSlotStore>>,
+    root_dir: PathBuf,
 }
 
 type FixtureSlotStore = SlotStore<Value, Value, (), Value>;
@@ -414,8 +416,20 @@ struct ToyConstraintPropagation {
 }
 
 impl FixtureRuntime {
-    fn with_slots(spec: RuntimeSpec, slots: Arc<Mutex<FixtureSlotStore>>) -> Self {
-        Self { spec, slots }
+    fn with_slots(
+        spec: RuntimeSpec,
+        slots: Arc<Mutex<FixtureSlotStore>>,
+        root_dir: PathBuf,
+    ) -> Self {
+        Self {
+            spec,
+            slots,
+            root_dir,
+        }
+    }
+
+    fn local_file_path(&self, path: &str) -> PathBuf {
+        self.root_dir.join(path)
     }
 
     fn place(&self, place: &str) -> Result<&PlaceSpec, EvalError> {
@@ -1094,6 +1108,39 @@ impl RuntimeHooks for FixtureRuntime {
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
         match callee {
+            "read_file" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() argument must evaluate to String",
+                    ));
+                };
+                let path_string = path.to_string();
+                let full_path = self.local_file_path(path.as_ref());
+                let contents = std::fs::read_to_string(&full_path).map_err(|error| {
+                    EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("read_file() failed for {}: {error}", full_path.display()),
+                    )
+                })?;
+                let content_hash = hash_string(&contents);
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Read {
+                            path: path_string,
+                            content_hash,
+                        }),
+                ))
+            }
             "slot_current_pure" => {
                 if args.len() != 3 {
                     return Err(EvalError::new(
@@ -1565,8 +1612,11 @@ async fn run_case_via_rpc(
     let mut cached = Vec::new();
     let mut outcomes = Vec::with_capacity(invocations.len());
     for invocation in invocations {
-        let runtime =
-            FixtureRuntime::with_slots(invocation.invoke.runtime.clone(), Arc::clone(&slots));
+        let runtime = FixtureRuntime::with_slots(
+            invocation.invoke.runtime.clone(),
+            Arc::clone(&slots),
+            case.dir.clone(),
+        );
         outcomes.push(
             run_rpc_invocation_at_runtime(case, invocation, runtime, proxies.clone(), &mut cached)
                 .await?,

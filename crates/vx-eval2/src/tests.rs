@@ -1,5 +1,7 @@
 use std::{
+    fs,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -22,6 +24,7 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, resolution_to_outcome, value_to_envelope,
 };
+use tempfile::tempdir;
 use vx_eval2_proto::EvalOutcome;
 
 fn expect_ready(resolution: Resolution) -> Value {
@@ -53,6 +56,51 @@ fn map_string_entry<'a>(value: &'a Value, key: &str) -> &'a Value {
                 .then_some(entry_value)
         })
         .unwrap_or_else(|| panic!("expected key {key:?} in {map:?}"))
+}
+
+struct ReadFileRuntime {
+    root_dir: PathBuf,
+}
+
+impl RuntimeHooks for ReadFileRuntime {
+    fn call(
+        &self,
+        _place: &str,
+        callee: &str,
+        args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match callee {
+            "read_file" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() argument must evaluate to String",
+                    ));
+                };
+                let full_path = self.root_dir.join(path.as_ref());
+                let contents = fs::read_to_string(&full_path).map_err(|error| {
+                    EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("read_file() failed for {}: {error}", full_path.display()),
+                    )
+                })?;
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
 }
 
 #[test]
@@ -465,6 +513,74 @@ fn build(blob: Blob) {
         ValueRep::String(Arc::from("demo"))
     );
     assert_eq!(struct_field(&value, "port").rep, ValueRep::U64(8080));
+}
+
+#[test]
+fn toml_parse_decodes_manifest_read_from_runtime_file() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"[package]
+name = "fixture-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    let runtime = ReadFileRuntime {
+        root_dir: dir.path().to_path_buf(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+struct Package {
+  name: String,
+  version: String,
+  edition: String,
+  publish: Bool,
+}
+
+struct Manifest {
+  package: Package,
+}
+
+fn build() {
+  let manifest = Toml.parse[Manifest](read_file("Cargo.toml"));
+  manifest.package
+}
+"#,
+        "toml-parse-runtime-file",
+        "build",
+        Vec::new(),
+        &runtime,
+        "local",
+    );
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("evaluate Toml.parse against runtime file")
+    else {
+        panic!("expected parsed Package struct result");
+    };
+
+    let ValueRep::Struct(package) = &value.rep else {
+        panic!("expected parsed Package struct, got {value:?}");
+    };
+    assert_eq!(package.type_name.as_ref(), "Package");
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String(Arc::from("fixture-demo"))
+    );
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String(Arc::from("0.1.0"))
+    );
+    assert_eq!(
+        struct_field(&value, "edition").rep,
+        ValueRep::String(Arc::from("2024"))
+    );
+    assert_eq!(struct_field(&value, "publish").rep, ValueRep::Bool(false));
 }
 
 #[test]
