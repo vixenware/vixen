@@ -395,15 +395,17 @@ Eval2 now has a first exact-search seam:
    `BranchConflict` that retains per-branch failure detail
 4. pending/resume paths continue the in-flight branch and can still move on to
    later candidates afterward
-5. exact failing branches can now be learned as conservative point no-goods and
+5. exact failing branches can now be learned as conservative no-goods and
    skipped on later identical searches in the same session
+6. adjacent identical failures can widen from singleton point exclusions into
+   one conservative candidate-index range exclusion
 
 This is enough for a first correct exact-search experiment, but it is still
 minimal:
 
 1. no parallel frontier yet
 2. no conflict widening yet
-3. no range/volume learning yet
+3. no broader range/volume learning yet
 4. no dominance-order comparison across multiple full solutions yet
 
 It is now also enough for a first tiny Cargo-shaped authored sketch:

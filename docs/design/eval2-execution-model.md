@@ -368,15 +368,18 @@ Eval2 now has a first explicit exact-search experiment too:
 - branch-local `UserFail` results are retained as structured attempt records
 - if every branch fails with `UserFail`, eval2 returns a structured
   `BranchConflict`
-- exact failing branches can now be learned as conservative point no-goods and
+- exact failing branches can now be learned as conservative no-goods and
   skipped on later identical searches in the same session
+- adjacent identical failures can widen from singleton point exclusions into
+  one conservative candidate-index range exclusion
 
 This is still deliberately minimal:
 
 - exact search is sequential today
 - it uses branch-local assumptions as the primitive instead of new surface
   syntax
-- it still does not yet do branch splitting, widening, or dominance ordering
+- it still does not yet do branch splitting, broader volume widening, or
+  dominance ordering
 
 What it does prove:
 
@@ -386,8 +389,8 @@ What it does prove:
   collapsing to text
 - pending/resume paths can continue an in-flight branch and still move on to
   later candidates correctly
-- exact point failures can become replayable learned facts before any widening
-  logic exists
+- exact failures can become replayable learned facts, and adjacent identical
+  failures can coalesce into one reusable range exclusion
 - a tiny package-shaped authored resolver can now backtrack from an
   incompatible newer candidate to an older successful one through keyed shared
   dependency conflict, not Rust-side policy

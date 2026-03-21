@@ -3193,6 +3193,52 @@ fn build() {
 }
 
 #[test]
+fn search_assumption_widens_adjacent_identical_conflicts_into_one_exclusion() {
+    let runtime = UnsupportedRuntime;
+    let program = EvalProgram::single_source(
+        "search-assumption-range-no-good",
+        r#"
+fn resolve_candidate() {
+  let version = branch_assumption("version");
+  if version == "1.2.0" (
+    version
+  ) else (
+    fail Conflict {
+      package: "logger",
+      reason: "locked-by-root",
+    }
+  )
+}
+
+fn search_once() {
+  search_assumption("version", ["1.0.0", "1.1.0", "1.2.0"], resolve_candidate)
+}
+
+fn build() {
+  let first = search_once();
+  let second = search_once();
+  [first, second]
+}
+"#,
+    );
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let Resolution::Ready(value) = session.run().expect("run widened no-good session") else {
+        panic!("expected ready widened no-good session");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected result array, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.2.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("1.2.0".into()));
+
+    let stats = session.stats();
+    assert_eq!(stats.learned_no_good_count, 1);
+    assert_eq!(stats.widened_no_good_count, 1);
+}
+
+#[test]
 fn entry_arguments_are_bound_as_runtime_inputs() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build(value: String) { value }",
