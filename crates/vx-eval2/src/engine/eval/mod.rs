@@ -511,6 +511,14 @@ pub(super) fn immediate_call_callee_value(
             Some(resolved_name),
         ))));
     }
+    if let Some(constructor) = state.program.resolve_variant_constructor(&name) {
+        return Ok(Some(enum_constructor_or_value(
+            state,
+            constructor.name,
+            constructor.fields,
+            state.span_for_token(&name_token),
+        )));
+    }
     Ok(Some(Value::function(FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from(name.as_str()),
@@ -549,6 +557,14 @@ pub(super) fn eval_name_ref(
         return Ok(
             Value::function(function).with_provenance(Provenance::binding(name_source, name))
         );
+    }
+    if let Some(constructor) = state.program.resolve_variant_constructor(&name) {
+        return Ok(enum_constructor_or_value(
+            state,
+            constructor.name,
+            constructor.fields,
+            state.span_for_token(&name_token),
+        ));
     }
     Err(EvalError::new(
         EvalErrorKind::Internal,
@@ -618,9 +634,14 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "to_lower") => Some("String.to_lower"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
+        (ValueRep::Array(_), "any") => Some("Array.any"),
+        (ValueRep::Array(_), "filter_map") => Some("Array.filter_map"),
+        (ValueRep::Array(_), "flatten") => Some("Array.flatten"),
         (ValueRep::Array(_), "filter") => Some("Array.filter"),
         (ValueRep::Array(_), "map") => Some("Array.map"),
         (ValueRep::Array(_), "to_array") => Some("Array.to_array"),
+        (ValueRep::Map(_), "map") => Some("Map.map"),
+        (ValueRep::Map(_), "to_array") => Some("Map.to_array"),
         (ValueRep::Map(_), "get") => Some("Map.get"),
         (ValueRep::Map(_), "has") => Some("Map.has"),
         (ValueRep::Struct(StructValue { type_name, .. }), "unwrap_or")
@@ -679,6 +700,64 @@ fn bound_method_dispatch_args(function: &FunctionRef, args: &[Value]) -> Vec<Val
     dispatch_args.push(receiver.clone());
     dispatch_args.extend(args.iter().cloned());
     dispatch_args
+}
+
+fn enum_constructor_or_value(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    name: Arc<str>,
+    field_names: Arc<[Arc<str>]>,
+    source: SourceSpan,
+) -> Value {
+    if field_names.is_empty() {
+        return Value::structure(name.clone(), Vec::new())
+            .with_provenance(Provenance::binding(source, name.to_string()));
+    }
+    let captures = Arc::from([
+        (Arc::from("__enum_variant_ctor"), Value::bool(true)),
+        (
+            Arc::from("__enum_variant_fields"),
+            Value::array(
+                field_names
+                    .iter()
+                    .map(|field_name| Value::string(field_name.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+    ]);
+    Value::function(FunctionRef::new(
+        state.program.source_id(state.current_source()),
+        name.clone(),
+        Arc::from([]),
+        false,
+        None,
+        captures,
+        None,
+    ))
+    .with_provenance(Provenance::binding(source, name.to_string()))
+}
+
+fn enum_constructor_field_names(function: &FunctionRef) -> Option<Vec<Arc<str>>> {
+    let marker = function
+        .captures
+        .iter()
+        .find(|(name, _)| name.as_ref() == "__enum_variant_ctor")?;
+    if marker.1.rep != ValueRep::Bool(true) {
+        return None;
+    }
+    let fields = function
+        .captures
+        .iter()
+        .find(|(name, _)| name.as_ref() == "__enum_variant_fields")?;
+    let ValueRep::Array(items) = &fields.1.rep else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|value| match &value.rep {
+            ValueRep::String(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn continue_call_from_args(
@@ -740,6 +819,23 @@ pub(super) fn continue_call_from_args(
         return state.with_source(prepared.source, |state| {
             eval_dependent_expr(state, node_id, &prepared.body, &mut env)
         });
+    }
+    if let Some(field_names) = enum_constructor_field_names(function) {
+        if field_names.len() != args.len() {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                format!(
+                    "enum constructor {} expected {} argument(s), got {}",
+                    function.name,
+                    field_names.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let fields = field_names.into_iter().zip(args).collect::<Vec<_>>();
+        let value = Value::structure(function.name.clone(), fields)
+            .with_provenance(Provenance::binding(call_source, function.name.to_string()));
+        return Ok(EvalStep::Ready(value));
     }
     let args = bound_method_dispatch_args(function, &args);
     let callee_name = function.name.to_string();

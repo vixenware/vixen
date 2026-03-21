@@ -368,6 +368,171 @@ pub(in crate::engine) fn continue_array_map_builtin(
     Ok(EvalStep::Ready(Value::array(mapped).with_meta(meta)))
 }
 
+pub(in crate::engine) fn continue_array_any_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    predicate: FunctionRef,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..items.len() {
+        let item = items[index].clone();
+        let Some(prepared) = prepare_function_call(state, &predicate, &[item], Some(node_id))?
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Array.any() predicate must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => match result.rep {
+                ValueRep::Bool(true) => return Ok(EvalStep::Ready(Value::bool(true))),
+                ValueRep::Bool(false) => {}
+                _ => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.any() predicate must return Bool",
+                    ));
+                }
+            },
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayAnyAfterPredicate {
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        index,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(EvalStep::Ready(Value::bool(false)))
+}
+
+pub(in crate::engine) fn continue_array_filter_map_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    items: Vec<Value>,
+    mapper: FunctionRef,
+    mut mapped: Vec<Value>,
+    mapper_result: Value,
+    index: usize,
+) -> Result<EvalStep, EvalError> {
+    match &mapper_result.rep {
+        ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
+            mapped.push(project_struct_field(mapper_result, "value".to_string())?);
+        }
+        ValueRep::Struct(option) if option.type_name.as_ref() == "None" => {}
+        _ => {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Array.filter_map() mapper must return Option",
+            ));
+        }
+    }
+
+    for next_index in (index + 1)..items.len() {
+        let item = items[next_index].clone();
+        let Some(prepared) = prepare_function_call(state, &mapper, &[item], Some(node_id))? else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Array.filter_map() mapper must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => match &result.rep {
+                ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
+                    mapped.push(project_struct_field(result, "value".to_string())?);
+                }
+                ValueRep::Struct(option) if option.type_name.as_ref() == "None" => {}
+                _ => {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.filter_map() mapper must return Option",
+                    ));
+                }
+            },
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayFilterMapAfterMapper {
+                        node_id,
+                        parent_id,
+                        items,
+                        mapper,
+                        mapped,
+                        index: next_index,
+                    },
+                ));
+            }
+        }
+    }
+
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<array-filter-map>")),
+        mapped.iter(),
+    );
+    Ok(EvalStep::Ready(Value::array(mapped).with_meta(meta)))
+}
+
+pub(in crate::engine) fn continue_map_map_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    entries: Vec<(Value, Value)>,
+    mapper: FunctionRef,
+    mut mapped: Vec<Value>,
+    start_index: usize,
+) -> Result<EvalStep, EvalError> {
+    for index in start_index..entries.len() {
+        let (key, value) = &entries[index];
+        let Some(prepared) =
+            prepare_function_call(state, &mapper, &[key.clone(), value.clone()], Some(node_id))?
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Map.map() mapper must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })? {
+            EvalStep::Ready(result) => mapped.push(result),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::MapMapAfterMapper {
+                        node_id,
+                        parent_id,
+                        entries,
+                        mapper,
+                        mapped,
+                        index,
+                    },
+                ));
+            }
+        }
+    }
+
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<map-map>")),
+        mapped.iter(),
+    );
+    Ok(EvalStep::Ready(Value::array(mapped).with_meta(meta)))
+}
+
 pub(in crate::engine) fn branch_attempt_value(candidate: Value, error: EvalError) -> Value {
     let conflict = error
         .detail
@@ -1087,6 +1252,120 @@ pub(in crate::engine) fn continue_builtin_call(
             )
             .map(Some)
         }
+        "Array.filter_map" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter_map() requires receiver and mapper",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter_map() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(mapper) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter_map() mapper must evaluate to a function value",
+                ));
+            };
+            let items = items.iter().cloned().collect::<Vec<_>>();
+            if items.is_empty() {
+                return Ok(ready_builtin_value(Value::array(Vec::<Value>::new())));
+            }
+            let Some(prepared) =
+                prepare_function_call(state, mapper, &[items[0].clone()], Some(node_id))?
+            else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.filter_map() mapper must be a bodyful Vixen function",
+                ));
+            };
+            let mut env = prepared.env;
+            match state.with_source(prepared.source, |state| {
+                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            })? {
+                EvalStep::Ready(result) => continue_array_filter_map_builtin(
+                    state,
+                    node_id,
+                    parent_id,
+                    items,
+                    mapper.clone(),
+                    Vec::new(),
+                    result,
+                    0,
+                )
+                .map(Some),
+                EvalStep::Suspended(suspension) => Ok(Some(extend_suspension(
+                    suspension,
+                    ContinuationFrame::ArrayFilterMapAfterMapper {
+                        node_id,
+                        parent_id,
+                        items,
+                        mapper: mapper.clone(),
+                        mapped: Vec::new(),
+                        index: 0,
+                    },
+                ))),
+            }
+        }
+        "Array.any" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.any() requires receiver and predicate",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.any() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(predicate) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.any() predicate must evaluate to a function value",
+                ));
+            };
+            continue_array_any_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                predicate.clone(),
+                0,
+            )
+            .map(Some)
+        }
+        "Array.flatten" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.flatten() requires receiver",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.flatten() receiver must evaluate to Array",
+                ));
+            };
+            let mut flattened = Vec::new();
+            for item in items.iter() {
+                let ValueRep::Array(inner) = &item.rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.flatten() items must evaluate to Array",
+                    ));
+                };
+                flattened.extend(inner.iter().cloned());
+            }
+            let meta = aggregate_child_meta(args[0].meta.provenance.clone(), flattened.iter());
+            Ok(ready_builtin_value(Value::array(flattened).with_meta(meta)))
+        }
         "Array.to_array" => {
             if args.len() != 1 {
                 return Err(EvalError::new(
@@ -1101,6 +1380,60 @@ pub(in crate::engine) fn continue_builtin_call(
                 ));
             };
             Ok(ready_builtin_value(args[0].clone()))
+        }
+        "Map.map" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.map() requires receiver and mapper",
+                ));
+            }
+            let ValueRep::Map(map) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.map() receiver must evaluate to Map",
+                ));
+            };
+            let ValueRep::Function(mapper) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.map() mapper must evaluate to a function value",
+                ));
+            };
+            continue_map_map_builtin(
+                state,
+                node_id,
+                parent_id,
+                map.entries.iter().cloned().collect(),
+                mapper.clone(),
+                Vec::new(),
+                0,
+            )
+            .map(Some)
+        }
+        "Map.to_array" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.to_array() requires receiver",
+                ));
+            }
+            let ValueRep::Map(map) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Map.to_array() receiver must evaluate to Map",
+                ));
+            };
+            let items = map
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, (key, value))| {
+                    map_entry_value(&args[0].meta.provenance, index, key, value)
+                })
+                .collect::<Vec<_>>();
+            let meta = aggregate_child_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
         }
         "map_get" => {
             if args.len() != 2 {

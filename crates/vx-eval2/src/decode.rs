@@ -248,6 +248,9 @@ impl DecodeContext<'_> {
                     Some(field_value) => {
                         self.decode_value(field_value, &field_ty, field_provenance)?
                     }
+                    None if field.has_default => {
+                        self.default_value(&field_ty, field_provenance.clone())?
+                    }
                     None if matches!(field_ty, Ty::Optional(_)) => {
                         Value::structure("None", Vec::new())
                             .with_meta(self.leaf_meta(field_provenance))
@@ -394,6 +397,9 @@ impl DecodeContext<'_> {
                 }
             }
             [field] if allow_direct_single_field => {
+                if value.as_object().is_some() {
+                    return self.decode_struct(value, variant_ty, provenance);
+                }
                 let field_ty = substitute_type_params(&field.ty, &variant_ty.type_args);
                 let decoded = self.decode_value(
                     value,
@@ -559,6 +565,47 @@ impl DecodeContext<'_> {
                     "flattened field {} must be a struct or Map[String, _]",
                     field.name
                 ),
+            )),
+        }
+    }
+
+    fn default_value(&self, target: &Ty, provenance: Provenance) -> Result<Value, EvalError> {
+        match target {
+            Ty::Scalar(Scalar::Bool) => {
+                Ok(Value::bool(false).with_meta(self.leaf_meta(provenance)))
+            }
+            Ty::Scalar(Scalar::String) => {
+                Ok(Value::string("").with_meta(self.leaf_meta(provenance)))
+            }
+            Ty::Scalar(Scalar::U64) => Ok(Value::u64(0).with_meta(self.leaf_meta(provenance))),
+            Ty::Optional(_) => {
+                Ok(Value::structure("None", Vec::new()).with_meta(self.leaf_meta(provenance)))
+            }
+            Ty::Array(_) => Ok(Value::array(Vec::new()).with_meta(self.leaf_meta(provenance))),
+            Ty::Map(_, _) => Ok(Value::map(Vec::new()).with_meta(self.leaf_meta(provenance))),
+            Ty::Alias(alias_ty) => {
+                let TypeDef::Alias(def) = &self.types.env[alias_ty.id] else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        "alias type id did not resolve to an alias definition",
+                    ));
+                };
+                let target = substitute_type_params(&def.target, &alias_ty.type_args);
+                self.default_value(&target, provenance)
+            }
+            Ty::Newtype(newtype_ty) => {
+                let TypeDef::Newtype(def) = &self.types.env[newtype_ty.id] else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        "newtype id did not resolve to a newtype definition",
+                    ));
+                };
+                let target = substitute_type_params(&def.inner, &newtype_ty.type_args);
+                self.default_value(&target, provenance)
+            }
+            _ => Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("missing field default for unsupported target type {target:?}"),
             )),
         }
     }

@@ -1449,6 +1449,123 @@ fn build(items: Array[String]) {
 }
 
 #[test]
+fn array_any_method_short_circuits_matches_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.any((item) => item == "serde")
+}
+"#,
+        "array-any-method-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("flate2"),
+            Value::string("serde"),
+            Value::string("tar"),
+        ])],
+    )
+    .expect("evaluate Array.any()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.any() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn array_filter_map_method_collects_some_values_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn maybe_named(item: String) {
+  if item.to_lower().contains("at") (
+    Some(item.to_lower())
+  ) else (
+    None
+  )
+}
+
+fn build(items: Array[String]) {
+  items.filter_map(maybe_named)
+}
+"#,
+        "array-filter-map-method-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("serde"),
+            Value::string("WAT"),
+        ])],
+    )
+    .expect("evaluate Array.filter_map()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.filter_map() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Array.filter_map(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("wat".into()));
+}
+
+#[test]
+fn enum_variant_constructors_build_struct_values_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(flag: Bool, value: String) {
+  if flag (
+    Some(value)
+  ) else (
+    None
+  )
+}
+"#,
+        "enum-variant-constructors-runtime",
+        "build",
+        &[Value::bool(true), Value::string("flate2")],
+    )
+    .expect("evaluate enum variant constructors");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready enum constructor result, got {resolution:?}");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected struct result from enum constructor, got {value:?}");
+    };
+    assert_eq!(option.type_name.as_ref(), "Some");
+    assert_eq!(option.fields.len(), 1);
+    assert_eq!(option.fields[0].0.as_ref(), "value");
+    assert_eq!(option.fields[0].1.rep, ValueRep::String("flate2".into()));
+}
+
+#[test]
+fn array_flatten_method_concatenates_nested_arrays_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [["flate2"], ["serde", "tar"]].flatten()
+}
+"#,
+        "array-flatten-method-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate Array.flatten()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.flatten() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Array.flatten(), got {value:?}");
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("serde".into()));
+    assert_eq!(items[2].rep, ValueRep::String("tar".into()));
+}
+
+#[test]
 fn array_to_array_method_returns_receiver_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1474,6 +1591,205 @@ fn build(items: Array[String]) {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
     assert_eq!(items[1].rep, ValueRep::String("serde".into()));
+}
+
+#[test]
+fn map_map_method_projects_entries_to_array_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Map[String, String]) {
+  items.map((name, _dep) => name).to_array()
+}
+"#,
+        "map-map-method-runtime",
+        "build",
+        &[Value::map(vec![
+            (Value::string("eyre"), Value::string("workspace")),
+            (Value::string("flate2"), Value::string("1")),
+        ])],
+    )
+    .expect("evaluate Map.map()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Map.map() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Map.map(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("eyre".into()));
+    assert_eq!(items[1].rep, ValueRep::String("flate2".into()));
+}
+
+#[test]
+fn map_to_array_method_returns_key_value_entries_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Map[String, String]) {
+  items.to_array()
+}
+"#,
+        "map-to-array-method-runtime",
+        "build",
+        &[Value::map(vec![
+            (Value::string("eyre"), Value::string("workspace")),
+            (Value::string("flate2"), Value::string("1")),
+        ])],
+    )
+    .expect("evaluate Map.to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Map.to_array() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Map.to_array(), got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        map_string_entry(&items[0], "key").rep,
+        ValueRep::String("eyre".into())
+    );
+    assert_eq!(
+        map_string_entry(&items[0], "value").rep,
+        ValueRep::String("workspace".into())
+    );
+}
+
+#[test]
+fn cargo_style_dependency_name_pipeline_works_at_runtime() {
+    let manifest = Value::structure(
+        "Manifest",
+        vec![
+            (
+                Arc::from("dependencies"),
+                Value::map(vec![
+                    (Value::string("eyre"), Value::string("workspace")),
+                    (Value::string("flate2"), Value::string("1")),
+                ]),
+            ),
+            (
+                Arc::from("dev_dependencies"),
+                Value::map(vec![(Value::string("insta"), Value::string("1"))]),
+            ),
+            (Arc::from("build_dependencies"), Value::map(Vec::new())),
+        ],
+    );
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Manifest {
+  dependencies: Map[String, String],
+  dev_dependencies: Map[String, String],
+  build_dependencies: Map[String, String],
+}
+
+struct Summary {
+  has_eyre: Bool,
+  has_flate2: Bool,
+  has_build_deps: Bool,
+}
+
+fn dependency_names(manifest: Manifest) {
+  [
+    manifest.dependencies.map((name, _dep) => name).to_array(),
+    manifest.dev_dependencies.map((name, _dep) => name).to_array(),
+    manifest.build_dependencies.map((name, _dep) => name).to_array(),
+  ].flatten()
+}
+
+fn build(manifest: Manifest) {
+  let names = dependency_names(manifest);
+  Summary {
+    has_eyre: names.any((name) => name == "eyre"),
+    has_flate2: names.any((name) => name == "flate2"),
+    has_build_deps: names.any((name) => name == "build-only-placeholder"),
+  }
+}
+"#,
+        "cargo-style-dependency-name-pipeline-runtime",
+        "build",
+        &[manifest],
+    )
+    .expect("evaluate cargo-style dependency pipeline");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready cargo-style dependency pipeline result, got {resolution:?}");
+    };
+    assert_eq!(struct_field(&value, "has_eyre").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "has_flate2").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_build_deps").rep,
+        ValueRep::Bool(false)
+    );
+}
+
+#[test]
+fn cargo_style_dependency_name_pipeline_works_from_toml_parse() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+#[untagged]
+enum CargoDependencySpec {
+  struct Version {
+    value: String,
+  },
+
+  struct Detailed {
+    workspace: Bool?,
+  },
+}
+
+struct Manifest {
+  dependencies: Map[String, CargoDependencySpec] = %{},
+  dev_dependencies: Map[String, CargoDependencySpec] = %{},
+  build_dependencies: Map[String, CargoDependencySpec] = %{},
+}
+
+struct Summary {
+  has_eyre: Bool,
+  has_flate2: Bool,
+  has_build_deps: Bool,
+}
+
+fn dependency_names(manifest: Manifest) {
+  [
+    manifest.dependencies.map((name, _dep) => name).to_array(),
+    manifest.dev_dependencies.map((name, _dep) => name).to_array(),
+    manifest.build_dependencies.map((name, _dep) => name).to_array(),
+  ].flatten()
+}
+
+fn build(text: String) {
+  let manifest = Toml.parse[Manifest](text);
+  let names = dependency_names(manifest);
+  Summary {
+    has_eyre: names.any((name) => name == "eyre"),
+    has_flate2: names.any((name) => name == "flate2"),
+    has_build_deps: names.any((name) => name == "build-only-placeholder"),
+  }
+}
+"#,
+        "cargo-style-dependency-name-pipeline-from-toml",
+        "build",
+        &[Value::string(
+            r#"[package]
+name = "xtask"
+
+[dependencies]
+eyre = { workspace = true }
+flate2 = "1"
+"#,
+        )],
+    )
+    .expect("evaluate cargo-style dependency pipeline from TOML parse");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready cargo-style dependency pipeline TOML result, got {resolution:?}");
+    };
+    assert_eq!(struct_field(&value, "has_eyre").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "has_flate2").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_build_deps").rep,
+        ValueRep::Bool(false)
+    );
 }
 
 #[test]

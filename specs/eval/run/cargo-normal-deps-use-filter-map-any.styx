@@ -1,0 +1,55 @@
+main <<VX,vx
+struct RegistryDep {
+  name: String,
+  kind: String?,
+}
+
+struct RegistryRelease {
+  deps: Array[RegistryDep],
+}
+
+struct Summary {
+  has_crc32fast: Bool,
+  has_futures: Bool,
+}
+
+fn normal_dep_names(release: RegistryRelease) {
+  release.deps
+    .filter_map((dep) => (
+      if dep.kind.unwrap_or("normal") == "normal" (
+        Some(dep.name)
+      ) else (
+        None
+      )
+    ))
+    .to_array()
+}
+
+fn build() {
+  let release = Json.parse[RegistryRelease](read_file("registry_real/flate2-1.1.9.json"));
+  let names = normal_dep_names(release);
+  Summary {
+    has_crc32fast: names.any((name) => name == "crc32fast"),
+    has_futures: names.any((name) => name == "futures"),
+  }
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @struct{
+    type Summary
+    fields {
+      has_crc32fast @bool"true"
+      has_futures @bool"false"
+    }
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

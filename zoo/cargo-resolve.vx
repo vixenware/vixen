@@ -8,7 +8,23 @@
 //
 // Everything else is ordinary Vixen code over those primitives.
 
-type CargoDependencySpec = String | CargoDependency
+#[untagged]
+enum CargoDependencySpec {
+  struct Version {
+    value: String,
+  },
+
+  #[rename_all = "kebab-case"]
+  struct Detailed {
+    version: String?,
+    features: Array[String] = [],
+    default_features: Bool = true,
+    optional: Bool = false,
+    path: String?,
+    git: String?,
+    package: String?,
+  },
+}
 
 #[rename_all = "kebab-case"]
 struct CargoManifest {
@@ -24,17 +40,6 @@ struct CargoPackage {
   name: String,
   version: String,
   edition: String = "2021",
-}
-
-#[rename_all = "kebab-case"]
-struct CargoDependency {
-  version: String?,
-  features: Array[String] = [],
-  default_features: Bool = true,
-  optional: Bool = false,
-  path: String?,
-  git: String?,
-  package: String?,
 }
 
 #[rename_all = "kebab-case"]
@@ -317,8 +322,8 @@ fn manifest_requests(manifest: CargoManifest) where {
 )
 
 fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> DependencyRequest (
-  match dep as? String (
-    Some { value } => DependencyRequest {
+  match dep (
+    Version { value } => DependencyRequest {
       name,
       package_name: None,
       version_req: parse_semver_req(value),
@@ -326,26 +331,33 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
       optional: false,
       target: None,
     },
-    None => (
-      let detail = dep as CargoDependency;
+    Detailed {
+      version,
+      features,
+      default_features,
+      optional,
+      path,
+      git,
+      package,
+    } => (
       DependencyRequest {
         name,
-        package_name: detail.package,
+        package_name: package,
         version_req:
-          match detail.version (
+          match version (
             Some { value } => parse_semver_req(value),
             None => None,
           ),
-        features: detail.features,
-        default_features: detail.default_features,
-        optional: detail.optional,
+        features,
+        default_features,
+        optional,
         kind,
         target: None,
         source:
-          match detail.path (
+          match path (
             Some { value } => DependencySource.Path { path: value },
             None => (
-              match detail.git (
+              match git (
                 Some { value } => DependencySource.Git { url: value },
                 None => DependencySource.Registry,
               )

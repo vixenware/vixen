@@ -193,6 +193,12 @@ pub(crate) struct CompiledProgram {
     types: TypeCollection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VariantConstructor {
+    pub(crate) name: Arc<str>,
+    pub(crate) fields: Arc<[Arc<str>]>,
+}
+
 impl CompiledProgram {
     pub(crate) fn new(source_id: impl Into<String>, source_text: impl Into<String>) -> Self {
         Self::from_eval_program(EvalProgram::single_source(source_id, source_text))
@@ -330,6 +336,34 @@ impl CompiledProgram {
 
     pub(crate) fn types(&self) -> &TypeCollection {
         &self.types
+    }
+
+    pub(crate) fn resolve_variant_constructor(&self, name: &str) -> Option<VariantConstructor> {
+        let variant_id = self
+            .types
+            .env
+            .lookup(name)
+            .iter()
+            .copied()
+            .find(|type_id| {
+                matches!(
+                    self.types.env.get(*type_id),
+                    vx_types::TypeDef::Struct(struct_def) if struct_def.parent_enum.is_some()
+                )
+            })?;
+        let vx_types::TypeDef::Struct(struct_def) = self.types.env.get(variant_id) else {
+            return None;
+        };
+        Some(VariantConstructor {
+            name: Arc::from(struct_def.name.as_str()),
+            fields: Arc::from(
+                struct_def
+                    .fields
+                    .iter()
+                    .map(|field| Arc::from(field.name.as_str()))
+                    .collect::<Vec<_>>(),
+            ),
+        })
     }
 
     #[cfg(test)]

@@ -970,6 +970,22 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::ArrayFilterMapAfterMapper {
+            node_id,
+            parent_id,
+            items,
+            mapper,
+            mapped,
+            index,
+        } => {
+            let result = match input {
+                Ok(value) => continue_array_filter_map_builtin(
+                    state, node_id, parent_id, items, mapper, mapped, value, index,
+                ),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::ArrayMapAfterMapper {
             node_id,
             parent_id,
@@ -986,6 +1002,58 @@ pub(in crate::engine) fn resume_frame(
                         node_id,
                         parent_id,
                         items,
+                        mapper,
+                        mapped,
+                        index + 1,
+                    )
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::ArrayAnyAfterPredicate {
+            node_id,
+            parent_id,
+            items,
+            predicate,
+            index,
+        } => {
+            let result = match input {
+                Ok(result) => match result.rep {
+                    ValueRep::Bool(true) => Ok(EvalStep::Ready(Value::bool(true))),
+                    ValueRep::Bool(false) => continue_array_any_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        items,
+                        predicate,
+                        index + 1,
+                    ),
+                    _ => Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Array.any() predicate must return Bool",
+                    )),
+                },
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::MapMapAfterMapper {
+            node_id,
+            parent_id,
+            entries,
+            mapper,
+            mut mapped,
+            index,
+        } => {
+            let result = match input {
+                Ok(value) => {
+                    mapped.push(value);
+                    continue_map_map_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        entries,
                         mapper,
                         mapped,
                         index + 1,
