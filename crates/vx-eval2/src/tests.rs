@@ -12,7 +12,7 @@ use crate::{
     Claim, CrossingPolicy, EvalBranchContext, EvalCompletedWorkOutcome, EvalDependencyEdge,
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal, EvalLeasedWorkState,
     EvalNodeId, EvalNodeKind, EvalNodeState, EvalProgram, EvalProgramImport, EvalProgramSource,
-    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, PendingRef,
+    EvalSession, EvalSessionStep, EvalTrace, EvalWorkKind, EvalWorkState, MapValue, PendingRef,
     ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
     RuntimeInputKind, RuntimeReady, RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason,
     SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
@@ -448,6 +448,178 @@ fn build() {
         panic!("expected ready map inequality result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn map_get_returns_clear_error_for_missing_key() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_get(%{ "left" => 1 }, "right")
+}
+"#,
+        "map-get-missing-key",
+        "build",
+        &[],
+    )
+    .expect_err("map_get missing key should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(error.message.contains("map_get() key was not found"));
+}
+
+#[test]
+fn map_get_requires_map_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_get("not a map", "right")
+}
+"#,
+        "map-get-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("map_get non-map first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("map_get() first argument must evaluate to a map")
+    );
+}
+
+#[test]
+fn map_get_supports_non_string_keys() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_get(%{ 1 => "one", 2 => "two" }, 2)
+}
+"#,
+        "map-get-u64-key",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_get with non-string key");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_get result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("two".into()));
+}
+
+#[test]
+fn map_put_replaces_existing_entry() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_put(%{ "left" => 1, "right" => 2 }, "right", 9)
+}
+"#,
+        "map-put-replace",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_put replacement");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_put replacement result, got {resolution:?}");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!(
+            "expected map_put replacement to return a map, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.rep, ValueRep::String("left".into()));
+    assert_eq!(entries[0].1.rep, ValueRep::U64(1));
+    assert_eq!(entries[1].0.rep, ValueRep::String("right".into()));
+    assert_eq!(entries[1].1.rep, ValueRep::U64(9));
+}
+
+#[test]
+fn map_put_inserts_new_entry_at_end() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_put(%{ "left" => 1 }, "right", 2)
+}
+"#,
+        "map-put-insert",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_put insertion");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_put insertion result, got {resolution:?}");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!(
+            "expected map_put insertion to return a map, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.rep, ValueRep::String("left".into()));
+    assert_eq!(entries[0].1.rep, ValueRep::U64(1));
+    assert_eq!(entries[1].0.rep, ValueRep::String("right".into()));
+    assert_eq!(entries[1].1.rep, ValueRep::U64(2));
+}
+
+#[test]
+fn map_put_requires_map_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_put("not a map", "right", 2)
+}
+"#,
+        "map-put-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("map_put non-map first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("map_put() first argument must evaluate to a map")
+    );
+}
+
+#[test]
+fn map_put_supports_non_string_keys() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_put(%{ 1 => "one" }, 2, "two")
+}
+"#,
+        "map-put-u64-key",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_put with non-string key");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_put non-string key result, got {resolution:?}");
+    };
+    let ValueRep::Map(MapValue { entries }) = &value.rep else {
+        panic!(
+            "expected map_put non-string key to return a map, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.rep, ValueRep::U64(1));
+    assert_eq!(entries[0].1.rep, ValueRep::String("one".into()));
+    assert_eq!(entries[1].0.rep, ValueRep::U64(2));
+    assert_eq!(entries[1].1.rep, ValueRep::String("two".into()));
 }
 
 #[test]

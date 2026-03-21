@@ -3156,6 +3156,35 @@ fn eval_builtin_call(callee_name: &str, args: &[Value]) -> Result<Option<Value>,
             }
             Ok(Some(value))
         }
+        "map_put" => {
+            if args.len() != 3 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_put() requires map, key, and value",
+                ));
+            }
+            let ValueRep::Map(map) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_put() first argument must evaluate to a map",
+                ));
+            };
+            let key = &args[1];
+            let value = &args[2];
+            let mut entries = map.entries.iter().cloned().collect::<Vec<_>>();
+            let mut replaced = false;
+            for (entry_key, entry_value) in &mut entries {
+                if values_equal(&entry_key.rep, &key.rep)? {
+                    *entry_value = value.clone();
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                entries.push((key.clone(), value.clone()));
+            }
+            Ok(Some(Value::map(entries)))
+        }
         _ => Ok(None),
     }
 }

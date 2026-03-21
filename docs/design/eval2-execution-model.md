@@ -256,8 +256,9 @@ results, not executable closures.
 ## Next authored resolver gap
 
 After slots, authored functions, closures, structs, fields, maps, simple
-authored equality, and `map_get`, eval2 can now express a tiny slot-backed
-resolver selection entirely in Vixen source.
+authored equality, `map_get`, and `map_put`, eval2 can now express a tiny
+slot-backed resolver selection and targeted map rewrite entirely in Vixen
+source.
 
 The remaining generic substrate gap is now narrower and more explicit:
 
