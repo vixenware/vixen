@@ -45,6 +45,64 @@ portable foundation:
 
 So we need a design that does not depend on per-request process identity.
 
+## Stable object identity under distinct paths
+
+There is a possible compromise between:
+
+- per-build visible path uniqueness for attribution
+- stable underlying file identity for filesystem caching
+
+The naive per-build-prefix model makes every build see the same file through a
+different path. That keeps attribution clean for:
+
+- positive reads
+- directory enumeration
+- lookup misses / negative edges
+- build-local namespace effects
+
+But it also destroys pathname stability. On systems like macOS, that can hurt:
+
+- VFS/path lookup caches
+- vnode/inode reuse
+- page-cache locality for repeated opens of the "same" bundle content
+
+One mitigation is to let multiple build-specific paths resolve to the same
+underlying filesystem item identity, effectively like virtual hard links.
+
+Conceptually:
+
+- `/build-A/toolchain/lib/libc++.dylib`
+- `/build-B/toolchain/lib/libc++.dylib`
+
+would be distinct paths for attribution purposes, but they would map to the
+same underlying VFS item object.
+
+If the platform VFS interface allows that, it should recover part of the cache
+benefit of stable paths without giving up per-build namespaces entirely.
+
+Expected upside:
+
+- better file-object and page-cache reuse across builds
+- better vnode/inode-level metadata reuse
+- less "every build is cold" behavior for stable read-only bundle contents
+
+Expected limits:
+
+- path lookup caches are still path-sensitive
+- directory enumeration caches are still tied to the visible directory tree
+- negative lookups are still namespace-specific
+- synthetic per-build directory structure still creates namespace churn
+
+So this is not a complete replacement for stable shared visible paths. It is a
+middle ground:
+
+- attribution remains path-local
+- underlying object identity becomes stable where possible
+
+This is most relevant for tracked mounts that still need per-build attribution,
+but where the underlying bytes are often shared enough that losing all
+filesystem cache locality is too expensive.
+
 ## Core distinction
 
 The important distinction is not:
