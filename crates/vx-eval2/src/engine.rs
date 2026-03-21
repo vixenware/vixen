@@ -744,13 +744,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub fn stats(&self) -> EvalSessionStats {
-        let mut graph_nodes = self
-            .scheduler
-            .node_records
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        graph_nodes.extend(self.scheduler.node_states.keys().copied());
+        let mut graph_nodes = self.scheduler.node_record_ids();
+        graph_nodes.extend(self.scheduler.node_state_ids());
         graph_nodes.extend(self.scheduler.keyed_nodes.keys().copied());
         for edge in self.scheduler.dependency_edges.iter() {
             graph_nodes.insert(edge.parent);
@@ -759,8 +754,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         EvalSessionStats {
             graph_node_count: graph_nodes.len(),
-            node_record_count: self.scheduler.node_records.len(),
-            node_state_count: self.scheduler.node_states.len(),
+            node_record_count: self.scheduler.node_record_count(),
+            node_state_count: self.scheduler.node_state_count(),
             keyed_node_count: self.scheduler.keyed_nodes.len(),
             dependency_edge_count: self.scheduler.dependency_edges.len(),
             queued_work_count: self.scheduler.ready_queue.len(),
@@ -1022,11 +1017,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     pub fn graph_snapshot(&self) -> EvalGraphSnapshot {
         let mut node_ids = self
             .scheduler
-            .node_records
-            .keys()
-            .copied()
+            .node_record_ids()
+            .into_iter()
             .collect::<Vec<_>>();
-        node_ids.extend(self.scheduler.node_states.keys().copied());
+        node_ids.extend(self.scheduler.node_state_ids());
         node_ids.extend(self.scheduler.keyed_nodes.keys().copied());
         for edge in self.scheduler.dependency_edges.iter() {
             node_ids.push(edge.parent);
@@ -1574,6 +1568,8 @@ struct EvalScheduler {
     lease_namespace: Option<LeaseNamespace>,
     node_states: Arc<BTreeMap<EvalNodeId, EvalNodeState>>,
     node_records: Arc<BTreeMap<EvalNodeId, EvalNodeRecord>>,
+    node_state_overrides: BTreeMap<EvalNodeId, EvalNodeState>,
+    node_record_overrides: BTreeMap<EvalNodeId, EvalNodeRecord>,
     keyed_nodes: Arc<BTreeMap<EvalNodeId, KeyedNodeMemo>>,
     dependency_edges: Arc<Vec<EvalDependencyEdge>>,
     ready_queue: VecDeque<EvalWorkId>,
@@ -1602,6 +1598,8 @@ impl Default for EvalScheduler {
             lease_namespace: None,
             node_states: Arc::new(BTreeMap::new()),
             node_records: Arc::new(BTreeMap::new()),
+            node_state_overrides: BTreeMap::new(),
+            node_record_overrides: BTreeMap::new(),
             keyed_nodes: Arc::new(BTreeMap::new()),
             dependency_edges: Arc::new(Vec::new()),
             ready_queue: VecDeque::new(),
@@ -2153,6 +2151,8 @@ impl EvalScheduler {
             }),
             node_states: Arc::clone(&self.node_states),
             node_records: Arc::clone(&self.node_records),
+            node_state_overrides: BTreeMap::new(),
+            node_record_overrides: BTreeMap::new(),
             keyed_nodes: Arc::clone(&self.keyed_nodes),
             dependency_edges: Arc::clone(&self.dependency_edges),
             ready_queue: VecDeque::new(),
@@ -2196,15 +2196,49 @@ impl EvalScheduler {
     }
 
     fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
-        self.node_records.get(&node_id)
+        self.node_record_overrides
+            .get(&node_id)
+            .or_else(|| self.node_records.get(&node_id))
     }
 
     fn node_records(&self) -> Vec<EvalNodeRecord> {
-        self.node_records.values().cloned().collect()
+        self.node_record_ids()
+            .into_iter()
+            .filter_map(|node_id| self.node_record(node_id).cloned())
+            .collect()
+    }
+
+    fn node_record_ids(&self) -> BTreeSet<EvalNodeId> {
+        let mut ids = self.node_records.keys().copied().collect::<BTreeSet<_>>();
+        ids.extend(self.node_record_overrides.keys().copied());
+        ids
+    }
+
+    fn node_state_ids(&self) -> BTreeSet<EvalNodeId> {
+        let mut ids = self.node_states.keys().copied().collect::<BTreeSet<_>>();
+        ids.extend(self.node_state_overrides.keys().copied());
+        ids
+    }
+
+    fn node_record_count(&self) -> usize {
+        self.node_record_ids().len()
+    }
+
+    fn node_state_count(&self) -> usize {
+        self.node_state_ids().len()
     }
 
     fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
+        if self.lease_namespace.is_some() {
+            if self.node_record(node_id).is_none() {
+                self.node_record_overrides.insert(node_id, record.clone());
+                if let Some(delta) = self.recorded_delta.as_mut() {
+                    delta.node_records.insert(node_id, record);
+                }
+            }
+            return;
+        }
         let node_records = Arc::make_mut(&mut self.node_records);
         if let Entry::Vacant(entry) = node_records.entry(node_id) {
             entry.insert(record.clone());
@@ -2416,7 +2450,9 @@ impl EvalScheduler {
     }
 
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
-        self.node_states.get(&node_id)
+        self.node_state_overrides
+            .get(&node_id)
+            .or_else(|| self.node_states.get(&node_id))
     }
 
     fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
@@ -2696,7 +2732,7 @@ impl EvalScheduler {
         let mut chain = vec![node_id];
         let mut current = node_id;
         loop {
-            let terminal = match self.node_states.get(&current) {
+            let terminal = match self.node_state(current) {
                 Some(EvalNodeState::Runnable { work, pending }) => {
                     if let Some(buffered) = self.buffered_completion_for_work(*work) {
                         EvalExplainTerminal::Buffered {
@@ -2735,6 +2771,13 @@ impl EvalScheduler {
     }
 
     fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
+        if self.lease_namespace.is_some() {
+            self.node_state_overrides.insert(node_id, state.clone());
+            if let Some(delta) = self.recorded_delta.as_mut() {
+                delta.node_states.insert(node_id, state);
+            }
+            return;
+        }
         Arc::make_mut(&mut self.node_states).insert(node_id, state.clone());
         if let Some(delta) = self.recorded_delta.as_mut() {
             delta.node_states.insert(node_id, state);
@@ -3115,19 +3158,25 @@ fn lease_scoped_id(namespace: u64, local: u64) -> u64 {
 impl EvalSchedulerDelta {
     fn from_diff(before: &EvalScheduler, after: &EvalScheduler) -> Self {
         let node_records = after
-            .node_records
-            .iter()
-            .filter_map(|(node_id, record)| {
-                (!matches!(before.node_records.get(node_id), Some(existing) if existing == record))
+            .node_record_ids()
+            .into_iter()
+            .filter_map(|node_id| {
+                let record = after
+                    .node_record(node_id)
+                    .expect("node record id should resolve to a record");
+                (!matches!(before.node_record(node_id), Some(existing) if existing == record))
                     .then(|| record.clone())
             })
             .collect();
         let node_states = after
-            .node_states
-            .iter()
-            .filter_map(|(node_id, state)| {
-                (!matches!(before.node_states.get(node_id), Some(existing) if existing == state))
-                    .then(|| (*node_id, state.clone()))
+            .node_state_ids()
+            .into_iter()
+            .filter_map(|node_id| {
+                let state = after
+                    .node_state(node_id)
+                    .expect("node state id should resolve to a state");
+                (!matches!(before.node_state(node_id), Some(existing) if existing == state))
+                    .then(|| (node_id, state.clone()))
             })
             .collect();
         let keyed_nodes = after
@@ -5675,8 +5724,7 @@ fn resume_suspension(
     let resume_node = suspension.resume_node;
     let parent_id = state
         .scheduler
-        .node_records
-        .get(&resume_node)
+        .node_record(resume_node)
         .and_then(|record| record.parent_id);
     let frames = suspension.frames;
     let mut index = 0;
