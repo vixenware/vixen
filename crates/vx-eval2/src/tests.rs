@@ -646,6 +646,125 @@ fn build() {
 }
 
 #[test]
+fn toml_parse_decodes_untagged_dependency_entries() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"[dependencies]
+eyre = { workspace = true }
+flate2 = "1"
+"#,
+    )
+    .expect("write Cargo.toml");
+
+    let runtime = ReadFileRuntime {
+        root_dir: dir.path().to_path_buf(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+#[untagged]
+enum DependencySpec {
+  struct Version {
+    value: String,
+  },
+
+  struct Detailed {
+    workspace: Bool?,
+    version: String?,
+  },
+}
+
+struct Manifest {
+  dependencies: Map[String, DependencySpec],
+}
+
+fn build() {
+  let manifest = Toml.parse[Manifest](read_file("Cargo.toml"));
+  manifest.dependencies
+}
+"#,
+        "toml-parse-untagged-dependencies",
+        "build",
+        Vec::new(),
+        &runtime,
+        "local",
+    );
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("evaluate Toml.parse against untagged dependency file")
+    else {
+        panic!("expected parsed dependency map result");
+    };
+
+    let eyre = map_string_entry(&value, "eyre");
+    let ValueRep::Struct(eyre_struct) = &eyre.rep else {
+        panic!("expected eyre dependency struct, got {eyre:?}");
+    };
+    assert_eq!(eyre_struct.type_name.as_ref(), "Detailed");
+    let workspace = struct_field(eyre, "workspace");
+    let ValueRep::Struct(workspace_option) = &workspace.rep else {
+        panic!("expected optional workspace field, got {workspace:?}");
+    };
+    assert_eq!(workspace_option.type_name.as_ref(), "Some");
+    assert_eq!(struct_field(workspace, "value").rep, ValueRep::Bool(true));
+    let version = struct_field(eyre, "version");
+    let ValueRep::Struct(version_option) = &version.rep else {
+        panic!("expected optional version field, got {version:?}");
+    };
+    assert_eq!(version_option.type_name.as_ref(), "None");
+
+    let flate2 = map_string_entry(&value, "flate2");
+    let ValueRep::Struct(flate2_struct) = &flate2.rep else {
+        panic!("expected flate2 dependency struct, got {flate2:?}");
+    };
+    assert_eq!(flate2_struct.type_name.as_ref(), "Version");
+    assert_eq!(
+        struct_field(flate2, "value").rep,
+        ValueRep::String(Arc::from("1"))
+    );
+}
+
+#[test]
+fn json_parse_decodes_enum_variant_with_rename_all() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+#[rename_all = "snake_case"]
+enum DepKind {
+  struct Normal,
+  struct Build,
+  struct Dev,
+}
+
+struct Dep {
+  kind: DepKind?,
+}
+
+fn build(blob: Blob) {
+  Json.parse[Dep](blob)
+}
+"#,
+            "json-parse-enum-rename-all",
+            "build",
+            &[Value::external("Blob", r#"{"kind":"normal"}"#)],
+        )
+        .expect("evaluate Json.parse with enum rename_all"),
+    );
+
+    let kind = struct_field(&value, "kind");
+    let ValueRep::Struct(option) = &kind.rep else {
+        panic!("expected optional kind field, got {kind:?}");
+    };
+    assert_eq!(option.type_name.as_ref(), "Some");
+    let nested = struct_field(kind, "value");
+    let ValueRep::Struct(kind_variant) = &nested.rep else {
+        panic!("expected enum variant, got {nested:?}");
+    };
+    assert_eq!(kind_variant.type_name.as_ref(), "Normal");
+}
+
+#[test]
 fn binary_equality_supports_authored_branching() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

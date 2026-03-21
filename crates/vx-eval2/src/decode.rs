@@ -247,8 +247,21 @@ impl DecodeContext<'_> {
                 "enum type id did not resolve to an enum definition",
             ));
         };
+        if def.attrs.untagged {
+            return self.decode_untagged_enum(value, enum_ty, def, provenance);
+        }
+        self.decode_externally_tagged_enum(value, enum_ty, def, provenance)
+    }
+
+    fn decode_externally_tagged_enum(
+        &self,
+        value: &FacetValue,
+        enum_ty: &EnumTy,
+        def: &EnumDef,
+        provenance: Provenance,
+    ) -> Result<Value, EvalError> {
         if let Some(variant_name) = value.as_string().map(|name| name.as_str()) {
-            let (_, variant) = find_variant(self.types, def, variant_name)?;
+            let (_, variant) = find_variant_by_decoded_name(self.types, def, variant_name)?;
             if !variant.fields.is_empty() {
                 return Err(EvalError::new(
                     EvalErrorKind::UserFail,
@@ -274,16 +287,97 @@ impl DecodeContext<'_> {
             .iter()
             .next()
             .expect("single-entry object should yield one item");
-        let (variant_id, variant) = find_variant(self.types, def, variant_name.as_str())?;
+        let (variant_id, variant) =
+            find_variant_by_decoded_name(self.types, def, variant_name.as_str())?;
         let variant_ty = StructTy {
             id: variant_id,
             type_args: enum_ty.type_args.clone(),
         };
-        self.decode_struct(
+        self.decode_variant_payload(
             variant_value,
             &variant_ty,
-            provenance.project(ProjectionStep::Field(variant.name.clone())),
+            variant,
+            provenance.project(ProjectionStep::Field(variant_name.to_string())),
+            true,
         )
+    }
+
+    fn decode_untagged_enum(
+        &self,
+        value: &FacetValue,
+        enum_ty: &EnumTy,
+        def: &EnumDef,
+        provenance: Provenance,
+    ) -> Result<Value, EvalError> {
+        let mut last_error = None;
+        for variant_id in &def.variants {
+            let TypeDef::Struct(variant) = &self.types.env[*variant_id] else {
+                continue;
+            };
+            let variant_ty = StructTy {
+                id: *variant_id,
+                type_args: enum_ty.type_args.clone(),
+            };
+            match self.decode_variant_payload(
+                value,
+                &variant_ty,
+                variant,
+                provenance.project(ProjectionStep::Field(decoded_variant_name(def, variant))),
+                true,
+            ) {
+                Ok(decoded) => return Ok(decoded),
+                Err(error) if error.kind == EvalErrorKind::UserFail => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("untagged enum {} did not match any variant", def.name),
+            )
+        }))
+    }
+
+    fn decode_variant_payload(
+        &self,
+        value: &FacetValue,
+        variant_ty: &StructTy,
+        variant: &StructDef,
+        provenance: Provenance,
+        allow_direct_single_field: bool,
+    ) -> Result<Value, EvalError> {
+        match variant.fields.as_slice() {
+            [] => {
+                if value.is_null() {
+                    Ok(
+                        Value::structure(Arc::from(variant.name.as_str()), Vec::new())
+                            .with_meta(self.leaf_meta(provenance)),
+                    )
+                } else {
+                    Err(EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("variant {} requires no payload", variant.name),
+                    ))
+                }
+            }
+            [field] if allow_direct_single_field => {
+                let field_ty = substitute_type_params(&field.ty, &variant_ty.type_args);
+                let decoded = self.decode_value(
+                    value,
+                    &field_ty,
+                    provenance.project(ProjectionStep::Field(field.name.clone())),
+                )?;
+                let meta = self.composite_meta(provenance, [&decoded]);
+                Ok(Value::structure(
+                    Arc::from(variant.name.as_str()),
+                    vec![(Arc::from(field.name.as_str()), decoded)],
+                )
+                .with_meta(meta))
+            }
+            _ => self.decode_struct(value, variant_ty, provenance),
+        }
     }
 
     fn decode_alias(
@@ -404,6 +498,12 @@ fn decoded_field_name(container: &StructDef, field: &vx_types::FieldDef) -> Stri
         .rename
         .clone()
         .unwrap_or_else(|| renamed_identifier(&field.name, &container.attrs, &field.attrs))
+}
+
+fn decoded_variant_name(container: &EnumDef, variant: &StructDef) -> String {
+    variant.attrs.rename.clone().unwrap_or_else(|| {
+        renamed_identifier(&variant.name, &container.attrs, &DeserFieldAttrs::default())
+    })
 }
 
 fn renamed_identifier(
@@ -623,4 +723,20 @@ fn find_variant<'a>(
         EvalErrorKind::UserFail,
         format!("variant {variant_name} was not found in {}", def.name),
     ))
+}
+
+fn find_variant_by_decoded_name<'a>(
+    types: &'a TypeCollection,
+    def: &'a EnumDef,
+    variant_name: &str,
+) -> Result<(TypeId, &'a StructDef), EvalError> {
+    for variant_id in &def.variants {
+        let TypeDef::Struct(variant) = &types.env[*variant_id] else {
+            continue;
+        };
+        if decoded_variant_name(def, variant) == variant_name {
+            return Ok((*variant_id, variant));
+        }
+    }
+    find_variant(types, def, variant_name)
 }

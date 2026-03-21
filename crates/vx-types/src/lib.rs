@@ -211,6 +211,7 @@ pub enum DeserRenameRule {
 pub struct DeserContainerAttrs {
     pub rename: Option<String>,
     pub rename_all: Option<DeserRenameRule>,
+    pub untagged: bool,
 }
 
 #[derive(Clone, Debug, Default)]

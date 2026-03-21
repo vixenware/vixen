@@ -1,0 +1,59 @@
+main <<VX,vx
+#[untagged]
+enum DependencySpec {
+  struct Version {
+    value: String,
+  },
+
+  struct Detailed {
+    workspace: Bool?,
+    version: String?,
+  },
+}
+
+struct Manifest {
+  dependencies: Map[String, DependencySpec],
+}
+
+fn build() {
+  let manifest = Toml.parse[Manifest](read_file("../../../xtask/Cargo.toml"));
+  %{
+    "eyre" => map_get(manifest.dependencies, "eyre"),
+    "flate2" => map_get(manifest.dependencies, "flate2"),
+  }
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @map{
+    eyre @struct{
+      type Detailed
+      fields {
+        workspace @struct{
+          type Some
+          fields {
+            value @bool"true"
+          }
+        }
+        version @struct{
+          type None
+        }
+      }
+    }
+    flate2 @struct{
+      type Version
+      fields {
+        value @string"1"
+      }
+    }
+  }
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

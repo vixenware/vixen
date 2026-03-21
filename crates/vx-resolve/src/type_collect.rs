@@ -439,6 +439,7 @@ fn collect_container_attrs(attributes: Option<AttributeList>) -> DeserContainerA
                         _ => None,
                     })
                 }
+                "untagged" => attrs.untagged = true,
                 _ => {}
             }
         }

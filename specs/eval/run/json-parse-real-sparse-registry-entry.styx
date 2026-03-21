@@ -6,7 +6,14 @@ struct RegistryDep {
   optional: Bool,
   default_features: Bool,
   target: String?,
-  kind: String?,
+  kind: DepKind?,
+}
+
+#[rename_all = "snake_case"]
+enum DepKind {
+  struct Normal,
+  struct Build,
+  struct Dev,
 }
 
 struct RegistryRelease {
@@ -25,6 +32,7 @@ struct ReleaseSummary {
   name: String,
   version: String,
   first_dep: String,
+  first_dep_kind: DepKind?,
   derive_feature: Array[String],
   rust_version: String?,
 }
@@ -36,6 +44,7 @@ fn build() {
     name: release.name,
     version: release.version,
     first_dep: first_dep.name,
+    first_dep_kind: first_dep.kind,
     derive_feature: map_get(release.features, "derive"),
     rust_version: release.rust_version,
   }
@@ -53,6 +62,14 @@ expect {
       name @string"serde"
       version @string"1.0.228"
       first_dep @string"serde_core"
+      first_dep_kind @struct{
+        type Some
+        fields {
+          value @struct{
+            type Normal
+          }
+        }
+      }
       derive_feature @array(
         @string"serde_derive"
       )
