@@ -307,7 +307,6 @@ struct LearnedSearchNoGood {
     branch_context: EvalBranchContext,
     assumption: Arc<str>,
     candidates: Arc<[Value]>,
-    start_index: usize,
     resolver: FunctionRef,
     error: EvalError,
 }
@@ -1849,7 +1848,8 @@ enum ContinuationFrame {
         resolver: FunctionRef,
         index: usize,
         attempts: Vec<Value>,
-        root_search_start: Option<usize>,
+        root_search_start: usize,
+        search_start_index: usize,
         prior_branch_context: EvalBranchContext,
     },
     IfCondition {
@@ -2594,7 +2594,6 @@ impl EvalScheduler {
         branch_context: &EvalBranchContext,
         assumption: &Arc<str>,
         candidates: &[Value],
-        start_index: usize,
         resolver: &FunctionRef,
     ) -> Result<Option<EvalError>, EvalError> {
         self.learned_search_no_goods
@@ -2602,7 +2601,6 @@ impl EvalScheduler {
             .find_map(|learned| {
                 if learned.branch_context == *branch_context
                     && learned.assumption == *assumption
-                    && learned.start_index == start_index
                     && learned.resolver == *resolver
                 {
                     Some(
@@ -2639,7 +2637,6 @@ impl EvalScheduler {
         for existing in learned_search_no_goods.iter_mut() {
             if existing.branch_context == learned.branch_context
                 && existing.assumption == learned.assumption
-                && existing.start_index == learned.start_index
                 && existing.resolver == learned.resolver
                 && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())?
             {
@@ -4549,6 +4546,40 @@ fn errors_equal_for_learning(lhs: &EvalError, rhs: &EvalError) -> Result<bool, E
     }
 }
 
+fn branch_conflict_attempts(error: &EvalError) -> Option<&[Value]> {
+    let detail = error.detail.as_ref()?;
+    let ValueRep::Struct(struct_value) = &detail.rep else {
+        return None;
+    };
+    if struct_value.type_name.as_ref() != "BranchConflict" {
+        return None;
+    }
+    let attempts_value = struct_value
+        .fields
+        .iter()
+        .find(|(field, _)| field.as_ref() == "attempts")
+        .map(|(_, value)| value)?;
+    let ValueRep::Array(attempts) = &attempts_value.rep else {
+        return None;
+    };
+    Some(&attempts[..])
+}
+
+fn local_branch_conflict_error(
+    name: Arc<str>,
+    error: &EvalError,
+    attempt_offset: usize,
+) -> Option<EvalError> {
+    if attempt_offset == 0 {
+        return Some(error.clone());
+    }
+    let attempts = branch_conflict_attempts(error)?;
+    Some(branch_conflict_error(
+        name,
+        attempts[attempt_offset..].to_vec(),
+    ))
+}
+
 fn learn_point_no_good(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     branch_context: &EvalBranchContext,
@@ -4574,7 +4605,6 @@ fn learn_search_no_good(
     branch_context: &EvalBranchContext,
     assumption: &Arc<str>,
     candidates: &[Value],
-    start_index: usize,
     resolver: &FunctionRef,
     error: &EvalError,
 ) -> Result<(), EvalError> {
@@ -4584,7 +4614,6 @@ fn learn_search_no_good(
             branch_context: branch_context.clone(),
             assumption: assumption.clone(),
             candidates: Arc::from(candidates.to_vec()),
-            start_index,
             resolver: resolver.clone(),
             error: error.clone(),
         })
@@ -4599,16 +4628,18 @@ fn continue_search_assumption_builtin(
     resolver: FunctionRef,
     start_index: usize,
     mut attempts: Vec<Value>,
-    root_search_start: Option<usize>,
+    root_search_start: usize,
+    search_start_index: usize,
 ) -> Result<EvalStep, EvalError> {
     let prior_branch_context = state.branch_context.clone();
-    let fresh_search = attempts.is_empty();
-    if fresh_search
+    let local_attempt_offset = search_start_index.saturating_sub(root_search_start);
+    let fresh_local_search = attempts.len() == local_attempt_offset;
+    let search_candidates = &candidates[search_start_index..];
+    if fresh_local_search
         && let Some(error) = state.scheduler.learned_search_no_good(
             &prior_branch_context,
             &name,
-            &candidates,
-            start_index,
+            search_candidates,
             &resolver,
         )?
     {
@@ -4652,6 +4683,7 @@ fn continue_search_assumption_builtin(
                         index,
                         attempts,
                         root_search_start,
+                        search_start_index,
                         prior_branch_context,
                     },
                 ));
@@ -4672,15 +4704,16 @@ fn continue_search_assumption_builtin(
         }
     }
     let error = branch_conflict_error(name.clone(), attempts);
-    if let Some(root_search_start) = root_search_start {
+    if !search_candidates.is_empty() {
+        let local_error = local_branch_conflict_error(name.clone(), &error, local_attempt_offset)
+            .unwrap_or_else(|| error.clone());
         learn_search_no_good(
             state,
             &prior_branch_context,
             &name,
-            &candidates,
-            root_search_start,
+            search_candidates,
             &resolver,
-            &error,
+            &local_error,
         )?;
     }
     Err(error)
@@ -5242,7 +5275,8 @@ fn continue_call_from_args(
             resolver,
             0,
             Vec::new(),
-            Some(0),
+            0,
+            0,
         );
     }
     if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
@@ -6443,6 +6477,7 @@ fn resume_frame(
             index,
             mut attempts,
             root_search_start,
+            search_start_index,
             prior_branch_context,
         } => {
             state.branch_context = prior_branch_context.clone();
@@ -6463,13 +6498,31 @@ fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        name,
-                        candidates,
-                        resolver,
+                        name.clone(),
+                        candidates.clone(),
+                        resolver.clone(),
                         index + 1,
                         attempts,
                         root_search_start,
+                        index + 1,
                     );
+                    if let Err(error) = &result
+                        && search_start_index < candidates.len()
+                    {
+                        let local_attempt_offset =
+                            search_start_index.saturating_sub(root_search_start);
+                        let local_error =
+                            local_branch_conflict_error(name.clone(), error, local_attempt_offset)
+                                .unwrap_or_else(|| error.clone());
+                        learn_search_no_good(
+                            state,
+                            &prior_branch_context,
+                            &name,
+                            &candidates[search_start_index..],
+                            &resolver,
+                            &local_error,
+                        )?;
+                    }
                     Ok(conclude_resumed_node(state, node_id, parent_id, result))
                 }
                 Err(error) => Ok(ResumeOutcome::Continue(Err(error))),

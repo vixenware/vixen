@@ -372,8 +372,9 @@ Eval2 now has a first explicit exact-search experiment too:
   skipped on later identical searches in the same session
 - adjacent identical failures can widen from singleton point exclusions into
   one conservative candidate-index range exclusion
-- fully failing exact searches can now be learned as conservative whole-search
-  no-goods and replayed on later identical searches in the same branch context
+- fully failing exact searches can now be learned as conservative candidate-slice
+  no-goods and replayed on later identical searches in the same branch context,
+  including exact suffix searches resumed from an already-failed earlier branch
 
 This is still deliberately minimal:
 

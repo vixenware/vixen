@@ -3258,8 +3258,17 @@ fn run_inner() {
   search_assumption("version", ["1.0.0", "1.1.0"], resolve_inner_candidate)
 }
 
+fn run_inner_suffix() {
+  search_assumption("version", ["1.1.0"], resolve_inner_candidate)
+}
+
 fn resolve_outer() {
-  with_assumption("outer", "shared", (() => run_inner()))
+  let outer = branch_assumption("outer");
+  with_assumption(
+    "outer",
+    "shared",
+    (() => if outer == "a" (run_inner()) else (run_inner_suffix())),
+  )
 }
 
 fn build() {
@@ -3287,11 +3296,10 @@ fn build() {
         }
     };
 
+    let stats = session.stats();
     assert_eq!(pending_count, 2);
     assert_eq!(error.kind, EvalErrorKind::UserFail);
     assert_eq!(error.message.as_ref(), "BranchConflict");
-
-    let stats = session.stats();
     assert_eq!(stats.learned_search_no_good_count, 2);
 }
 

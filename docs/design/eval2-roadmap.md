@@ -400,7 +400,8 @@ Eval2 now has a first exact-search seam:
 6. adjacent identical failures can widen from singleton point exclusions into
    one conservative candidate-index range exclusion
 7. fully failing exact searches can now be learned as conservative
-   whole-search no-goods and replayed on later identical searches
+   candidate-slice no-goods and replayed on later identical searches,
+   including exact suffix searches
 
 This is enough for a first correct exact-search experiment, but it is still
 minimal:
