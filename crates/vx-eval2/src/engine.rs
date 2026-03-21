@@ -559,7 +559,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn run(&mut self) -> Result<Resolution, EvalError> {
         loop {
-            match self.step()? {
+            match self.drive_step_without_history()? {
                 EvalSessionStep::Progressed => {}
                 EvalSessionStep::Pending(pending) => return Ok(Resolution::Pending(pending)),
                 EvalSessionStep::WaitingOnInFlight => return Ok(Resolution::Waiting),
@@ -573,6 +573,21 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 }
             }
         }
+    }
+
+    fn drive_step_without_history(&mut self) -> Result<EvalSessionStep, EvalError> {
+        if let Some(result) = &self.completed {
+            return Ok(match result {
+                Ok(value) => EvalSessionStep::Ready(value.clone()),
+                Err(error) => EvalSessionStep::Poison(error.clone()),
+            });
+        }
+
+        let Some(prepared) = self.prepare_step_impl(false)? else {
+            return Ok(step_without_ready_work(&self.scheduler, &self.completed));
+        };
+        let completion = prepared.execute()?;
+        self.apply_completion_impl(completion, false)
     }
 
     pub fn run_parallel(&mut self, max_workers: usize) -> Result<Resolution, EvalError> {
