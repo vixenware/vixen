@@ -5227,6 +5227,182 @@ fn branch_context_does_not_leak_across_unrelated_sessions() {
 }
 
 #[test]
+fn branch_assumption_reads_session_assumption() {
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  branch_assumption("version")
+}
+"#,
+        "branch-assumption-read",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+    session.set_branch_context(
+        EvalBranchContext::default().with_assumption("version", Value::string("1.1.0")),
+    );
+
+    let Resolution::Ready(value) = session.run().expect("evaluate branch assumption") else {
+        panic!("expected ready branch assumption result");
+    };
+    assert_eq!(value.rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
+fn with_assumption_scopes_and_restores_branch_context() {
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  [
+    with_assumption("version", "1.0.0", (() => branch_assumption("version"))),
+    branch_assumption("version"),
+  ]
+}
+"#,
+        "with-assumption-scope",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+    let root_context =
+        EvalBranchContext::default().with_assumption("version", Value::string("base"));
+    session.set_branch_context(root_context.clone());
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("evaluate scoped branch assumption result")
+    else {
+        panic!("expected ready scoped branch assumption result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("base".into()));
+    assert_eq!(session.branch_context(), &root_context);
+}
+
+#[test]
+fn with_assumption_resumes_pending_under_derived_context() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn build() {
+  [
+    with_assumption("version", "1.0.0", (() => {
+      let _ready = host_wait();
+      branch_assumption("version")
+    })),
+    branch_assumption("version"),
+  ]
+}
+"#,
+        "with-assumption-pending",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+    let root_context =
+        EvalBranchContext::default().with_assumption("version", Value::string("base"));
+    session.set_branch_context(root_context.clone());
+
+    let Resolution::Pending(pending) = session
+        .run()
+        .expect("start suspended derived branch assumption")
+    else {
+        panic!("expected pending derived branch assumption");
+    };
+    session
+        .resolve_pending(&pending, Value::string("ready"))
+        .expect("resolve derived branch pending value");
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("resume derived branch assumption result")
+    else {
+        panic!("expected ready derived branch assumption result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("base".into()));
+    assert_eq!(session.branch_context(), &root_context);
+}
+
+#[test]
+fn keyed_nodes_are_scoped_by_branch_context() {
+    let mut session = EvalSession::new(
+        r#"
+fn resolve_pkg(ctx) {
+  branch_assumption("version")
+}
+
+fn build() {
+  [
+    with_assumption("version", "1.0.0", (() => keyed("logger", [], resolve_pkg))),
+    with_assumption("version", "1.0.0", (() => keyed("logger", [], resolve_pkg))),
+    with_assumption("version", "1.1.0", (() => keyed("logger", [], resolve_pkg))),
+  ]
+}
+"#,
+        "keyed-branch-context-scope",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("evaluate keyed nodes under branch contexts")
+    else {
+        panic!("expected ready keyed branch-context result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[2].rep, ValueRep::String("1.1.0".into()));
+
+    let snapshot = session.graph_snapshot();
+    let keyed_nodes = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.keyed.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_nodes.len(), 2);
+
+    let first_context =
+        EvalBranchContext::default().with_assumption("version", Value::string("1.0.0"));
+    let second_context =
+        EvalBranchContext::default().with_assumption("version", Value::string("1.1.0"));
+    assert_eq!(
+        keyed_nodes
+            .iter()
+            .filter(|node| node.branch_context == first_context)
+            .count(),
+        1
+    );
+    assert_eq!(
+        keyed_nodes
+            .iter()
+            .filter(|node| node.branch_context == second_context)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn run_parallel_can_drive_multiple_frontier_waves_to_completion() {
     let active_calls = Arc::new(AtomicUsize::new(0));
     let max_calls = Arc::new(AtomicUsize::new(0));

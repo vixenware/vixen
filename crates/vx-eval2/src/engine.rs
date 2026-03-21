@@ -97,16 +97,54 @@ pub struct EvalWorkId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalWaveId(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct EvalBranchContext {
     key: Arc<str>,
+    assumptions: Arc<[(Arc<str>, Value)]>,
 }
 
 impl EvalBranchContext {
     pub fn new(key: impl Into<Arc<str>>) -> Self {
-        Self { key: key.into() }
+        Self {
+            key: key.into(),
+            assumptions: Arc::from([]),
+        }
+    }
+
+    pub fn with_assumption(&self, name: impl Into<Arc<str>>, value: Value) -> Self {
+        let name = name.into();
+        let mut assumptions = self.assumptions.iter().cloned().collect::<Vec<_>>();
+        match assumptions.binary_search_by(|(existing, _)| existing.as_ref().cmp(name.as_ref())) {
+            Ok(index) => assumptions[index] = (name, value),
+            Err(index) => assumptions.insert(index, (name, value)),
+        }
+        Self {
+            key: self.key.clone(),
+            assumptions: Arc::from(assumptions),
+        }
+    }
+
+    pub fn assumption(&self, name: &str) -> Option<&Value> {
+        self.assumptions
+            .iter()
+            .find(|(existing, _)| existing.as_ref() == name)
+            .map(|(_, value)| value)
     }
 }
+
+impl PartialEq for EvalBranchContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.assumptions.len() == other.assumptions.len()
+            && self.assumptions.iter().zip(other.assumptions.iter()).all(
+                |((left_name, left_value), (right_name, right_value))| {
+                    left_name == right_name && left_value.rep == right_value.rep
+                },
+            )
+    }
+}
+
+impl Eq for EvalBranchContext {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalWorkKind {
@@ -217,6 +255,7 @@ pub struct EvalKeyedNode {
     pub resolver_name: Arc<str>,
     pub key: Value,
     pub joined: Value,
+    pub branch_context: EvalBranchContext,
     pub revision: u64,
     pub active_revision: Option<u64>,
     pub evaluated_revision: Option<u64>,
@@ -229,6 +268,7 @@ struct KeyedNodeMemo {
     resolver: FunctionRef,
     key: Value,
     joined: Value,
+    branch_context: EvalBranchContext,
     revision: u64,
     active_revision: Option<u64>,
     evaluated_revision: Option<u64>,
@@ -242,6 +282,7 @@ impl KeyedNodeMemo {
             resolver_name: self.resolver.name.clone(),
             key: self.key.clone(),
             joined: self.joined.clone(),
+            branch_context: self.branch_context.clone(),
             revision: self.revision,
             active_revision: self.active_revision,
             evaluated_revision: self.evaluated_revision,
@@ -398,9 +439,18 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         place: impl Into<String>,
     ) -> Self {
         let mut scheduler = EvalScheduler::default();
-        scheduler.enqueue_start_entry();
+        let branch_context = EvalBranchContext::default();
+        scheduler.enqueue_start_entry(branch_context.clone());
         let program = Arc::new(CompiledProgram::new(source_id, source));
-        Self::new_with_program(program, entry, args, runtime, place, scheduler)
+        Self::new_with_program(
+            program,
+            entry,
+            args,
+            runtime,
+            place,
+            scheduler,
+            branch_context,
+        )
     }
 
     pub fn new_program(
@@ -411,9 +461,18 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         place: impl Into<String>,
     ) -> Self {
         let mut scheduler = EvalScheduler::default();
-        scheduler.enqueue_start_entry();
+        let branch_context = EvalBranchContext::default();
+        scheduler.enqueue_start_entry(branch_context.clone());
         let program = Arc::new(CompiledProgram::from_eval_program(program));
-        Self::new_with_program(program, entry, args, runtime, place, scheduler)
+        Self::new_with_program(
+            program,
+            entry,
+            args,
+            runtime,
+            place,
+            scheduler,
+            branch_context,
+        )
     }
 
     fn new_with_program(
@@ -423,6 +482,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         runtime: &'runtime Runtime,
         place: impl Into<String>,
         scheduler: EvalScheduler,
+        branch_context: EvalBranchContext,
     ) -> Self {
         Self {
             program,
@@ -430,7 +490,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args,
             runtime,
             place: place.into(),
-            branch_context: EvalBranchContext::default(),
+            branch_context,
             scheduler,
             trace: EvalTrace::default(),
             completed_work: Vec::new(),
@@ -540,7 +600,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub fn set_branch_context(&mut self, branch_context: EvalBranchContext) {
+        let previous = self.branch_context.clone();
         self.branch_context = branch_context;
+        self.scheduler
+            .replace_queued_branch_context(&previous, &self.branch_context);
         self.generation += 1;
     }
 
@@ -664,7 +727,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             args: self.args.clone(),
             runtime: self.runtime,
             place: self.place.clone(),
-            branch_context: self.branch_context.clone(),
+            branch_context: lease.record.branch_context.clone(),
             wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
             scheduler: self.scheduler.clone_for_lease(lease.namespace),
@@ -765,7 +828,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 &mut trace,
                 &mut completed_work,
                 &mut completed,
-                &self.branch_context,
                 completion,
             )?);
         }
@@ -978,15 +1040,8 @@ fn apply_completion_to_state(
     trace: &mut EvalTrace,
     completed_work: &mut Vec<EvalCompletedWork>,
     completed: &mut Option<Result<Value, EvalError>>,
-    branch_context: &EvalBranchContext,
     completion: EvalWorkCompletion,
 ) -> Result<EvalSessionStep, EvalError> {
-    if completion.branch_context != *branch_context {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "stale eval work completion for mismatched branch context",
-        ));
-    }
     scheduler.validate_in_flight_task(
         completion.work.id,
         completion.lease_sequence,
@@ -1123,6 +1178,7 @@ impl EvalWorkCompletion {
         self.delta.scheduler.queued.push(ReadyTaskRecord {
             work: record.clone(),
             task: ReadyTask::StartEntry,
+            branch_context: EvalBranchContext::default(),
         });
     }
 }
@@ -1332,6 +1388,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
     let mut state = EvalState::new(
         &program,
         program.entry_source(),
+        EvalBranchContext::default(),
         runtime,
         place,
         sink,
@@ -1348,6 +1405,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
 struct EvalState<'source, 'scheduler, Runtime, Sink> {
     program: &'source CompiledProgram,
     current_source: SourceId,
+    branch_context: EvalBranchContext,
     runtime: &'source Runtime,
     place: &'source str,
     sink: &'source mut Sink,
@@ -1408,6 +1466,7 @@ impl Default for EvalScheduler {
 struct ReadyTaskRecord {
     work: EvalQueuedWork,
     task: ReadyTask,
+    branch_context: EvalBranchContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1461,6 +1520,7 @@ enum ReadyTask {
 struct EvalSuspension {
     resume_node: EvalNodeId,
     pending: PendingRef,
+    branch_context: EvalBranchContext,
     frames: Vec<ContinuationFrame>,
 }
 
@@ -1574,6 +1634,9 @@ enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
     },
+    RestoreBranchContext {
+        branch_context: EvalBranchContext,
+    },
     IfCondition {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -1645,6 +1708,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     fn new(
         program: &'source CompiledProgram,
         current_source: SourceId,
+        branch_context: EvalBranchContext,
         runtime: &'source Runtime,
         place: &'source str,
         sink: &'source mut Sink,
@@ -1655,6 +1719,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         Self {
             program,
             current_source,
+            branch_context,
             runtime,
             place,
             sink,
@@ -1682,6 +1747,22 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         self.current_source = source;
         let result = f(self);
         self.current_source = previous;
+        result
+    }
+
+    fn branch_context(&self) -> &EvalBranchContext {
+        &self.branch_context
+    }
+
+    fn with_branch_context<T>(
+        &mut self,
+        branch_context: EvalBranchContext,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.branch_context.clone();
+        self.branch_context = branch_context;
+        let result = f(self);
+        self.branch_context = previous;
         result
     }
 
@@ -1809,6 +1890,7 @@ fn record_poison_step(
 }
 
 fn wrap_suspended(
+    branch_context: EvalBranchContext,
     pending: PendingRef,
     resume_node: EvalNodeId,
     frame: ContinuationFrame,
@@ -1816,6 +1898,7 @@ fn wrap_suspended(
     EvalStep::Suspended(EvalSuspension {
         resume_node,
         pending,
+        branch_context,
         frames: vec![frame],
     })
 }
@@ -1969,7 +2052,7 @@ impl EvalScheduler {
             .collect()
     }
 
-    fn enqueue_start_entry(&mut self) -> EvalQueuedWork {
+    fn enqueue_start_entry(&mut self, branch_context: EvalBranchContext) -> EvalQueuedWork {
         self.record_node(EvalNodeRecord {
             node_id: ENTRY_WORK_NODE_ID,
             parent_id: None,
@@ -1981,6 +2064,7 @@ impl EvalScheduler {
             EvalWorkKind::StartEntry,
             ENTRY_WORK_NODE_ID,
             None,
+            branch_context,
         );
         self.record_node_state(
             ENTRY_WORK_NODE_ID,
@@ -2073,6 +2157,18 @@ impl EvalScheduler {
         }
     }
 
+    fn replace_queued_branch_context(
+        &mut self,
+        previous: &EvalBranchContext,
+        next: &EvalBranchContext,
+    ) {
+        for record in self.ready_tasks.values_mut() {
+            if record.branch_context == *previous {
+                record.branch_context = next.clone();
+            }
+        }
+    }
+
     fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
         self.node_states.get(&node_id)
     }
@@ -2089,11 +2185,12 @@ impl EvalScheduler {
         &self,
         resolver: &FunctionRef,
         key: &Value,
+        branch_context: &EvalBranchContext,
     ) -> Result<Option<EvalNodeId>, EvalError> {
         self.keyed_nodes
             .iter()
             .find_map(|(node_id, memo)| {
-                if memo.resolver == *resolver {
+                if memo.resolver == *resolver && memo.branch_context == *branch_context {
                     Some(
                         values_equal(&memo.key.rep, &key.rep)
                             .map(|equal| equal.then_some(*node_id)),
@@ -2111,17 +2208,20 @@ impl EvalScheduler {
     }
 
     fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
-        if !self.keyed_nodes.contains_key(&node_id) {
+        let branch_context = if let Some(memo) = self.keyed_nodes.get(&node_id) {
+            memo.branch_context.clone()
+        } else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 format!("keyed node {:?} is not registered", node_id),
             ));
-        }
+        };
         let work = self.enqueue_ready_task(
             ReadyTask::EvaluateKeyed(node_id),
             EvalWorkKind::EvaluateKeyed,
             node_id,
             None,
+            branch_context,
         );
         self.record_node_state(
             node_id,
@@ -2144,9 +2244,10 @@ impl EvalScheduler {
         resolver: FunctionRef,
         key: Value,
         joined: Value,
+        branch_context: EvalBranchContext,
         source: SourceSpan,
     ) -> Result<EvalNodeId, EvalError> {
-        if let Some(node_id) = self.find_keyed_node(&resolver, &key)? {
+        if let Some(node_id) = self.find_keyed_node(&resolver, &key, &branch_context)? {
             let mut widened = false;
             {
                 let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
@@ -2191,6 +2292,7 @@ impl EvalScheduler {
                 resolver,
                 key,
                 joined,
+                branch_context,
                 revision: 1,
                 active_revision: None,
                 evaluated_revision: None,
@@ -2349,6 +2451,7 @@ impl EvalScheduler {
         }
         for suspension in suspensions {
             let resume_node = suspension.resume_node;
+            let branch_context = suspension.branch_context.clone();
             let work = self.enqueue_ready_task(
                 ReadyTask::Resume(ScheduledResume {
                     suspension,
@@ -2357,6 +2460,7 @@ impl EvalScheduler {
                 EvalWorkKind::ResumePending,
                 resume_node,
                 Some(pending.clone()),
+                branch_context,
             );
             self.record_node_state(
                 resume_node,
@@ -2577,6 +2681,7 @@ impl EvalScheduler {
         kind: EvalWorkKind,
         node_id: EvalNodeId,
         pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
     ) -> EvalQueuedWork {
         let work = EvalQueuedWork {
             id: EvalWorkId(if let Some(namespace) = &mut self.lease_namespace {
@@ -2598,6 +2703,7 @@ impl EvalScheduler {
             ReadyTaskRecord {
                 work: work.clone(),
                 task,
+                branch_context,
             },
         );
         work
@@ -2693,6 +2799,7 @@ fn execute_ready_task(
     let mut state = EvalState::new(
         program.as_ref(),
         program.entry_source(),
+        record.branch_context.clone(),
         runtime,
         place,
         &mut trace,
@@ -2728,6 +2835,7 @@ fn execute_ready_task(
                 EvalWorkKind::EvaluateExpr,
                 node_id,
                 None,
+                state.branch_context.clone(),
             );
             state.scheduler.record_node_state(
                 node_id,
@@ -3481,6 +3589,56 @@ fn keyed_builtin_action(
     Ok(Some((args[0].clone(), args[1].clone(), resolver.clone())))
 }
 
+fn branch_assumption_builtin_action(
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<Arc<str>>, EvalError> {
+    if callee_name != "branch_assumption" {
+        return Ok(None);
+    }
+    if args.len() != 1 {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "branch_assumption() requires the assumption name",
+        ));
+    }
+    let ValueRep::String(name) = &args[0].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "branch_assumption() name must evaluate to String",
+        ));
+    };
+    Ok(Some(name.clone()))
+}
+
+fn with_assumption_builtin_action(
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<(Arc<str>, Value, FunctionRef)>, EvalError> {
+    if callee_name != "with_assumption" {
+        return Ok(None);
+    }
+    if args.len() != 3 {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "with_assumption() requires name, value, and resolver",
+        ));
+    }
+    let ValueRep::String(name) = &args[0].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "with_assumption() name must evaluate to String",
+        ));
+    };
+    let ValueRep::Function(resolver) = &args[2].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "with_assumption() resolver must evaluate to a function value",
+        ));
+    };
+    Ok(Some((name.clone(), args[1].clone(), resolver.clone())))
+}
+
 fn ready_builtin_value(value: Value) -> Option<EvalStep> {
     Some(EvalStep::Ready(value))
 }
@@ -3939,10 +4097,13 @@ fn continue_keyed_builtin(
     joined: Value,
     resolver: FunctionRef,
 ) -> Result<EvalStep, EvalError> {
-    let keyed_node_id =
-        state
-            .scheduler
-            .demand_keyed_node(resolver, key, joined, call_source.clone())?;
+    let keyed_node_id = state.scheduler.demand_keyed_node(
+        resolver,
+        key,
+        joined,
+        state.branch_context.clone(),
+        call_source.clone(),
+    )?;
     state.emit_current_dependency(keyed_node_id, Some(call_source.clone()));
 
     if let Some(result) = state.scheduler.keyed_resolution(keyed_node_id) {
@@ -3971,6 +4132,7 @@ fn continue_keyed_builtin(
                 Ok(EvalStep::Suspended(EvalSuspension {
                     resume_node: node_id,
                     pending,
+                    branch_context: state.branch_context.clone(),
                     frames: Vec::new(),
                 }))
             }
@@ -3989,6 +4151,51 @@ fn continue_keyed_builtin(
         keyed_node_id,
         Vec::new(),
     ))
+}
+
+fn continue_branch_assumption_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    name: Arc<str>,
+) -> Result<EvalStep, EvalError> {
+    let Some(value) = state.branch_context().assumption(name.as_ref()).cloned() else {
+        return Err(EvalError::new(
+            EvalErrorKind::UserFail,
+            format!("branch assumption {name:?} is not set"),
+        ));
+    };
+    Ok(EvalStep::Ready(value))
+}
+
+fn continue_with_assumption_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    name: Arc<str>,
+    value: Value,
+    resolver: FunctionRef,
+) -> Result<EvalStep, EvalError> {
+    let branch_context = state.branch_context().with_assumption(name, value);
+    let Some(prepared) = prepare_function_call(state, &resolver, &[], Some(node_id))? else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "with_assumption() resolver must be a bodyful Vixen function",
+        ));
+    };
+    let mut env = prepared.env;
+    let prior_branch_context = state.branch_context.clone();
+    let result = state.with_branch_context(branch_context, |state| {
+        state.with_source(prepared.source, |state| {
+            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+        })
+    })?;
+    match result {
+        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::RestoreBranchContext {
+                branch_context: prior_branch_context,
+            },
+        )),
+    }
 }
 
 fn continue_call_from_args(
@@ -4058,6 +4265,12 @@ fn continue_call_from_args(
             resolver,
         );
     }
+    if let Some(name) = branch_assumption_builtin_action(&callee_name, &args)? {
+        return continue_branch_assumption_builtin(state, name);
+    }
+    if let Some((name, value, resolver)) = with_assumption_builtin_action(&callee_name, &args)? {
+        return continue_with_assumption_builtin(state, node_id, name, value, resolver);
+    }
     if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
         return Ok(step);
     }
@@ -4124,6 +4337,7 @@ fn continue_call_from_args(
                 },
             );
             Ok(wrap_suspended(
+                state.branch_context.clone(),
                 pending,
                 node_id,
                 ContinuationFrame::RuntimeCall {
@@ -4702,6 +4916,7 @@ fn queue_child_expr_handle(
         EvalWorkKind::EvaluateExpr,
         child_id,
         None,
+        state.branch_context.clone(),
     );
     state.scheduler.record_node_state(
         child_id,
@@ -4723,6 +4938,7 @@ fn wait_on_child_dependency(
     EvalStep::Suspended(EvalSuspension {
         resume_node,
         pending,
+        branch_context: state.branch_context.clone(),
         frames,
     })
 }
@@ -4862,7 +5078,10 @@ fn resume_suspension(
         }
         index += 1;
     }
-    if frames.is_empty() {
+    if !matches!(
+        state.scheduler.node_state(resume_node),
+        Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
+    ) {
         match &current {
             Ok(value) => record_ready_step(state, resume_node, parent_id, value),
             Err(error) => record_poison_step(state, resume_node, parent_id, error),
@@ -4967,6 +5186,7 @@ fn resume_frame(
                                 return Ok(ResumeOutcome::Suspended(EvalSuspension {
                                     resume_node: node_id,
                                     pending,
+                                    branch_context: state.branch_context.clone(),
                                     frames: vec![ContinuationFrame::CallJoin {
                                         node_id,
                                         parent_id,
@@ -5136,6 +5356,7 @@ fn resume_frame(
                                 return Ok(ResumeOutcome::Suspended(EvalSuspension {
                                     resume_node: node_id,
                                     pending,
+                                    branch_context: state.branch_context.clone(),
                                     frames: vec![ContinuationFrame::ArrayJoin {
                                         node_id,
                                         parent_id,
@@ -5231,6 +5452,10 @@ fn resume_frame(
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::RestoreBranchContext { branch_context } => {
+            state.branch_context = branch_context;
+            Ok(ResumeOutcome::Continue(input))
         }
         ContinuationFrame::IfCondition {
             node_id,
@@ -5342,6 +5567,7 @@ fn resume_frame(
                                 return Ok(ResumeOutcome::Suspended(EvalSuspension {
                                     resume_node: node_id,
                                     pending,
+                                    branch_context: state.branch_context.clone(),
                                     frames: vec![ContinuationFrame::StructJoin {
                                         node_id,
                                         parent_id,
@@ -5604,6 +5830,15 @@ fn merge_keyed_node(
             EvalErrorKind::Internal,
             format!(
                 "keyed node {:?} diverged during completion merge",
+                incoming.node_id
+            ),
+        ));
+    }
+    if existing.branch_context != incoming.branch_context {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "keyed node {:?} changed branch context during completion merge",
                 incoming.node_id
             ),
         ));

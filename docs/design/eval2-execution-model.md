@@ -284,7 +284,6 @@ What it does not yet prove:
 
 - general dependent invalidation after a keyed node has already been consumed
 - user-defined join semantics per value type
-- branch-local assumptions
 - parallel-safe keyed widening across independently executing workers
 
 So the next solver-shaped pressure is no longer "more worklist helpers". It is:
@@ -316,11 +315,45 @@ What it does prove:
 
 What it does not yet prove:
 
-- branch-local assumptions
+- branch-local assumptions can steer exact search
 - exact search over alternatives
 - learned no-goods
 - conflict widening
 - parallel frontier exploration
+
+## First branch-local assumption seam
+
+Eval2 now has a first explicit branch-local assumption experiment too:
+
+- `branch_assumption(name)` reads a scoped assumption value from the current
+  branch context
+- `with_assumption(name, value, resolver)` evaluates `resolver` under a derived
+  branch context and restores the prior context afterward
+- keyed nodes are scoped by full branch context, so the same keyed call can
+  converge within one branch while remaining distinct across incompatible local
+  assumptions
+- branch context survives:
+  - checkpoint / restore
+  - lease / prepared work execution
+  - pending suspension / resume
+  - completion apply
+
+This is still the semantic primitive, not search.
+
+What it does prove:
+
+- evaluator-owned branch-local data can affect authored Vixen code today
+- pending/resume paths preserve derived assumptions instead of collapsing back
+  to the session root
+- keyed convergent demand can distinguish branch-local alternatives without
+  turning them into globally joined facts
+
+What it does not yet prove:
+
+- branch splitting or a runtime-owned search frontier
+- learned exclusions / no-goods
+- branch-local conflict widening
+- parallel exploration of multiple assumption volumes
 
 ## What this does not do yet
 
@@ -459,16 +492,15 @@ The current local-resume session is also useful in its own right:
 - it gives the debugger/explainer story a real notion of resumed execution
   before we commit to a full task VM
 
-An opaque branch context also lives in the session-owned kernel now. It is
-semantically inert today, but it already survives:
+A branch context also lives in the session-owned kernel now. Today it carries
+scoped assumption values, and it survives:
 
 - checkpoint / restore
 - lease / prepared work execution
 - completion apply
 
-That is the reserved place for later branch-local assumptions. Those are not
-intended to be global joined facts, and they should not require another
-scheduler rewrite just to gain a stable home.
+Those assumptions are not intended to be global joined facts, and they should
+not require another scheduler rewrite just to gain a stable home.
 
 ## Settled scheduler contract
 

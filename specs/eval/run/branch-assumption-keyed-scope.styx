@@ -1,0 +1,30 @@
+main <<VX,vx
+fn resolve_pkg(ctx) {
+  branch_assumption("version")
+}
+
+fn build() {
+  [
+    with_assumption("version", "1.0.0", (() => keyed("logger", [], resolve_pkg))),
+    with_assumption("version", "1.0.0", (() => keyed("logger", [], resolve_pkg))),
+    with_assumption("version", "1.1.0", (() => keyed("logger", [], resolve_pkg))),
+  ]
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @array(
+    @string"1.0.0"
+    @string"1.0.0"
+    @string"1.1.0"
+  )
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

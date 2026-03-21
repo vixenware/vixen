@@ -348,16 +348,30 @@ This is still only the data boundary, not solver behavior:
 
 ### 5.4 Branch-Local Context
 
-We need a way to evaluate the same keyed graph under branch-local assumptions
-without turning those assumptions into global joined facts.
+Eval2 now has a first branch-local assumption seam:
 
-This is the most important solver primitive that is not already implied by the
-current build/distributed work.
+1. `branch_assumption(name)` reads the current branch-local assumption value
+2. `with_assumption(name, value, resolver)` evaluates `resolver` under a
+   derived branch context
+3. keyed nodes are scoped by full branch context, so canonical keyed demand can
+   converge within one branch while staying distinct across incompatible local
+   assumptions
+4. branch context survives queueing, lease, suspension, resume, and completion
 
-This likely corresponds to the "branch-local assumptions" section in
+This is the semantic primitive, not search.
+
+What is still missing:
+
+1. runtime-owned branch splitting / search frontier management
+2. exact search over alternatives
+3. branch-local conflict widening and no-good learning
+4. honest dependent invalidation after already-consumed keyed results
+
+This still corresponds to the "branch-local assumptions" section in
 [parallel-solver.md](/Users/amos/bearcove/vixen/docs/design/parallel-solver.md).
 
-`#[choose]` may still be sugar later, but branch context is the real primitive.
+`#[choose]` may still be sugar later, but branch context remains the real
+primitive.
 
 ## Phase 6: Cargo Resolver In Vixen
 
