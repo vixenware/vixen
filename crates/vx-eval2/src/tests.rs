@@ -511,6 +511,174 @@ fn build() {
 }
 
 #[test]
+fn map_entries_preserves_insertion_order() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_entries(%{ "left" => 1, "right" => 2 })
+}
+"#,
+        "map-entries-order",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_entries");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_entries result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!(
+            "expected map_entries to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(items.len(), 2);
+
+    let ValueRep::Map(MapValue { entries: first }) = &items[0].rep else {
+        panic!(
+            "expected first map_entries item to be a map, got {:?}",
+            items[0].rep
+        );
+    };
+    let ValueRep::Map(MapValue { entries: second }) = &items[1].rep else {
+        panic!(
+            "expected second map_entries item to be a map, got {:?}",
+            items[1].rep
+        );
+    };
+
+    assert_eq!(first[0].0.rep, ValueRep::String("key".into()));
+    assert_eq!(first[0].1.rep, ValueRep::String("left".into()));
+    assert_eq!(first[1].0.rep, ValueRep::String("value".into()));
+    assert_eq!(first[1].1.rep, ValueRep::U64(1));
+
+    assert_eq!(second[0].0.rep, ValueRep::String("key".into()));
+    assert_eq!(second[0].1.rep, ValueRep::String("right".into()));
+    assert_eq!(second[1].0.rep, ValueRep::String("value".into()));
+    assert_eq!(second[1].1.rep, ValueRep::U64(2));
+}
+
+#[test]
+fn map_entries_requires_map_as_first_argument() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_entries("not a map")
+}
+"#,
+        "map-entries-first-arg-type",
+        "build",
+        &[],
+    )
+    .expect_err("map_entries non-map first argument should fail");
+
+    assert_eq!(error.kind, EvalErrorKind::TypeError);
+    assert!(
+        error
+            .message
+            .contains("map_entries() first argument must evaluate to a map")
+    );
+}
+
+#[test]
+fn map_entries_preserves_non_string_keys() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  map_entries(%{ 1 => "one" })
+}
+"#,
+        "map-entries-u64-key",
+        "build",
+        &[],
+    )
+    .expect("evaluate map_entries with non-string key");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready map_entries result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!(
+            "expected map_entries to return an array, got {:?}",
+            value.rep
+        );
+    };
+    let ValueRep::Map(MapValue { entries }) = &items[0].rep else {
+        panic!(
+            "expected map_entries item to be a map, got {:?}",
+            items[0].rep
+        );
+    };
+    assert_eq!(entries[0].1.rep, ValueRep::U64(1));
+    assert_eq!(entries[1].1.rep, ValueRep::String("one".into()));
+}
+
+#[test]
+fn map_entries_aggregates_metadata_from_contents() {
+    struct MetadataRuntime;
+
+    impl RuntimeHooks for MetadataRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
+                    Value::string("observed")
+                        .with_provenance(Provenance::host_probe(
+                            source.clone(),
+                            place,
+                            "claimed value",
+                        ))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue)
+                        .with_claim(Claim::Arch {
+                            value: "x86_64".to_string(),
+                        }),
+                )),
+                ("win", "host_blocked_value") => Ok(RuntimeCallOutcome::Ready(Value::external(
+                    "tree",
+                    "/workspace",
+                ))),
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let Resolution::Ready(value) = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_claimed_value();
+fn host_blocked_value();
+
+fn build() {
+  map_entries(%{ "blocked" => host_blocked_value(), "observed" => host_claimed_value() })
+}
+"#,
+        "map-entries-metadata",
+        "build",
+        &[],
+        &MetadataRuntime,
+        "win",
+    )
+    .expect("evaluate metadata-preserving map_entries") else {
+        panic!("expected ready map_entries metadata result");
+    };
+
+    assert_eq!(value.meta.reuse, ReuseClass::Live);
+    assert_eq!(value.meta.crossing, CrossingPolicy::Blocked);
+    assert!(value.meta.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Claim::Arch { value } if value == "x86_64"
+        )
+    }));
+}
+
+#[test]
 fn map_put_replaces_existing_entry() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

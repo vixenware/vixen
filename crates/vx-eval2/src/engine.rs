@@ -3251,6 +3251,16 @@ fn aggregate_map_entries_meta<'a>(
     )
 }
 
+fn map_entry_value(map_provenance: &Provenance, index: usize, key: &Value, value: &Value) -> Value {
+    let entry_provenance = map_provenance.project(ProjectionStep::Index(index as u64));
+    let entry_fields = vec![
+        (Value::string("key"), key.clone()),
+        (Value::string("value"), value.clone()),
+    ];
+    let entry_meta = aggregate_map_entries_meta(entry_provenance, entry_fields.iter());
+    Value::map(entry_fields).with_meta(entry_meta)
+}
+
 fn continue_builtin_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -3315,14 +3325,32 @@ fn continue_builtin_call(
             if !replaced {
                 entries.push((key.clone(), value.clone()));
             }
-            let meta = aggregate_map_entries_meta(
-                map.entries.iter().next().map_or_else(
-                    || args[0].meta.provenance.clone(),
-                    |_| args[0].meta.provenance.clone(),
-                ),
-                entries.iter(),
-            );
+            let meta = aggregate_map_entries_meta(args[0].meta.provenance.clone(), entries.iter());
             Ok(ready_builtin_value(Value::map(entries).with_meta(meta)))
+        }
+        "map_entries" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_entries() requires map",
+                ));
+            }
+            let ValueRep::Map(map) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "map_entries() first argument must evaluate to a map",
+                ));
+            };
+            let items = map
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(index, (key, value))| {
+                    map_entry_value(&args[0].meta.provenance, index, key, value)
+                })
+                .collect::<Vec<_>>();
+            let meta = aggregate_child_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
         }
         "array_find" => {
             if args.len() != 2 {
