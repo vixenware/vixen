@@ -2907,6 +2907,146 @@ fn build() {
 }
 
 #[test]
+fn search_assumption_returns_first_successful_branch() {
+    let (resolution, _trace) = eval_source_entry_with_args_with_source_id_traced(
+        r#"
+fn resolve_candidate() {
+  let version = branch_assumption("version");
+  if version == "1.0.0" (
+    fail Conflict {
+      version: version,
+    }
+  ) else (
+    version
+  )
+}
+
+fn build() {
+  search_assumption("version", ["1.0.0", "1.1.0"], resolve_candidate)
+}
+"#,
+        "search-assumption-success",
+        "build",
+        &[],
+    )
+    .expect("evaluate exact-search success");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready exact-search result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
+fn search_assumption_aggregates_conflicts_when_all_branches_fail() {
+    let (resolution, _trace) = eval_source_entry_with_args_with_source_id_traced(
+        r#"
+fn resolve_candidate() {
+  fail Conflict {
+    version: branch_assumption("version"),
+  }
+}
+
+fn build() {
+  search_assumption("version", ["1.0.0", "1.1.0"], resolve_candidate)
+}
+"#,
+        "search-assumption-conflicts",
+        "build",
+        &[],
+    )
+    .expect("evaluate exact-search conflict aggregation");
+
+    let Resolution::Poison(error) = resolution else {
+        panic!("expected poison exact-search conflict result, got {resolution:?}");
+    };
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "BranchConflict");
+    let detail = error
+        .detail
+        .expect("expected aggregated branch conflict detail");
+    let ValueRep::Struct(struct_value) = &detail.rep else {
+        panic!("expected BranchConflict detail, got {:?}", detail.rep);
+    };
+    assert_eq!(struct_value.type_name.as_ref(), "BranchConflict");
+    assert_eq!(struct_value.fields[0].0.as_ref(), "assumption");
+    assert_eq!(
+        struct_value.fields[0].1.rep,
+        ValueRep::String("version".into())
+    );
+    assert_eq!(struct_value.fields[1].0.as_ref(), "attempts");
+    let ValueRep::Array(attempts) = &struct_value.fields[1].1.rep else {
+        panic!(
+            "expected attempts array, got {:?}",
+            struct_value.fields[1].1.rep
+        );
+    };
+    assert_eq!(attempts.len(), 2);
+    for (attempt, expected) in attempts.iter().zip(["1.0.0", "1.1.0"]) {
+        let ValueRep::Struct(attempt_struct) = &attempt.rep else {
+            panic!("expected BranchAttempt detail, got {:?}", attempt.rep);
+        };
+        assert_eq!(attempt_struct.type_name.as_ref(), "BranchAttempt");
+        assert_eq!(attempt_struct.fields[0].0.as_ref(), "value");
+        assert_eq!(
+            attempt_struct.fields[0].1.rep,
+            ValueRep::String(expected.into())
+        );
+        assert_eq!(attempt_struct.fields[1].0.as_ref(), "conflict");
+        let ValueRep::Struct(conflict) = &attempt_struct.fields[1].1.rep else {
+            panic!(
+                "expected structured conflict payload, got {:?}",
+                attempt_struct.fields[1].1.rep
+            );
+        };
+        assert_eq!(conflict.type_name.as_ref(), "Conflict");
+    }
+}
+
+#[test]
+fn search_assumption_resumes_pending_branch_and_continues_to_later_success() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn resolve_candidate() {
+  let version = branch_assumption("version");
+  if version == "1.0.0" (
+    let _ready = host_wait();
+    fail Conflict {
+      version: version,
+    }
+  ) else (
+    version
+  )
+}
+
+fn build() {
+  search_assumption("version", ["1.0.0", "1.1.0"], resolve_candidate)
+}
+"#,
+        "search-assumption-pending",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start suspended exact-search branch")
+    else {
+        panic!("expected pending exact-search branch");
+    };
+    session
+        .resolve_pending(&pending, Value::string("ready"))
+        .expect("resolve suspended exact-search branch");
+
+    let Resolution::Ready(value) = session.run().expect("resume exact-search branch") else {
+        panic!("expected ready exact-search result after resume");
+    };
+    assert_eq!(value.rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
 fn entry_arguments_are_bound_as_runtime_inputs() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build(value: String) { value }",

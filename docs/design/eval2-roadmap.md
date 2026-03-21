@@ -373,6 +373,29 @@ This still corresponds to the "branch-local assumptions" section in
 `#[choose]` may still be sugar later, but branch context remains the real
 primitive.
 
+### 5.5 Exact Search
+
+Eval2 now has a first exact-search seam:
+
+1. `search_assumption(name, candidates, resolver)` explores candidate values in
+   order under branch-local assumptions
+2. the first successful branch returns immediately
+3. if every branch fails with `UserFail`, eval2 returns a structured
+   `BranchConflict` that retains per-branch failure detail
+4. pending/resume paths continue the in-flight branch and can still move on to
+   later candidates afterward
+
+This is enough for a first correct exact-search experiment, but it is still
+minimal:
+
+1. no parallel frontier yet
+2. no learned no-goods yet
+3. no conflict widening yet
+4. no dominance-order comparison across multiple full solutions yet
+
+This keeps exact search generic and assumption-based without committing to
+`#[choose]` surface syntax prematurely.
+
 ## Phase 6: Cargo Resolver In Vixen
 
 Only after the primitives above exist should we attempt a Cargo-shaped

@@ -1,0 +1,34 @@
+main <<VX,vx
+fn resolve_candidate() {
+  let version = branch_assumption("version");
+  if version == "1.0.0" (
+    fail Conflict {
+      package: "logger",
+      version: version,
+    }
+  ) else (
+    version
+  )
+}
+
+fn resolve_pkg(ctx) {
+  search_assumption("version", ctx.joined, resolve_candidate)
+}
+
+fn build() {
+  keyed("logger", ["1.0.0", "1.1.0"], resolve_pkg)
+}
+VX
+
+invoke {
+  entry build
+}
+
+expect {
+  result @string"1.1.0"
+
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

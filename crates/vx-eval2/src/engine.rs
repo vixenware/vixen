@@ -1637,6 +1637,16 @@ enum ContinuationFrame {
     RestoreBranchContext {
         branch_context: EvalBranchContext,
     },
+    SearchAssumptionAfterBranch {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        name: Arc<str>,
+        candidates: Vec<Value>,
+        resolver: FunctionRef,
+        index: usize,
+        attempts: Vec<Value>,
+        prior_branch_context: EvalBranchContext,
+    },
     IfCondition {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -3639,6 +3649,44 @@ fn with_assumption_builtin_action(
     Ok(Some((name.clone(), args[1].clone(), resolver.clone())))
 }
 
+fn search_assumption_builtin_action(
+    callee_name: &str,
+    args: &[Value],
+) -> Result<Option<(Arc<str>, Vec<Value>, FunctionRef)>, EvalError> {
+    if callee_name != "search_assumption" {
+        return Ok(None);
+    }
+    if args.len() != 3 {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "search_assumption() requires name, candidates, and resolver",
+        ));
+    }
+    let ValueRep::String(name) = &args[0].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "search_assumption() name must evaluate to String",
+        ));
+    };
+    let ValueRep::Array(candidates) = &args[1].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "search_assumption() candidates must evaluate to an array",
+        ));
+    };
+    let ValueRep::Function(resolver) = &args[2].rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "search_assumption() resolver must evaluate to a function value",
+        ));
+    };
+    Ok(Some((
+        name.clone(),
+        candidates.iter().cloned().collect(),
+        resolver.clone(),
+    )))
+}
+
 fn ready_builtin_value(value: Value) -> Option<EvalStep> {
     Some(EvalStep::Ready(value))
 }
@@ -3739,6 +3787,84 @@ fn continue_array_fold_builtin(
         };
     }
     Ok(EvalStep::Ready(accumulator))
+}
+
+fn branch_attempt_value(candidate: Value, error: EvalError) -> Value {
+    let conflict = error
+        .detail
+        .unwrap_or_else(|| Value::string(error.message.as_ref()));
+    let fields = vec![
+        (Arc::from("value"), candidate),
+        (Arc::from("conflict"), conflict),
+    ];
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<branch-attempt>")),
+        fields.iter().map(|(_, value)| value),
+    );
+    Value::structure("BranchAttempt", fields).with_meta(meta)
+}
+
+fn branch_conflict_error(name: Arc<str>, attempts: Vec<Value>) -> EvalError {
+    let fields = vec![
+        (Arc::from("assumption"), Value::string(name)),
+        (Arc::from("attempts"), Value::array(attempts)),
+    ];
+    let meta = aggregate_child_meta(
+        Provenance::unknown(SourceSpan::synthetic("<branch-conflict>")),
+        fields.iter().map(|(_, value)| value),
+    );
+    user_fail_error(Value::structure("BranchConflict", fields).with_meta(meta))
+}
+
+fn continue_search_assumption_builtin(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    name: Arc<str>,
+    candidates: Vec<Value>,
+    resolver: FunctionRef,
+    start_index: usize,
+    mut attempts: Vec<Value>,
+) -> Result<EvalStep, EvalError> {
+    let prior_branch_context = state.branch_context.clone();
+    for index in start_index..candidates.len() {
+        let candidate = candidates[index].clone();
+        let branch_context = prior_branch_context.with_assumption(name.clone(), candidate.clone());
+        let Some(prepared) = prepare_function_call(state, &resolver, &[], Some(node_id))? else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "search_assumption() resolver must be a bodyful Vixen function",
+            ));
+        };
+        let mut env = prepared.env;
+        match state.with_branch_context(branch_context, |state| {
+            state.with_source(prepared.source, |state| {
+                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            })
+        }) {
+            Ok(EvalStep::Ready(value)) => return Ok(EvalStep::Ready(value)),
+            Ok(EvalStep::Suspended(suspension)) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::SearchAssumptionAfterBranch {
+                        node_id,
+                        parent_id,
+                        name,
+                        candidates,
+                        resolver,
+                        index,
+                        attempts,
+                        prior_branch_context,
+                    },
+                ));
+            }
+            Err(error) if error.kind == EvalErrorKind::UserFail => {
+                attempts.push(branch_attempt_value(candidate, error));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(branch_conflict_error(name, attempts))
 }
 
 fn aggregate_map_entries_meta<'a>(
@@ -4270,6 +4396,20 @@ fn continue_call_from_args(
     }
     if let Some((name, value, resolver)) = with_assumption_builtin_action(&callee_name, &args)? {
         return continue_with_assumption_builtin(state, node_id, name, value, resolver);
+    }
+    if let Some((name, candidates, resolver)) =
+        search_assumption_builtin_action(&callee_name, &args)?
+    {
+        return continue_search_assumption_builtin(
+            state,
+            node_id,
+            parent_id,
+            name,
+            candidates,
+            resolver,
+            0,
+            Vec::new(),
+        );
     }
     if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
         return Ok(step);
@@ -5456,6 +5596,36 @@ fn resume_frame(
         ContinuationFrame::RestoreBranchContext { branch_context } => {
             state.branch_context = branch_context;
             Ok(ResumeOutcome::Continue(input))
+        }
+        ContinuationFrame::SearchAssumptionAfterBranch {
+            node_id,
+            parent_id,
+            name,
+            candidates,
+            resolver,
+            index,
+            mut attempts,
+            prior_branch_context,
+        } => {
+            state.branch_context = prior_branch_context.clone();
+            match input {
+                Ok(value) => Ok(ResumeOutcome::Continue(Ok(value))),
+                Err(error) if error.kind == EvalErrorKind::UserFail => {
+                    attempts.push(branch_attempt_value(candidates[index].clone(), error));
+                    let result = continue_search_assumption_builtin(
+                        state,
+                        node_id,
+                        parent_id,
+                        name,
+                        candidates,
+                        resolver,
+                        index + 1,
+                        attempts,
+                    );
+                    Ok(conclude_resumed_node(state, node_id, parent_id, result))
+                }
+                Err(error) => Ok(ResumeOutcome::Continue(Err(error))),
+            }
         }
         ContinuationFrame::IfCondition {
             node_id,

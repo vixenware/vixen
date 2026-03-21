@@ -355,6 +355,40 @@ What it does not yet prove:
 - branch-local conflict widening
 - parallel exploration of multiple assumption volumes
 
+## First exact-search seam
+
+Eval2 now has a first explicit exact-search experiment too:
+
+- `search_assumption(name, candidates, resolver)` explores candidate values in
+  order under derived branch-local assumptions
+- the first successful branch returns immediately
+- branch-local `UserFail` results are retained as structured attempt records
+- if every branch fails with `UserFail`, eval2 returns a structured
+  `BranchConflict`
+
+This is still deliberately minimal:
+
+- exact search is sequential today
+- it uses branch-local assumptions as the primitive instead of new surface
+  syntax
+- it does not yet do branch splitting, learning, or dominance ordering
+
+What it does prove:
+
+- the runtime can own exact branch exploration instead of pushing it back into
+  authored manual loops
+- structured conflicts can be aggregated across failed branches without
+  collapsing to text
+- pending/resume paths can continue an in-flight branch and still move on to
+  later candidates correctly
+
+What it does not yet prove:
+
+- parallel search frontier exploration
+- learned no-goods or conflict widening
+- dominance comparisons across multiple complete solutions
+- user-defined split heuristics
+
 ## What this does not do yet
 
 This slice does not yet provide:
