@@ -67,6 +67,13 @@ fn tuple_item(value: &Value, index: usize) -> &Value {
         .unwrap_or_else(|| panic!("expected tuple index {index} in {items:?}"))
 }
 
+fn range_value(value: &Value) -> &crate::RangeValue {
+    let ValueRep::Range(range) = &value.rep else {
+        panic!("expected range value, got {value:?}");
+    };
+    range
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -1194,6 +1201,49 @@ fn build(name: String) {
 }
 
 #[test]
+fn range_literal_evaluates_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  0..=3
+}
+"#,
+        "range-literal-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate range literal");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready range result, got {resolution:?}");
+    };
+    let range = range_value(&value);
+    assert_eq!(range.start, Some(0));
+    assert_eq!(range.end, Some(3));
+    assert!(range.inclusive_end);
+}
+
+#[test]
+fn string_slice_method_accepts_range_argument_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String) {
+  name.slice(0..4)
+}
+"#,
+        "string-slice-method-runtime",
+        "build",
+        &[Value::string("flate2")],
+    )
+    .expect("evaluate String.slice()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.slice() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("flat".into()));
+}
+
+#[test]
 fn bound_string_method_value_can_be_called() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1294,6 +1344,14 @@ fn wire_round_trip_preserves_tuple_shape_and_metadata() {
         Value::tuple(vec![Value::string("serde"), Value::u64(5)]).with_reuse(ReuseClass::Observed);
     let envelope = value_to_envelope(&value).expect("encode tuple to envelope");
     let decoded = envelope_to_value(envelope).expect("decode tuple from envelope");
+    assert_eq!(decoded, value);
+}
+
+#[test]
+fn wire_round_trip_preserves_range_shape_and_metadata() {
+    let value = Value::range(Some(0), Some(3), true).with_reuse(ReuseClass::Observed);
+    let envelope = value_to_envelope(&value).expect("encode range to envelope");
+    let decoded = envelope_to_value(envelope).expect("decode range from envelope");
     assert_eq!(decoded, value);
 }
 
@@ -2993,6 +3051,7 @@ fn normalized_slot_witness(value: Value) -> Value {
                 .map(normalized_slot_witness)
                 .collect::<Vec<_>>(),
         ),
+        ValueRep::Range(range) => Value::range(range.start, range.end, range.inclusive_end),
         ValueRep::Map(map) => Value::map(
             map.entries
                 .iter()

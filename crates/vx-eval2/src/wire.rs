@@ -2,9 +2,12 @@
 
 use std::sync::Arc;
 
-use vx_eval2_proto::{EvalOutcome, StructValue as WireStructValue, ValueEnvelope, WireValue};
+use vx_eval2_proto::{
+    EvalOutcome, RangeValue as WireRangeValue, StructValue as WireStructValue, ValueEnvelope,
+    WireValue,
+};
 
-use crate::{EvalError, EvalErrorKind, Resolution, StructValue, Value, ValueRep};
+use crate::{EvalError, EvalErrorKind, RangeValue, Resolution, StructValue, Value, ValueRep};
 
 pub fn value_to_envelope(value: &Value) -> Result<ValueEnvelope, EvalError> {
     Ok(ValueEnvelope {
@@ -57,6 +60,15 @@ fn value_to_wire_value(value: &Value) -> Result<WireValue, EvalError> {
                 .map(value_to_envelope)
                 .collect::<Result<_, _>>()?,
         )),
+        ValueRep::Range(RangeValue {
+            start,
+            end,
+            inclusive_end,
+        }) => Ok(WireValue::Range(WireRangeValue {
+            start: *start,
+            end: *end,
+            inclusive_end: *inclusive_end,
+        })),
         ValueRep::Map(map) => Ok(WireValue::Map(
             map.entries
                 .iter()
@@ -108,6 +120,15 @@ fn wire_value_to_value_rep(value: WireValue) -> Result<ValueRep, EvalError> {
                 .map(envelope_to_value)
                 .collect::<Result<Vec<_>, _>>()?,
         ))),
+        WireValue::Range(WireRangeValue {
+            start,
+            end,
+            inclusive_end,
+        }) => Ok(ValueRep::Range(RangeValue {
+            start,
+            end,
+            inclusive_end,
+        })),
         WireValue::Map(entries) => Ok(ValueRep::Map(crate::MapValue {
             entries: Arc::from(
                 entries

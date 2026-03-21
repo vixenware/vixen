@@ -616,6 +616,64 @@ pub(in crate::engine) fn continue_builtin_call(
             };
             Ok(ready_builtin_value(value))
         }
+        "String.slice" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() requires receiver and range",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() receiver must evaluate to String",
+                ));
+            };
+            let ValueRep::Range(range) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() range must evaluate to Range",
+                ));
+            };
+
+            let start = usize::try_from(range.start.unwrap_or(0)).map_err(|_| {
+                EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() range start does not fit in usize",
+                )
+            })?;
+            let mut end =
+                usize::try_from(range.end.unwrap_or(text.len() as u64)).map_err(|_| {
+                    EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "String.slice() range end does not fit in usize",
+                    )
+                })?;
+            if range.inclusive_end {
+                end = end.checked_add(1).ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "String.slice() inclusive range end overflowed",
+                    )
+                })?;
+            }
+            if start > end {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() range start must be <= end",
+                ));
+            }
+            let Some(slice) = text.get(start..end) else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.slice() range was out of bounds or not on UTF-8 boundaries",
+                ));
+            };
+            let path = slice_projection_path(range);
+            Ok(ready_builtin_value(Value::string(slice).with_provenance(
+                args[0].meta.provenance.project(ProjectionStep::Path(path)),
+            )))
+        }
         "String.starts_with" => {
             if args.len() != 2 {
                 return Err(EvalError::new(
@@ -906,6 +964,17 @@ pub(in crate::engine) fn continue_builtin_call(
         }
         _ => Ok(None),
     }
+}
+
+fn slice_projection_path(range: &RangeValue) -> String {
+    let start = range
+        .start
+        .map_or(String::new(), |value: u64| value.to_string());
+    let end = range
+        .end
+        .map_or(String::new(), |value: u64| value.to_string());
+    let op = if range.inclusive_end { "..=" } else { ".." };
+    format!("slice({start}{op}{end})")
 }
 
 fn map_lookup_value(

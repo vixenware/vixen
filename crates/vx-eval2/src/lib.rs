@@ -52,7 +52,7 @@ pub use trace::{
 };
 
 mod value;
-pub use value::{ExternalValue, FunctionRef, MapValue, StructValue, Value, ValueRep};
+pub use value::{ExternalValue, FunctionRef, MapValue, RangeValue, StructValue, Value, ValueRep};
 
 mod wire;
 pub use vx_eval2_proto::{

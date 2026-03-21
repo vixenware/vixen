@@ -936,6 +936,7 @@ fn normalized_slot_witness(value: Value) -> Value {
                 .map(normalized_slot_witness)
                 .collect::<Vec<_>>(),
         ),
+        ValueRep::Range(range) => Value::range(range.start, range.end, range.inclusive_end),
         ValueRep::Map(map) => Value::map(
             map.entries
                 .into_iter()

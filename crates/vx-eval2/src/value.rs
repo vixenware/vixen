@@ -46,6 +46,14 @@ impl Value {
         Self::new(ValueRep::Tuple(Arc::from(items.into())))
     }
 
+    pub fn range(start: Option<u64>, end: Option<u64>, inclusive_end: bool) -> Self {
+        Self::new(ValueRep::Range(RangeValue {
+            start,
+            end,
+            inclusive_end,
+        }))
+    }
+
     pub fn map(entries: impl Into<Vec<(Value, Value)>>) -> Self {
         Self::new(ValueRep::Map(MapValue {
             entries: Arc::from(entries.into()),
@@ -120,6 +128,7 @@ pub enum ValueRep {
     String(Arc<str>),
     Array(Arc<[Value]>),
     Tuple(Arc<[Value]>),
+    Range(RangeValue),
     Map(MapValue),
     Struct(StructValue),
     External(ExternalValue),
@@ -135,6 +144,7 @@ impl ValueRep {
             | Self::String(_)
             | Self::Array(_)
             | Self::Tuple(_)
+            | Self::Range(_)
             | Self::Map(_)
             | Self::Struct(_)
             | Self::Function(_) => ValueMeta::new(
@@ -155,6 +165,13 @@ impl ValueRep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapValue {
     pub entries: Arc<[(Value, Value)]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeValue {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+    pub inclusive_end: bool,
 }
 
 /// A struct value: type name plus fields.

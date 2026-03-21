@@ -1,6 +1,6 @@
 use facet::Facet;
 
-pub const EVAL2_PROTOCOL_VERSION: u32 = 3;
+pub const EVAL2_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 pub struct Eval2Version {
@@ -281,6 +281,13 @@ pub struct StructValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RangeValue {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+    pub inclusive_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[facet(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum WireValue {
@@ -291,6 +298,7 @@ pub enum WireValue {
     String(String),
     Array(Vec<ValueEnvelope>),
     Tuple(Vec<ValueEnvelope>),
+    Range(RangeValue),
     Map(Vec<(ValueEnvelope, ValueEnvelope)>),
     Struct(StructValue),
     External { kind: String, descriptor: String },

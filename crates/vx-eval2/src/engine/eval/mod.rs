@@ -334,6 +334,7 @@ pub(super) fn eval_expr_with_node_id(
         Expr::Call(call) => eval_call(state, call, env),
         Expr::Array(array) => eval_array(state, array, env),
         Expr::Tuple(tuple) => eval_tuple(state, tuple, env),
+        Expr::Range(range) => eval_range(state, range, env),
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
@@ -602,6 +603,7 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
     match (&receiver.rep, field_name) {
         (ValueRep::String(_), "len") => Some("String.len"),
         (ValueRep::String(_), "split_once") => Some("String.split_once"),
+        (ValueRep::String(_), "slice") => Some("String.slice"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Map(_), "get") => Some("Map.get"),
@@ -1069,6 +1071,90 @@ pub(super) fn eval_tuple(
     )
 }
 
+pub(super) fn eval_range(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    range: &RangeExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("range should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let range_source = state.span_for_node(range);
+    let start = range.start();
+    let end = range.end();
+    let inclusive_end = range.is_inclusive();
+
+    if state.queue_child_work {
+        let start_child = start
+            .as_ref()
+            .map(|expr| queue_child_expr(state, expr, env));
+        let end_child = end.as_ref().map(|expr| queue_child_expr(state, expr, env));
+        if let Some(child_id) = start_child.or(end_child) {
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_id,
+                vec![ContinuationFrame::RangeJoin {
+                    node_id,
+                    parent_id,
+                    start_child,
+                    end_child,
+                    range_source,
+                    inclusive_end,
+                }],
+            ));
+        }
+        return Ok(EvalStep::Ready(ready_range_value(
+            None,
+            None,
+            inclusive_end,
+            range_source,
+        )));
+    }
+
+    let start_handle = start.as_ref().map(|expr| state.expr_handle(expr));
+    let end_handle = end.as_ref().map(|expr| state.expr_handle(expr));
+    if let Some(start_handle) = start_handle {
+        match eval_dependent_expr_handle(state, node_id, start_handle, env)? {
+            EvalStep::Ready(start) => continue_range_end(
+                state,
+                node_id,
+                parent_id,
+                Some(start),
+                end_handle,
+                env.clone(),
+                range_source,
+                inclusive_end,
+            ),
+            EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::RangeAfterStart {
+                    node_id,
+                    parent_id,
+                    end: end_handle,
+                    env: env.clone(),
+                    range_source,
+                    inclusive_end,
+                },
+            )),
+        }
+    } else {
+        continue_range_end(
+            state,
+            node_id,
+            parent_id,
+            None,
+            end_handle,
+            env.clone(),
+            range_source,
+            inclusive_end,
+        )
+    }
+}
+
 pub(super) fn eval_map(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     map: &MapExpr,
@@ -1144,6 +1230,7 @@ pub(super) fn user_fail_error(value: Value) -> EvalError {
         ValueRep::U64(_) => EvalError::new(EvalErrorKind::UserFail, "U64").with_detail(value),
         ValueRep::Array(_) => EvalError::new(EvalErrorKind::UserFail, "Array").with_detail(value),
         ValueRep::Tuple(_) => EvalError::new(EvalErrorKind::UserFail, "Tuple").with_detail(value),
+        ValueRep::Range(_) => EvalError::new(EvalErrorKind::UserFail, "Range").with_detail(value),
         ValueRep::Map(_) => EvalError::new(EvalErrorKind::UserFail, "Map").with_detail(value),
         ValueRep::External(external) => {
             EvalError::new(EvalErrorKind::UserFail, external.kind.clone()).with_detail(value)
@@ -1464,6 +1551,82 @@ pub(super) fn continue_tuple_items(
     Ok(EvalStep::Ready(Value::tuple(items).with_meta(meta)))
 }
 
+pub(super) fn continue_range_end(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    start: Option<Value>,
+    end: Option<ExprHandle>,
+    mut env: EvalEnv,
+    range_source: SourceSpan,
+    inclusive_end: bool,
+) -> Result<EvalStep, EvalError> {
+    let end = match end {
+        Some(end_handle) => match eval_dependent_expr_handle(state, node_id, end_handle, &mut env)?
+        {
+            EvalStep::Ready(end) => Some(end),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::RangeAfterEnd {
+                        node_id,
+                        parent_id,
+                        start,
+                        range_source,
+                        inclusive_end,
+                    },
+                ));
+            }
+        },
+        None => None,
+    };
+    Ok(EvalStep::Ready(build_range_value(
+        start,
+        end,
+        inclusive_end,
+        range_source,
+    )?))
+}
+
+fn build_range_value(
+    start: Option<Value>,
+    end: Option<Value>,
+    inclusive_end: bool,
+    range_source: SourceSpan,
+) -> Result<Value, EvalError> {
+    let start = range_bound_as_u64(start.as_ref(), "range start")?;
+    let end = range_bound_as_u64(end.as_ref(), "range end")?;
+    Ok(ready_range_value(start, end, inclusive_end, range_source))
+}
+
+fn range_bound_as_u64(value: Option<&Value>, label: &str) -> Result<Option<u64>, EvalError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let ValueRep::U64(bound) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{label} must evaluate to U64"),
+        ));
+    };
+    Ok(Some(*bound))
+}
+
+fn ready_range_value(
+    start: Option<u64>,
+    end: Option<u64>,
+    inclusive_end: bool,
+    range_source: SourceSpan,
+) -> Value {
+    let range = Value::range(start, end, inclusive_end);
+    let provenance = Provenance::literal(range_source);
+    range.with_meta(ValueMeta::new(
+        provenance,
+        ReuseClass::Stable,
+        CrossingPolicy::ByValue,
+    ))
+}
+
 pub(super) fn let_pattern_from_ast(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     pattern: &Pattern,
@@ -1738,6 +1901,7 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Call(_) => EvalExprKind::Call,
         Expr::Array(_) => EvalExprKind::Array,
         Expr::Tuple(_) => EvalExprKind::Tuple,
+        Expr::Range(_) => EvalExprKind::Range,
         Expr::Map(_) => EvalExprKind::Map,
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
@@ -1823,6 +1987,7 @@ pub(super) fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalE
                     Ok(equal && values_equal(&lhs.rep, &rhs.rep)?)
                 })
         }
+        (ValueRep::Range(lhs), ValueRep::Range(rhs)) => Ok(lhs == rhs),
         (ValueRep::Map(lhs), ValueRep::Map(rhs)) => {
             if lhs.entries.len() != rhs.entries.len() {
                 return Ok(false);

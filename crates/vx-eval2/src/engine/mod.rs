@@ -8,8 +8,8 @@ use std::thread;
 
 use vx_parser::{
     ArrayExpr, ArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr,
-    FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Pattern, Stmt, StructLiteralExpr,
-    SyntaxKind, TupleExpr,
+    FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Pattern, RangeExpr, Stmt,
+    StructLiteralExpr, SyntaxKind, TupleExpr,
 };
 use vx_resolve::SourceId;
 use vx_types::Ty;
@@ -17,8 +17,8 @@ use vx_types::Ty;
 use crate::{
     CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalEventSink,
     EvalExprKind, EvalNodeId, EvalTrace, FunctionRef, NullEvalEventSink, PendingRef,
-    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SlotAction, SourceSpan,
-    StructValue, Value, ValueMeta, ValueRep,
+    ProjectionStep, Provenance, RangeValue, Resolution, ReuseClass, RuntimeInputKind, SlotAction,
+    SourceSpan, StructValue, Value, ValueMeta, ValueRep,
     decode::{StructuredFormat, parse_blob_as_value},
     program::{CompiledParameter, CompiledProgram, EvalProgram, ProgramNodeHandle},
 };

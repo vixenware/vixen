@@ -1193,6 +1193,29 @@ impl RangeExpr {
     pub fn operands(&self) -> AstChildren<Expr> {
         AstChildren::new(self.syntax())
     }
+
+    pub fn operator_token(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::DOT2 | SyntaxKind::DOT2_EQ)
+        })
+    }
+
+    pub fn start(&self) -> Option<Expr> {
+        let operator_start = self.operator_token()?.text_range().start();
+        self.operands()
+            .find(|expr| expr.syntax().text_range().start() < operator_start)
+    }
+
+    pub fn end(&self) -> Option<Expr> {
+        let operator_start = self.operator_token()?.text_range().start();
+        self.operands()
+            .find(|expr| expr.syntax().text_range().start() > operator_start)
+    }
+
+    pub fn is_inclusive(&self) -> bool {
+        self.operator_token()
+            .is_some_and(|token| token.kind() == SyntaxKind::DOT2_EQ)
+    }
 }
 
 impl TypeOpExpr {

@@ -390,6 +390,120 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::RangeAfterStart {
+            node_id,
+            parent_id,
+            end,
+            env,
+            range_source,
+            inclusive_end,
+        } => {
+            let result = match input {
+                Ok(start) => continue_range_end(
+                    state,
+                    node_id,
+                    parent_id,
+                    Some(start),
+                    end,
+                    env,
+                    range_source,
+                    inclusive_end,
+                ),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::RangeAfterEnd {
+            node_id,
+            parent_id,
+            start,
+            range_source,
+            inclusive_end,
+        } => {
+            let result = match input {
+                Ok(end) => Ok(EvalStep::Ready(build_range_value(
+                    start,
+                    Some(end),
+                    inclusive_end,
+                    range_source,
+                )?)),
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::RangeJoin {
+            node_id,
+            parent_id,
+            start_child,
+            end_child,
+            range_source,
+            inclusive_end,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let start = match start_child {
+                        Some(child_node) => match state.scheduler.node_state(child_node) {
+                            Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    branch_context: state.branch_context.clone(),
+                                    frames: vec![ContinuationFrame::RangeJoin {
+                                        node_id,
+                                        parent_id,
+                                        start_child,
+                                        end_child,
+                                        range_source: range_source.clone(),
+                                        inclusive_end,
+                                    }],
+                                }));
+                            }
+                        },
+                        None => None,
+                    };
+                    let end = match end_child {
+                        Some(child_node) => match state.scheduler.node_state(child_node) {
+                            Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending =
+                                    state.scheduler.alloc_child_dependency_pending(child_node);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    branch_context: state.branch_context.clone(),
+                                    frames: vec![ContinuationFrame::RangeJoin {
+                                        node_id,
+                                        parent_id,
+                                        start_child,
+                                        end_child,
+                                        range_source: range_source.clone(),
+                                        inclusive_end,
+                                    }],
+                                }));
+                            }
+                        },
+                        None => None,
+                    };
+                    Ok(EvalStep::Ready(build_range_value(
+                        start,
+                        end,
+                        inclusive_end,
+                        range_source,
+                    )?))
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::MapAfterKey {
             node_id,
             parent_id,
