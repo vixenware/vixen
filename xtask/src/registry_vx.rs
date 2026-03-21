@@ -426,4 +426,20 @@ mod tests {
         assert!(output.contains("fn registry_data_lookup(name: PackageName) -> RegistryPackage"));
         assert!(output.contains("fail RegistryMiss"));
     }
+
+    #[test]
+    fn checked_in_sparse_snapshot_matches_generated_registry_module() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask should live under workspace root");
+        let snapshot_root = workspace_root.join("specs/eval/run/registry_snapshot/index");
+        let generated_path =
+            workspace_root.join("specs/eval/run/registry_snapshot/registry_data.vx");
+
+        let packages = load_all_packages(&snapshot_root).expect("load checked-in sparse snapshot");
+        let actual = emit_registry_vx(&packages);
+        let expected =
+            fs::read_to_string(&generated_path).expect("read checked-in generated registry module");
+        assert_eq!(actual, expected);
+    }
 }

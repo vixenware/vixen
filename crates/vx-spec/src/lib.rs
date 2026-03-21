@@ -137,6 +137,12 @@ pub struct SpecCase {
 impl SpecCase {
     pub fn parse(source: &str) -> Result<Self, SpecParseError> {
         let parsed = SpecDocument::parse(source)?;
+        let files = resolve_spec_files(
+            Path::new("."),
+            "<inline case>",
+            &parsed.files,
+            &parsed.file_paths,
+        )?;
         Ok(Self {
             path: PathBuf::from("<inline case>"),
             dir: PathBuf::from("."),
@@ -144,7 +150,7 @@ impl SpecCase {
             invoke: parsed.invoke,
             expect: parsed.expect,
             runs: parsed.runs,
-            files: parsed.files,
+            files,
         })
     }
 
@@ -164,6 +170,12 @@ impl SpecCase {
             source,
         })?;
         let parsed = SpecDocument::parse_with_path(&source, path)?;
+        let files = resolve_spec_files(
+            &dir,
+            &path.display().to_string(),
+            &parsed.files,
+            &parsed.file_paths,
+        )?;
         Ok(Self {
             path: path.to_path_buf(),
             dir,
@@ -171,7 +183,7 @@ impl SpecCase {
             invoke: parsed.invoke,
             expect: parsed.expect,
             runs: parsed.runs,
-            files: parsed.files,
+            files,
         })
     }
 
@@ -217,6 +229,8 @@ pub struct SpecDocument {
     pub runs: Vec<SpecRun>,
     #[facet(default)]
     pub files: BTreeMap<String, String>,
+    #[facet(default)]
+    pub file_paths: BTreeMap<String, String>,
 }
 
 impl SpecDocument {
@@ -233,6 +247,34 @@ impl SpecDocument {
             message: source.to_string(),
         })
     }
+}
+
+fn resolve_spec_files(
+    base_dir: &Path,
+    spec_path: &str,
+    inline_files: &BTreeMap<String, String>,
+    file_paths: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, SpecParseError> {
+    let mut files = inline_files.clone();
+    for (virtual_path, relative_path) in file_paths {
+        if files.contains_key(virtual_path) {
+            return Err(SpecParseError::ValidationError {
+                path: spec_path.to_string(),
+                message: format!(
+                    "duplicate file entry for {virtual_path:?} across files and file_paths"
+                ),
+            });
+        }
+        let resolved_path = base_dir.join(relative_path);
+        let contents = std::fs::read_to_string(&resolved_path).map_err(|source| {
+            SpecParseError::ReadError {
+                path: resolved_path.display().to_string(),
+                source,
+            }
+        })?;
+        files.insert(virtual_path.clone(), contents);
+    }
+    Ok(files)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Facet)]
@@ -1062,6 +1104,8 @@ pub enum EngineExpectation {
 #[cfg(test)]
 mod tests {
     use super::{SpecCase, SpecParseError};
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn slot_override_without_base_id_is_rejected() {
@@ -1137,6 +1181,86 @@ invoke {
             error,
             SpecParseError::ValidationError { message, .. }
             if message.contains("slot id must be present and non-empty")
+        ));
+    }
+
+    #[test]
+    fn file_paths_load_relative_files_from_spec_directory() {
+        let temp = tempdir().expect("temp dir");
+        let dir = temp.path();
+        fs::write(dir.join("helper.vx"), "fn helper() { 41 }\n").expect("write helper");
+        fs::write(
+            dir.join("case.styx"),
+            r#"
+main <<VX,vx
+fn build() {
+  helper()
+}
+VX
+
+files {
+  "extra.vx" <<VX,vx
+fn extra() { 0 }
+VX
+}
+
+file_paths {
+  "helper.vx" "helper.vx"
+}
+
+invoke {
+  entry build
+}
+
+expect {
+  result @u64"41"
+}
+"#,
+        )
+        .expect("write case");
+
+        let case = SpecCase::from_path(&dir.join("case.styx")).expect("load case");
+        assert_eq!(
+            case.files.get("helper.vx").map(String::as_str),
+            Some("fn helper() { 41 }\n")
+        );
+        assert!(case.files.contains_key("extra.vx"));
+    }
+
+    #[test]
+    fn file_paths_conflicts_with_inline_files_are_rejected() {
+        let error = SpecCase::parse(
+            r#"
+main <<VX,vx
+fn build() {
+  0
+}
+VX
+
+files {
+  "helper.vx" <<VX,vx
+fn helper() { 0 }
+VX
+}
+
+file_paths {
+  "helper.vx" "helper.vx"
+}
+
+invoke {
+  entry build
+}
+
+expect {
+  result @u64"0"
+}
+"#,
+        )
+        .expect_err("duplicate file key should fail");
+        assert!(matches!(
+            error,
+            SpecParseError::ValidationError { message, .. }
+            if message.contains("duplicate file entry")
         ));
     }
 }
