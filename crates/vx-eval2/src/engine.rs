@@ -1578,6 +1578,7 @@ struct EvalScheduler {
     dependency_edges: Vec<EvalDependencyEdge>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
+    baseline_ready_tasks: BTreeSet<EvalWorkId>,
     in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
     buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
     pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
@@ -1605,6 +1606,7 @@ impl Default for EvalScheduler {
             dependency_edges: Vec::new(),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
+            baseline_ready_tasks: BTreeSet::new(),
             in_flight_tasks: BTreeMap::new(),
             buffered_completions: BTreeMap::new(),
             pending_resumes: BTreeMap::new(),
@@ -2144,7 +2146,8 @@ impl EvalScheduler {
             keyed_nodes: self.keyed_nodes.clone(),
             dependency_edges: self.dependency_edges.clone(),
             ready_queue: VecDeque::new(),
-            ready_tasks: self.ready_tasks.clone(),
+            ready_tasks: BTreeMap::new(),
+            baseline_ready_tasks: self.ready_tasks.keys().copied().collect(),
             in_flight_tasks: BTreeMap::new(),
             buffered_completions: BTreeMap::new(),
             pending_resumes: self.pending_resumes.clone(),
@@ -2437,7 +2440,7 @@ impl EvalScheduler {
     }
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
-        self.ready_tasks.contains_key(&work_id)
+        self.ready_tasks.contains_key(&work_id) || self.baseline_ready_tasks.contains(&work_id)
     }
 
     fn remember_expr_task(
@@ -3080,6 +3083,7 @@ impl EvalScheduler {
                 branch_context,
             },
         );
+        self.baseline_ready_tasks.remove(&work.id);
         if let Some(delta) = self.recorded_delta.as_mut()
             && let Some(record) = self.ready_tasks.get(&work.id)
         {
