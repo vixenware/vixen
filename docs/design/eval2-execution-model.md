@@ -403,6 +403,9 @@ What it does prove:
 - slot-backed current/refresh can now drive that same package-shaped resolver,
   so partial updates and no-op refreshes no longer need an authored recursive
   queue
+- offline Cargo-shaped registry data can now be treated as generated `.vx`
+  facts behind an authored `registry_lookup(...)` boundary, so JSON parsing can
+  stay in Rust without pulling package-selection policy back out of Vixen
 
 What it does not yet prove:
 

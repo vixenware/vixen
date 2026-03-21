@@ -1,0 +1,417 @@
+main <<VX,vx
+struct Requirement {
+  version: String,
+}
+
+struct RegistryLookupKey {
+  name: String,
+}
+
+type Solution = Map[String, String]
+
+fn requirement(version: String) -> Requirement {
+  Requirement {
+    version: version,
+  }
+}
+
+fn requirements_allow(requirements: Array[Requirement], version: String) -> Bool {
+  array_fold(
+    requirements,
+    true,
+    ((ok, requirement) => if ok (requirement.version == version) else (false)),
+  )
+}
+
+fn merge_solution_entry(solution: Solution, entry) -> Solution {
+  map_put(solution, map_get(entry, "key"), map_get(entry, "value"))
+}
+
+fn merge_solution(left: Solution, right: Solution) -> Solution {
+  array_fold(map_entries(right), left, merge_solution_entry)
+}
+
+fn registry_lookup(name: String) -> RegistryPackage {
+  keyed(
+    RegistryLookupKey { name: name },
+    "",
+    ((ctx) => registry_data_lookup(ctx.key.name)),
+  )
+}
+
+fn release_versions(name: String) -> Array[String] {
+  array_fold(
+    registry_lookup(name),
+    [],
+    ((acc, release) => array_push(acc, release.version)),
+  )
+}
+
+fn release_for_version(name: String, version: String) -> RegistryRelease {
+  array_find(
+    registry_lookup(name),
+    ((release) => release.version == version),
+  )
+}
+
+fn resolve_logger(ctx) -> Solution {
+  let requirements = ctx.joined;
+  search_assumption(
+    "logger",
+    release_versions("logger"),
+    (() => {
+      let version = branch_assumption("logger");
+      if requirements_allow(requirements, version) (
+        %{
+          "logger" => version,
+        }
+      ) else (
+        fail Conflict {
+          package: "logger",
+          version: version,
+          joined: requirements,
+        }
+      )
+    }),
+  )
+}
+
+fn util_candidates(ctx) -> Array[String] {
+  if ctx.is_refresh (
+    if ctx.intent.name == "util" (
+      release_versions("util")
+    ) else (
+      [map_get(ctx.current, "util")]
+    )
+  ) else (
+    if ctx.has_current (
+      [map_get(ctx.current, "util")]
+    ) else (
+      release_versions("util")
+    )
+  )
+}
+
+fn resolve_util(ctx) -> Solution {
+  search_assumption(
+    "util",
+    util_candidates(ctx),
+    (() => {
+      let version = branch_assumption("util");
+      if ctx.is_refresh (
+        if ctx.intent.name == "util" (
+          if ctx.has_current (
+            if version == map_get(ctx.current, "util") (
+              fail Conflict {
+                package: "util",
+                version: version,
+                reason: "already-selected",
+              }
+            ) else (
+              %{
+                "util" => version,
+              }
+            )
+          ) else (
+            %{
+              "util" => version,
+            }
+          )
+        ) else (
+          %{
+            "util" => version,
+          }
+        )
+      ) else (
+        %{
+          "util" => version,
+        }
+      )
+    }),
+  )
+}
+
+fn apply_dep(solution: Solution, dep: RegistryDep) -> Solution {
+  let logger = keyed(dep.name, [requirement(dep.req)], resolve_logger);
+  merge_solution(solution, logger)
+}
+
+fn codec_candidates(ctx) -> Array[String] {
+  if ctx.is_refresh (
+    if ctx.intent.name == "codec" (
+      release_versions("codec")
+    ) else (
+      [map_get(ctx.current, "codec")]
+    )
+  ) else (
+    if ctx.has_current (
+      [map_get(ctx.current, "codec")]
+    ) else (
+      release_versions("codec")
+    )
+  )
+}
+
+fn resolve_codec(ctx) -> Solution {
+  search_assumption(
+    "codec",
+    codec_candidates(ctx),
+    (() => {
+      let version = branch_assumption("codec");
+      if ctx.is_refresh (
+        if ctx.intent.name == "codec" (
+          if ctx.has_current (
+            if version == map_get(ctx.current, "codec") (
+              fail Conflict {
+                package: "codec",
+                version: version,
+                reason: "already-selected",
+              }
+            ) else (
+              let release = release_for_version("codec", version);
+              let base = %{
+                "codec" => version,
+              };
+              array_fold(release.deps, base, apply_dep)
+            )
+          ) else (
+            let release = release_for_version("codec", version);
+            let base = %{
+              "codec" => version,
+            };
+            array_fold(release.deps, base, apply_dep)
+          )
+        ) else (
+          let release = release_for_version("codec", version);
+          let base = %{
+            "codec" => version,
+          };
+          array_fold(release.deps, base, apply_dep)
+        )
+      ) else (
+        let release = release_for_version("codec", version);
+        let base = %{
+          "codec" => version,
+        };
+        array_fold(release.deps, base, apply_dep)
+      )
+    }),
+  )
+}
+
+fn resolve_solution(ctx) -> Solution {
+  merge_solution(resolve_util(ctx), resolve_codec(ctx))
+}
+
+fn build_current() {
+  slot_current("authored-registry-snapshot-slot", "manifest-v1", resolve_solution)
+}
+
+fn build_refresh(name: String) {
+  slot_refresh(
+    "authored-registry-snapshot-slot",
+    "manifest-v1",
+    UpdatePackage { name: name },
+    resolve_solution,
+  )
+}
+VX
+
+files {
+  "registry_data.vx" <<VX,vx
+// @generated by `cargo xtask registry-vx`
+// Source: curated Cargo sparse-index snapshot
+
+type PackageName = String
+type Version = String
+type VersionReq = String
+
+struct RegistryDep {
+  name: PackageName,
+  req: VersionReq,
+}
+
+struct RegistryRelease {
+  version: Version,
+  deps: Array[RegistryDep],
+  yanked: Bool,
+}
+
+type RegistryPackage = Array[RegistryRelease]
+
+struct RegistryMiss {
+  name: PackageName,
+}
+
+fn registry_package_codec() -> RegistryPackage {
+  [
+    RegistryRelease {
+      version: "1.0.0",
+      deps: [
+        RegistryDep {
+          name: "logger",
+          req: "1.0.0",
+        },
+      ],
+      yanked: false,
+    },
+    RegistryRelease {
+      version: "1.1.0",
+      deps: [
+        RegistryDep {
+          name: "logger",
+          req: "1.1.0",
+        },
+      ],
+      yanked: false,
+    },
+  ]
+}
+
+fn registry_package_logger() -> RegistryPackage {
+  [
+    RegistryRelease {
+      version: "1.0.0",
+      deps: [],
+      yanked: false,
+    },
+    RegistryRelease {
+      version: "1.1.0",
+      deps: [],
+      yanked: false,
+    },
+  ]
+}
+
+fn registry_package_util() -> RegistryPackage {
+  [
+    RegistryRelease {
+      version: "1.0.0",
+      deps: [],
+      yanked: false,
+    },
+    RegistryRelease {
+      version: "1.1.0",
+      deps: [],
+      yanked: false,
+    },
+  ]
+}
+
+fn registry_data_lookup(name: PackageName) -> RegistryPackage {
+  if name == "codec" (
+    registry_package_codec()
+  ) else if name == "logger" (
+    registry_package_logger()
+  ) else if name == "util" (
+    registry_package_util()
+  ) else (
+    fail RegistryMiss {
+      name: name,
+    }
+  )
+}
+VX
+}
+
+invoke {
+  entry build_current
+}
+
+runs (
+  {
+    expect {
+      result @map{
+        util @string"1.0.0"
+        codec @string"1.0.0"
+        logger @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_populate{
+          slot "authored-registry-snapshot-slot"
+          reason @missing
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
+      args (@string"util")
+    }
+
+    expect {
+      result @map{
+        util @string"1.1.0"
+        codec @string"1.0.0"
+        logger @string"1.0.0"
+      }
+      events (
+        @must_emit/@slot_rewrite{
+          slot "authored-registry-snapshot-slot"
+          reason @refresh{
+            intent @struct{
+              type UpdatePackage
+              fields {
+                name @string"util"
+              }
+            }
+          }
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_refresh
+      args (@string"codec")
+    }
+
+    expect {
+      result @map{
+        util @string"1.1.0"
+        codec @string"1.1.0"
+        logger @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_rewrite{
+          slot "authored-registry-snapshot-slot"
+          reason @refresh{
+            intent @struct{
+              type UpdatePackage
+              fields {
+                name @string"codec"
+              }
+            }
+          }
+        }
+      )
+    }
+  }
+
+  {
+    invoke {
+      entry build_current
+    }
+
+    expect {
+      result @map{
+        util @string"1.1.0"
+        codec @string"1.1.0"
+        logger @string"1.1.0"
+      }
+      events (
+        @must_emit/@slot_reuse{slot "authored-registry-snapshot-slot"}
+      )
+    }
+  }
+)
+
+expect {
+  engines {
+    eval1 @skip
+    eval2 @pass
+  }
+}

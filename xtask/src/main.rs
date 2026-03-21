@@ -6,6 +6,7 @@ use std::thread;
 use eyre::{Context, ContextCompat, Result};
 
 mod integration;
+mod registry_vx;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,14 +27,24 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("registry-vx") => {
+            if let Err(error) = registry_vx::run(&args[1..]) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        }
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
-            eprintln!("Available commands: install, bump-roam, perfetto-proto, smoke, integration");
+            eprintln!(
+                "Available commands: install, bump-roam, perfetto-proto, smoke, integration, registry-vx"
+            );
             std::process::exit(1);
         }
         None => {
             eprintln!("Usage: cargo xtask <command>");
-            eprintln!("Available commands: install, bump-roam, perfetto-proto, smoke, integration");
+            eprintln!(
+                "Available commands: install, bump-roam, perfetto-proto, smoke, integration, registry-vx"
+            );
             std::process::exit(1);
         }
     }

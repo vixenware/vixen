@@ -454,6 +454,9 @@ The first version of that bridge now exists:
 2. keyed demand and exact search now replace the earlier recursive queue sketch
 3. the remaining pressure is no-good learning and wider Cargo semantics, not
    more imperative worklist surface
+4. an offline extractor can now reasonably normalize sparse-index JSON into
+   generated `.vx` registry facts, as long as the generated module stays a fact
+   boundary and not a Rust-owned resolver policy boundary
 
 ## Phase 7: Cargo Solver MVP
 
