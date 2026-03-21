@@ -726,6 +726,127 @@ fn build() {
 }
 
 #[test]
+fn json_parse_decodes_flattened_struct_fields() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct SharedDep {
+  version: String,
+  optional: Bool?,
+}
+
+struct Dependency {
+  #[flatten]
+  shared: SharedDep,
+  package: String?,
+}
+
+fn build(blob: Blob) {
+  Json.parse[Dependency](blob)
+}
+"#,
+            "json-parse-flattened-struct-fields",
+            "build",
+            &[Value::external(
+                "Blob",
+                r#"{"version":"1","optional":true,"package":"zlib"}"#,
+            )],
+        )
+        .expect("evaluate Json.parse with flattened struct field"),
+    );
+
+    let shared = struct_field(&value, "shared");
+    let ValueRep::Struct(shared_struct) = &shared.rep else {
+        panic!("expected flattened shared struct, got {shared:?}");
+    };
+    assert_eq!(shared_struct.type_name.as_ref(), "SharedDep");
+    assert_eq!(
+        struct_field(shared, "version").rep,
+        ValueRep::String(Arc::from("1"))
+    );
+    let optional = struct_field(shared, "optional");
+    let ValueRep::Struct(optional_struct) = &optional.rep else {
+        panic!("expected optional field in flattened struct, got {optional:?}");
+    };
+    assert_eq!(optional_struct.type_name.as_ref(), "Some");
+    assert_eq!(struct_field(optional, "value").rep, ValueRep::Bool(true));
+
+    let package = struct_field(&value, "package");
+    let ValueRep::Struct(package_struct) = &package.rep else {
+        panic!("expected optional package field, got {package:?}");
+    };
+    assert_eq!(package_struct.type_name.as_ref(), "Some");
+    assert_eq!(
+        struct_field(package, "value").rep,
+        ValueRep::String(Arc::from("zlib"))
+    );
+}
+
+#[test]
+fn toml_parse_flattens_leftover_keys_into_string_map() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Header {
+  title: String,
+  edition: String,
+}
+
+struct Doc {
+  #[flatten]
+  header: Header,
+  #[flatten]
+  extra: Map[String, String],
+}
+
+fn build(blob: Blob) {
+  Toml.parse[Doc](blob)
+}
+"#,
+            "toml-parse-flatten-leftover-map",
+            "build",
+            &[Value::external(
+                "Blob",
+                r#"title = "demo"
+edition = "2024"
+x-extra = "1"
+y-extra = "2"
+"#,
+            )],
+        )
+        .expect("evaluate Toml.parse with flattened leftover map"),
+    );
+
+    let header = struct_field(&value, "header");
+    let ValueRep::Struct(header_struct) = &header.rep else {
+        panic!("expected flattened header struct, got {header:?}");
+    };
+    assert_eq!(header_struct.type_name.as_ref(), "Header");
+    assert_eq!(
+        struct_field(header, "title").rep,
+        ValueRep::String(Arc::from("demo"))
+    );
+    assert_eq!(
+        struct_field(header, "edition").rep,
+        ValueRep::String(Arc::from("2024"))
+    );
+
+    let extra = struct_field(&value, "extra");
+    let ValueRep::Map(extra_map) = &extra.rep else {
+        panic!("expected flattened extra map, got {extra:?}");
+    };
+    assert_eq!(extra_map.entries.len(), 2);
+    assert_eq!(
+        map_string_entry(extra, "x-extra").rep,
+        ValueRep::String(Arc::from("1"))
+    );
+    assert_eq!(
+        map_string_entry(extra, "y-extra").rep,
+        ValueRep::String(Arc::from("2"))
+    );
+}
+
+#[test]
 fn json_parse_decodes_enum_variant_with_rename_all() {
     let value = expect_ready(
         eval_source_entry_with_args_with_source_id(

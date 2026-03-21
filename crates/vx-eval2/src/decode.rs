@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use facet_value::Value as FacetValue;
+use facet_value::{VObject, Value as FacetValue};
 use vx_resolve::TypeCollection;
 use vx_types::{
     AliasTy, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, EnumTy, NewtypeTy,
@@ -212,21 +212,52 @@ impl DecodeContext<'_> {
         let object = value
             .as_object()
             .ok_or_else(|| type_mismatch(def.name.as_str(), value))?;
+        self.decode_struct_from_object(object, struct_ty, def, provenance)
+    }
+
+    fn decode_struct_from_object(
+        &self,
+        object: &VObject,
+        struct_ty: &StructTy,
+        def: &StructDef,
+        provenance: Provenance,
+    ) -> Result<Value, EvalError> {
         let mut fields = Vec::with_capacity(def.fields.len());
+        let mut claimed_keys = def
+            .fields
+            .iter()
+            .filter(|field| !field.attrs.flatten)
+            .map(|field| decoded_field_name(def, field))
+            .collect::<BTreeSet<_>>();
         for field in &def.fields {
             let field_ty = substitute_type_params(&field.ty, &struct_ty.type_args);
             let decoded_name = decoded_field_name(def, field);
             let field_provenance = provenance.project(ProjectionStep::Field(decoded_name.clone()));
-            let decoded = match object.get(&decoded_name) {
-                Some(field_value) => self.decode_value(field_value, &field_ty, field_provenance)?,
-                None if matches!(field_ty, Ty::Optional(_)) => {
-                    Value::structure("None", Vec::new()).with_meta(self.leaf_meta(field_provenance))
-                }
-                None => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::UserFail,
-                        format!("missing field {} for {}", field.name, def.name),
-                    ));
+            let decoded = if field.attrs.flatten {
+                let decoded = self.decode_flattened_field(
+                    object,
+                    &field_ty,
+                    field,
+                    field_provenance,
+                    &claimed_keys,
+                )?;
+                claimed_keys.extend(flatten_claimed_keys(self.types, &field_ty, field, def));
+                decoded
+            } else {
+                match object.get(&decoded_name) {
+                    Some(field_value) => {
+                        self.decode_value(field_value, &field_ty, field_provenance)?
+                    }
+                    None if matches!(field_ty, Ty::Optional(_)) => {
+                        Value::structure("None", Vec::new())
+                            .with_meta(self.leaf_meta(field_provenance))
+                    }
+                    None => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::UserFail,
+                            format!("missing field {} for {}", field.name, def.name),
+                        ));
+                    }
                 }
             };
             fields.push((Arc::from(field.name.as_str()), decoded));
@@ -490,6 +521,47 @@ impl DecodeContext<'_> {
         }
         meta
     }
+
+    fn decode_flattened_field(
+        &self,
+        object: &VObject,
+        target: &Ty,
+        field: &vx_types::FieldDef,
+        provenance: Provenance,
+        claimed_keys: &BTreeSet<String>,
+    ) -> Result<Value, EvalError> {
+        match target {
+            Ty::Struct(struct_ty) => self.decode_struct_from_object(
+                object,
+                struct_ty,
+                struct_def(self.types, struct_ty.id)?,
+                provenance,
+            ),
+            Ty::Map(key_ty, value_ty) if matches!(key_ty.as_ref(), Ty::Scalar(Scalar::String)) => {
+                let mut entries = Vec::new();
+                for (key, entry_value) in object.iter() {
+                    if claimed_keys.contains(key.as_str()) {
+                        continue;
+                    }
+                    let key_provenance =
+                        provenance.project(ProjectionStep::MapKey(key.as_str().to_string()));
+                    let decoded_key =
+                        self.decode_object_key(key.as_str(), key_ty, key_provenance.clone())?;
+                    let decoded_value = self.decode_value(entry_value, value_ty, key_provenance)?;
+                    entries.push((decoded_key, decoded_value));
+                }
+                let meta = self.map_meta(provenance, entries.iter());
+                Ok(Value::map(entries).with_meta(meta))
+            }
+            _ => Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!(
+                    "flattened field {} must be a struct or Map[String, _]",
+                    field.name
+                ),
+            )),
+        }
+    }
 }
 
 fn decoded_field_name(container: &StructDef, field: &vx_types::FieldDef) -> String {
@@ -600,6 +672,51 @@ fn blob_text(blob: &Value, format: StructuredFormat) -> Result<String, EvalError
             format!("{} requires a Blob argument", format.display_name()),
         )),
     }
+}
+
+fn flatten_claimed_keys(
+    types: &TypeCollection,
+    target: &Ty,
+    field: &vx_types::FieldDef,
+    parent: &StructDef,
+) -> BTreeSet<String> {
+    match target {
+        Ty::Struct(struct_ty) => collect_struct_flatten_keys(types, struct_ty),
+        Ty::Map(key_ty, _) if matches!(key_ty.as_ref(), Ty::Scalar(Scalar::String)) => {
+            BTreeSet::new()
+        }
+        _ => {
+            let mut fallback = BTreeSet::new();
+            fallback.insert(decoded_field_name(parent, field));
+            fallback
+        }
+    }
+}
+
+fn collect_struct_flatten_keys(types: &TypeCollection, struct_ty: &StructTy) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let Ok(def) = struct_def(types, struct_ty.id) else {
+        return keys;
+    };
+    for field in &def.fields {
+        let field_ty = substitute_type_params(&field.ty, &struct_ty.type_args);
+        if field.attrs.flatten {
+            keys.extend(flatten_claimed_keys(types, &field_ty, field, def));
+        } else {
+            keys.insert(decoded_field_name(def, field));
+        }
+    }
+    keys
+}
+
+fn struct_def<'a>(types: &'a TypeCollection, id: TypeId) -> Result<&'a StructDef, EvalError> {
+    let TypeDef::Struct(def) = &types.env[id] else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "struct type id did not resolve to a struct definition",
+        ));
+    };
+    Ok(def)
 }
 
 fn type_mismatch(expected: &str, actual: &FacetValue) -> EvalError {

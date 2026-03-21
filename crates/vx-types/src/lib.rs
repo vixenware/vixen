@@ -217,6 +217,7 @@ pub struct DeserContainerAttrs {
 #[derive(Clone, Debug, Default)]
 pub struct DeserFieldAttrs {
     pub rename: Option<String>,
+    pub flatten: bool,
 }
 
 /// A newtype definition.

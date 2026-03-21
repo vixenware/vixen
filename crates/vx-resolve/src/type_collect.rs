@@ -457,8 +457,10 @@ fn collect_field_attrs(field: &FieldDecl) -> DeserFieldAttrs {
             let Some(key) = entry.key() else {
                 continue;
             };
-            if key.text() == "rename" {
-                attrs.rename = entry.string_value();
+            match key.text() {
+                "rename" => attrs.rename = entry.string_value(),
+                "flatten" => attrs.flatten = true,
+                _ => {}
             }
         }
     }
