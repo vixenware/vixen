@@ -175,6 +175,10 @@ fn resolution_to_spec_outcome_with_trace(
     }
 }
 
+fn poison_detail_envelope(detail: Option<&Value>) -> Option<ValueEnvelope> {
+    detail.and_then(|value| value_to_envelope(value).ok())
+}
+
 fn trace_events_to_spec_events(
     trace: &EvalTrace,
 ) -> Result<Vec<EventPattern>, Box<dyn std::error::Error>> {
@@ -1459,6 +1463,7 @@ impl Eval2Daemon for FixtureDaemon {
                 return EvalOutcome::Poison {
                     kind: "Internal".to_string(),
                     message: format!("invalid eval2 subgraph args: {error:?}"),
+                    detail: None,
                 };
             }
         };
@@ -1468,6 +1473,7 @@ impl Eval2Daemon for FixtureDaemon {
                 return EvalOutcome::Poison {
                     kind: format!("{:?}", error.kind),
                     message: error.message.to_string(),
+                    detail: poison_detail_envelope(error.detail.as_ref()),
                 };
             }
         };
@@ -1484,11 +1490,13 @@ impl Eval2Daemon for FixtureDaemon {
                 Err(error) => EvalOutcome::Poison {
                     kind: format!("{:?}", error.kind),
                     message: error.message.to_string(),
+                    detail: poison_detail_envelope(error.detail.as_ref()),
                 },
             },
             Err(error) => EvalOutcome::Poison {
                 kind: format!("{:?}", error.kind),
                 message: error.message.to_string(),
+                detail: poison_detail_envelope(error.detail.as_ref()),
             },
         }
     }
@@ -1506,6 +1514,7 @@ impl Eval2Daemon for FixtureDaemon {
                     "proxy {}:{} was not found",
                     request.reference.owner_place, request.reference.handle_id
                 ),
+                detail: None,
             },
         }
     }
@@ -2114,7 +2123,11 @@ async fn eval_outcome_to_spec(
                 events,
             )
         }
-        EvalOutcome::Poison { kind, message } => Ok(SpecOutcome::Poison(ObservedPoison {
+        EvalOutcome::Poison {
+            kind,
+            message,
+            detail: _,
+        } => Ok(SpecOutcome::Poison(ObservedPoison {
             kind,
             message,
             events,
@@ -2204,7 +2217,11 @@ fn materialize_proxy_envelope<'a>(
                     envelope.meta.crossing = original_crossing;
                     envelope
                 }
-                EvalOutcome::Poison { kind, message } => {
+                EvalOutcome::Poison {
+                    kind,
+                    message,
+                    detail: _,
+                } => {
                     return Err(std::io::Error::other(format!(
                         "proxy fetch returned poison {kind}: {message}"
                     ))

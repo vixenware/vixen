@@ -22,6 +22,7 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink, resolution_to_outcome, value_to_envelope,
 };
+use vx_eval2_proto::EvalOutcome;
 
 #[test]
 fn current_populates_missing_slot_and_then_reuses_it() {
@@ -1759,6 +1760,75 @@ fn build() {
 }
 
 #[test]
+fn keyed_structured_conflict_retains_latest_joined_input() {
+    let mut session = EvalSession::new(
+        r#"
+fn resolve_pkg(ctx) {
+  fail Conflict {
+    package: ctx.key,
+    joined: ctx.joined,
+  }
+}
+
+fn build() {
+  [
+    keyed("logger", ["1.0.0"], resolve_pkg),
+    keyed("logger", ["1.1.0"], resolve_pkg),
+  ]
+}
+"#,
+        "keyed-conflict",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    let Resolution::Poison(error) = session.run().expect("evaluate keyed structured conflict")
+    else {
+        panic!("expected poison keyed structured conflict");
+    };
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "Conflict");
+    let detail = error.detail.expect("expected keyed conflict detail");
+    let ValueRep::Struct(struct_value) = &detail.rep else {
+        panic!("expected structured keyed detail, got {:?}", detail.rep);
+    };
+    assert_eq!(struct_value.type_name.as_ref(), "Conflict");
+    let joined = struct_value
+        .fields
+        .iter()
+        .find(|(name, _)| name.as_ref() == "joined")
+        .expect("expected joined field")
+        .1
+        .clone();
+    let ValueRep::Array(items) = &joined.rep else {
+        panic!("expected joined array, got {:?}", joined.rep);
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+
+    let snapshot = session.graph_snapshot();
+    let keyed_node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.keyed.is_some())
+        .expect("expected keyed node in graph snapshot");
+    let Some(EvalNodeState::Poison(keyed_error)) = &keyed_node.state else {
+        panic!(
+            "expected keyed node to be poisoned, got {:?}",
+            keyed_node.state
+        );
+    };
+    let keyed_detail = keyed_error
+        .detail
+        .clone()
+        .expect("expected keyed node conflict detail");
+    assert_eq!(keyed_detail, detail);
+}
+
+#[test]
 fn function_values_do_not_support_authored_equality() {
     let error = eval_source_entry_with_args_with_source_id(
         r#"
@@ -2749,6 +2819,91 @@ fn function_values_fail_cleanly_at_the_wire_boundary() {
             .message
             .contains("function values cannot cross the daemon boundary yet")
     );
+}
+
+#[test]
+fn fail_expression_preserves_structured_conflict_detail() {
+    let (resolution, _trace) = eval_source_entry_with_args_with_source_id_traced(
+        r#"
+fn build() {
+  fail Conflict {
+    package: "logger",
+    versions: ["1.0.0", "1.1.0"],
+  }
+}
+"#,
+        "structured-fail",
+        "build",
+        &[],
+    )
+    .expect("evaluate structured fail");
+
+    let Resolution::Poison(error) = resolution else {
+        panic!("expected poison structured fail");
+    };
+    assert_eq!(error.kind, EvalErrorKind::UserFail);
+    assert_eq!(error.message.as_ref(), "Conflict");
+    let detail = error.detail.expect("expected structured conflict detail");
+    let ValueRep::Struct(struct_value) = &detail.rep else {
+        panic!("expected structured detail, got {:?}", detail.rep);
+    };
+    assert_eq!(struct_value.type_name.as_ref(), "Conflict");
+    assert_eq!(struct_value.fields.len(), 2);
+    assert_eq!(struct_value.fields[0].0.as_ref(), "package");
+    assert_eq!(
+        struct_value.fields[0].1.rep,
+        ValueRep::String("logger".into())
+    );
+    assert_eq!(struct_value.fields[1].0.as_ref(), "versions");
+    let ValueRep::Array(versions) = &struct_value.fields[1].1.rep else {
+        panic!(
+            "expected versions array, got {:?}",
+            struct_value.fields[1].1.rep
+        );
+    };
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].rep, ValueRep::String("1.0.0".into()));
+    assert_eq!(versions[1].rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
+fn poison_outcome_preserves_structured_conflict_detail_across_wire() {
+    let (resolution, _trace) = eval_source_entry_with_args_with_source_id_traced(
+        r#"
+fn build() {
+  fail Conflict {
+    package: "logger",
+    version: "1.1.0",
+  }
+}
+"#,
+        "structured-fail-wire",
+        "build",
+        &[],
+    )
+    .expect("evaluate structured fail");
+
+    let Resolution::Poison(error) = resolution else {
+        panic!("expected poison structured fail");
+    };
+    let expected_detail = error
+        .detail
+        .clone()
+        .expect("expected structured conflict detail");
+    let outcome = resolution_to_outcome(Resolution::Poison(error)).expect("serialize poison");
+    let EvalOutcome::Poison {
+        kind,
+        message,
+        detail,
+    } = outcome
+    else {
+        panic!("expected poison outcome");
+    };
+    assert_eq!(kind, "UserFail");
+    assert_eq!(message, "Conflict");
+    let detail = detail.expect("expected structured poison detail on wire");
+    let detail = envelope_to_value(detail).expect("decode structured poison detail");
+    assert_eq!(detail, expected_detail);
 }
 
 #[test]

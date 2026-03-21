@@ -4352,7 +4352,7 @@ fn eval_fail(
         .copied()
         .expect("fail expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let message = match eval_child_expr(
+    let failure = match eval_child_expr(
         state,
         &fail.message().ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
@@ -4367,13 +4367,30 @@ fn eval_fail(
             ));
         }
     };
-    let ValueRep::String(message) = message.rep else {
-        return Err(EvalError::new(
-            EvalErrorKind::TypeError,
-            "fail message must evaluate to String",
-        ));
-    };
-    Err(EvalError::new(EvalErrorKind::UserFail, message.to_string()))
+    Err(user_fail_error(failure))
+}
+
+fn user_fail_error(value: Value) -> EvalError {
+    match &value.rep {
+        ValueRep::String(message) => EvalError::new(EvalErrorKind::UserFail, message.clone()),
+        ValueRep::Struct(struct_value) => {
+            EvalError::new(EvalErrorKind::UserFail, struct_value.type_name.clone())
+                .with_detail(value)
+        }
+        ValueRep::Unit => EvalError::new(EvalErrorKind::UserFail, "Unit").with_detail(value),
+        ValueRep::Bool(_) => EvalError::new(EvalErrorKind::UserFail, "Bool").with_detail(value),
+        ValueRep::U64(_) => EvalError::new(EvalErrorKind::UserFail, "U64").with_detail(value),
+        ValueRep::Array(_) => EvalError::new(EvalErrorKind::UserFail, "Array").with_detail(value),
+        ValueRep::Map(_) => EvalError::new(EvalErrorKind::UserFail, "Map").with_detail(value),
+        ValueRep::External(external) => {
+            EvalError::new(EvalErrorKind::UserFail, external.kind.clone()).with_detail(value)
+        }
+        ValueRep::Function(function) => EvalError::new(
+            EvalErrorKind::UserFail,
+            format!("{}::{}", function.source_id, function.name),
+        )
+        .with_detail(value),
+    }
 }
 
 fn eval_if(
@@ -5210,15 +5227,7 @@ fn resume_frame(
         }
         ContinuationFrame::FailMessage { node_id, parent_id } => {
             let result = match input {
-                Ok(message) => {
-                    let ValueRep::String(message) = message.rep else {
-                        return Err(EvalError::new(
-                            EvalErrorKind::TypeError,
-                            "fail message must evaluate to String",
-                        ));
-                    };
-                    Err(EvalError::new(EvalErrorKind::UserFail, message.to_string()))
-                }
+                Ok(value) => Err(user_fail_error(value)),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

@@ -284,15 +284,43 @@ What it does not yet prove:
 
 - general dependent invalidation after a keyed node has already been consumed
 - user-defined join semantics per value type
-- structured conflict capture
 - branch-local assumptions
 - parallel-safe keyed widening across independently executing workers
 
 So the next solver-shaped pressure is no longer "more worklist helpers". It is:
 
 - make keyed invalidation/re-evaluation honest
-- add structured conflicts
-- then add branch-local assumption semantics
+- add branch-local assumption semantics
+
+## First structured-conflict seam
+
+Eval2 now has a first explicit structured-conflict experiment too:
+
+- `fail` can preserve non-string values instead of collapsing everything to text
+- `fail Conflict { ... }` becomes `UserFail` with retained structured detail on
+  `EvalError`
+- that detail survives:
+  - keyed-node poison state
+  - graph snapshots / explanations
+  - the daemon poison boundary, when the detail is an ordinary wireable value
+
+This is the data boundary the solver note asked for, not search.
+
+What it does prove:
+
+- resolver code can emit domain-shaped conflict data today
+- conflict provenance rides with ordinary value metadata instead of being
+  squeezed into one message string
+- keyed convergent demand can replay the widened conflict detail for the
+  canonical node
+
+What it does not yet prove:
+
+- branch-local assumptions
+- exact search over alternatives
+- learned no-goods
+- conflict widening
+- parallel frontier exploration
 
 ## What this does not do yet
 

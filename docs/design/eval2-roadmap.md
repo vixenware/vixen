@@ -332,6 +332,20 @@ Why:
 
 This should arrive before real search.
 
+Eval2 now has a first provisional seam here too:
+
+1. `fail` no longer has to collapse to a string
+2. `fail Conflict { ... }` surfaces as `UserFail` plus retained structured
+   detail on `EvalError`
+3. that structured detail survives keyed-node poison state and the daemon
+   outcome boundary when it is representable as an ordinary value
+
+This is still only the data boundary, not solver behavior:
+
+1. no structured conflict learning yet
+2. no branch splitting yet
+3. no widening or no-good reuse yet
+
 ### 5.4 Branch-Local Context
 
 We need a way to evaluate the same keyed graph under branch-local assumptions

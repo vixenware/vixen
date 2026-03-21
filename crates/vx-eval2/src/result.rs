@@ -34,6 +34,7 @@ impl PendingRef {
 pub struct EvalError {
     pub kind: EvalErrorKind,
     pub message: Arc<str>,
+    pub detail: Option<Value>,
     pub demand_chain: Arc<[DemandFrame]>,
 }
 
@@ -42,8 +43,14 @@ impl EvalError {
         Self {
             kind,
             message: message.into(),
+            detail: None,
             demand_chain: Arc::from([]),
         }
+    }
+
+    pub fn with_detail(mut self, detail: Value) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn with_demand_frame(mut self, frame: DemandFrame) -> Self {

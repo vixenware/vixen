@@ -34,6 +34,7 @@ pub fn resolution_to_outcome(resolution: Resolution) -> Result<EvalOutcome, Eval
         Resolution::Poison(error) => Ok(EvalOutcome::Poison {
             kind: format!("{:?}", error.kind),
             message: error.message.to_string(),
+            detail: error.detail.as_ref().map(value_to_envelope).transpose()?,
         }),
     }
 }

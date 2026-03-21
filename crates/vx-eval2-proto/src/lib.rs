@@ -337,7 +337,12 @@ pub struct EvalSubgraphRequest {
 #[repr(u8)]
 pub enum EvalOutcome {
     Ready(ValueEnvelope),
-    Poison { kind: String, message: String },
+    Poison {
+        kind: String,
+        message: String,
+        #[facet(default)]
+        detail: Option<ValueEnvelope>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
