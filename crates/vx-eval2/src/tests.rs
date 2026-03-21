@@ -3136,6 +3136,63 @@ fn build() {
 }
 
 #[test]
+fn search_assumption_reuses_learned_point_no_goods_within_same_session() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn resolve_candidate() {
+  let version = branch_assumption("version");
+  if version == "1.0.0" (
+    let _ready = host_wait();
+    fail Conflict {
+      version: version,
+    }
+  ) else (
+    version
+  )
+}
+
+fn search_once() {
+  search_assumption("version", ["1.0.0", "1.1.0"], resolve_candidate)
+}
+
+fn build() {
+  let first = search_once();
+  let second = search_once();
+  [first, second]
+}
+"#,
+        "search-assumption-learned-point-no-good",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start first exact-search branch")
+    else {
+        panic!("expected pending exact-search branch");
+    };
+    session
+        .resolve_pending(&pending, Value::string("ready"))
+        .expect("resolve learned point no-good branch");
+
+    let Resolution::Ready(value) = session
+        .run()
+        .expect("resume exact-search with learned point no-good")
+    else {
+        panic!("expected ready exact-search result after learning point no-good");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected result array, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].rep, ValueRep::String("1.1.0".into()));
+    assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+}
+
+#[test]
 fn entry_arguments_are_bound_as_runtime_inputs() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build(value: String) { value }",

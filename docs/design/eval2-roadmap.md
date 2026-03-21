@@ -395,13 +395,15 @@ Eval2 now has a first exact-search seam:
    `BranchConflict` that retains per-branch failure detail
 4. pending/resume paths continue the in-flight branch and can still move on to
    later candidates afterward
+5. exact failing branches can now be learned as conservative point no-goods and
+   skipped on later identical searches in the same session
 
 This is enough for a first correct exact-search experiment, but it is still
 minimal:
 
 1. no parallel frontier yet
-2. no learned no-goods yet
-3. no conflict widening yet
+2. no conflict widening yet
+3. no range/volume learning yet
 4. no dominance-order comparison across multiple full solutions yet
 
 It is now also enough for a first tiny Cargo-shaped authored sketch:
@@ -474,13 +476,12 @@ resolution without hardcoding Cargo semantics in Rust.
 
 Only after the MVP works should we add the more advanced solver machinery:
 
-1. learned point no-goods
-2. range widening
-3. metadata-aware splitting
-4. optimistic bounds
-5. incumbent tracking
-6. parallel frontier search
-7. diagnostic fallback search
+1. range widening
+2. metadata-aware splitting
+3. optimistic bounds
+4. incumbent tracking
+5. parallel frontier search
+6. diagnostic fallback search
 
 That is where the research-heavy parts live.
 
