@@ -11,12 +11,14 @@ use vx_parser::{
     FieldExpr, IfExpr, LiteralExpr, MapExpr, NameRefExpr, Stmt, StructLiteralExpr, SyntaxKind,
 };
 use vx_resolve::SourceId;
+use vx_types::Ty;
 
 use crate::{
     CrossingPolicy, EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalEventSink,
     EvalExprKind, EvalNodeId, EvalTrace, FunctionRef, NullEvalEventSink, PendingRef,
     ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeInputKind, SlotAction, SourceSpan,
     StructValue, Value, ValueMeta, ValueRep,
+    decode::{StructuredFormat, parse_blob_as_value},
     program::{CompiledParameter, CompiledProgram, EvalProgram, ProgramNodeHandle},
 };
 
@@ -1767,6 +1769,7 @@ enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         callee: Value,
         call_source: SourceSpan,
+        type_args: Arc<[Ty]>,
         child_nodes: Vec<EvalNodeId>,
     },
     BlockAfterLet {
@@ -1788,6 +1791,7 @@ enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         call_source: SourceSpan,
+        type_args: Arc<[Ty]>,
         env: EvalEnv,
         args: Vec<Value>,
         remaining_args: Vec<ExprHandle>,
@@ -1797,6 +1801,7 @@ enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         callee: Value,
         call_source: SourceSpan,
+        type_args: Arc<[Ty]>,
         args: Vec<Value>,
         remaining_args: Vec<ExprHandle>,
         env: EvalEnv,
@@ -4079,6 +4084,13 @@ fn eval_call(
         .copied()
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    let type_args = Arc::<[Ty]>::from(
+        call.type_args()
+            .into_iter()
+            .flat_map(|args| args.types())
+            .map(|ty| state.program.resolve_type_annotation(&ty))
+            .collect::<Vec<_>>(),
+    );
     let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
     if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
@@ -4095,6 +4107,7 @@ fn eval_call(
                     parent_id,
                     callee: callee_value,
                     call_source,
+                    type_args: Arc::clone(&type_args),
                     child_nodes,
                 }],
             ));
@@ -4105,6 +4118,7 @@ fn eval_call(
             parent_id,
             callee_value,
             call_source,
+            Arc::clone(&type_args),
             Vec::new(),
             positional_args
                 .iter()
@@ -4122,6 +4136,7 @@ fn eval_call(
                     node_id,
                     parent_id,
                     call_source,
+                    type_args: Arc::clone(&type_args),
                     env: env.clone(),
                     args: Vec::new(),
                     remaining_args: positional_args
@@ -4138,6 +4153,7 @@ fn eval_call(
         parent_id,
         callee_value,
         call_source,
+        type_args,
         Vec::new(),
         positional_args
             .iter()
@@ -4228,6 +4244,42 @@ fn eval_call_callee(
         return Ok(EvalStep::Ready(value));
     }
     eval_child_expr(state, callee, env)
+}
+
+fn static_namespace_member_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    field: &FieldExpr,
+    env: &EvalEnv,
+) -> Result<Option<Value>, EvalError> {
+    let Some(Expr::NameRef(receiver)) = field.receiver() else {
+        return Ok(None);
+    };
+    let Some(receiver_token) = receiver.token() else {
+        return Ok(None);
+    };
+    if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
+        return Ok(None);
+    }
+    if env.contains_key(receiver_token.text()) {
+        return Ok(None);
+    }
+    let Some(field_name) = field.field_name() else {
+        return Ok(None);
+    };
+    let full_name = format!("{}.{}", receiver_token.text(), field_name.text());
+    let function = FunctionRef::new(
+        state.program.source_id(state.current_source()),
+        Arc::from(full_name.as_str()),
+        Arc::from([]),
+        false,
+        None,
+        Arc::from([]),
+        None,
+    );
+    let source = state.span_for_node(field);
+    Ok(Some(
+        Value::function(function).with_provenance(Provenance::binding(source, full_name)),
+    ))
 }
 
 fn slot_builtin_action(
@@ -4751,9 +4803,32 @@ fn continue_builtin_call(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     callee_name: &str,
+    type_args: &[Ty],
     args: &[Value],
 ) -> Result<Option<EvalStep>, EvalError> {
     match callee_name {
+        "Json.parse" | "Toml.parse" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee_name}() requires one Blob argument"),
+                ));
+            }
+            if type_args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee_name}() requires exactly one type argument"),
+                ));
+            }
+            let format = match callee_name {
+                "Json.parse" => StructuredFormat::Json,
+                "Toml.parse" => StructuredFormat::Toml,
+                _ => unreachable!(),
+            };
+            let value =
+                parse_blob_as_value(format, &args[0], &type_args[0], state.program.types())?;
+            Ok(ready_builtin_value(value))
+        }
         "map_get" => {
             if args.len() != 2 {
                 return Err(EvalError::new(
@@ -5182,6 +5257,7 @@ fn continue_call_from_args(
     parent_id: Option<EvalNodeId>,
     callee: Value,
     call_source: SourceSpan,
+    type_args: Arc<[Ty]>,
     mut args: Vec<Value>,
     remaining_args: Vec<ExprHandle>,
     mut env: EvalEnv,
@@ -5194,6 +5270,7 @@ fn continue_call_from_args(
                 parent_id,
                 callee,
                 call_source,
+                type_args,
                 args,
                 remaining_args,
                 env,
@@ -5213,6 +5290,7 @@ fn continue_call_from_args(
                         parent_id,
                         callee: callee.clone(),
                         call_source,
+                        type_args: Arc::clone(&type_args),
                         args,
                         remaining_args,
                         env,
@@ -5279,7 +5357,9 @@ fn continue_call_from_args(
             0,
         );
     }
-    if let Some(step) = continue_builtin_call(state, node_id, parent_id, &callee_name, &args)? {
+    if let Some(step) =
+        continue_builtin_call(state, node_id, parent_id, &callee_name, &type_args, &args)?
+    {
         return Ok(step);
     }
     state.emit(
@@ -5683,6 +5763,9 @@ fn eval_field(
     field: &FieldExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    if let Some(value) = static_namespace_member_value(state, field, env)? {
+        return Ok(EvalStep::Ready(value));
+    }
     let node_id = state
         .stack
         .last()
@@ -6180,6 +6263,7 @@ fn resume_frame(
             parent_id,
             callee,
             call_source,
+            type_args,
             child_nodes,
         } => {
             let result = match input {
@@ -6203,6 +6287,7 @@ fn resume_frame(
                                         parent_id,
                                         callee: callee.clone(),
                                         call_source,
+                                        type_args: Arc::clone(&type_args),
                                         child_nodes: child_nodes.clone(),
                                     }],
                                 }));
@@ -6215,6 +6300,7 @@ fn resume_frame(
                         parent_id,
                         callee,
                         call_source,
+                        type_args,
                         args,
                         Vec::new(),
                         empty_env(),
@@ -6228,6 +6314,7 @@ fn resume_frame(
             node_id,
             parent_id,
             call_source,
+            type_args,
             env,
             args,
             remaining_args,
@@ -6239,6 +6326,7 @@ fn resume_frame(
                     parent_id,
                     callee,
                     call_source,
+                    type_args,
                     args,
                     remaining_args,
                     env,
@@ -6299,6 +6387,7 @@ fn resume_frame(
             parent_id,
             callee,
             call_source,
+            type_args,
             mut args,
             remaining_args,
             env,
@@ -6312,6 +6401,7 @@ fn resume_frame(
                         parent_id,
                         callee,
                         call_source,
+                        type_args,
                         args,
                         remaining_args,
                         env,

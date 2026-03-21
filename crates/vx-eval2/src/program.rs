@@ -4,9 +4,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use vx_parser::{
     AstNode, Expr, FnDecl, Item, LineIndex as ParserLineIndex, Parse, SourceFile, Stmt, SyntaxKind,
-    SyntaxNode, SyntaxToken, TextRange, TextSize, parse, trimmed_range,
+    SyntaxNode, SyntaxToken, TextRange, TextSize, Type, parse, trimmed_range,
 };
-use vx_resolve::{DefKind, ImportGraph, ProgramScopes, SourceFileRef, SourceId};
+use vx_resolve::{
+    DefKind, ImportGraph, ProgramScopes, SourceFileRef, SourceId, TypeCollection,
+    collect_types_for_sources, stdlib_sources,
+};
+use vx_types::Ty;
 
 use crate::{
     ByteOffset, ColumnIndex, EvalError, EvalErrorKind, LineIndex, SourcePoint, SourceSpan,
@@ -186,6 +190,7 @@ pub(crate) struct CompiledProgram {
     entry_source: SourceId,
     sources: BTreeMap<u32, CompiledProgramSource>,
     scopes: ProgramScopes,
+    types: TypeCollection,
 }
 
 impl CompiledProgram {
@@ -214,10 +219,21 @@ impl CompiledProgram {
             imports.add_import(SourceId(import.from as u32), SourceId(import.to as u32));
         }
 
+        let mut type_sources = scope_sources.clone();
+        for (index, stdlib) in stdlib_sources().iter().enumerate() {
+            let parse = parse(stdlib.text);
+            let file = SourceFile::cast_root(parse.syntax());
+            type_sources.push(SourceFileRef {
+                id: SourceId(program.sources.len() as u32 + index as u32),
+                file,
+            });
+        }
+
         Self {
             entry_source,
             sources,
             scopes: ProgramScopes::build(&scope_sources, imports),
+            types: collect_types_for_sources(&type_sources),
         }
     }
 
@@ -306,6 +322,14 @@ impl CompiledProgram {
         self.source(source)
             .expect("token span lookup should use a valid source")
             .span_for_range(token.text_range())
+    }
+
+    pub(crate) fn resolve_type_annotation(&self, ty: &Type) -> Ty {
+        self.types.resolve_type_annotation(ty)
+    }
+
+    pub(crate) fn types(&self) -> &TypeCollection {
+        &self.types
     }
 
     #[cfg(test)]

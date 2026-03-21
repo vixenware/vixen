@@ -11,15 +11,18 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+facet-json.workspace = true
+facet-toml.workspace = true
+facet-value.workspace = true
 vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }
 vx-eval2-proto.workspace = true
+vx-types = { path = "../vx-types" }
 
 [dev-dependencies]
 blake3.workspace = true
 camino.workspace = true
 datatest-stable = "0.3.3"
-facet-value.workspace = true
 moire.workspace = true
 roam-core.workspace = true
 roam-stream.workspace = true

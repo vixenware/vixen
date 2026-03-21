@@ -358,7 +358,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
 
 impl TypeCollection {
     /// Resolve a type annotation AST node to a [`Ty`].
-    pub(crate) fn resolve_type_annotation(&self, ty: &vx_parser::Type) -> Ty {
+    pub fn resolve_type_annotation(&self, ty: &vx_parser::Type) -> Ty {
         let resolver = TypeResolver::new(&self.name_to_id);
         resolver.resolve_type(ty, &[])
     }

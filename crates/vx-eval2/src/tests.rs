@@ -24,6 +24,37 @@ use crate::{
 };
 use vx_eval2_proto::EvalOutcome;
 
+fn expect_ready(resolution: Resolution) -> Value {
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready result, got {resolution:?}");
+    };
+    value
+}
+
+fn struct_field<'a>(value: &'a Value, name: &str) -> &'a Value {
+    let ValueRep::Struct(struct_value) = &value.rep else {
+        panic!("expected struct value, got {value:?}");
+    };
+    struct_value
+        .fields
+        .iter()
+        .find_map(|(field_name, field_value)| (field_name.as_ref() == name).then_some(field_value))
+        .unwrap_or_else(|| panic!("expected field {name:?} in {struct_value:?}"))
+}
+
+fn map_string_entry<'a>(value: &'a Value, key: &str) -> &'a Value {
+    let ValueRep::Map(map) = &value.rep else {
+        panic!("expected map value, got {value:?}");
+    };
+    map.entries
+        .iter()
+        .find_map(|(entry_key, entry_value)| {
+            matches!(&entry_key.rep, ValueRep::String(text) if text.as_ref() == key)
+                .then_some(entry_value)
+        })
+        .unwrap_or_else(|| panic!("expected key {key:?} in {map:?}"))
+}
+
 #[test]
 fn current_populates_missing_slot_and_then_reuses_it() {
     let mut slots = SlotStore::<u64, String, String, String>::default();
@@ -295,6 +326,145 @@ fn recursive_named_function_works() {
         panic!("expected ready recursive function result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::U64(41));
+}
+
+#[test]
+fn json_parse_decodes_struct_from_blob_argument() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Person {
+  name: String,
+  age: U64,
+}
+
+fn build(blob: Blob) {
+  Json.parse[Person](blob)
+}
+"#,
+            "json-parse-struct",
+            "build",
+            &[Value::external("Blob", r#"{"name":"Alice","age":30}"#)],
+        )
+        .expect("evaluate Json.parse"),
+    );
+
+    let ValueRep::Struct(person) = &value.rep else {
+        panic!("expected parsed Person struct, got {value:?}");
+    };
+    assert_eq!(person.type_name.as_ref(), "Person");
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String(Arc::from("Alice"))
+    );
+    assert_eq!(struct_field(&value, "age").rep, ValueRep::U64(30));
+}
+
+#[test]
+fn json_parse_defaults_missing_optional_field_to_none() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Config {
+  name: String,
+  description: String?,
+}
+
+fn build(blob: Blob) {
+  Json.parse[Config](blob)
+}
+"#,
+            "json-parse-optional",
+            "build",
+            &[Value::external("Blob", r#"{"name":"demo"}"#)],
+        )
+        .expect("evaluate Json.parse with missing optional field"),
+    );
+
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String(Arc::from("demo"))
+    );
+    let ValueRep::Struct(description) = &struct_field(&value, "description").rep else {
+        panic!(
+            "expected optional variant, got {:?}",
+            struct_field(&value, "description")
+        );
+    };
+    assert_eq!(description.type_name.as_ref(), "None");
+    assert!(description.fields.is_empty());
+}
+
+#[test]
+fn json_parse_decodes_array_and_map_fields() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Config {
+  values: Array[U64],
+  labels: Map[String, U64],
+}
+
+fn build(blob: Blob) {
+  Json.parse[Config](blob)
+}
+"#,
+            "json-parse-array-map",
+            "build",
+            &[Value::external(
+                "Blob",
+                r#"{"values":[1,2,3],"labels":{"left":4,"right":5}}"#,
+            )],
+        )
+        .expect("evaluate Json.parse with arrays and maps"),
+    );
+
+    let ValueRep::Array(values) = &struct_field(&value, "values").rep else {
+        panic!(
+            "expected values array, got {:?}",
+            struct_field(&value, "values")
+        );
+    };
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0].rep, ValueRep::U64(1));
+    assert_eq!(values[1].rep, ValueRep::U64(2));
+    assert_eq!(values[2].rep, ValueRep::U64(3));
+
+    let labels = struct_field(&value, "labels");
+    assert_eq!(map_string_entry(labels, "left").rep, ValueRep::U64(4));
+    assert_eq!(map_string_entry(labels, "right").rep, ValueRep::U64(5));
+}
+
+#[test]
+fn toml_parse_decodes_struct_from_blob_argument() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Config {
+  name: String,
+  port: U64,
+}
+
+fn build(blob: Blob) {
+  Toml.parse[Config](blob)
+}
+"#,
+            "toml-parse-struct",
+            "build",
+            &[Value::external("Blob", "name = \"demo\"\nport = 8080\n")],
+        )
+        .expect("evaluate Toml.parse"),
+    );
+
+    let ValueRep::Struct(config) = &value.rep else {
+        panic!("expected parsed Config struct, got {value:?}");
+    };
+    assert_eq!(config.type_name.as_ref(), "Config");
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String(Arc::from("demo"))
+    );
+    assert_eq!(struct_field(&value, "port").rep, ValueRep::U64(8080));
 }
 
 #[test]

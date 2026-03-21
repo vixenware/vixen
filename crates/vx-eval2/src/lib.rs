@@ -14,6 +14,8 @@
 mod program;
 pub use program::{EvalProgram, EvalProgramImport, EvalProgramSource};
 
+mod decode;
+
 mod engine;
 pub use engine::{
     EvalActiveWave, EvalBranchContext, EvalBufferedWork, EvalCompletedWork,

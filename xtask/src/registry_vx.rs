@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +9,18 @@ use facet::Facet;
 struct SparseIndexDep {
     name: String,
     req: String,
+    #[facet(default)]
+    package: Option<String>,
+    #[facet(default)]
+    kind: Option<String>,
+    #[facet(default)]
+    optional: bool,
+    #[facet(rename = "default_features", default)]
+    default_features: bool,
+    #[facet(default)]
+    features: Vec<String>,
+    #[facet(default)]
+    target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -18,20 +31,37 @@ struct SparseIndexEntry {
     #[facet(default)]
     deps: Vec<SparseIndexDep>,
     #[facet(default)]
+    features: BTreeMap<String, Vec<String>>,
+    #[facet(default)]
+    features2: BTreeMap<String, Vec<String>>,
+    #[facet(default)]
     yanked: bool,
+    #[facet(default)]
+    rust_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegistryDepFact {
     name: String,
+    package: String,
+    has_package: bool,
     req: String,
+    kind: String,
+    optional: bool,
+    default_features: bool,
+    features: Vec<String>,
+    target: String,
+    has_target: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegistryReleaseFact {
     version: String,
     deps: Vec<RegistryDepFact>,
+    features: BTreeMap<String, Vec<String>>,
     yanked: bool,
+    rust_version: String,
+    has_rust_version: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +74,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         bail!(
             "Usage: cargo xtask registry-vx <snapshot-dir> <output.vx> [package ...]\n\
-             Emits a generated Vixen module from a curated Cargo sparse-index snapshot."
+             Emits a generated Vixen module from a Cargo sparse-index snapshot."
         );
     }
 
@@ -75,10 +105,11 @@ fn load_selected_packages(
     snapshot_dir: &Path,
     package_names: &[String],
 ) -> Result<Vec<RegistryPackageFacts>> {
+    let data_root = sparse_index_data_root(snapshot_dir);
     let mut packages = package_names
         .iter()
         .map(|package_name| {
-            let path = snapshot_dir.join(sparse_index_rel_path(package_name));
+            let path = data_root.join(sparse_index_rel_path(package_name));
             load_package_file(&path).with_context(|| {
                 format!(
                     "failed to load sparse-index package {package_name:?} from {}",
@@ -93,7 +124,7 @@ fn load_selected_packages(
 
 fn load_all_packages(snapshot_dir: &Path) -> Result<Vec<RegistryPackageFacts>> {
     let mut files = Vec::new();
-    collect_regular_files(snapshot_dir, &mut files)?;
+    collect_regular_files(&sparse_index_data_root(snapshot_dir), &mut files)?;
 
     let mut packages = files
         .iter()
@@ -104,6 +135,15 @@ fn load_all_packages(snapshot_dir: &Path) -> Result<Vec<RegistryPackageFacts>> {
         .collect::<Result<Vec<_>>>()?;
     packages.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(packages)
+}
+
+fn sparse_index_data_root(snapshot_dir: &Path) -> PathBuf {
+    let cache_root = snapshot_dir.join(".cache");
+    if cache_root.is_dir() {
+        cache_root
+    } else {
+        snapshot_dir.to_path_buf()
+    }
 }
 
 fn collect_regular_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -129,11 +169,77 @@ fn collect_regular_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn load_package_file(path: &Path) -> Result<RegistryPackageFacts> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let contents = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let entries = parse_sparse_index_entries(&contents, path)?;
 
     let mut releases = Vec::new();
     let mut package_name = None::<String>;
+    for entry in entries {
+        match &package_name {
+            Some(existing) if existing != &entry.name => bail!(
+                "sparse-index file {} mixes package names {:?} and {:?}",
+                path.display(),
+                existing,
+                entry.name
+            ),
+            Some(_) => {}
+            None => package_name = Some(entry.name.clone()),
+        }
+
+        let mut features = entry.features;
+        for (feature_name, members) in entry.features2 {
+            if features.insert(feature_name.clone(), members).is_some() {
+                bail!(
+                    "sparse-index file {} repeated feature {:?} across features/features2",
+                    path.display(),
+                    feature_name
+                );
+            }
+        }
+
+        releases.push(RegistryReleaseFact {
+            version: entry.version,
+            deps: entry
+                .deps
+                .into_iter()
+                .map(|dep| RegistryDepFact {
+                    name: dep.name,
+                    package: dep.package.clone().unwrap_or_default(),
+                    has_package: dep.package.is_some(),
+                    req: dep.req,
+                    kind: dep.kind.unwrap_or_else(|| "normal".to_string()),
+                    optional: dep.optional,
+                    default_features: dep.default_features,
+                    features: dep.features,
+                    target: dep.target.clone().unwrap_or_default(),
+                    has_target: dep.target.is_some(),
+                })
+                .collect(),
+            features,
+            yanked: entry.yanked,
+            rust_version: entry.rust_version.clone().unwrap_or_default(),
+            has_rust_version: entry.rust_version.is_some(),
+        });
+    }
+
+    let name = package_name
+        .ok_or_else(|| eyre::eyre!("sparse-index file {} was empty", path.display()))?;
+    Ok(RegistryPackageFacts { name, releases })
+}
+
+fn parse_sparse_index_entries(contents: &[u8], path: &Path) -> Result<Vec<SparseIndexEntry>> {
+    if contents.contains(&0) {
+        parse_sparse_index_cache_entries(contents, path)
+    } else {
+        parse_sparse_index_json_lines(contents, path)
+    }
+}
+
+fn parse_sparse_index_json_lines(contents: &[u8], path: &Path) -> Result<Vec<SparseIndexEntry>> {
+    let contents = std::str::from_utf8(contents)
+        .with_context(|| format!("sparse-index file {} was not valid UTF-8", path.display()))?;
+
+    let mut entries = Vec::new();
     for (line_index, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -146,33 +252,71 @@ fn load_package_file(path: &Path) -> Result<RegistryPackageFacts> {
                 path.display()
             )
         })?;
-        match &package_name {
-            Some(existing) if existing != &entry.name => bail!(
-                "sparse-index file {} mixes package names {:?} and {:?}",
-                path.display(),
-                existing,
-                entry.name
-            ),
-            Some(_) => {}
-            None => package_name = Some(entry.name.clone()),
-        }
-        releases.push(RegistryReleaseFact {
-            version: entry.version,
-            deps: entry
-                .deps
-                .into_iter()
-                .map(|dep| RegistryDepFact {
-                    name: dep.name,
-                    req: dep.req,
-                })
-                .collect(),
-            yanked: entry.yanked,
-        });
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn parse_sparse_index_cache_entries(contents: &[u8], path: &Path) -> Result<Vec<SparseIndexEntry>> {
+    const SPARSE_CACHE_PREFIX_LEN: usize = 5;
+
+    if contents.len() < SPARSE_CACHE_PREFIX_LEN {
+        bail!(
+            "sparse cache file {} was too short to contain a cache header",
+            path.display()
+        );
     }
 
-    let name = package_name
-        .ok_or_else(|| eyre::eyre!("sparse-index file {} was empty", path.display()))?;
-    Ok(RegistryPackageFacts { name, releases })
+    let header_end = contents[SPARSE_CACHE_PREFIX_LEN..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|offset| SPARSE_CACHE_PREFIX_LEN + offset)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "sparse cache file {} was missing its header terminator",
+                path.display()
+            )
+        })?;
+    let payload = &contents[header_end + 1..];
+
+    let mut entries = Vec::new();
+    let mut fields = payload.split(|byte| *byte == 0);
+    while let Some(version_bytes) = fields.next() {
+        if version_bytes.is_empty() {
+            continue;
+        }
+        let json_bytes = fields.next().ok_or_else(|| {
+            eyre::eyre!(
+                "sparse cache file {} ended with a version but no JSON payload",
+                path.display()
+            )
+        })?;
+        let version = std::str::from_utf8(version_bytes).with_context(|| {
+            format!(
+                "sparse cache version tag in {} was not valid UTF-8",
+                path.display()
+            )
+        })?;
+        let json = std::str::from_utf8(json_bytes).with_context(|| {
+            format!(
+                "sparse cache JSON payload in {} was not valid UTF-8",
+                path.display()
+            )
+        })?;
+        let entry = facet_json::from_str::<SparseIndexEntry>(json)
+            .with_context(|| format!("failed to parse sparse cache entry in {}", path.display()))?;
+        if entry.version != version {
+            bail!(
+                "sparse cache file {} mismatched version tag {:?} vs JSON {:?}",
+                path.display(),
+                version,
+                entry.version
+            );
+        }
+        entries.push(entry);
+    }
+
+    Ok(entries)
 }
 
 fn sparse_index_rel_path(package_name: &str) -> PathBuf {
@@ -191,18 +335,30 @@ fn sparse_index_rel_path(package_name: &str) -> PathBuf {
 fn emit_registry_vx(packages: &[RegistryPackageFacts]) -> String {
     let mut out = String::new();
     out.push_str("// @generated by `cargo xtask registry-vx`\n");
-    out.push_str("// Source: curated Cargo sparse-index snapshot\n\n");
+    out.push_str("// Source: Cargo sparse-index snapshot\n\n");
     out.push_str("type PackageName = String\n");
     out.push_str("type Version = String\n");
-    out.push_str("type VersionReq = String\n\n");
+    out.push_str("type VersionReq = String\n");
+    out.push_str("type FeatureName = String\n\n");
     out.push_str("struct RegistryDep {\n");
     out.push_str("  name: PackageName,\n");
+    out.push_str("  package: PackageName,\n");
+    out.push_str("  has_package: Bool,\n");
     out.push_str("  req: VersionReq,\n");
+    out.push_str("  kind: String,\n");
+    out.push_str("  optional: Bool,\n");
+    out.push_str("  default_features: Bool,\n");
+    out.push_str("  features: Array[FeatureName],\n");
+    out.push_str("  target: String,\n");
+    out.push_str("  has_target: Bool,\n");
     out.push_str("}\n\n");
     out.push_str("struct RegistryRelease {\n");
     out.push_str("  version: Version,\n");
     out.push_str("  deps: Array[RegistryDep],\n");
+    out.push_str("  features: Map[FeatureName, Array[String]],\n");
     out.push_str("  yanked: Bool,\n");
+    out.push_str("  rust_version: String,\n");
+    out.push_str("  has_rust_version: Bool,\n");
     out.push_str("}\n\n");
     out.push_str("type RegistryPackage = Array[RegistryRelease]\n\n");
     out.push_str("struct RegistryMiss {\n");
@@ -223,11 +379,40 @@ fn emit_registry_vx(packages: &[RegistryPackageFacts]) -> String {
             for dep in &release.deps {
                 out.push_str("        RegistryDep {\n");
                 out.push_str(&format!("          name: {},\n", vx_string(&dep.name)));
+                out.push_str(&format!(
+                    "          package: {},\n",
+                    vx_string(&dep.package)
+                ));
+                out.push_str(&format!("          has_package: {},\n", dep.has_package));
                 out.push_str(&format!("          req: {},\n", vx_string(&dep.req)));
+                out.push_str(&format!("          kind: {},\n", vx_string(&dep.kind)));
+                out.push_str(&format!("          optional: {},\n", dep.optional));
+                out.push_str(&format!(
+                    "          default_features: {},\n",
+                    dep.default_features
+                ));
+                out.push_str(&format!(
+                    "          features: {},\n",
+                    vx_string_array(&dep.features)
+                ));
+                out.push_str(&format!("          target: {},\n", vx_string(&dep.target)));
+                out.push_str(&format!("          has_target: {},\n", dep.has_target));
                 out.push_str("        },\n");
             }
             out.push_str("      ],\n");
+            out.push_str(&format!(
+                "      features: {},\n",
+                vx_string_array_map(&release.features)
+            ));
             out.push_str(&format!("      yanked: {},\n", release.yanked));
+            out.push_str(&format!(
+                "      rust_version: {},\n",
+                vx_string(&release.rust_version)
+            ));
+            out.push_str(&format!(
+                "      has_rust_version: {},\n",
+                release.has_rust_version
+            ));
             out.push_str("    },\n");
         }
         out.push_str("  ]\n");
@@ -286,36 +471,59 @@ fn vx_string(value: &str) -> String {
     format!("{value:?}")
 }
 
+fn vx_string_array(values: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&vx_string(value));
+    }
+    out.push(']');
+    out
+}
+
+fn vx_string_array_map(values: &BTreeMap<String, Vec<String>>) -> String {
+    if values.is_empty() {
+        return "%{}".to_string();
+    }
+
+    let mut out = String::from("%{");
+    for (index, (key, members)) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(&vx_string(key));
+        out.push_str(" => ");
+        out.push_str(&vx_string_array(members));
+    }
+    out.push('}');
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        emit_registry_vx, load_all_packages, load_selected_packages, sparse_index_rel_path,
-    };
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
+
     use tempfile::tempdir;
+
+    use super::{
+        RegistryDepFact, RegistryPackageFacts, RegistryReleaseFact, emit_registry_vx,
+        load_all_packages, load_selected_packages, sparse_index_rel_path,
+    };
 
     #[test]
     fn sparse_index_rel_path_matches_crates_io_layout() {
-        assert_eq!(sparse_index_rel_path("a"), std::path::PathBuf::from("1/a"));
-        assert_eq!(
-            sparse_index_rel_path("ab"),
-            std::path::PathBuf::from("2/ab")
-        );
-        assert_eq!(
-            sparse_index_rel_path("abc"),
-            std::path::PathBuf::from("3/a/abc")
-        );
-        assert_eq!(
-            sparse_index_rel_path("serde"),
-            std::path::PathBuf::from("se/rd/serde")
-        );
-        assert_eq!(
-            sparse_index_rel_path("tokio"),
-            std::path::PathBuf::from("to/ki/tokio")
-        );
+        assert_eq!(sparse_index_rel_path("a"), PathBuf::from("1/a"));
+        assert_eq!(sparse_index_rel_path("ab"), PathBuf::from("2/ab"));
+        assert_eq!(sparse_index_rel_path("abc"), PathBuf::from("3/a/abc"));
+        assert_eq!(sparse_index_rel_path("serde"), PathBuf::from("se/rd/serde"));
+        assert_eq!(sparse_index_rel_path("tokio"), PathBuf::from("to/ki/tokio"));
         assert_eq!(
             sparse_index_rel_path("HashBrown"),
-            std::path::PathBuf::from("ha/sh/hashbrown")
+            PathBuf::from("ha/sh/hashbrown")
         );
     }
 
@@ -330,7 +538,7 @@ mod tests {
         fs::create_dir_all(logger_path.parent().expect("logger parent")).expect("mkdir logger");
         fs::write(
             &codec_path,
-            r#"{"name":"codec","vers":"1.1.0","deps":[{"name":"logger","req":"1.1.0"}],"yanked":false}"#
+            r#"{"name":"codec","vers":"1.1.0","deps":[{"name":"logger","req":"1.1.0","package":"logger-core","kind":"build","optional":true,"default_features":false,"features":["std"],"target":"cfg(unix)"}],"features":{"derive":["dep:logger"]},"features2":{"unstable":["derive"]},"yanked":false,"rust_version":"1.80"}"#
                 .to_string()
                 + "\n"
                 + r#"{"name":"codec","vers":"1.0.0","deps":[{"name":"logger","req":"1.0.0"}],"yanked":false}"#,
@@ -349,8 +557,56 @@ mod tests {
         assert_eq!(packages[0].name, "codec");
         assert_eq!(packages[0].releases.len(), 2);
         assert_eq!(packages[0].releases[0].deps[0].name, "logger");
+        assert_eq!(packages[0].releases[0].deps[0].package, "logger-core");
+        assert!(packages[0].releases[0].deps[0].has_package);
+        assert_eq!(packages[0].releases[0].deps[0].kind, "build");
+        assert!(packages[0].releases[0].deps[0].optional);
+        assert!(!packages[0].releases[0].deps[0].default_features);
+        assert_eq!(packages[0].releases[0].deps[0].features, vec!["std"]);
+        assert_eq!(packages[0].releases[0].deps[0].target, "cfg(unix)");
+        assert!(packages[0].releases[0].deps[0].has_target);
+        assert_eq!(
+            packages[0].releases[0].features.get("derive"),
+            Some(&vec!["dep:logger".to_string()])
+        );
+        assert_eq!(
+            packages[0].releases[0].features.get("unstable"),
+            Some(&vec!["derive".to_string()])
+        );
+        assert_eq!(packages[0].releases[0].rust_version, "1.80");
+        assert!(packages[0].releases[0].has_rust_version);
         assert_eq!(packages[1].name, "logger");
         assert_eq!(packages[1].releases[0].version, "1.1.0");
+    }
+
+    #[test]
+    fn load_selected_packages_parses_sparse_cache_files() {
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path().join(".cache");
+
+        let serde_path = root.join(sparse_index_rel_path("serde"));
+        fs::create_dir_all(serde_path.parent().expect("serde parent")).expect("mkdir serde");
+        fs::write(
+            &serde_path,
+            sparse_cache_bytes(
+                "etag: \"demo\"",
+                &[(
+                    "1.0.0",
+                    r#"{"name":"serde","vers":"1.0.0","deps":[{"name":"serde_derive","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"}],"features":{"derive":["dep:serde_derive"]},"yanked":false,"rust_version":"1.56"}"#,
+                )],
+            ),
+        )
+        .expect("write serde");
+
+        let packages =
+            load_selected_packages(dir.path(), &["serde".to_string()]).expect("load cache");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "serde");
+        assert_eq!(packages[0].releases[0].version, "1.0.0");
+        assert_eq!(packages[0].releases[0].deps[0].kind, "normal");
+        assert!(packages[0].releases[0].deps[0].optional);
+        assert_eq!(packages[0].releases[0].rust_version, "1.56");
+        assert!(packages[0].releases[0].has_rust_version);
     }
 
     #[test]
@@ -385,51 +641,89 @@ mod tests {
 
     #[test]
     fn emitter_writes_generated_lookup_module() {
+        let mut feature_map = BTreeMap::new();
+        feature_map.insert("derive".to_string(), vec!["dep:serde_derive".to_string()]);
+
         let output = emit_registry_vx(&[
-            super::RegistryPackageFacts {
+            RegistryPackageFacts {
                 name: "codec".to_string(),
                 releases: vec![
-                    super::RegistryReleaseFact {
+                    RegistryReleaseFact {
                         version: "1.1.0".to_string(),
-                        deps: vec![super::RegistryDepFact {
+                        deps: vec![RegistryDepFact {
                             name: "logger".to_string(),
+                            package: "logger-core".to_string(),
+                            has_package: true,
                             req: "1.1.0".to_string(),
+                            kind: "build".to_string(),
+                            optional: true,
+                            default_features: false,
+                            features: vec!["std".to_string()],
+                            target: "cfg(unix)".to_string(),
+                            has_target: true,
                         }],
+                        features: feature_map.clone(),
                         yanked: false,
+                        rust_version: "1.80".to_string(),
+                        has_rust_version: true,
                     },
-                    super::RegistryReleaseFact {
+                    RegistryReleaseFact {
                         version: "1.0.0".to_string(),
-                        deps: vec![super::RegistryDepFact {
+                        deps: vec![RegistryDepFact {
                             name: "logger".to_string(),
+                            package: String::new(),
+                            has_package: false,
                             req: "1.0.0".to_string(),
+                            kind: "normal".to_string(),
+                            optional: false,
+                            default_features: false,
+                            features: Vec::new(),
+                            target: String::new(),
+                            has_target: false,
                         }],
+                        features: BTreeMap::new(),
                         yanked: false,
+                        rust_version: String::new(),
+                        has_rust_version: false,
                     },
                 ],
             },
-            super::RegistryPackageFacts {
+            RegistryPackageFacts {
                 name: "logger".to_string(),
-                releases: vec![super::RegistryReleaseFact {
+                releases: vec![RegistryReleaseFact {
                     version: "1.1.0".to_string(),
                     deps: Vec::new(),
+                    features: BTreeMap::new(),
                     yanked: false,
+                    rust_version: String::new(),
+                    has_rust_version: false,
                 }],
             },
         ]);
 
         assert!(output.contains("struct RegistryDep"));
-        assert!(output.contains("struct RegistryRelease"));
-        assert!(output.contains("type RegistryPackage = Array[RegistryRelease]"));
+        assert!(output.contains("package: PackageName"));
+        assert!(output.contains("has_package: Bool"));
+        assert!(output.contains("kind: String"));
+        assert!(output.contains("features: Map[FeatureName, Array[String]]"));
+        assert!(output.contains("rust_version: String"));
+        assert!(output.contains("has_rust_version: Bool"));
         assert!(output.contains("fn registry_package_codec() -> RegistryPackage"));
-        assert!(output.contains("version: \"1.1.0\""));
-        assert!(output.contains("name: \"logger\""));
+        assert!(output.contains("package: \"logger-core\""));
+        assert!(output.contains("has_package: true"));
+        assert!(output.contains("kind: \"build\""));
+        assert!(output.contains("optional: true"));
+        assert!(output.contains("default_features: false"));
+        assert!(output.contains("features: %{"));
+        assert!(output.contains("rust_version: \"1.80\""));
+        assert!(output.contains("has_rust_version: true"));
         assert!(output.contains("fn registry_data_lookup(name: PackageName) -> RegistryPackage"));
         assert!(output.contains("fail RegistryMiss"));
     }
 
     #[test]
     fn checked_in_sparse_snapshot_matches_generated_registry_module() {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask should live under workspace root");
         let snapshot_root = workspace_root.join("specs/eval/run/registry_snapshot/index");
@@ -441,5 +735,18 @@ mod tests {
         let expected =
             fs::read_to_string(&generated_path).expect("read checked-in generated registry module");
         assert_eq!(actual, expected);
+    }
+
+    fn sparse_cache_bytes(etag: &str, entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = vec![0x03, 0x02, 0x00, 0x00, 0x00];
+        bytes.extend_from_slice(etag.as_bytes());
+        bytes.push(0);
+        for (version, json) in entries {
+            bytes.extend_from_slice(version.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(json.as_bytes());
+            bytes.push(0);
+        }
+        bytes
     }
 }
