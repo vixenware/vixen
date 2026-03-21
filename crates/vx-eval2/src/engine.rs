@@ -382,8 +382,8 @@ pub struct EvalSessionStats {
 pub struct EvalSessionCheckpoint {
     branch_context: EvalBranchContext,
     scheduler: EvalScheduler,
-    trace: EvalTrace,
-    completed_work: Vec<EvalCompletedWork>,
+    trace_len: usize,
+    completed_work_len: usize,
     completed: Option<Result<Value, EvalError>>,
 }
 
@@ -628,8 +628,16 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             return Ok(step_without_ready_work(&self.scheduler, &self.completed));
         };
         let completion = prepared.execute()?;
-        self.history.push(snapshot);
-        self.apply_completion_impl(completion, false)
+        match self.apply_completion_impl(completion, false) {
+            Ok(step) => {
+                self.history.push(snapshot);
+                Ok(step)
+            }
+            Err(error) => {
+                self.restore(snapshot);
+                Err(error)
+            }
+        }
     }
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
@@ -757,8 +765,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         EvalSessionCheckpoint {
             branch_context: self.branch_context.clone(),
             scheduler: self.scheduler.clone(),
-            trace: self.trace.clone(),
-            completed_work: self.completed_work.clone(),
+            trace_len: self.trace.events.len(),
+            completed_work_len: self.completed_work.len(),
             completed: self.completed.clone(),
         }
     }
@@ -781,8 +789,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.next_lease_sequence = next_lease_sequence;
         self.scheduler.next_lease_namespace = next_lease_namespace;
         self.branch_context = checkpoint.branch_context;
-        self.trace = checkpoint.trace;
-        self.completed_work = checkpoint.completed_work;
+        self.trace.events.truncate(checkpoint.trace_len);
+        self.completed_work.truncate(checkpoint.completed_work_len);
         self.completed = checkpoint.completed;
         self.generation += 1;
     }
@@ -901,6 +909,24 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         completions: Vec<EvalWorkCompletion>,
         record_history: bool,
     ) -> Result<EvalSessionStep, EvalError> {
+        if !record_history {
+            let mut step = None;
+            for completion in completions {
+                step = Some(apply_completion_to_state(
+                    &mut self.scheduler,
+                    &mut self.trace,
+                    &mut self.completed_work,
+                    &mut self.completed,
+                    completion,
+                )?);
+            }
+            self.scheduler.clear_active_wave_if_idle();
+            self.generation += 1;
+            return Ok(
+                step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed))
+            );
+        }
+
         let snapshot = record_history.then(|| self.checkpoint());
         let mut scheduler = self.scheduler.clone();
         let mut trace = self.trace.clone();
@@ -2086,13 +2112,32 @@ fn eval_dependent_expr_handle(
 
 impl EvalScheduler {
     fn clone_for_lease(&self, namespace: Option<u64>) -> Self {
-        let mut cloned = self.clone();
-        cloned.lease_namespace = namespace.map(|id| LeaseNamespace {
-            id,
-            next_node_local: 1,
-            next_work_local: 1,
-        });
-        cloned
+        Self {
+            next_id: self.next_id,
+            next_work_id: self.next_work_id,
+            next_wave_id: self.next_wave_id,
+            next_lease_namespace: self.next_lease_namespace,
+            next_lease_sequence: self.next_lease_sequence,
+            active_wave: None,
+            lease_namespace: namespace.map(|id| LeaseNamespace {
+                id,
+                next_node_local: 1,
+                next_work_local: 1,
+            }),
+            node_states: self.node_states.clone(),
+            node_records: self.node_records.clone(),
+            keyed_nodes: self.keyed_nodes.clone(),
+            dependency_edges: self.dependency_edges.clone(),
+            ready_queue: VecDeque::new(),
+            ready_tasks: self.ready_tasks.clone(),
+            in_flight_tasks: BTreeMap::new(),
+            buffered_completions: BTreeMap::new(),
+            pending_resumes: self.pending_resumes.clone(),
+            pending_kinds: self.pending_kinds.clone(),
+            retained_exprs: self.retained_exprs.clone(),
+            completed_invalidated: false,
+            recorded_delta: None,
+        }
     }
 
     fn begin_recording_delta(&mut self) {
