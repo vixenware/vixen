@@ -752,7 +752,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .collect::<BTreeSet<_>>();
         graph_nodes.extend(self.scheduler.node_states.keys().copied());
         graph_nodes.extend(self.scheduler.keyed_nodes.keys().copied());
-        for edge in &self.scheduler.dependency_edges {
+        for edge in self.scheduler.dependency_edges.iter() {
             graph_nodes.insert(edge.parent);
             graph_nodes.insert(edge.child);
         }
@@ -1028,7 +1028,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .collect::<Vec<_>>();
         node_ids.extend(self.scheduler.node_states.keys().copied());
         node_ids.extend(self.scheduler.keyed_nodes.keys().copied());
-        for edge in &self.scheduler.dependency_edges {
+        for edge in self.scheduler.dependency_edges.iter() {
             node_ids.push(edge.parent);
             node_ids.push(edge.child);
         }
@@ -1037,7 +1037,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         let mut dependencies = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
         let mut dependents = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
-        for edge in &self.scheduler.dependency_edges {
+        for edge in self.scheduler.dependency_edges.iter() {
             dependencies
                 .entry(edge.parent)
                 .or_default()
@@ -1572,18 +1572,18 @@ struct EvalScheduler {
     next_lease_sequence: u64,
     active_wave: Option<EvalWaveId>,
     lease_namespace: Option<LeaseNamespace>,
-    node_states: BTreeMap<EvalNodeId, EvalNodeState>,
-    node_records: BTreeMap<EvalNodeId, EvalNodeRecord>,
-    keyed_nodes: BTreeMap<EvalNodeId, KeyedNodeMemo>,
-    dependency_edges: Vec<EvalDependencyEdge>,
+    node_states: Arc<BTreeMap<EvalNodeId, EvalNodeState>>,
+    node_records: Arc<BTreeMap<EvalNodeId, EvalNodeRecord>>,
+    keyed_nodes: Arc<BTreeMap<EvalNodeId, KeyedNodeMemo>>,
+    dependency_edges: Arc<Vec<EvalDependencyEdge>>,
     ready_queue: VecDeque<EvalWorkId>,
     ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     baseline_ready_tasks: BTreeSet<EvalWorkId>,
     in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
     buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
-    pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
-    pending_kinds: BTreeMap<u64, PendingKind>,
-    retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
+    pending_resumes: Arc<BTreeMap<u64, Vec<EvalSuspension>>>,
+    pending_kinds: Arc<BTreeMap<u64, PendingKind>>,
+    retained_exprs: Arc<BTreeMap<EvalNodeId, RetainedExprTask>>,
     completed_invalidated: bool,
     recorded_delta: Option<Box<RecordedSchedulerDelta>>,
 }
@@ -1600,18 +1600,18 @@ impl Default for EvalScheduler {
             next_lease_sequence: 1,
             active_wave: None,
             lease_namespace: None,
-            node_states: BTreeMap::new(),
-            node_records: BTreeMap::new(),
-            keyed_nodes: BTreeMap::new(),
-            dependency_edges: Vec::new(),
+            node_states: Arc::new(BTreeMap::new()),
+            node_records: Arc::new(BTreeMap::new()),
+            keyed_nodes: Arc::new(BTreeMap::new()),
+            dependency_edges: Arc::new(Vec::new()),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             baseline_ready_tasks: BTreeSet::new(),
             in_flight_tasks: BTreeMap::new(),
             buffered_completions: BTreeMap::new(),
-            pending_resumes: BTreeMap::new(),
-            pending_kinds: BTreeMap::new(),
-            retained_exprs: BTreeMap::new(),
+            pending_resumes: Arc::new(BTreeMap::new()),
+            pending_kinds: Arc::new(BTreeMap::new()),
+            retained_exprs: Arc::new(BTreeMap::new()),
             completed_invalidated: false,
             recorded_delta: None,
         }
@@ -2141,18 +2141,18 @@ impl EvalScheduler {
                 next_node_local: 1,
                 next_work_local: 1,
             }),
-            node_states: self.node_states.clone(),
-            node_records: self.node_records.clone(),
-            keyed_nodes: self.keyed_nodes.clone(),
-            dependency_edges: self.dependency_edges.clone(),
+            node_states: Arc::clone(&self.node_states),
+            node_records: Arc::clone(&self.node_records),
+            keyed_nodes: Arc::clone(&self.keyed_nodes),
+            dependency_edges: Arc::clone(&self.dependency_edges),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             baseline_ready_tasks: self.ready_tasks.keys().copied().collect(),
             in_flight_tasks: BTreeMap::new(),
             buffered_completions: BTreeMap::new(),
-            pending_resumes: self.pending_resumes.clone(),
-            pending_kinds: self.pending_kinds.clone(),
-            retained_exprs: self.retained_exprs.clone(),
+            pending_resumes: Arc::clone(&self.pending_resumes),
+            pending_kinds: Arc::clone(&self.pending_kinds),
+            retained_exprs: Arc::clone(&self.retained_exprs),
             completed_invalidated: false,
             recorded_delta: None,
         }
@@ -2195,7 +2195,8 @@ impl EvalScheduler {
 
     fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
-        if let Entry::Vacant(entry) = self.node_records.entry(node_id) {
+        let node_records = Arc::make_mut(&mut self.node_records);
+        if let Entry::Vacant(entry) = node_records.entry(node_id) {
             entry.insert(record.clone());
             if let Some(delta) = self.recorded_delta.as_mut() {
                 delta.node_records.insert(node_id, record);
@@ -2205,7 +2206,7 @@ impl EvalScheduler {
 
     fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
         let edge = EvalDependencyEdge { parent, child };
-        self.dependency_edges.push(edge.clone());
+        Arc::make_mut(&mut self.dependency_edges).push(edge.clone());
         if let Some(delta) = self.recorded_delta.as_mut() {
             delta.dependency_edges.push(edge);
         }
@@ -2318,8 +2319,7 @@ impl EvalScheduler {
         let pending_id = self.alloc_node_id();
         let description = description.into();
         let pending = PendingRef::new(pending_id.0, description.clone());
-        self.pending_kinds
-            .insert(pending.node_id, PendingKind::External);
+        Arc::make_mut(&mut self.pending_kinds).insert(pending.node_id, PendingKind::External);
         if let Some(delta) = self.recorded_delta.as_mut() {
             delta
                 .pending_kinds
@@ -2336,7 +2336,7 @@ impl EvalScheduler {
 
     fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
-        self.pending_kinds
+        Arc::make_mut(&mut self.pending_kinds)
             .insert(pending.node_id, PendingKind::ChildDependency { dependency });
         if let Some(delta) = self.recorded_delta.as_mut() {
             delta
@@ -2414,7 +2414,7 @@ impl EvalScheduler {
     }
 
     fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
-        self.keyed_nodes.get_mut(&node_id)
+        Arc::make_mut(&mut self.keyed_nodes).get_mut(&node_id)
     }
 
     fn find_keyed_node(
@@ -2449,7 +2449,7 @@ impl EvalScheduler {
         scheduled: ScheduledExpr,
         branch_context: EvalBranchContext,
     ) {
-        self.retained_exprs
+        Arc::make_mut(&mut self.retained_exprs)
             .entry(node_id)
             .or_insert(RetainedExprTask {
                 scheduled,
@@ -2574,8 +2574,7 @@ impl EvalScheduler {
                 pending: None,
             },
         );
-        let keyed = self
-            .keyed_nodes
+        let keyed = Arc::make_mut(&mut self.keyed_nodes)
             .get_mut(&node_id)
             .expect("keyed node must still exist");
         keyed.active_revision = Some(keyed.revision);
@@ -2632,7 +2631,7 @@ impl EvalScheduler {
             },
             source: Some(source),
         });
-        self.keyed_nodes.insert(
+        Arc::make_mut(&mut self.keyed_nodes).insert(
             node_id,
             KeyedNodeMemo {
                 node_id,
@@ -2666,8 +2665,7 @@ impl EvalScheduler {
             self.enqueue_keyed_work(node_id)?;
             return Ok(true);
         }
-        let memo = self
-            .keyed_nodes
+        let memo = Arc::make_mut(&mut self.keyed_nodes)
             .get_mut(&node_id)
             .expect("keyed node must exist");
         memo.evaluated_revision = Some(active_revision);
@@ -2727,7 +2725,7 @@ impl EvalScheduler {
     }
 
     fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
-        self.node_states.insert(node_id, state.clone());
+        Arc::make_mut(&mut self.node_states).insert(node_id, state.clone());
         if let Some(delta) = self.recorded_delta.as_mut() {
             delta.node_states.insert(node_id, state);
         }
@@ -2780,7 +2778,7 @@ impl EvalScheduler {
         pending_id: u64,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
-        let Some(suspensions) = self.pending_resumes.remove(&pending_id) else {
+        let Some(suspensions) = Arc::make_mut(&mut self.pending_resumes).remove(&pending_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 format!("pending node {pending_id} is not registered"),
@@ -2795,7 +2793,7 @@ impl EvalScheduler {
                 format!("pending node {pending_id} had no registered suspensions"),
             ));
         };
-        self.pending_kinds.remove(&pending_id);
+        Arc::make_mut(&mut self.pending_kinds).remove(&pending_id);
         let node_id = EvalNodeId(pending.node_id);
         match &result {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
@@ -2826,7 +2824,7 @@ impl EvalScheduler {
     }
 
     fn register_suspension(&mut self, suspension: EvalSuspension) {
-        self.pending_resumes
+        Arc::make_mut(&mut self.pending_resumes)
             .entry(suspension.pending.node_id)
             .or_default()
             .push(suspension.clone());
@@ -2964,8 +2962,9 @@ impl EvalScheduler {
     fn apply_delta(&mut self, delta: EvalSchedulerDelta) -> Result<(), EvalError> {
         self.next_id = self.next_id.max(delta.next_id);
         self.next_work_id = self.next_work_id.max(delta.next_work_id);
+        let node_records = Arc::make_mut(&mut self.node_records);
         for record in delta.node_records {
-            match self.node_records.get(&record.node_id) {
+            match node_records.get(&record.node_id) {
                 Some(existing) if existing != &record => {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
@@ -2977,21 +2976,23 @@ impl EvalScheduler {
                 }
                 Some(_) => {}
                 None => {
-                    self.node_records.insert(record.node_id, record);
+                    node_records.insert(record.node_id, record);
                 }
             }
         }
+        let keyed_nodes = Arc::make_mut(&mut self.keyed_nodes);
         for keyed in delta.keyed_nodes {
-            match self.keyed_nodes.get_mut(&keyed.node_id) {
+            match keyed_nodes.get_mut(&keyed.node_id) {
                 Some(existing) => merge_keyed_node(existing, keyed)?,
                 None => {
-                    self.keyed_nodes.insert(keyed.node_id, keyed);
+                    keyed_nodes.insert(keyed.node_id, keyed);
                 }
             }
         }
-        self.dependency_edges.extend(delta.dependency_edges);
+        Arc::make_mut(&mut self.dependency_edges).extend(delta.dependency_edges);
+        let pending_kinds = Arc::make_mut(&mut self.pending_kinds);
         for (pending_id, kind) in delta.pending_kinds {
-            match self.pending_kinds.get(&pending_id) {
+            match pending_kinds.get(&pending_id) {
                 Some(existing) if existing != &kind => {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
@@ -3003,21 +3004,24 @@ impl EvalScheduler {
                 }
                 Some(_) => {}
                 None => {
-                    self.pending_kinds.insert(pending_id, kind);
+                    pending_kinds.insert(pending_id, kind);
                 }
             }
         }
+        let pending_resumes = Arc::make_mut(&mut self.pending_resumes);
         for (pending_id, suspension) in delta.pending_resumes {
-            let suspensions = self.pending_resumes.entry(pending_id).or_default();
+            let suspensions = pending_resumes.entry(pending_id).or_default();
             if !suspensions.contains(&suspension) {
                 suspensions.push(suspension);
             }
         }
+        let node_states = Arc::make_mut(&mut self.node_states);
         for (node_id, state) in delta.node_states {
-            self.node_states.insert(node_id, state);
+            node_states.insert(node_id, state);
         }
+        let retained_exprs = Arc::make_mut(&mut self.retained_exprs);
         for (node_id, retained) in delta.retained_exprs {
-            match self.retained_exprs.get(&node_id) {
+            match retained_exprs.get(&node_id) {
                 Some(existing) if existing != &retained => {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
@@ -3029,7 +3033,7 @@ impl EvalScheduler {
                 }
                 Some(_) => {}
                 None => {
-                    self.retained_exprs.insert(node_id, retained);
+                    retained_exprs.insert(node_id, retained);
                 }
             }
         }
