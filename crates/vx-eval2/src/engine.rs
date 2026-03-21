@@ -1664,10 +1664,12 @@ struct ScheduledResume {
     result: Result<Value, EvalError>,
 }
 
+type EvalEnv = Arc<BTreeMap<String, Value>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScheduledExpr {
     expr: ExprHandle,
-    env: BTreeMap<String, Value>,
+    env: EvalEnv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1731,7 +1733,7 @@ enum ContinuationFrame {
     BlockAfterLet {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        scope: BTreeMap<String, Value>,
+        scope: EvalEnv,
         last: Value,
         name: String,
         name_source: SourceSpan,
@@ -1740,14 +1742,14 @@ enum ContinuationFrame {
     BlockAfterExpr {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        scope: BTreeMap<String, Value>,
+        scope: EvalEnv,
         remaining_statements: Vec<StmtHandle>,
     },
     CallAfterCallee {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         call_source: SourceSpan,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
         args: Vec<Value>,
         remaining_args: Vec<ExprHandle>,
     },
@@ -1758,14 +1760,14 @@ enum ContinuationFrame {
         call_source: SourceSpan,
         args: Vec<Value>,
         remaining_args: Vec<ExprHandle>,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
     },
     ArrayAfterItem {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,
         remaining_items: Vec<ExprHandle>,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
         array_source: SourceSpan,
     },
     ArrayJoin {
@@ -1780,7 +1782,7 @@ enum ContinuationFrame {
         entries: Vec<(Value, Value)>,
         value_expr: ExprHandle,
         remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
         map_source: SourceSpan,
     },
     MapAfterValue {
@@ -1789,7 +1791,7 @@ enum ContinuationFrame {
         entries: Vec<(Value, Value)>,
         key: Value,
         remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
         map_source: SourceSpan,
     },
     FailMessage {
@@ -1814,14 +1816,14 @@ enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         then_branch: ExprHandle,
         else_branch: ExprHandle,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
     },
     BinaryLhs {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         operator: SyntaxKind,
         rhs: ExprHandle,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
     },
     BinaryRhs {
         node_id: EvalNodeId,
@@ -1836,7 +1838,7 @@ enum ContinuationFrame {
         fields: Vec<(Arc<str>, Value)>,
         name: Arc<str>,
         remaining_fields: Vec<(Arc<str>, ExprHandle)>,
-        env: BTreeMap<String, Value>,
+        env: EvalEnv,
         struct_source: SourceSpan,
     },
     StructJoin {
@@ -2102,11 +2104,19 @@ fn conclude_resumed_node(
     }
 }
 
+fn empty_env() -> EvalEnv {
+    Arc::new(BTreeMap::new())
+}
+
+fn env_mut(env: &mut EvalEnv) -> &mut BTreeMap<String, Value> {
+    Arc::make_mut(env)
+}
+
 fn eval_dependent_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     expr: &Expr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if state.current_parent() == Some(node_id) {
         eval_child_expr(state, expr, env)
@@ -2119,7 +2129,7 @@ fn eval_dependent_expr_handle(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     handle: ExprHandle,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let expr = state.program.resolve_expr(handle.key)?;
     state.with_source(handle.key.source(), |state| {
@@ -3427,7 +3437,7 @@ fn execute_ready_task(
 struct PreparedEntry {
     source: SourceId,
     body: Expr,
-    env: BTreeMap<String, Value>,
+    env: EvalEnv,
 }
 
 fn function_ref_from_compiled(
@@ -3448,7 +3458,7 @@ fn function_ref_from_compiled(
     )
 }
 
-fn captures_from_scope(scope: &BTreeMap<String, Value>) -> Arc<[(Arc<str>, Value)]> {
+fn captures_from_scope(scope: &EvalEnv) -> Arc<[(Arc<str>, Value)]> {
     Arc::from(
         scope
             .iter()
@@ -3482,7 +3492,7 @@ fn compile_closure_parameters(
 fn bind_named_function_decl(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     function: &vx_parser::FnDecl,
-    scope: &BTreeMap<String, Value>,
+    scope: &EvalEnv,
 ) -> Result<(String, SourceSpan, Value), EvalError> {
     let name_token = function.name().ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "function declaration has no name")
@@ -3513,7 +3523,7 @@ fn bind_named_function_decl(
 fn eval_closure(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     closure: &ClosureExpr,
-    env: &BTreeMap<String, Value>,
+    env: &EvalEnv,
 ) -> Result<Value, EvalError> {
     let body = closure
         .body()
@@ -3596,9 +3606,9 @@ fn prepare_function_call(
             ),
         ));
     }
-    let mut env = function.capture_env();
+    let mut env = Arc::new(function.capture_env());
     if let Some(self_name) = &function.self_name {
-        env.insert(self_name.to_string(), Value::function(function.clone()));
+        env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
     Ok(Some(PreparedEntry {
@@ -3659,15 +3669,15 @@ fn bind_arguments(
     parameters: &[CompiledParameter],
     args: &[Value],
     parent_id: Option<EvalNodeId>,
-) -> Result<BTreeMap<String, Value>, EvalError> {
-    let mut env = BTreeMap::new();
+) -> Result<EvalEnv, EvalError> {
+    let mut env = empty_env();
     bind_arguments_into_env(state, &mut env, parameters, args, parent_id)?;
     Ok(env)
 }
 
 fn bind_arguments_into_env(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
     parameters: &[CompiledParameter],
     args: &[Value],
     parent_id: Option<EvalNodeId>,
@@ -3697,7 +3707,7 @@ fn bind_arguments_into_env(
             RuntimeInputKind::Argument,
             label.clone(),
         ));
-        env.insert(label, bound);
+        env_mut(env).insert(label, bound);
     }
     Ok(())
 }
@@ -3705,7 +3715,7 @@ fn bind_arguments_into_env(
 fn eval_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state.alloc_node_id();
     eval_expr_with_node_id(state, node_id, expr, env)
@@ -3715,7 +3725,7 @@ fn eval_expr_with_node_id(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     expr: &Expr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let parent_id = state.current_parent();
     let kind = expr_kind(expr);
@@ -3783,7 +3793,7 @@ fn eval_expr_with_node_id(
 fn eval_child_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
@@ -3805,7 +3815,7 @@ fn eval_child_expr(
 fn eval_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let callee = call
         .callee()
@@ -3888,7 +3898,7 @@ fn eval_call(
 fn immediate_call_callee_value(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     callee: &Expr,
-    env: &BTreeMap<String, Value>,
+    env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
     let Expr::NameRef(name_ref) = callee else {
         return Ok(None);
@@ -3926,7 +3936,7 @@ fn immediate_call_callee_value(
 fn eval_name_ref(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     name_ref: &NameRefExpr,
-    env: &BTreeMap<String, Value>,
+    env: &EvalEnv,
 ) -> Result<Value, EvalError> {
     let name_token = name_ref
         .token()
@@ -3960,7 +3970,7 @@ fn eval_name_ref(
 fn eval_call_callee(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     callee: &Expr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if let Some(value) = immediate_call_callee_value(state, callee, env)? {
         return Ok(EvalStep::Ready(value));
@@ -4778,7 +4788,7 @@ fn continue_call_from_args(
     call_source: SourceSpan,
     mut args: Vec<Value>,
     remaining_args: Vec<ExprHandle>,
-    mut env: BTreeMap<String, Value>,
+    mut env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if state.current_parent() != Some(node_id) {
         return state.with_active_node(node_id, |state| {
@@ -4968,7 +4978,7 @@ fn continue_call_from_args(
 fn eval_struct_literal(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     struct_literal: &StructLiteralExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let type_name = struct_literal
         .name()
@@ -5038,7 +5048,7 @@ fn eval_struct_literal(
 fn eval_block(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     block: &BlockExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5062,7 +5072,7 @@ fn eval_block(
 fn eval_array(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     array: &ArrayExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5124,7 +5134,7 @@ fn eval_array(
 fn eval_map(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     map: &MapExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5158,7 +5168,7 @@ fn eval_map(
 fn eval_fail(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     fail: &FailExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5210,7 +5220,7 @@ fn user_fail_error(value: Value) -> EvalError {
 fn eval_if(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     if_expr: &IfExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5273,7 +5283,7 @@ fn eval_if(
 fn eval_field(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     field: &FieldExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5327,7 +5337,7 @@ fn eval_field(
 fn eval_binary(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     binary: &BinaryExpr,
-    env: &mut BTreeMap<String, Value>,
+    env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
@@ -5369,7 +5379,7 @@ fn continue_block_statements(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut scope: BTreeMap<String, Value>,
+    mut scope: EvalEnv,
     mut last: Value,
     statements: Vec<StmtHandle>,
 ) -> Result<EvalStep, EvalError> {
@@ -5392,7 +5402,7 @@ fn continue_block_statements(
                     eval_dependent_expr(state, node_id, &expr, &mut scope)
                 })? {
                     EvalStep::Ready(value) => {
-                        scope.insert(
+                        env_mut(&mut scope).insert(
                             name.clone(),
                             value.with_provenance(Provenance::binding(name_source.clone(), name)),
                         );
@@ -5418,7 +5428,7 @@ fn continue_block_statements(
                     .with_source(statement_handle.key.source(), |state| {
                         bind_named_function_decl(state, &function, &scope)
                     })?;
-                scope.insert(name, value);
+                env_mut(&mut scope).insert(name, value);
             }
             Stmt::Expr(expr) => match state.with_source(statement_handle.key.source(), |state| {
                 eval_dependent_expr(state, node_id, &expr, &mut scope)
@@ -5453,7 +5463,7 @@ fn continue_array_items(
     parent_id: Option<EvalNodeId>,
     mut items: Vec<Value>,
     remaining_items: Vec<ExprHandle>,
-    mut env: BTreeMap<String, Value>,
+    mut env: EvalEnv,
     array_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_items.into_iter();
@@ -5483,7 +5493,7 @@ fn continue_array_items(
 fn queue_child_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
-    env: &BTreeMap<String, Value>,
+    env: &EvalEnv,
 ) -> EvalNodeId {
     queue_child_expr_handle(state, state.expr_handle(expr), env)
 }
@@ -5491,7 +5501,7 @@ fn queue_child_expr(
 fn queue_child_expr_handle(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: ExprHandle,
-    env: &BTreeMap<String, Value>,
+    env: &EvalEnv,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let resolved = state
@@ -5510,7 +5520,7 @@ fn queue_child_expr_handle(
     });
     let scheduled = ScheduledExpr {
         expr,
-        env: env.clone(),
+        env: Arc::clone(env),
     };
     state
         .scheduler
@@ -5553,7 +5563,7 @@ fn continue_map_entries(
     parent_id: Option<EvalNodeId>,
     mut entries: Vec<(Value, Value)>,
     remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-    mut env: BTreeMap<String, Value>,
+    mut env: EvalEnv,
     map_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_entries.into_iter();
@@ -5606,7 +5616,7 @@ fn continue_struct_fields(
     type_name: Arc<str>,
     mut fields: Vec<(Arc<str>, Value)>,
     remaining_fields: Vec<(Arc<str>, ExprHandle)>,
-    mut env: BTreeMap<String, Value>,
+    mut env: EvalEnv,
     struct_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_fields.into_iter();
@@ -5810,7 +5820,7 @@ fn resume_frame(
                         call_source,
                         args,
                         Vec::new(),
-                        BTreeMap::new(),
+                        empty_env(),
                     )
                 }
                 Err(error) => Err(error),
@@ -5851,7 +5861,7 @@ fn resume_frame(
         } => {
             let result = match input {
                 Ok(value) => {
-                    scope.insert(
+                    env_mut(&mut scope).insert(
                         name.clone(),
                         value.with_provenance(Provenance::binding(name_source, name)),
                     );
@@ -6338,7 +6348,7 @@ fn continue_binary_rhs(
     lhs: Value,
     operator: SyntaxKind,
     rhs: ExprHandle,
-    mut env: BTreeMap<String, Value>,
+    mut env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     match eval_dependent_expr_handle(state, node_id, rhs, &mut env)? {
         EvalStep::Ready(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
