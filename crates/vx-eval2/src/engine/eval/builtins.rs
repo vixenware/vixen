@@ -815,6 +815,74 @@ pub(in crate::engine) fn continue_builtin_call(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     callee_name: &str,
+    call_source: SourceSpan,
+    type_args: &[Ty],
+    args: &[Value],
+) -> Result<Option<EvalStep>, EvalError> {
+    if !is_profiled_builtin_call_name(callee_name) {
+        return Ok(None);
+    }
+    if state.track_calls {
+        let frame = authored_call_frame(
+            state,
+            node_id,
+            Arc::from(callee_name),
+            args,
+            call_source.clone(),
+        );
+        emit_authored_call_started(state, node_id, parent_id, call_source, &frame, args.len());
+        return state.with_authored_call(frame, |state| {
+            continue_builtin_call_inner(state, node_id, parent_id, callee_name, type_args, args)
+        });
+    }
+    continue_builtin_call_inner(state, node_id, parent_id, callee_name, type_args, args)
+}
+
+fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
+    matches!(
+        callee_name,
+        "Json.parse"
+            | "Toml.parse"
+            | "Blob.utf8"
+            | "String.len"
+            | "String.is_empty"
+            | "String.split_once"
+            | "String.slice"
+            | "String.contains"
+            | "String.lines"
+            | "String.replace"
+            | "String.to_lower"
+            | "String.to_u64"
+            | "String.starts_with"
+            | "String.ends_with"
+            | "Map.get"
+            | "Map.has"
+            | "Option.unwrap_or"
+            | "Array.filter"
+            | "Array.map"
+            | "Array.filter_map"
+            | "Array.any"
+            | "Array.find"
+            | "Array.flatten"
+            | "Array.to_array"
+            | "Map.map"
+            | "Map.to_array"
+            | "map_get"
+            | "map_put"
+            | "map_entries"
+            | "array_first"
+            | "array_rest"
+            | "array_push"
+            | "array_find"
+            | "array_fold"
+    )
+}
+
+fn continue_builtin_call_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    callee_name: &str,
     type_args: &[Ty],
     args: &[Value],
 ) -> Result<Option<EvalStep>, EvalError> {

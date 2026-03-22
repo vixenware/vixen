@@ -1161,9 +1161,15 @@ pub(super) fn continue_call_from_args(
             0,
         );
     }
-    if let Some(step) =
-        continue_builtin_call(state, node_id, parent_id, &callee_name, &type_args, &args)?
-    {
+    if let Some(step) = continue_builtin_call(
+        state,
+        node_id,
+        parent_id,
+        &callee_name,
+        call_source.clone(),
+        &type_args,
+        &args,
+    )? {
         return Ok(step);
     }
     state.emit(

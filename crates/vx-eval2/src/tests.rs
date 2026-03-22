@@ -5429,6 +5429,59 @@ fn build() {
     assert!(report.contains("callee=leaf"));
 }
 
+#[test]
+fn session_call_profile_tracks_builtin_calls() {
+    let runtime = UnsupportedRuntime;
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  "ABC".to_lower().contains("ab")
+}
+"#,
+        "session-call-profile-builtins",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+    session.set_call_profiling_enabled(true);
+
+    let Resolution::Ready(value) = session.run().expect("run profiled builtin session") else {
+        panic!("expected ready profiled builtin session");
+    };
+    let ValueRep::Bool(result) = value.rep else {
+        panic!("expected bool result, got {value:?}");
+    };
+    assert!(result);
+
+    let profile = session.call_profile();
+    let summary = &profile.summary;
+    assert!(
+        summary
+            .iter()
+            .any(|entry| entry.callee.as_ref() == "String.to_lower")
+    );
+    assert!(
+        summary
+            .iter()
+            .any(|entry| entry.callee.as_ref() == "String.contains")
+    );
+
+    let build = &profile.roots[0];
+    assert!(
+        build
+            .children
+            .iter()
+            .any(|entry| entry.callee.as_ref() == "String.contains")
+    );
+    assert!(
+        build
+            .children
+            .iter()
+            .any(|entry| entry.callee.as_ref() == "String.to_lower")
+    );
+}
+
 struct UnsupportedRuntime;
 
 impl RuntimeHooks for UnsupportedRuntime {
