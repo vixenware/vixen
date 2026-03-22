@@ -1691,6 +1691,7 @@ impl<'a> ExprTyper<'a> {
                     ty: substitute_type_params(&field.ty, &[(*inner.clone())]),
                     attrs: field.attrs.clone(),
                     has_default: field.has_default,
+                    default_value: field.default_value.clone(),
                     name_range: field.name_range,
                 })
                 .collect();

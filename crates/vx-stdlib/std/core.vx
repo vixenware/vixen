@@ -52,6 +52,11 @@ struct Process {
   exit_code: U64,
 }
 
+struct KeyedContext[K, J] {
+  key: K,
+  joined: J,
+}
+
 namespace Symbol {
   /// Convert a symbol to its textual spelling.
   fn to_string(self) -> String;
@@ -78,6 +83,8 @@ namespace String {
   fn to_upper(self) -> String;
   /// Convert the string to lowercase.
   fn to_lower(self) -> String;
+  /// Parse a decimal integer.
+  fn to_u64(self) -> U64;
   /// Replace all occurrences of `old` with `new`.
   fn replace(self, old: String, new: String) -> String;
   /// Return the byte length of the string.
@@ -113,6 +120,15 @@ namespace Array[T] {
   fn merge(self) -> Tree;
 }
 
+/// Return the first element from `items`, poisoning if the array is empty.
+fn array_first[T](items: Array[T]) -> T;
+/// Return every element after the first.
+fn array_rest[T](items: Array[T]) -> Array[T];
+/// Append one item to the end of an array.
+fn array_push[T](items: Array[T], item: T) -> Array[T];
+/// Fold an array left-to-right.
+fn array_fold[T, U](items: Array[T], init: U, step: Fn(U, T) -> U) -> U;
+
 namespace Map[K, V] {
   /// Apply `f` to each `(key, value)` pair and collect the results.
   fn map[U](self, f: Fn(K, V) -> U) -> Array[U];
@@ -123,6 +139,9 @@ namespace Map[K, V] {
   /// Return the value for `key`, poisoning if it does not exist.
   fn get(self, key: K) -> V;
 }
+
+/// Insert or replace one map entry.
+fn map_put[K, V](map: Map[K, V], key: K, value: V) -> Map[K, V];
 
 namespace Path {
   /// Parse and normalize a path string.
@@ -161,6 +180,8 @@ namespace Stream[T] {
 namespace Toml {
   /// Parse a TOML blob into a value of type `T`.
   fn parse[T](blob: Blob) -> T;
+  /// Parse a TOML string into a value of type `T`.
+  fn parse[T](text: String) -> T;
   /// Serialize a value to TOML.
   fn serialize[T](value: T) -> Blob;
 }
@@ -168,11 +189,15 @@ namespace Toml {
 namespace Json {
   /// Parse a JSON blob into a value of type `T`.
   fn parse[T](blob: Blob) -> T;
+  /// Parse a JSON string into a value of type `T`.
+  fn parse[T](text: String) -> T;
 }
 
 namespace Yaml {
   /// Parse a YAML blob into a value of type `T`.
   fn parse[T](blob: Blob) -> T;
+  /// Parse a YAML string into a value of type `T`.
+  fn parse[T](text: String) -> T;
 }
 
 namespace Http {
@@ -208,3 +233,10 @@ namespace Host {
   /// Hash a host file with Blake3.
   fn hash(self, path: String) -> Blob;
 }
+
+/// Demand or widen a keyed incremental computation.
+fn keyed[K, J, R](key: K, joined: J, resolver: Fn(KeyedContext[K, J]) -> R) -> R;
+/// Read a branch-local assumption.
+fn branch_assumption[T](name: String) -> T;
+/// Search candidate assumptions until one branch succeeds.
+fn search_assumption[T, R](name: String, candidates: Array[T], resolver: Fn() -> R) -> R;

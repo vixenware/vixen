@@ -227,6 +227,31 @@ fn resolved_crate_version(snapshot: &crate::EvalGraphSnapshot, name: &str) -> Op
         )
 }
 
+fn cargo_feature_join_http_responses() -> HashMap<String, String> {
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/sh/ar/shared".to_string(),
+        r#"{"name":"shared","vers":"1.0.0","deps":[{"name":"defdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"},{"name":"leftdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"},{"name":"rightdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"}],"cksum":"3333333333333333333333333333333333333333333333333333333333333333","features":{},"features2":{"default":["dep:defdep"],"left":["dep:leftdep"],"right":["dep:rightdep"]},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/de/fd/defdep".to_string(),
+        r#"{"name":"defdep","vers":"1.0.0","deps":[],"cksum":"4444444444444444444444444444444444444444444444444444444444444444","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/le/ft/leftdep".to_string(),
+        r#"{"name":"leftdep","vers":"1.0.0","deps":[],"cksum":"5555555555555555555555555555555555555555555555555555555555555555","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ri/gh/rightdep".to_string(),
+        r#"{"name":"rightdep","vers":"1.0.0","deps":[],"cksum":"6666666666666666666666666666666666666666666666666666666666666666","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -1014,6 +1039,50 @@ fn build(blob: Blob) {
     assert_eq!(
         struct_field(&value, "default_features").rep,
         ValueRep::Bool(false)
+    );
+}
+
+#[test]
+fn toml_parse_applies_defaults_inside_untagged_detailed_dependency_specs() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+#[untagged]
+enum CargoDependencySpec {
+  struct Version { value: String },
+
+  #[rename_all = "kebab-case"]
+  struct Detailed {
+    version: String?,
+    default_features: Bool = true,
+  },
+}
+
+struct Manifest {
+  dependencies: Map[String, CargoDependencySpec] = %{},
+}
+
+fn build(blob: Blob) {
+  Toml.parse[Manifest](blob).dependencies.get("shared")
+}
+"#,
+            "toml-parse-untagged-detailed-defaults",
+            "build",
+            &[Value::external(
+                "Blob",
+                "[dependencies]\nshared = { version = \"1\" }\n",
+            )],
+        )
+        .expect("evaluate Toml.parse with missing default-features"),
+    );
+
+    let ValueRep::Struct(detailed) = &value.rep else {
+        panic!("expected parsed Detailed dependency, got {value:?}");
+    };
+    assert_eq!(detailed.type_name.as_ref(), "Detailed");
+    assert_eq!(
+        struct_field(&value, "default_features").rep,
+        ValueRep::Bool(true)
     );
 }
 
@@ -3580,11 +3649,7 @@ fn build() {
         ],
         vec![EvalProgramImport { from: 0, to: 1 }],
     );
-    let mut http_responses = HashMap::new();
-    http_responses.insert(
-        "https://index.crates.io/config.json".to_string(),
-        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
-    );
+    let mut http_responses = cargo_feature_join_http_responses();
     http_responses.insert(
         "https://index.crates.io/le/ft/left".to_string(),
         r#"{"name":"left","vers":"1.0.0","deps":[{"name":"shared","req":"^1","features":["left"],"optional":false,"default_features":false,"target":null,"kind":"normal"}],"cksum":"1111111111111111111111111111111111111111111111111111111111111111","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
@@ -3592,22 +3657,6 @@ fn build() {
     http_responses.insert(
         "https://index.crates.io/ri/gh/right".to_string(),
         r#"{"name":"right","vers":"1.0.0","deps":[{"name":"shared","req":"^1","features":["right"],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"2222222222222222222222222222222222222222222222222222222222222222","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
-    );
-    http_responses.insert(
-        "https://index.crates.io/sh/ar/shared".to_string(),
-        r#"{"name":"shared","vers":"1.0.0","deps":[{"name":"defdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"},{"name":"leftdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"},{"name":"rightdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"}],"cksum":"3333333333333333333333333333333333333333333333333333333333333333","features":{},"features2":{"default":["dep:defdep"],"left":["dep:leftdep"],"right":["dep:rightdep"]},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
-    );
-    http_responses.insert(
-        "https://index.crates.io/de/fd/defdep".to_string(),
-        r#"{"name":"defdep","vers":"1.0.0","deps":[],"cksum":"4444444444444444444444444444444444444444444444444444444444444444","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
-    );
-    http_responses.insert(
-        "https://index.crates.io/le/ft/leftdep".to_string(),
-        r#"{"name":"leftdep","vers":"1.0.0","deps":[],"cksum":"5555555555555555555555555555555555555555555555555555555555555555","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
-    );
-    http_responses.insert(
-        "https://index.crates.io/ri/gh/rightdep".to_string(),
-        r#"{"name":"rightdep","vers":"1.0.0","deps":[],"cksum":"6666666666666666666666666666666666666666666666666666666666666666","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
     );
     let runtime = CargoSketchRuntime {
         root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -3628,6 +3677,126 @@ fn build() {
     assert!(roots.contains(&"registry:left@1.0.0"));
     assert!(roots.contains(&"registry:right@1.0.0"));
     assert!(resolved_crates_contain_name(&snapshot, "shared"));
+    assert!(resolved_crates_contain_name(&snapshot, "defdep"));
+    assert!(resolved_crates_contain_name(&snapshot, "leftdep"));
+    assert!(resolved_crates_contain_name(&snapshot, "rightdep"));
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_joins_normal_and_build_requests_for_same_package() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo-kind-join-root.toml"));
+  demand_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses: cargo_feature_join_http_responses(),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session.run().expect("run zoo cargo kind join manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo kind join result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert_eq!(roots, ["registry:shared@1.0.0"]);
+    assert!(resolved_crates_contain_name(&snapshot, "defdep"));
+    assert!(resolved_crates_contain_name(&snapshot, "leftdep"));
+    assert!(resolved_crates_contain_name(&snapshot, "rightdep"));
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_joins_target_specific_and_unconditional_requests() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo-target-join-root.toml"));
+  demand_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses: cargo_feature_join_http_responses(),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session.run().expect("run zoo cargo target join manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo target join result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert_eq!(roots, ["registry:shared@1.0.0"]);
     assert!(resolved_crates_contain_name(&snapshot, "defdep"));
     assert!(resolved_crates_contain_name(&snapshot, "leftdep"));
     assert!(resolved_crates_contain_name(&snapshot, "rightdep"));

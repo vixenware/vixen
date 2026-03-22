@@ -183,8 +183,19 @@ pub struct FieldDef {
     pub ty: Ty,
     pub attrs: DeserFieldAttrs,
     pub has_default: bool,
+    pub default_value: Option<FieldDefaultValue>,
     /// Text range of the field name token in source (for go-to-definition).
     pub name_range: rowan::TextRange,
+}
+
+#[derive(Clone, Debug)]
+pub enum FieldDefaultValue {
+    Bool(bool),
+    String(String),
+    U64(u64),
+    None,
+    EmptyArray,
+    EmptyMap,
 }
 
 /// An enum definition with its variants and generic parameters.
@@ -776,6 +787,7 @@ mod tests {
                         ty: Ty::Scalar(Scalar::F64),
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
+                        default_value: None,
                         name_range: Default::default(),
                     },
                     FieldDef {
@@ -783,6 +795,7 @@ mod tests {
                         ty: Ty::Scalar(Scalar::F64),
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
+                        default_value: None,
                         name_range: Default::default(),
                     },
                 ],
@@ -852,6 +865,7 @@ mod tests {
                     ty: Ty::Scalar(Scalar::F64),
                     attrs: DeserFieldAttrs::default(),
                     has_default: false,
+                    default_value: None,
                     name_range: Default::default(),
                 }],
             }),
@@ -870,6 +884,7 @@ mod tests {
                         ty: Ty::Scalar(Scalar::F64),
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
+                        default_value: None,
                         name_range: Default::default(),
                     },
                     FieldDef {
@@ -877,6 +892,7 @@ mod tests {
                         ty: Ty::Scalar(Scalar::F64),
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
+                        default_value: None,
                         name_range: Default::default(),
                     },
                 ],

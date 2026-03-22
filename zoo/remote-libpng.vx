@@ -184,15 +184,9 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
     );
 
   let version_source = Tree %{
-    @png-version.c => Blob(`
-#include <stdio.h>
-#include <png.h>
-
-int main(void) {
-  printf("%lu\\n", (unsigned long)png_access_version_number());
-  return 0;
-}
-`),
+    @png-version.c => Blob(
+      "#include <stdio.h>\n#include <png.h>\n\nint main(void) {\n  printf(\"%lu\\\\n\", (unsigned long)png_access_version_number());\n  return 0;\n}\n"
+    ),
   };
 
   let version_program =

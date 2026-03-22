@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use facet_value::{VObject, Value as FacetValue};
 use vx_resolve::TypeCollection;
 use vx_types::{
-    AliasTy, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, EnumTy, NewtypeTy,
-    OpaqueTy, Scalar, StructDef, StructTy, Ty, TypeDef, TypeId,
+    AliasTy, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, EnumTy,
+    FieldDefaultValue, NewtypeTy, OpaqueTy, Scalar, StructDef, StructTy, Ty, TypeDef, TypeId,
 };
 
 use crate::{
@@ -249,7 +249,7 @@ impl DecodeContext<'_> {
                         self.decode_value(field_value, &field_ty, field_provenance)?
                     }
                     None if field.has_default => {
-                        self.default_value(&field_ty, field_provenance.clone())?
+                        self.decode_field_default(field, &field_ty, field_provenance.clone())?
                     }
                     None if matches!(field_ty, Ty::Optional(_)) => {
                         Value::structure("None", Vec::new())
@@ -607,6 +607,35 @@ impl DecodeContext<'_> {
                 EvalErrorKind::UserFail,
                 format!("missing field default for unsupported target type {target:?}"),
             )),
+        }
+    }
+
+    fn decode_field_default(
+        &self,
+        field: &vx_types::FieldDef,
+        target: &Ty,
+        provenance: Provenance,
+    ) -> Result<Value, EvalError> {
+        match field.default_value.as_ref() {
+            Some(FieldDefaultValue::Bool(value)) => {
+                Ok(Value::bool(*value).with_meta(self.leaf_meta(provenance)))
+            }
+            Some(FieldDefaultValue::String(value)) => {
+                Ok(Value::string(value.clone()).with_meta(self.leaf_meta(provenance)))
+            }
+            Some(FieldDefaultValue::U64(value)) => {
+                Ok(Value::u64(*value).with_meta(self.leaf_meta(provenance)))
+            }
+            Some(FieldDefaultValue::None) => {
+                Ok(Value::structure("None", Vec::new()).with_meta(self.leaf_meta(provenance)))
+            }
+            Some(FieldDefaultValue::EmptyArray) => {
+                Ok(Value::array(Vec::new()).with_meta(self.leaf_meta(provenance)))
+            }
+            Some(FieldDefaultValue::EmptyMap) => {
+                Ok(Value::map(Vec::new()).with_meta(self.leaf_meta(provenance)))
+            }
+            None => self.default_value(target, provenance),
         }
     }
 }

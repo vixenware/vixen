@@ -7,12 +7,14 @@
 use std::collections::HashMap;
 
 use vx_parser::{
-    AstNode, AttributeList, EnumDecl, FieldDecl, FnDecl, Item, NamespaceDecl, NewtypeDecl,
-    SourceFile, StructDecl, SyntaxKind, Type, TypeAliasDecl,
+    ArrayExpr, AstNode, AttributeList, EnumDecl, Expr, FieldDecl, FnDecl, Item, LiteralExpr,
+    MapExpr, NameRefExpr, NamespaceDecl, NewtypeDecl, SourceFile, StructDecl, SyntaxKind, Type,
+    TypeAliasDecl,
 };
 use vx_types::{
-    AliasDef, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, FieldDef, FnSig,
-    KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef, StructDef, Ty, TypeDef, TypeEnv, TypeId,
+    AliasDef, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, FieldDef,
+    FieldDefaultValue, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef, StructDef, Ty,
+    TypeDef, TypeEnv, TypeId,
 };
 
 use crate::{DefSite, Definition, SourceFileRef, SourceId};
@@ -223,15 +225,17 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                                             .and_then(|st| st.ty())
                                             .map(|t| resolver.resolve_type(&t, &type_params))
                                             .unwrap_or(Ty::Poison);
-                                        let has_default = f
-                                            .syntax()
-                                            .children()
-                                            .any(|c| vx_parser::Expr::cast(c).is_some());
+                                        let default_value = field_default_value(&f);
+                                        let has_default = default_value.is_some()
+                                            || f.syntax()
+                                                .children()
+                                                .any(|c| Expr::cast(c).is_some());
                                         Some(FieldDef {
                                             name,
                                             ty,
                                             attrs: collect_field_attrs(&f),
                                             has_default,
+                                            default_value,
                                             name_range,
                                         })
                                     })
@@ -406,19 +410,68 @@ fn collect_fields(
                 .map(|t| resolver.resolve_type(&t, type_params))
                 .unwrap_or(Ty::Poison);
             // Check if there's an expression after the type (default value)
-            let has_default = f
-                .syntax()
-                .children()
-                .any(|c| vx_parser::Expr::cast(c).is_some());
+            let default_value = field_default_value(&f);
+            let has_default =
+                default_value.is_some() || f.syntax().children().any(|c| Expr::cast(c).is_some());
             Some(FieldDef {
                 name,
                 ty,
                 attrs: collect_field_attrs(&f),
                 has_default,
+                default_value,
                 name_range,
             })
         })
         .collect()
+}
+
+fn field_default_value(field: &FieldDecl) -> Option<FieldDefaultValue> {
+    let expr = field.syntax().children().find_map(Expr::cast)?;
+    default_value_from_expr(&expr)
+}
+
+fn default_value_from_expr(expr: &Expr) -> Option<FieldDefaultValue> {
+    match expr {
+        Expr::Literal(literal) => literal_default_value(literal),
+        Expr::Array(array) => empty_array_default_value(array),
+        Expr::Map(map) => empty_map_default_value(map),
+        Expr::NameRef(name) => name_ref_default_value(name),
+        _ => None,
+    }
+}
+
+fn literal_default_value(literal: &LiteralExpr) -> Option<FieldDefaultValue> {
+    let token = literal.token()?;
+    let text = token.text();
+    match token.kind() {
+        SyntaxKind::TRUE_KW => Some(FieldDefaultValue::Bool(true)),
+        SyntaxKind::FALSE_KW => Some(FieldDefaultValue::Bool(false)),
+        SyntaxKind::INT => text.parse::<u64>().ok().map(FieldDefaultValue::U64),
+        SyntaxKind::STRING => {
+            let unquoted = text.strip_prefix('"')?.strip_suffix('"')?;
+            Some(FieldDefaultValue::String(unquoted.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn empty_array_default_value(array: &ArrayExpr) -> Option<FieldDefaultValue> {
+    array
+        .items()
+        .next()
+        .is_none()
+        .then_some(FieldDefaultValue::EmptyArray)
+}
+
+fn empty_map_default_value(map: &MapExpr) -> Option<FieldDefaultValue> {
+    map.entries()
+        .next()
+        .is_none()
+        .then_some(FieldDefaultValue::EmptyMap)
+}
+
+fn name_ref_default_value(name: &NameRefExpr) -> Option<FieldDefaultValue> {
+    (name.token()?.text() == "None").then_some(FieldDefaultValue::None)
 }
 
 fn collect_container_attrs(attributes: Option<AttributeList>) -> DeserContainerAttrs {

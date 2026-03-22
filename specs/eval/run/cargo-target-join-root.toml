@@ -1,0 +1,10 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shared = { version = "1", default-features = false, features = ["left"] }
+
+[target.'cfg(unix)'.dependencies]
+shared = { version = "1", features = ["right"] }
