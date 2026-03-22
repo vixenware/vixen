@@ -2519,6 +2519,149 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+struct Summary {
+  root_crc32fast: Bool,
+  root_miniz_oxide: Bool,
+  has_crc32fast: Bool,
+  has_cfg_if: Bool,
+  has_miniz_oxide: Bool,
+  has_adler2: Bool,
+  has_simd_adler32: Bool,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/registry_real/cargo-transitive-root.toml"));
+  let resolution = resolve_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  };
+
+  Summary {
+    root_crc32fast: resolution.roots.any($.value == "registry:crc32fast@1.5.0"),
+    root_miniz_oxide: resolution.roots.any($.value == "registry:miniz_oxide@0.8.9"),
+    has_crc32fast: resolution.packages.any($.name == "crc32fast"),
+    has_cfg_if: resolution.packages.any($.name == "cfg-if"),
+    has_miniz_oxide: resolution.packages.any($.name == "miniz_oxide"),
+    has_adler2: resolution.packages.any($.name == "adler2"),
+    has_simd_adler32: resolution.packages.any($.name == "simd-adler32"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/cr/c3/crc32fast".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/crc32fast-1.5.0.jsonl"),
+        )
+        .expect("read real crc32fast sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/mi/ni/miniz_oxide".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/miniz_oxide-0.8.9.jsonl"),
+        )
+        .expect("read real miniz_oxide sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/cf/g-/cfg-if".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/cfg-if-1.0.4.jsonl"),
+        )
+        .expect("read real cfg-if sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ad/le/adler2".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/adler2-2.0.1.jsonl"),
+        )
+        .expect("read real adler2 sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/si/md/simd-adler32".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/simd-adler32-0.3.8.jsonl"),
+        )
+        .expect("read real simd-adler32 sparse index entries"),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest over transitive registry subset");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo resolve_manifest result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(
+        struct_field(&value, "root_crc32fast").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "root_miniz_oxide").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_crc32fast").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(struct_field(&value, "has_cfg_if").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_miniz_oxide").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(struct_field(&value, "has_adler2").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_simd_adler32").rep,
+        ValueRep::Bool(true)
+    );
+}
+
+#[test]
 fn array_spread_flattens_array_items_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

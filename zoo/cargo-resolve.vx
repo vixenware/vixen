@@ -225,6 +225,16 @@ struct RegistryResolution {
   packages: Array[ResolvedCrate],
 }
 
+struct PackageResolution {
+  root: ResolvedCrate,
+  packages: Map[String, ResolvedCrate],
+}
+
+struct GraphResolutionState {
+  roots: Array[PackageId] = [],
+  packages: Map[String, ResolvedCrate] = %{},
+}
+
 fn parse_lock(ws: Tree) -> CargoLock? (
   match ws.file(@Cargo.lock)? (
     Some { value } => Toml.parse[CargoLock](value),
@@ -738,12 +748,26 @@ fn append_unique_dependency_feature(
   )
 )
 
-fn apply_feature_edge(state: FeatureExpansionState, edge_text: String) -> FeatureExpansionState (
+fn apply_feature_edge(
+  state: FeatureExpansionState,
+  feature_graph: Map[String, Array[String]],
+  optional_dependencies: Array[String],
+  edge_text: String,
+) -> FeatureExpansionState (
   match parse_feature_edge(edge_text) (
-    FeatureEdge.Local { feature } => FeatureExpansionState {
-      ..state,
-      pending: append_unique_string(state.pending, feature),
-    },
+    FeatureEdge.Local { feature } => (
+      if !feature_graph.has(feature) && optional_dependencies.any($ == feature) (
+        FeatureExpansionState {
+          ..state,
+          enabled_optional_deps: append_unique_string(state.enabled_optional_deps, feature),
+        }
+      ) else (
+        FeatureExpansionState {
+          ..state,
+          pending: append_unique_string(state.pending, feature),
+        }
+      )
+    ),
     FeatureEdge.EnableDependency { dependency } => FeatureExpansionState {
       ..state,
       enabled_optional_deps: append_unique_string(state.enabled_optional_deps, dependency),
@@ -771,6 +795,7 @@ fn apply_feature_edge(state: FeatureExpansionState, edge_text: String) -> Featur
 
 fn expand_features(
   feature_graph: Map[String, Array[String]],
+  optional_dependencies: Array[String],
   pending: Array[String],
   seen: Array[String],
   enabled_optional_deps: Array[String],
@@ -788,6 +813,7 @@ fn expand_features(
     if seen.any($ == feature) (
       expand_features(
         feature_graph,
+        optional_dependencies,
         rest,
         seen,
         enabled_optional_deps,
@@ -808,10 +834,13 @@ fn expand_features(
             enabled_optional_deps,
             dependency_features,
           },
-          apply_feature_edge,
+          ((state, edge_text) =>
+            apply_feature_edge(state, feature_graph, optional_dependencies, edge_text)
+          ),
         );
       expand_features(
         feature_graph,
+        optional_dependencies,
         folded.pending,
         append_unique_string(seen, feature),
         folded.enabled_optional_deps,
@@ -821,14 +850,32 @@ fn expand_features(
   )
 )
 
-fn unify_features(feature_graph: Map[String, Array[String]], request: DependencyRequest) -> UnifiedFeatures (
+fn optional_dependency_names(deps: Array[DependencyRequest]) -> Array[String] (
+  array_fold(
+    deps,
+    [],
+    ((acc, dep) =>
+      if dep.optional (
+        append_unique_string(acc, dep.name)
+      ) else (
+        acc
+      )
+    ),
+  )
+)
+
+fn unify_features(
+  feature_graph: Map[String, Array[String]],
+  optional_dependencies: Array[String],
+  request: DependencyRequest,
+) -> UnifiedFeatures (
   let seeds =
     if request.default_features && feature_graph.has("default") (
       ["default", ..request.features]
     ) else (
       request.features
     );
-  expand_features(feature_graph, seeds, [], [], [])
+  expand_features(feature_graph, optional_dependencies, seeds, [], [], [])
 )
 
 fn extend_dependency_features(dep: DependencyRequest, extra: Array[String]) -> DependencyRequest (
@@ -918,13 +965,137 @@ fn merge_requests(existing: DependencyRequest, incoming: DependencyRequest) -> D
   }
 )
 
+fn merge_joined_requests(requests: Array[DependencyRequest]) -> DependencyRequest (
+  array_fold(array_rest(requests), array_first(requests), merge_requests)
+)
+
+fn canonical_request_insert(
+  acc: Map[String, DependencyRequest],
+  req: DependencyRequest,
+) -> Map[String, DependencyRequest] (
+  let key = request_key(req);
+  if acc.has(key) (
+    map_put(acc, key, merge_requests(acc.get(key), req))
+  ) else (
+    map_put(acc, key, req)
+  )
+)
+
 fn canonical_requests(requests: Array[DependencyRequest]) -> Array[DependencyRequest] (
-  // Sketch only:
-  // group by `request_key`, then merge requests that target the same package
-  requests
-    .group_by(request_key($))
-    .map((key, group) => group.reduce((left, right) => merge_requests(left, right)))
+  array_fold(requests, %{}, canonical_request_insert)
     .to_array()
+    .map($.get("value"))
+    .to_array()
+)
+
+fn merge_package_graph_entry(
+  graph: Map[String, ResolvedCrate],
+  entry,
+) -> Map[String, ResolvedCrate] (
+  map_put(graph, entry.get("key"), entry.get("value"))
+)
+
+fn merge_package_graphs(
+  left: Map[String, ResolvedCrate],
+  right: Map[String, ResolvedCrate],
+) -> Map[String, ResolvedCrate] (
+  array_fold(right.to_array(), left, merge_package_graph_entry)
+)
+
+fn resolve_dependency_graph(
+  graph: Map[String, ResolvedCrate],
+  dep: DependencyRequest,
+) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> Map[String, ResolvedCrate] (
+  let resolution =
+    keyed(
+      request_key(dep),
+      [dep],
+      ((ctx) => resolve_package_node(ctx) where {
+        config,
+        lock,
+        target,
+        workspace,
+      }),
+    );
+  merge_package_graphs(graph, resolution.packages)
+)
+
+fn resolve_package(crate: ResolvedCrate) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> PackageResolution (
+  let base = %{
+    crate.id.value => crate,
+  };
+  let packages =
+    array_fold(
+      canonical_requests(crate.dependencies),
+      base,
+      ((graph, dep) => resolve_dependency_graph(graph, dep) where {
+        config,
+        lock,
+        target,
+        workspace,
+      }),
+    );
+  PackageResolution {
+    root: crate,
+    packages,
+  }
+)
+
+fn resolve_package_node(ctx) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> PackageResolution (
+  let request = merge_joined_requests(ctx.joined);
+  let crate = resolve_request(request) where {
+    config,
+    lock,
+    target,
+    workspace,
+  };
+  resolve_package(crate) where {
+    config,
+    lock,
+    target,
+    workspace,
+  }
+)
+
+fn merge_root_resolution(
+  state: GraphResolutionState,
+  request: DependencyRequest,
+) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> GraphResolutionState (
+  let resolution =
+    keyed(
+      request_key(request),
+      [request],
+      ((ctx) => resolve_package_node(ctx) where {
+        config,
+        lock,
+        target,
+        workspace,
+      }),
+    );
+  GraphResolutionState {
+    roots: [..state.roots, resolution.root.id],
+    packages: merge_package_graphs(state.packages, resolution.packages),
+  }
 )
 
 fn resolve_graph(roots: Array[DependencyRequest]) where {
@@ -934,21 +1105,24 @@ fn resolve_graph(roots: Array[DependencyRequest]) where {
   workspace: Tree,
 } #discover -> RegistryResolution (
   let demanded = canonical_requests(roots);
-
-  // Sketch only:
-  // - treat `demanded` as the root package requests
-  // - resolve each request into a canonical package node
-  // - each resolved package contributes more dependency requests
-  // - merge those requests by `request_key`
-  // - repeat to a least fixpoint
-  // - the semantic result is the resolved graph itself; any ordering is a
-  //   later projection for lockfiles, diagnostics, or export
-  let _demanded = demanded;
-  let _config = config;
-  let _lock = lock;
-  let _target = target;
-  let _workspace = workspace;
-  fail "transitive graph resolution omitted from sketch"
+  let state =
+    array_fold(
+      demanded,
+      GraphResolutionState {
+        roots: [],
+        packages: %{},
+      },
+      ((acc, request) => merge_root_resolution(acc, request) where {
+        config,
+        lock,
+        target,
+        workspace,
+      }),
+    );
+  RegistryResolution {
+    roots: state.roots,
+    packages: state.packages.to_array().map($.get("value")).to_array(),
+  }
 )
 
 fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
@@ -984,14 +1158,19 @@ fn resolve_request(request: DependencyRequest) where {
     DependencySource.Path { path } => (
       let dep_root = Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
-      let features = unify_features(dep_manifest.features, request);
+      let dependency_requests = manifest_requests(dep_manifest) where { target };
+      let features = unify_features(
+        dep_manifest.features,
+        optional_dependency_names(dependency_requests),
+        request,
+      );
       let source = ResolvedSource.Path { path };
       ResolvedCrate {
         id: PackageId(`path:{path}`),
         name: dep_manifest.package.name,
         version: dep_manifest.package.version,
         features: features.local,
-        dependencies: apply_feature_requests(manifest_requests(dep_manifest) where { target }, features),
+        dependencies: apply_feature_requests(dependency_requests, features),
         source,
       }
     ),
@@ -1007,12 +1186,16 @@ fn resolve_request(request: DependencyRequest) where {
   let entries = parse_sparse_entries(Http.get(sparse_index_url(package_name)));
 
   let chosen = pick_version(entries, request, lock_entry(lock, package_name));
-  let features = unify_features(merged_entry_features(chosen), request);
   let dependencies =
     chosen.deps
       .filter($.kind.unwrap_or("normal") == request.kind)
       .map(request_from_index_dep($))
       .to_array();
+  let features = unify_features(
+    merged_entry_features(chosen),
+    optional_dependency_names(dependencies),
+    request,
+  );
   let source =
     ResolvedSource.Registry {
       checksum: chosen.cksum,
