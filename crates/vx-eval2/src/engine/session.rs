@@ -107,6 +107,31 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
     }
 
+    pub(crate) fn run_with_event_sink(
+        &mut self,
+        sink: &mut impl EvalEventSink,
+        scrub_work_ids: bool,
+    ) -> Result<Resolution, EvalError> {
+        let mut emitted = 0;
+        loop {
+            let step = self.drive_step_without_history()?;
+            emit_new_trace_events(&self.trace, &mut emitted, sink, scrub_work_ids);
+            match step {
+                EvalSessionStep::Progressed => {}
+                EvalSessionStep::Pending(pending) => return Ok(Resolution::Pending(pending)),
+                EvalSessionStep::WaitingOnInFlight => return Ok(Resolution::Waiting),
+                EvalSessionStep::Ready(value) => return Ok(Resolution::Ready(value)),
+                EvalSessionStep::Poison(error) => return Ok(Resolution::Poison(error)),
+                EvalSessionStep::Idle => {
+                    return Ok(resolution_without_ready_work(
+                        &self.scheduler,
+                        &self.completed,
+                    ));
+                }
+            }
+        }
+    }
+
     fn drive_step_without_history(&mut self) -> Result<EvalSessionStep, EvalError> {
         if let Some(result) = &self.completed {
             return Ok(match result {
@@ -907,6 +932,22 @@ fn apply_completion_to_state(
         scheduler.buffer_completion(completion)?;
         Ok(step_after_buffering(scheduler, completed))
     }
+}
+
+fn emit_new_trace_events(
+    trace: &EvalTrace,
+    emitted: &mut usize,
+    sink: &mut impl EvalEventSink,
+    scrub_work_ids: bool,
+) {
+    for event in &trace.events[*emitted..] {
+        let mut event = event.clone();
+        if scrub_work_ids {
+            event.work_id = None;
+        }
+        sink.push(event);
+    }
+    *emitted = trace.events.len();
 }
 
 fn commit_completion(

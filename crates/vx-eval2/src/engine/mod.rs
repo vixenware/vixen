@@ -301,44 +301,9 @@ pub fn eval_source_entry_at_place_with_args_with_source_id_with_sink(
     place: &str,
     sink: &mut impl EvalEventSink,
 ) -> Result<Resolution, EvalError> {
-    let mut scheduler = EvalScheduler::default();
-    eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
-        source,
-        source_id,
-        entry,
-        args,
-        runtime,
-        place,
-        &mut scheduler,
-        sink,
-    )
-}
-
-fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
-    source_text: &str,
-    source_id: impl Into<String>,
-    entry: &str,
-    args: &[Value],
-    runtime: &impl RuntimeHooks,
-    place: &str,
-    scheduler: &mut EvalScheduler,
-    sink: &mut impl EvalEventSink,
-) -> Result<Resolution, EvalError> {
-    let program = CompiledProgram::new(source_id, source_text);
-    let mut state = EvalState::new(
-        &program,
-        program.entry_source(),
-        EvalBranchContext::default(),
-        runtime,
-        place,
-        sink,
-        scheduler,
-        None,
-        false,
-        false,
-    );
-    match evaluate_entry_once(&mut state, entry, args)? {
-        EvalStep::Ready(value) => Ok(Resolution::Ready(value)),
-        EvalStep::Suspended(suspension) => Ok(Resolution::Pending(suspension.pending)),
+    let mut session = EvalSession::new(source, source_id, entry, args.to_vec(), runtime, place);
+    match session.run_with_event_sink(sink, true)? {
+        Resolution::Poison(error) => Err(error),
+        resolution => Ok(resolution),
     }
 }

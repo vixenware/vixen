@@ -364,18 +364,6 @@ pub(super) fn prepare_keyed_call(
     Ok(prepared)
 }
 
-pub(super) fn evaluate_entry_once(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    entry: &str,
-    args: &[Value],
-) -> Result<EvalStep, EvalError> {
-    let prepared = prepare_entry(state, entry, args)?;
-    let mut env = prepared.env;
-    state.with_source(prepared.source, |state| {
-        eval_expr(state, &prepared.body, &mut env)
-    })
-}
-
 pub(super) fn bind_arguments(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     parameters: &[CompiledParameter],
@@ -422,15 +410,6 @@ pub(super) fn bind_arguments_into_env(
         env_mut(env).insert(label, bound);
     }
     Ok(())
-}
-
-pub(super) fn eval_expr(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: &Expr,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state.alloc_node_id();
-    eval_expr_with_node_id(state, node_id, expr, env)
 }
 
 pub(super) fn eval_expr_with_node_id(
