@@ -2024,7 +2024,6 @@ fn vendored_entry(pkg: ResolvedCrate) where {
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let workspace = Tree(ws);
-  let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
   let lock = parse_lock(workspace);
   let target = BuildTarget {
     // Sketch only:
@@ -2033,7 +2032,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     triple: "x86_64-unknown-linux-gnu",
   };
 
-  let resolution = resolve_manifest(manifest) where { lock, target, workspace };
+  let resolution =
+    match args.find((_item) => true) (
+      Some { value } => resolve_workspace_member_at(workspace, Path(value)) where { lock, target },
+      None => (
+        let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
+        resolve_manifest(manifest) where { lock, target, workspace }
+      ),
+    );
 
   // Resolution discovers exact versions and checksums.
   // Acquisition stays fixed-hash and cacheable.
