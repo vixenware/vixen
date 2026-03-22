@@ -22,6 +22,8 @@ pub enum EvalExprKind {
     Map,
     Fail,
     If,
+    Match,
+    Where,
     Binary,
     Prefix,
     InterpolatedString,

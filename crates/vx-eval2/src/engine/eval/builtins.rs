@@ -1087,6 +1087,34 @@ pub(in crate::engine) fn continue_builtin_call(
                 ),
             ))
         }
+        "String.to_u64" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.to_u64() requires receiver",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.to_u64() receiver must evaluate to String",
+                ));
+            };
+            let parsed = text.parse::<u64>().map_err(|_| {
+                EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "String.to_u64() receiver must contain a base-10 U64",
+                )
+            })?;
+            Ok(ready_builtin_value(
+                Value::u64(parsed).with_provenance(
+                    args[0]
+                        .meta
+                        .provenance
+                        .project(ProjectionStep::Path("to_u64()".to_string())),
+                ),
+            ))
+        }
         "String.starts_with" => {
             if args.len() != 2 {
                 return Err(EvalError::new(

@@ -1016,6 +1016,37 @@ fn build() {
 }
 
 #[test]
+fn struct_literal_field_puns_use_bound_names_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Pair {
+  left: String,
+  right: Bool,
+}
+
+fn build() {
+  let left = "serde";
+  let right = true;
+  Pair { left, right }
+}
+"#,
+        "struct-literal-field-puns-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate struct literal field puns");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready struct literal field pun result, got {resolution:?}");
+    };
+    assert_eq!(
+        struct_field(&value, "left").rep,
+        ValueRep::String("serde".into())
+    );
+    assert_eq!(struct_field(&value, "right").rep, ValueRep::Bool(true));
+}
+
+#[test]
 fn map_equality_checks_all_entries() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1198,6 +1229,131 @@ fn build(name: String) {
     let tuple = struct_field(&value, "value");
     assert_eq!(tuple_item(tuple, 0).rep, ValueRep::String("serde".into()));
     assert_eq!(tuple_item(tuple, 1).rep, ValueRep::String("json".into()));
+}
+
+#[test]
+fn match_over_option_variants_destructures_some_and_none_at_runtime() {
+    let some = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String?) {
+  match name (
+    Some { value } => value,
+    None => "fallback",
+  )
+}
+"#,
+        "match-option-some-runtime",
+        "build",
+        &[Value::structure(
+            "Some",
+            vec![(Arc::from("value"), Value::string("serde"))],
+        )],
+    )
+    .expect("evaluate match over Some");
+    let Resolution::Ready(some) = some else {
+        panic!("expected ready match Some result, got {some:?}");
+    };
+    assert_eq!(some.rep, ValueRep::String("serde".into()));
+
+    let none = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(name: String?) {
+  match name (
+    Some { value } => value,
+    None => "fallback",
+  )
+}
+"#,
+        "match-option-none-runtime",
+        "build",
+        &[Value::structure("None", Vec::new())],
+    )
+    .expect("evaluate match over None");
+    let Resolution::Ready(none) = none else {
+        panic!("expected ready match None result, got {none:?}");
+    };
+    assert_eq!(none.rep, ValueRep::String("fallback".into()));
+}
+
+#[test]
+fn match_over_untagged_dependency_spec_builds_request_shape_at_runtime() {
+    let detailed = eval_source_entry_with_args_with_source_id(
+        r#"
+#[untagged]
+enum CargoDependencySpec {
+  struct Version { value: String },
+  struct Detailed {
+    version: String?,
+    optional: Bool,
+  },
+}
+
+struct DependencyRequest {
+  version: String?,
+  optional: Bool,
+}
+
+fn request_from_dep(dep: CargoDependencySpec) {
+  match dep (
+    Version { value } => DependencyRequest {
+      version: Some(value),
+      optional: false,
+    },
+    Detailed { version, optional } => DependencyRequest {
+      version,
+      optional,
+    },
+  )
+}
+
+fn build() {
+  request_from_dep(Detailed {
+    version: Some("1"),
+    optional: true,
+  })
+}
+"#,
+        "match-untagged-dependency-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate match over untagged dependency spec");
+    let Resolution::Ready(detailed) = detailed else {
+        panic!("expected ready match over untagged dependency result, got {detailed:?}");
+    };
+    assert_eq!(
+        struct_field(struct_field(&detailed, "version"), "value").rep,
+        ValueRep::String("1".into())
+    );
+    assert_eq!(
+        struct_field(&detailed, "optional").rep,
+        ValueRep::Bool(true)
+    );
+}
+
+#[test]
+fn match_over_tuple_pattern_binds_elements_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(pair: (String, String)) {
+  match pair (
+    (left, right) => left.ends_with("?") && right == "json",
+  )
+}
+"#,
+        "match-tuple-pattern-runtime",
+        "build",
+        &[Value::tuple(vec![
+            Value::string("serde?"),
+            Value::string("json"),
+        ])],
+    )
+    .expect("evaluate match over tuple pattern");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready match over tuple result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
 }
 
 #[test]
@@ -1540,6 +1696,38 @@ fn build(flag: Bool, value: String) {
 }
 
 #[test]
+fn enum_variants_can_be_referenced_with_type_prefix_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+enum Choice {
+  struct Left,
+  struct Right,
+}
+
+fn build(flag: Bool) {
+  if flag (
+    Choice.Left
+  ) else (
+    Choice.Right
+  )
+}
+"#,
+        "enum-variant-type-prefix-runtime",
+        "build",
+        &[Value::bool(true)],
+    )
+    .expect("evaluate type-prefixed enum variants");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready type-prefixed enum variant result, got {resolution:?}");
+    };
+    let ValueRep::Struct(choice) = &value.rep else {
+        panic!("expected struct result from type-prefixed enum variant, got {value:?}");
+    };
+    assert_eq!(choice.type_name.as_ref(), "Left");
+}
+
+#[test]
 fn array_flatten_method_concatenates_nested_arrays_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1793,6 +1981,94 @@ flate2 = "1"
 }
 
 #[test]
+fn zoo_cargo_manifest_requests_execute_against_real_manifest() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r#"
+struct Summary {
+  has_flate2: Bool,
+  has_dev_deps: Bool,
+  has_build_deps: Bool,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
+  let requests = manifest_requests(manifest) where {
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      os: "macos",
+      arch: "aarch64",
+    },
+  };
+  Summary {
+    has_flate2: requests.any($.name == "flate2"),
+    has_dev_deps: requests.any($.kind == "dev"),
+    has_build_deps: requests.any($.kind == "build"),
+  }
+}
+"#,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = ReadFileRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo manifest_requests against real manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready zoo cargo manifest_requests result, got {resolution:?}");
+    };
+
+    assert_eq!(struct_field(&value, "has_flate2").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_dev_deps").rep,
+        ValueRep::Bool(false)
+    );
+    assert_eq!(
+        struct_field(&value, "has_build_deps").rep,
+        ValueRep::Bool(false)
+    );
+}
+
+#[test]
+fn array_spread_flattens_array_items_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [1, ..[2, 3], 4]
+}
+"#,
+        "array-spread-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate array spread");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready array spread result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from spread, got {value:?}");
+    };
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].rep, ValueRep::U64(1));
+    assert_eq!(items[1].rep, ValueRep::U64(2));
+    assert_eq!(items[2].rep, ValueRep::U64(3));
+    assert_eq!(items[3].rep, ValueRep::U64(4));
+}
+
+#[test]
 fn string_lines_method_splits_newlines_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -1838,6 +2114,46 @@ fn build(template: String) {
         value.rep,
         ValueRep::String("https://x/flate2/flate2".into())
     );
+}
+
+#[test]
+fn string_to_u64_method_parses_decimal_text_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(text: String) {
+  text.to_u64()
+}
+"#,
+        "string-to-u64-method-runtime",
+        "build",
+        &[Value::string("123")],
+    )
+    .expect("evaluate String.to_u64()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready String.to_u64() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(123));
+}
+
+#[test]
+fn dollar_adapter_expressions_work_for_array_any_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  ["flate2", "serde"].any($ == "flate2")
+}
+"#,
+        "dollar-adapter-array-any-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate dollar adapter with Array.any()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready dollar adapter Array.any() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Bool(true));
 }
 
 #[test]

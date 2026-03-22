@@ -38,11 +38,59 @@ pub(super) enum InterpolatedPart {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ArrayEvalItem {
+    Expr(ExprHandle),
+    Spread(ExprHandle),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ArrayJoinItem {
+    Expr(EvalNodeId),
+    Spread(EvalNodeId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MatchArmPlan {
+    pub(super) pattern: MatchPattern,
+    pub(super) body: ExprHandle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LetPattern {
     Binding { name: String, source: SourceSpan },
     Wildcard,
     Tuple(Vec<LetPattern>),
     Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MatchFieldPattern {
+    pub(super) name: String,
+    pub(super) source: SourceSpan,
+    pub(super) pattern: Option<Box<MatchPattern>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MatchPattern {
+    Binding {
+        name: String,
+        source: SourceSpan,
+    },
+    Wildcard,
+    Literal(Value),
+    Tuple(Vec<MatchPattern>),
+    Struct(Vec<MatchFieldPattern>),
+    Unit,
+    Variant {
+        name: Arc<str>,
+        fields: Option<Vec<MatchFieldPattern>>,
+    },
+    At {
+        binding_name: String,
+        binding_source: SourceSpan,
+        pattern: Box<MatchPattern>,
+    },
+    Or(Vec<MatchPattern>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,14 +157,15 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,
-        remaining_items: Vec<ExprHandle>,
+        spread: bool,
+        remaining_items: Vec<ArrayEvalItem>,
         env: EvalEnv,
         array_source: SourceSpan,
     },
     ArrayJoin {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        child_nodes: Vec<EvalNodeId>,
+        child_nodes: Vec<ArrayJoinItem>,
         array_source: SourceSpan,
     },
     TupleAfterItem {
@@ -213,6 +262,21 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         then_branch: ExprHandle,
         else_branch: ExprHandle,
+        env: EvalEnv,
+    },
+    MatchScrutinee {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        arms: Arc<[MatchArmPlan]>,
+        env: EvalEnv,
+    },
+    WhereAfterKeyword {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        call: ExprHandle,
+        pending_keyword_name: Arc<str>,
+        keyword_bindings: Vec<(Arc<str>, Value)>,
+        remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
         env: EvalEnv,
     },
     PrefixOperand {

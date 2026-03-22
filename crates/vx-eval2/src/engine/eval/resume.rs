@@ -264,13 +264,14 @@ pub(in crate::engine) fn resume_frame(
             node_id,
             parent_id,
             mut items,
+            spread,
             remaining_items,
             env,
             array_source,
         } => {
             let result = match input {
                 Ok(value) => {
-                    items.push(value);
+                    append_array_item(&mut items, value, spread)?;
                     continue_array_items(
                         state,
                         node_id,
@@ -293,16 +294,23 @@ pub(in crate::engine) fn resume_frame(
         } => {
             let result = match input {
                 Ok(_) => {
-                    let mut items = Vec::with_capacity(child_nodes.len());
+                    let mut items = Vec::new();
                     for child_node in &child_nodes {
-                        match state.scheduler.node_state(*child_node) {
-                            Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                        let (child_node_id, spread) = match child_node {
+                            ArrayJoinItem::Expr(child_node_id) => (*child_node_id, false),
+                            ArrayJoinItem::Spread(child_node_id) => (*child_node_id, true),
+                        };
+                        match state.scheduler.node_state(child_node_id) {
+                            Some(EvalNodeState::Ready(value)) => {
+                                append_array_item(&mut items, value.clone(), spread)?
+                            }
                             Some(EvalNodeState::Poison(error)) => {
                                 return Ok(ResumeOutcome::Continue(Err(error.clone())));
                             }
                             _ => {
-                                let pending =
-                                    state.scheduler.alloc_child_dependency_pending(*child_node);
+                                let pending = state
+                                    .scheduler
+                                    .alloc_child_dependency_pending(child_node_id);
                                 return Ok(ResumeOutcome::Suspended(EvalSuspension {
                                     resume_node: node_id,
                                     pending,
@@ -756,6 +764,53 @@ pub(in crate::engine) fn resume_frame(
                             ContinuationFrame::FinishNode { node_id, parent_id },
                         )),
                     }
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::MatchScrutinee {
+            node_id,
+            parent_id,
+            arms,
+            env,
+        } => {
+            let result = match input {
+                Ok(scrutinee) => {
+                    continue_match_arms(state, node_id, parent_id, scrutinee, arms, env)
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::WhereAfterKeyword {
+            node_id,
+            parent_id,
+            call,
+            pending_keyword_name,
+            mut keyword_bindings,
+            remaining_keyword_bindings,
+            env,
+        } => {
+            let result = match input {
+                Ok(value) => {
+                    let expr = state.program.resolve_expr(call.key)?;
+                    let Expr::Call(call_expr) = expr else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            "where continuation expected a call expression",
+                        ));
+                    };
+                    keyword_bindings.push((pending_keyword_name, value));
+                    continue_where_keyword_bindings(
+                        state,
+                        node_id,
+                        parent_id,
+                        &call_expr,
+                        keyword_bindings,
+                        remaining_keyword_bindings,
+                        env,
+                    )
                 }
                 Err(error) => Err(error),
             };

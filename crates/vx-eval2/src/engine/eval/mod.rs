@@ -1,4 +1,5 @@
 use super::*;
+use vx_parser::MatchExpr;
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -59,6 +60,96 @@ pub(super) fn compile_closure_parameters(
         })
         .collect::<Result<Vec<_>, EvalError>>()
         .map(Arc::from)
+}
+
+fn dollar_placeholder_index(text: &str) -> Option<usize> {
+    if text == "$" {
+        return Some(0);
+    }
+    text.strip_prefix('$')?.parse().ok()
+}
+
+fn compile_adapter_parameters(
+    source: SourceId,
+    expr: &Expr,
+    fallback: ProgramNodeHandle,
+) -> Option<Arc<[CompiledParameter]>> {
+    let mut names_by_index: Vec<Option<ProgramNodeHandle>> = Vec::new();
+    for name_ref in expr.syntax().descendants().filter_map(NameRefExpr::cast) {
+        let token = name_ref.token()?;
+        if token.kind() != SyntaxKind::DOLLAR_IDENT {
+            continue;
+        }
+        let index = dollar_placeholder_index(token.text())?;
+        if names_by_index.len() <= index {
+            names_by_index.resize(index + 1, None);
+        }
+        names_by_index[index] = Some(ProgramNodeHandle::for_token(source, &token));
+    }
+    if names_by_index.is_empty() {
+        return None;
+    }
+    Some(Arc::from(
+        names_by_index
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let label = if index == 0 {
+                    Arc::<str>::from("$")
+                } else {
+                    Arc::<str>::from(format!("${index}"))
+                };
+                CompiledParameter {
+                    label,
+                    name: name.unwrap_or(fallback),
+                }
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn builtin_adapter_arg_index(function_name: &str, arg_index: usize) -> bool {
+    match function_name {
+        "Array.any" | "Array.filter" | "Array.map" | "Array.filter_map" | "Map.map" => {
+            arg_index == 0
+        }
+        "array_find" => arg_index == 1,
+        "array_fold" => arg_index == 2,
+        _ => false,
+    }
+}
+
+fn function_adapter_value_for_arg(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee: &Value,
+    arg_index: usize,
+    arg_handle: ExprHandle,
+    env: &EvalEnv,
+) -> Result<Option<Value>, EvalError> {
+    let ValueRep::Function(function) = &callee.rep else {
+        return Ok(None);
+    };
+    if !builtin_adapter_arg_index(function.name.as_ref(), arg_index) {
+        return Ok(None);
+    }
+    let expr = state.program.resolve_expr(arg_handle.key)?;
+    let Some(parameters) =
+        compile_adapter_parameters(arg_handle.key.source(), &expr, arg_handle.key)
+    else {
+        return Ok(None);
+    };
+    let function = FunctionRef::new(
+        state.program.source_id(arg_handle.key.source()),
+        Arc::from("<adapter>"),
+        parameters,
+        false,
+        Some(arg_handle.key),
+        captures_from_scope(env),
+        None,
+    );
+    Ok(Some(Value::function(function).with_provenance(
+        Provenance::literal(state.program.span_for_node(arg_handle.key.source(), &expr)),
+    )))
 }
 
 pub(super) fn bind_named_function_decl(
@@ -338,6 +429,8 @@ pub(super) fn eval_expr_with_node_id(
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
+        Expr::Match(match_expr) => eval_match(state, match_expr, env),
+        Expr::Where(where_expr) => eval_where(state, where_expr, env),
         Expr::Prefix(prefix) => eval_prefix(state, prefix, env),
         Expr::Binary(binary) => eval_binary(state, binary, env),
         Expr::InterpolatedString(interpolated) => {
@@ -495,7 +588,7 @@ pub(super) fn immediate_call_callee_value(
     let name_token = name_ref
         .token()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
-    let name = name_token.text().to_string();
+    let name = name_ref_text(name_ref);
     if let Some(value) = env.get(&name) {
         return Ok(Some(value.clone()));
     }
@@ -511,7 +604,10 @@ pub(super) fn immediate_call_callee_value(
             Some(resolved_name),
         ))));
     }
-    if let Some(constructor) = state.program.resolve_variant_constructor(&name) {
+    if let Some(constructor) = state
+        .program
+        .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
         return Ok(Some(enum_constructor_or_value(
             state,
             constructor.name,
@@ -538,7 +634,7 @@ pub(super) fn eval_name_ref(
     let name_token = name_ref
         .token()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "name reference has no token"))?;
-    let name = name_token.text().to_string();
+    let name = name_ref_text(name_ref);
     if let Some(value) = env.get(&name) {
         return Ok(value.clone());
     }
@@ -558,7 +654,10 @@ pub(super) fn eval_name_ref(
             Value::function(function).with_provenance(Provenance::binding(name_source, name))
         );
     }
-    if let Some(constructor) = state.program.resolve_variant_constructor(&name) {
+    if let Some(constructor) = state
+        .program
+        .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
         return Ok(enum_constructor_or_value(
             state,
             constructor.name,
@@ -570,6 +669,25 @@ pub(super) fn eval_name_ref(
         EvalErrorKind::Internal,
         format!("name {name} is not bound in this scope"),
     ))
+}
+
+fn name_ref_text(name_ref: &NameRefExpr) -> String {
+    name_ref
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .filter(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::LOWER_IDENT
+                    | SyntaxKind::UPPER_IDENT
+                    | SyntaxKind::DOLLAR_IDENT
+                    | SyntaxKind::UNDERSCORE
+                    | SyntaxKind::DOT
+            )
+        })
+        .map(|token| token.text().to_string())
+        .collect()
 }
 
 pub(super) fn eval_call_callee(
@@ -603,6 +721,14 @@ pub(super) fn static_namespace_member_value(
     let Some(field_name) = field.field_name() else {
         return Ok(None);
     };
+    if let Some(constructor) = state.program.resolve_variant_constructor(field_name.text()) {
+        return Ok(Some(enum_constructor_or_value(
+            state,
+            constructor.name,
+            constructor.fields,
+            state.span_for_node(field),
+        )));
+    }
     let full_name = format!("{}.{}", receiver_token.text(), field_name.text());
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
@@ -632,6 +758,7 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "lines") => Some("String.lines"),
         (ValueRep::String(_), "replace") => Some("String.replace"),
         (ValueRep::String(_), "to_lower") => Some("String.to_lower"),
+        (ValueRep::String(_), "to_u64") => Some("String.to_u64"),
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Array(_), "any") => Some("Array.any"),
@@ -788,7 +915,13 @@ pub(super) fn continue_call_from_args(
     }
     let mut remaining = remaining_args.into_iter();
     while let Some(arg_handle) = remaining.next() {
-        match eval_dependent_expr_handle(state, node_id, arg_handle, &mut env)? {
+        let arg_index = args.len();
+        let adapter = function_adapter_value_for_arg(state, &callee, arg_index, arg_handle, &env)?;
+        let arg_step = match adapter {
+            Some(value) => EvalStep::Ready(value),
+            None => eval_dependent_expr_handle(state, node_id, arg_handle, &mut env)?,
+        };
+        match arg_step {
             EvalStep::Ready(value) => args.push(value),
             EvalStep::Suspended(suspension) => {
                 let remaining_args = remaining.collect::<Vec<_>>();
@@ -998,24 +1131,28 @@ pub(super) fn eval_struct_literal(
         .expect("struct literal should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let struct_source = state.span_for_node(struct_literal);
-    let remaining_fields = struct_literal
-        .fields()
-        .map(|field| {
-            let name = Arc::<str>::from(
-                field
-                    .name()
-                    .map(|name| name.text().to_string())
-                    .ok_or_else(|| {
-                        EvalError::new(EvalErrorKind::Internal, "struct field has no name")
-                    })?,
-            );
-            let expr = field.expr().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "struct field has no value")
-            })?;
-            Ok((name, state.expr_handle(&expr)))
-        })
-        .collect::<Result<Vec<_>, EvalError>>()?;
-    if state.queue_child_work && !remaining_fields.is_empty() {
+    let mut immediate_fields = Vec::new();
+    let mut remaining_fields = Vec::new();
+    for field in struct_literal.fields() {
+        let name_token = field
+            .name()
+            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct field has no name"))?;
+        let name = Arc::<str>::from(name_token.text().to_string());
+        match field.expr() {
+            Some(expr) => remaining_fields.push((name, state.expr_handle(&expr))),
+            None => {
+                let field_name = name_token.text();
+                let Some(value) = env.get(field_name) else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("struct field {field_name} has no value"),
+                    ));
+                };
+                immediate_fields.push((name, value.clone()));
+            }
+        }
+    }
+    if state.queue_child_work && immediate_fields.is_empty() && !remaining_fields.is_empty() {
         let field_names = remaining_fields
             .iter()
             .map(|(name, _)| name.clone())
@@ -1043,7 +1180,7 @@ pub(super) fn eval_struct_literal(
         node_id,
         parent_id,
         type_name,
-        Vec::new(),
+        immediate_fields,
         remaining_fields,
         env.clone(),
         struct_source,
@@ -1089,12 +1226,20 @@ pub(super) fn eval_array(
         let mut child_nodes = Vec::new();
         for item in array.items() {
             match item {
-                ArrayItem::Expr(expr) => child_nodes.push(queue_child_expr(state, &expr, env)),
-                ArrayItem::Spread(_) => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        "array spread is not supported yet",
-                    ));
+                ArrayItem::Expr(expr) => {
+                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr(state, &expr, env)));
+                }
+                ArrayItem::Spread(spread) => {
+                    child_nodes.push(ArrayJoinItem::Spread(queue_child_expr(
+                        state,
+                        &spread.expr().ok_or_else(|| {
+                            EvalError::new(
+                                EvalErrorKind::Internal,
+                                "array spread expression has no operand",
+                            )
+                        })?,
+                        env,
+                    )))
                 }
             }
         }
@@ -1104,10 +1249,13 @@ pub(super) fn eval_array(
                 ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
             )));
         }
+        let first_child = match child_nodes[0] {
+            ArrayJoinItem::Expr(child_id) | ArrayJoinItem::Spread(child_id) => child_id,
+        };
         return Ok(wait_on_child_dependency(
             state,
             node_id,
-            child_nodes[0],
+            first_child,
             vec![ContinuationFrame::ArrayJoin {
                 node_id,
                 parent_id,
@@ -1124,16 +1272,35 @@ pub(super) fn eval_array(
         array
             .items()
             .map(|item| match item {
-                ArrayItem::Expr(expr) => Ok(state.expr_handle(&expr)),
-                ArrayItem::Spread(_) => Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    "array spread is not supported yet",
-                )),
+                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle(&expr))),
+                ArrayItem::Spread(spread) => Ok(ArrayEvalItem::Spread(state.expr_handle(
+                    &spread.expr().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "array spread expression has no operand",
+                        )
+                    })?,
+                ))),
             })
             .collect::<Result<Vec<_>, EvalError>>()?,
         env.clone(),
         state.span_for_node(array),
     )
+}
+
+fn append_array_item(items: &mut Vec<Value>, value: Value, spread: bool) -> Result<(), EvalError> {
+    if spread {
+        let ValueRep::Array(spread_items) = &value.rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "array spread value must evaluate to Array",
+            ));
+        };
+        items.extend(spread_items.iter().cloned());
+    } else {
+        items.push(value);
+    }
+    Ok(())
 }
 
 pub(super) fn eval_tuple(
@@ -1484,6 +1651,272 @@ pub(super) fn eval_if(
     }
 }
 
+pub(super) fn eval_match(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    match_expr: &MatchExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("match expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let scrutinee = match_expr
+        .syntax()
+        .children()
+        .find_map(Expr::cast)
+        .ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
+        })?;
+    let arms = Arc::<[MatchArmPlan]>::from(
+        match_expr
+            .arms()
+            .map(|arm| {
+                let pattern = arm.pattern().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "match arm has no pattern")
+                })?;
+                let body = arm.expr().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "match arm has no body")
+                })?;
+                Ok(MatchArmPlan {
+                    pattern: match_pattern_from_ast(state, &pattern)?,
+                    body: state.expr_handle(&body),
+                })
+            })
+            .collect::<Result<Vec<_>, EvalError>>()?,
+    );
+    let scrutinee = match eval_child_expr(state, &scrutinee, env)? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Suspended(suspension) => {
+            return Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::MatchScrutinee {
+                    node_id,
+                    parent_id,
+                    arms,
+                    env: env.clone(),
+                },
+            ));
+        }
+    };
+    continue_match_arms(state, node_id, parent_id, scrutinee, arms, env.clone())
+}
+
+pub(super) fn continue_match_arms(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    scrutinee: Value,
+    arms: Arc<[MatchArmPlan]>,
+    env: EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    for arm in arms.iter() {
+        let mut arm_env = env.clone();
+        if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
+            return match eval_dependent_expr_handle(state, node_id, arm.body, &mut arm_env)? {
+                EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+                EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::FinishNode { node_id, parent_id },
+                )),
+            };
+        }
+    }
+    Err(EvalError::new(
+        EvalErrorKind::Internal,
+        "match expression had no matching arm",
+    ))
+}
+
+pub(super) fn eval_where(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    where_expr: &vx_parser::WhereExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("where expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let call = where_expr
+        .callee()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "where expression has no callee"))?;
+    let Expr::Call(call_expr) = call else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where expression currently requires a call callee",
+        ));
+    };
+    let keywords = where_expr.keywords().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "where expression has no keyword record",
+        )
+    })?;
+    let Expr::Record(record) = keywords else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where expression currently requires a record keyword payload",
+        ));
+    };
+    let mut keyword_bindings = Vec::new();
+    let mut remaining_keyword_bindings = Vec::new();
+    for field in record.fields() {
+        let name_token = field.name().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "where keyword field is missing a name",
+            )
+        })?;
+        let name = Arc::<str>::from(name_token.text().to_string());
+        match field.value() {
+            Some(expr) => remaining_keyword_bindings.push((name, state.expr_handle(&expr))),
+            None => {
+                let Some(value) = env.get(name_token.text()) else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!(
+                            "where binding {} is not available in scope",
+                            name_token.text()
+                        ),
+                    ));
+                };
+                keyword_bindings.push((name, value.clone()));
+            }
+        }
+    }
+    continue_where_keyword_bindings(
+        state,
+        node_id,
+        parent_id,
+        &call_expr,
+        keyword_bindings,
+        remaining_keyword_bindings,
+        env.clone(),
+    )
+}
+
+pub(super) fn continue_where_keyword_bindings(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    call_expr: &CallExpr,
+    mut keyword_bindings: Vec<(Arc<str>, Value)>,
+    remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
+    mut env: EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let mut remaining = remaining_keyword_bindings.into_iter();
+    while let Some((name, expr_handle)) = remaining.next() {
+        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut env)? {
+            EvalStep::Ready(value) => keyword_bindings.push((name, value)),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::WhereAfterKeyword {
+                        node_id,
+                        parent_id,
+                        call: ExprHandle {
+                            key: ProgramNodeHandle::for_node(state.current_source(), call_expr),
+                        },
+                        pending_keyword_name: name,
+                        keyword_bindings,
+                        remaining_keyword_bindings: remaining.collect(),
+                        env,
+                    },
+                ));
+            }
+        }
+    }
+    eval_call_with_keyword_bindings(state, node_id, parent_id, call_expr, env, keyword_bindings)
+}
+
+fn eval_call_with_keyword_bindings(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    call: &CallExpr,
+    env: EvalEnv,
+    keyword_bindings: Vec<(Arc<str>, Value)>,
+) -> Result<EvalStep, EvalError> {
+    let callee = call
+        .callee()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
+    let call_source = state.span_for_node(call);
+    let type_args = Arc::<[Ty]>::from(
+        call.type_args()
+            .into_iter()
+            .flat_map(|args| args.types())
+            .map(|ty| state.program.resolve_type_annotation(&ty))
+            .collect::<Vec<_>>(),
+    );
+    let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
+    let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where call callee must resolve immediately for now",
+        ));
+    };
+    let callee_value = apply_where_keyword_bindings(callee_value, keyword_bindings);
+    if state.queue_child_work && !positional_args.is_empty() {
+        let child_nodes = positional_args
+            .iter()
+            .map(|arg| queue_child_expr(state, arg, &env))
+            .collect::<Vec<_>>();
+        return Ok(wait_on_child_dependency(
+            state,
+            node_id,
+            child_nodes[0],
+            vec![ContinuationFrame::CallJoin {
+                node_id,
+                parent_id,
+                callee: callee_value,
+                call_source,
+                type_args: Arc::clone(&type_args),
+                child_nodes,
+            }],
+        ));
+    }
+    continue_call_from_args(
+        state,
+        node_id,
+        parent_id,
+        callee_value,
+        call_source,
+        type_args,
+        Vec::new(),
+        positional_args
+            .iter()
+            .map(|arg| state.expr_handle(arg))
+            .collect(),
+        env,
+    )
+}
+
+fn apply_where_keyword_bindings(callee: Value, keyword_bindings: Vec<(Arc<str>, Value)>) -> Value {
+    let ValueRep::Function(function) = &callee.rep else {
+        return callee;
+    };
+    let mut captures = function.captures.iter().cloned().collect::<Vec<_>>();
+    for (name, value) in keyword_bindings {
+        match captures.iter_mut().find(|(existing, _)| existing == &name) {
+            Some((_, existing_value)) => *existing_value = value,
+            None => captures.push((name, value)),
+        }
+    }
+    Value::function(FunctionRef::new(
+        function.source_id.clone(),
+        function.name.clone(),
+        Arc::clone(&function.parameters),
+        false,
+        function.body,
+        Arc::from(captures),
+        function.self_name.clone(),
+    ))
+    .with_meta(callee.meta)
+}
+
 pub(super) fn eval_field(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     field: &FieldExpr,
@@ -1701,14 +2134,18 @@ pub(super) fn continue_array_items(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     mut items: Vec<Value>,
-    remaining_items: Vec<ExprHandle>,
+    remaining_items: Vec<ArrayEvalItem>,
     mut env: EvalEnv,
     array_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
+        let (item_handle, spread) = match item_handle {
+            ArrayEvalItem::Expr(handle) => (handle, false),
+            ArrayEvalItem::Spread(handle) => (handle, true),
+        };
         match eval_dependent_expr_handle(state, node_id, item_handle, &mut env)? {
-            EvalStep::Ready(value) => items.push(value),
+            EvalStep::Ready(value) => append_array_item(&mut items, value, spread)?,
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
@@ -1716,6 +2153,7 @@ pub(super) fn continue_array_items(
                         node_id,
                         parent_id,
                         items,
+                        spread,
                         remaining_items: remaining.collect(),
                         env,
                         array_source,
@@ -1985,6 +2423,263 @@ pub(super) fn bind_let_pattern(
     }
 }
 
+pub(super) fn match_pattern(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    scope: &mut EvalEnv,
+    pattern: &MatchPattern,
+    value: Value,
+) -> Result<bool, EvalError> {
+    match pattern {
+        MatchPattern::Binding { name, source } => {
+            if name == "_" {
+                return Ok(true);
+            }
+            env_mut(scope).insert(
+                name.clone(),
+                value.with_provenance(Provenance::binding(source.clone(), name.clone())),
+            );
+            Ok(true)
+        }
+        MatchPattern::Wildcard => Ok(true),
+        MatchPattern::Unit => Ok(matches!(value.rep, ValueRep::Unit)),
+        MatchPattern::Tuple(patterns) => {
+            let ValueRep::Tuple(items) = &value.rep else {
+                return Ok(false);
+            };
+            if patterns.len() != items.len() {
+                return Ok(false);
+            }
+            for (pattern, item) in patterns.iter().zip(items.iter().cloned()) {
+                if !match_pattern(state, scope, pattern, item)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        MatchPattern::Literal(expected) => values_equal(&expected.rep, &value.rep),
+        MatchPattern::Variant { name, fields } => {
+            match_variant_pattern(state, scope, name, fields.as_deref(), value)
+        }
+        MatchPattern::Struct(fields) => {
+            let ValueRep::Struct(struct_value) = &value.rep else {
+                return Ok(false);
+            };
+            match_struct_pattern_fields(state, scope, fields, struct_value)
+        }
+        MatchPattern::At {
+            binding_name,
+            binding_source,
+            pattern,
+        } => {
+            env_mut(scope).insert(
+                binding_name.clone(),
+                value.clone().with_provenance(Provenance::binding(
+                    binding_source.clone(),
+                    binding_name.clone(),
+                )),
+            );
+            match_pattern(state, scope, pattern, value)
+        }
+        MatchPattern::Or(alternatives) => {
+            for alternative in alternatives {
+                let mut alternative_scope = scope.clone();
+                if match_pattern(state, &mut alternative_scope, alternative, value.clone())? {
+                    *scope = alternative_scope;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn match_variant_pattern(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    scope: &mut EvalEnv,
+    variant_name: &Arc<str>,
+    fields: Option<&[MatchFieldPattern]>,
+    value: Value,
+) -> Result<bool, EvalError> {
+    let ValueRep::Struct(struct_value) = &value.rep else {
+        return Ok(false);
+    };
+    if struct_value.type_name.as_ref() != variant_name.as_ref() {
+        return Ok(false);
+    }
+    match fields {
+        Some(fields) => match_struct_pattern_fields(state, scope, fields, struct_value),
+        None => Ok(true),
+    }
+}
+
+fn match_struct_pattern_fields(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    scope: &mut EvalEnv,
+    fields: &[MatchFieldPattern],
+    struct_value: &StructValue,
+) -> Result<bool, EvalError> {
+    for field in fields {
+        let name = field.name.as_str();
+        let Some(value) = struct_value
+            .fields
+            .iter()
+            .find_map(|(field_name, value)| (field_name.as_ref() == name).then_some(value))
+        else {
+            return Ok(false);
+        };
+        if let Some(pattern) = &field.pattern {
+            if !match_pattern(state, scope, pattern, value.clone())? {
+                return Ok(false);
+            }
+        } else {
+            env_mut(scope).insert(
+                field.name.clone(),
+                value.clone().with_provenance(Provenance::binding(
+                    field.source.clone(),
+                    field.name.clone(),
+                )),
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn match_pattern_from_ast(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    pattern: &Pattern,
+) -> Result<MatchPattern, EvalError> {
+    match pattern {
+        Pattern::Binding(binding) => {
+            let name_token = binding.name().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "binding pattern has no name")
+            })?;
+            Ok(MatchPattern::Binding {
+                name: name_token.text().to_string(),
+                source: state.span_for_token(&name_token),
+            })
+        }
+        Pattern::Wildcard(_) => Ok(MatchPattern::Wildcard),
+        Pattern::Literal(literal) => {
+            literal_pattern_value(state, literal).map(MatchPattern::Literal)
+        }
+        Pattern::Tuple(tuple) => Ok(MatchPattern::Tuple(
+            tuple
+                .items()
+                .map(|item| match_pattern_from_ast(state, &item))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Pattern::Struct(struct_pattern) => Ok(MatchPattern::Struct(
+            struct_pattern
+                .fields()
+                .map(|field| match_field_pattern_from_ast(state, &field))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Pattern::Paren(paren) => {
+            let inner = paren.inner().ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    "paren pattern has no inner pattern",
+                )
+            })?;
+            match_pattern_from_ast(state, &inner)
+        }
+        Pattern::Unit(_) => Ok(MatchPattern::Unit),
+        Pattern::Variant(variant) => Ok(MatchPattern::Variant {
+            name: Arc::from(
+                variant
+                    .segments()
+                    .last()
+                    .ok_or_else(|| {
+                        EvalError::new(EvalErrorKind::Internal, "variant pattern has no name")
+                    })?
+                    .text(),
+            ),
+            fields: variant
+                .fields()
+                .map(|fields| {
+                    fields
+                        .fields()
+                        .map(|field| match_field_pattern_from_ast(state, &field))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?,
+        }),
+        Pattern::At(at) => {
+            let binding_name = at.binding_name().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "at pattern has no binding name")
+            })?;
+            let pattern = at.pattern().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "at pattern has no nested pattern")
+            })?;
+            Ok(MatchPattern::At {
+                binding_name: binding_name.text().to_string(),
+                binding_source: state.span_for_token(&binding_name),
+                pattern: Box::new(match_pattern_from_ast(state, &pattern)?),
+            })
+        }
+        Pattern::Or(or) => Ok(MatchPattern::Or(
+            or.patterns()
+                .map(|pattern| match_pattern_from_ast(state, &pattern))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        other => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("unsupported match pattern: {other:?}"),
+        )),
+    }
+}
+
+fn match_field_pattern_from_ast(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    field: &vx_parser::StructPatternField,
+) -> Result<MatchFieldPattern, EvalError> {
+    let name_token = field.name().ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "struct pattern field has no name")
+    })?;
+    Ok(MatchFieldPattern {
+        name: name_token.text().to_string(),
+        source: state.span_for_token(&name_token),
+        pattern: field
+            .pattern()
+            .map(|pattern| match_pattern_from_ast(state, &pattern).map(Box::new))
+            .transpose()?,
+    })
+}
+
+fn literal_pattern_value(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    literal: &vx_parser::LiteralPattern,
+) -> Result<Value, EvalError> {
+    let token = literal
+        .token()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "literal pattern has no token"))?;
+    let source = state.span_for_token(&token);
+    match token.kind() {
+        SyntaxKind::INT => {
+            let value = token.text().parse::<u64>().map_err(|source| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("invalid integer literal {}: {source}", token.text()),
+                )
+            })?;
+            Ok(Value::u64(value).with_provenance(Provenance::literal(source)))
+        }
+        SyntaxKind::TRUE_KW => Ok(Value::bool(true).with_provenance(Provenance::literal(source))),
+        SyntaxKind::FALSE_KW => Ok(Value::bool(false).with_provenance(Provenance::literal(source))),
+        SyntaxKind::STRING => {
+            let text = token.text();
+            Ok(
+                Value::string(&text[1..text.len() - 1])
+                    .with_provenance(Provenance::literal(source)),
+            )
+        }
+        other => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!("unsupported literal pattern token: {other:?}"),
+        )),
+    }
+}
+
 pub(super) fn queue_child_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     expr: &Expr,
@@ -2178,6 +2873,8 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
         Expr::Map(_) => EvalExprKind::Map,
         Expr::Fail(_) => EvalExprKind::Fail,
         Expr::If(_) => EvalExprKind::If,
+        Expr::Match(_) => EvalExprKind::Match,
+        Expr::Where(_) => EvalExprKind::Where,
         Expr::Prefix(_) => EvalExprKind::Prefix,
         Expr::Binary(_) => EvalExprKind::Binary,
         Expr::InterpolatedString(_) => EvalExprKind::InterpolatedString,

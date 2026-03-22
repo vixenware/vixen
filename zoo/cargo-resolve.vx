@@ -369,20 +369,118 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
 )
 
 fn parse_semver_version(s: String) -> SemverVersion (
-  // Sketch only:
-  // - split `major.minor.patch[-pre]`
-  // - parse numeric fields
-  // - preserve prerelease text
-  let _s = s;
-  fail "semver version parser omitted from sketch"
+  let core_and_pre = s.split_once("-");
+  let core =
+    match core_and_pre (
+      Some { value } => (
+        let (value, _pre) = value;
+        value
+      ),
+      None => s,
+    );
+  let pre =
+    match core_and_pre (
+      Some { value } => (
+        let (_value, pre) = value;
+        Some(pre)
+      ),
+      None => None,
+    );
+  match core.split_once(".") (
+    Some { value } => (
+      let (major, minor_patch) = value;
+      match minor_patch.split_once(".") (
+        Some { value } => (
+          let (minor, patch) = value;
+          SemverVersion {
+            major: major.to_u64(),
+            minor: minor.to_u64(),
+            patch: patch.to_u64(),
+            pre,
+          }
+        ),
+        None => SemverVersion {
+          major: major.to_u64(),
+          minor: minor_patch.to_u64(),
+          patch: 0,
+          pre,
+        },
+      )
+    ),
+    None => SemverVersion {
+      major: core.to_u64(),
+      minor: 0,
+      patch: 0,
+      pre,
+    },
+  )
 )
 
 fn parse_semver_req(s: String) -> SemverReq (
-  // Sketch only:
-  // - parse Cargo's semver requirement syntax (`^1`, `~1.2`, `>=1,<2`, ...)
-  // - lower it to explicit comparators
-  let _s = s;
-  fail "semver requirement parser omitted from sketch"
+  if s.starts_with("^") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.Caret,
+          version: parse_semver_version(s.slice(1..)),
+        },
+      ],
+    }
+  ) else if s.starts_with("~") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.Tilde,
+          version: parse_semver_version(s.slice(1..)),
+        },
+      ],
+    }
+  ) else if s.starts_with(">=") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.GreaterEq,
+          version: parse_semver_version(s.slice(2..)),
+        },
+      ],
+    }
+  ) else if s.starts_with("<=") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.LessEq,
+          version: parse_semver_version(s.slice(2..)),
+        },
+      ],
+    }
+  ) else if s.starts_with(">") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.Greater,
+          version: parse_semver_version(s.slice(1..)),
+        },
+      ],
+    }
+  ) else if s.starts_with("<") (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.Less,
+          version: parse_semver_version(s.slice(1..)),
+        },
+      ],
+    }
+  ) else (
+    SemverReq {
+      comparators: [
+        Comparator {
+          op: ComparatorOp.Caret,
+          version: parse_semver_version(s),
+        },
+      ],
+    }
+  )
 )
 
 fn matches_semver(req: SemverReq?, version: SemverVersion) -> Bool (

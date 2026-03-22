@@ -223,11 +223,15 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                                             .and_then(|st| st.ty())
                                             .map(|t| resolver.resolve_type(&t, &type_params))
                                             .unwrap_or(Ty::Poison);
+                                        let has_default = f
+                                            .syntax()
+                                            .children()
+                                            .any(|c| vx_parser::Expr::cast(c).is_some());
                                         Some(FieldDef {
                                             name,
                                             ty,
                                             attrs: collect_field_attrs(&f),
-                                            has_default: false,
+                                            has_default,
                                             name_range,
                                         })
                                     })
