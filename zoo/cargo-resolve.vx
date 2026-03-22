@@ -1517,8 +1517,18 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
   workspace: Tree,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
-  let entries = parse_sparse_entries(Http.get(sparse_index_url(package_name)));
-  let candidates = ordered_candidate_versions(entries, request, lock_entry(lock, package_name));
+  let entries =
+    keyed(
+      registry_entries_key(package_name),
+      [package_name],
+      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
+    );
+  let candidates =
+    keyed(
+      registry_candidates_key(request),
+      [request],
+      ((ctx) => resolve_registry_candidates(merge_joined_requests(ctx.joined)) where { lock }),
+    );
 
   match candidates.find((_item) => true) (
     Some { value: _ } => (
@@ -1751,12 +1761,37 @@ fn version_assumption_name(request: DependencyRequest) -> String (
   `version:{request_key(request)}`
 )
 
+fn registry_entries_key(package_name: String) -> String (
+  `entries:registry:{package_name}`
+)
+
+fn registry_candidates_key(request: DependencyRequest) -> String (
+  `candidates:{request_key(request)}`
+)
+
 fn package_facts_key(source: DependencySource) -> String (
   `facts:{dependency_source_key(source)}`
 )
 
 fn registry_candidate_facts_key(package_name: String, version: String) -> String (
   `candidate:registry:{package_name}@{version}`
+)
+
+fn resolve_registry_entries(package_name: String) -> Array[IndexEntry] (
+  parse_sparse_entries(Http.get(sparse_index_url(package_name)))
+)
+
+fn resolve_registry_candidates(request: DependencyRequest) where {
+  lock: CargoLock?,
+} -> Array[String] (
+  let package_name = request.package_name.unwrap_or(request.name);
+  let entries =
+    keyed(
+      registry_entries_key(package_name),
+      [package_name],
+      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
+    );
+  ordered_candidate_versions(entries, request, lock_entry(lock, package_name))
 )
 
 fn resolve_registry_candidate_facts(
@@ -1796,16 +1831,24 @@ fn resolve_registry_candidate_facts(
   }
 )
 
-fn search_registry_candidate(
-  entries: Array[IndexEntry],
-  request: DependencyRequest,
-  lock: CargoLock?,
-) where {
+fn search_registry_candidate(request: DependencyRequest) where {
   config: SparseConfig,
+  lock: CargoLock?,
   target: BuildTarget,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
-  let candidates = ordered_candidate_versions(entries, request, lock_entry(lock, package_name));
+  let entries =
+    keyed(
+      registry_entries_key(package_name),
+      [package_name],
+      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
+    );
+  let candidates =
+    keyed(
+      registry_candidates_key(request),
+      [request],
+      ((ctx) => resolve_registry_candidates(merge_joined_requests(ctx.joined)) where { lock }),
+    );
 
   match candidates.find((_item) => true) (
     Some { value: _ } => (
@@ -1897,9 +1940,9 @@ fn resolve_request(request: DependencyRequest) where {
 
   match request.source (
     DependencySource.Registry => (
-      let entries = parse_sparse_entries(Http.get(sparse_index_url(package_name)));
-      search_registry_candidate(entries, request, lock) where {
+      search_registry_candidate(request) where {
         config,
+        lock,
         target,
       }
     ),
