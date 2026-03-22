@@ -1130,18 +1130,15 @@ fn apply_feature_edge(
       feature,
       weak,
     } => (
-      if weak && !state.enabled_optional_deps.any($ == dependency) (
-        state
-      ) else (
-        FeatureExpansionState {
-          ..state,
-          dependency_features: append_unique_dependency_feature(
-            state.dependency_features,
-            dependency,
-            feature,
-          ),
-        }
-      )
+      let _weak = weak;
+      FeatureExpansionState {
+        ..state,
+        dependency_features: append_unique_dependency_feature(
+          state.dependency_features,
+          dependency,
+          feature,
+        ),
+      }
     ),
   )
 )
