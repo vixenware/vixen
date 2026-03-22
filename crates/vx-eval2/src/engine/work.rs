@@ -98,6 +98,637 @@ pub(super) struct ReadyTaskLease {
     pub(super) record: ReadyTaskRecord,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum EvalPreparedIdAllocator {
+    Direct {
+        next_node_id: u64,
+        next_work_id: u64,
+    },
+    Scoped {
+        namespace: LeaseNamespace,
+    },
+}
+
+impl EvalPreparedIdAllocator {
+    fn from_base(base: &EvalScheduler) -> Self {
+        match base.lease_namespace {
+            Some(namespace) => Self::Scoped { namespace },
+            None => Self::Direct {
+                next_node_id: base.next_id,
+                next_work_id: base.next_work_id,
+            },
+        }
+    }
+
+    fn alloc_node_id(&mut self) -> EvalNodeId {
+        match self {
+            Self::Direct { next_node_id, .. } => {
+                let node_id = EvalNodeId(*next_node_id);
+                *next_node_id += 1;
+                node_id
+            }
+            Self::Scoped { namespace } => {
+                let node_id = EvalNodeId(lease_scoped_id(namespace.id, namespace.next_node_local));
+                namespace.next_node_local += 1;
+                node_id
+            }
+        }
+    }
+
+    fn alloc_work_id(&mut self) -> EvalWorkId {
+        match self {
+            Self::Direct { next_work_id, .. } => {
+                let work_id = EvalWorkId(*next_work_id);
+                *next_work_id += 1;
+                work_id
+            }
+            Self::Scoped { namespace } => {
+                let work_id = EvalWorkId(lease_scoped_id(namespace.id, namespace.next_work_local));
+                namespace.next_work_local += 1;
+                work_id
+            }
+        }
+    }
+
+    fn owner_next_id(&self, base: &EvalScheduler) -> u64 {
+        match self {
+            Self::Direct { next_node_id, .. } => *next_node_id,
+            Self::Scoped { .. } => base.next_id,
+        }
+    }
+
+    fn owner_next_work_id(&self, base: &EvalScheduler) -> u64 {
+        match self {
+            Self::Direct { next_work_id, .. } => *next_work_id,
+            Self::Scoped { .. } => base.next_work_id,
+        }
+    }
+}
+
+struct EvalPreparedScheduler<'a> {
+    base: &'a EvalScheduler,
+    allocator: EvalPreparedIdAllocator,
+    delta: RecordedSchedulerDelta,
+    queued: Vec<ReadyTaskRecord>,
+    completed_invalidated: bool,
+}
+
+impl<'a> EvalPreparedScheduler<'a> {
+    fn new(base: &'a EvalScheduler) -> Self {
+        Self {
+            base,
+            allocator: EvalPreparedIdAllocator::from_base(base),
+            delta: RecordedSchedulerDelta::default(),
+            queued: Vec::new(),
+            completed_invalidated: false,
+        }
+    }
+
+    fn finish(self) -> (EvalSchedulerDelta, bool) {
+        let mut delta = self.delta.into_delta();
+        delta.next_id = self.allocator.owner_next_id(self.base);
+        delta.next_work_id = self.allocator.owner_next_work_id(self.base);
+        delta.queued = self.queued;
+        (delta, self.completed_invalidated)
+    }
+
+    fn node_record_local(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.delta
+            .node_records
+            .get(&node_id)
+            .or_else(|| self.base.node_record(node_id))
+    }
+
+    fn node_state_local(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.delta
+            .node_states
+            .get(&node_id)
+            .or_else(|| self.base.node_state(node_id))
+    }
+
+    fn pending_kind_local(&self, pending_id: u64) -> Option<PendingKind> {
+        self.delta
+            .pending_kinds
+            .get(&pending_id)
+            .copied()
+            .or_else(|| self.base.pending_kinds.get(&pending_id).copied())
+    }
+
+    fn keyed_node_local(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
+        self.delta
+            .keyed_nodes
+            .get(&node_id)
+            .or_else(|| self.base.keyed_nodes.get(&node_id))
+    }
+
+    fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
+        if !self.delta.keyed_nodes.contains_key(&node_id) {
+            let base = self.base.keyed_nodes.get(&node_id)?.clone();
+            self.delta.keyed_nodes.insert(node_id, base);
+        }
+        self.delta.keyed_nodes.get_mut(&node_id)
+    }
+
+    fn retained_expr_local(&self, node_id: EvalNodeId) -> Option<&RetainedExprTask> {
+        self.delta
+            .retained_exprs
+            .get(&node_id)
+            .or_else(|| self.base.retained_exprs.get(&node_id))
+    }
+
+    fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
+        self.queued.iter().any(|record| record.work.id == work_id)
+            || self.base.ready_tasks.contains_key(&work_id)
+            || self.base.baseline_ready_tasks.contains(&work_id)
+    }
+
+    fn find_keyed_node(
+        &self,
+        resolver: &FunctionRef,
+        key: &Value,
+        branch_context: &EvalBranchContext,
+    ) -> Result<Option<EvalNodeId>, EvalError> {
+        for memo in self.delta.keyed_nodes.values().chain(
+            self.base
+                .keyed_nodes
+                .iter()
+                .filter(|(node_id, _)| !self.delta.keyed_nodes.contains_key(node_id))
+                .map(|(_, memo)| memo),
+        ) {
+            if memo.resolver == *resolver && memo.branch_context == *branch_context {
+                if values_equal(&memo.key.rep, &key.rep)? {
+                    return Ok(Some(memo.node_id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn dependent_nodes(&self, dependency: EvalNodeId) -> Vec<EvalNodeId> {
+        self.base
+            .dependency_edges
+            .iter()
+            .chain(self.delta.dependency_edges.iter())
+            .filter_map(|edge| (edge.child == dependency).then_some(edge.parent))
+            .collect()
+    }
+
+    fn enqueue_expr_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+        let retained = self.retained_expr_local(node_id).cloned().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("expression node {:?} has no retained replay task", node_id),
+            )
+        })?;
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateExpr(retained.scheduled),
+            EvalWorkKind::EvaluateExpr,
+            node_id,
+            None,
+            retained.branch_context,
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        if self
+            .node_record_local(node_id)
+            .and_then(|record| record.parent_id)
+            == Some(ENTRY_WORK_NODE_ID)
+        {
+            self.record_node_state(
+                ENTRY_WORK_NODE_ID,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+        let branch_context = self
+            .keyed_node_local(node_id)
+            .map(|memo| memo.branch_context.clone())
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("keyed node {:?} is not registered", node_id),
+                )
+            })?;
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateKeyed(node_id),
+            EvalWorkKind::EvaluateKeyed,
+            node_id,
+            None,
+            branch_context,
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        let keyed = self
+            .keyed_node_mut(node_id)
+            .expect("keyed node must still exist");
+        keyed.active_revision = Some(keyed.revision);
+        keyed.evaluated_revision = None;
+        Ok(())
+    }
+
+    fn invalidate_completed_dependents(
+        &mut self,
+        dependency: EvalNodeId,
+    ) -> Result<bool, EvalError> {
+        let mut invalidated = false;
+        let mut stack = self.dependent_nodes(dependency);
+        let mut seen = BTreeSet::new();
+        while let Some(node_id) = stack.pop() {
+            if !seen.insert(node_id) {
+                continue;
+            }
+            let state = self.node_state_local(node_id).cloned();
+            let reran = match state {
+                Some(EvalNodeState::Ready(_))
+                | Some(EvalNodeState::Poison(_))
+                | Some(EvalNodeState::Runnable { .. })
+                | Some(EvalNodeState::BlockedOnNode { .. })
+                | Some(EvalNodeState::Pending(_))
+                | None => {
+                    if self.keyed_node_local(node_id).is_some() {
+                        self.enqueue_keyed_work(node_id)?;
+                        true
+                    } else if self.retained_expr_local(node_id).is_some() {
+                        self.enqueue_expr_work(node_id)?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if reran {
+                invalidated = true;
+                stack.extend(self.dependent_nodes(node_id));
+            }
+        }
+        if invalidated {
+            self.completed_invalidated = true;
+        }
+        Ok(invalidated)
+    }
+
+    fn learned_no_goods<'b>(&'b self) -> impl Iterator<Item = &'b LearnedNoGood> + 'b {
+        self.delta
+            .learned_no_goods
+            .iter()
+            .chain(self.base.learned_no_goods.iter())
+    }
+
+    fn learned_search_no_goods<'b>(&'b self) -> impl Iterator<Item = &'b LearnedSearchNoGood> + 'b {
+        self.delta
+            .learned_search_no_goods
+            .iter()
+            .chain(self.base.learned_search_no_goods.iter())
+    }
+
+    fn covers_learned_no_good(&self, learned: &LearnedNoGood) -> Result<bool, EvalError> {
+        Ok(self.learned_no_goods().any(|existing| {
+            existing.branch_context == learned.branch_context
+                && existing.assumption == learned.assumption
+                && existing.resolver == learned.resolver
+                && existing.start_index <= learned.start_index
+                && learned.end_index <= existing.end_index
+                && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())
+                    .is_ok_and(|equal| equal)
+                && errors_equal_for_learning(&existing.error, &learned.error)
+                    .is_ok_and(|equal| equal)
+        }))
+    }
+}
+
+impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
+    fn alloc_node_id(&mut self) -> EvalNodeId {
+        self.allocator.alloc_node_id()
+    }
+
+    fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
+        self.delta
+            .dependency_edges
+            .push(EvalDependencyEdge { parent, child });
+    }
+
+    fn record_node(&mut self, record: EvalNodeRecord) {
+        let node_id = record.node_id;
+        if self.node_record_local(node_id).is_none() {
+            self.delta.node_records.insert(node_id, record);
+        }
+    }
+
+    fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
+        self.delta.node_states.insert(node_id, state);
+    }
+
+    fn alloc_pending(&mut self, description: Arc<str>) -> PendingRef {
+        let pending_id = self.alloc_node_id();
+        let pending = PendingRef::new(pending_id.0, description.clone());
+        self.delta
+            .pending_kinds
+            .insert(pending.node_id, PendingKind::External);
+        self.record_node(EvalNodeRecord {
+            node_id: pending_id,
+            parent_id: None,
+            kind: EvalNodeKind::PendingToken { description },
+            source: None,
+        });
+        pending
+    }
+
+    fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
+        let pending = PendingRef::new(dependency.0, "waiting on child expression");
+        self.delta
+            .pending_kinds
+            .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+        pending
+    }
+
+    fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
+        self.pending_kind_local(pending.node_id)
+    }
+
+    fn register_suspension(&mut self, suspension: EvalSuspension) {
+        self.delta
+            .pending_resumes
+            .entry(suspension.pending.node_id)
+            .or_default()
+            .push(suspension);
+    }
+
+    fn remember_expr_task(
+        &mut self,
+        node_id: EvalNodeId,
+        scheduled: ScheduledExpr,
+        branch_context: EvalBranchContext,
+    ) {
+        if self.retained_expr_local(node_id).is_none() {
+            self.delta.retained_exprs.insert(
+                node_id,
+                RetainedExprTask {
+                    scheduled,
+                    branch_context,
+                },
+            );
+        }
+    }
+
+    fn demand_keyed_node(
+        &mut self,
+        resolver: FunctionRef,
+        key: Value,
+        joined: Value,
+        branch_context: EvalBranchContext,
+        source: SourceSpan,
+    ) -> Result<EvalNodeId, EvalError> {
+        if let Some(node_id) = self.find_keyed_node(&resolver, &key, &branch_context)? {
+            let mut widened = false;
+            {
+                let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
+                let (next_joined, did_widen) = join_keyed_input(&memo.joined, &joined)?;
+                if did_widen {
+                    memo.joined = next_joined;
+                    memo.revision += 1;
+                    memo.last_update = EvalKeyedNodeUpdateReason::JoinedWidened;
+                    widened = true;
+                }
+            }
+
+            if widened {
+                match self.node_state_local(node_id).cloned() {
+                    Some(EvalNodeState::Runnable { work, .. }) if self.work_is_queued(work) => {
+                        let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
+                        memo.active_revision = Some(memo.revision);
+                    }
+                    Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_)) | None => {
+                        self.enqueue_keyed_work(node_id)?;
+                        let _ = self.invalidate_completed_dependents(node_id)?;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(node_id);
+        }
+
+        let node_id = self.alloc_node_id();
+        self.record_node(EvalNodeRecord {
+            node_id,
+            parent_id: None,
+            kind: EvalNodeKind::Keyed {
+                resolver: resolver.name.clone(),
+                key: key.clone(),
+            },
+            source: Some(source),
+        });
+        self.delta.keyed_nodes.insert(
+            node_id,
+            KeyedNodeMemo {
+                node_id,
+                resolver,
+                key,
+                joined,
+                branch_context,
+                revision: 1,
+                active_revision: None,
+                evaluated_revision: None,
+                last_update: EvalKeyedNodeUpdateReason::Created,
+            },
+        );
+        self.enqueue_keyed_work(node_id)?;
+        Ok(node_id)
+    }
+
+    fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError> {
+        let Some((active_revision, current_revision)) = self
+            .keyed_node_local(node_id)
+            .map(|memo| (memo.active_revision, memo.revision))
+        else {
+            return Ok(false);
+        };
+        let Some(active_revision) = active_revision else {
+            return Ok(false);
+        };
+        if active_revision < current_revision {
+            self.enqueue_keyed_work(node_id)?;
+            return Ok(true);
+        }
+        let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
+        memo.evaluated_revision = Some(active_revision);
+        memo.active_revision = None;
+        Ok(false)
+    }
+
+    fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>> {
+        match self.node_state_local(node_id)? {
+            EvalNodeState::Ready(value) => Some(Ok(value.clone())),
+            EvalNodeState::Poison(error) => Some(Err(error.clone())),
+            _ => None,
+        }
+    }
+
+    fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
+        self.keyed_node_local(node_id)
+    }
+
+    fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.node_state_local(node_id)
+    }
+
+    fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.node_record_local(node_id)
+    }
+
+    fn learned_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        index: usize,
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError> {
+        self.learned_no_goods()
+            .find_map(|learned| {
+                if learned.branch_context == *branch_context
+                    && learned.assumption == *assumption
+                    && learned.resolver == *resolver
+                {
+                    Some(
+                        candidate_lists_equal(learned.candidates.as_ref(), candidates).map(
+                            |equal| {
+                                (equal
+                                    && learned.start_index <= index
+                                    && index <= learned.end_index)
+                                    .then(|| learned.error.clone())
+                            },
+                        ),
+                    )
+                } else {
+                    None
+                }
+            })
+            .transpose()
+            .map(|found| found.flatten())
+    }
+
+    fn learned_search_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError> {
+        self.learned_search_no_goods()
+            .find_map(|learned| {
+                if learned.branch_context == *branch_context
+                    && learned.assumption == *assumption
+                    && learned.resolver == *resolver
+                {
+                    Some(
+                        candidate_lists_equal(learned.candidates.as_ref(), candidates)
+                            .map(|equal| equal.then(|| learned.error.clone())),
+                    )
+                } else {
+                    None
+                }
+            })
+            .transpose()
+            .map(|found| found.flatten())
+    }
+
+    fn record_learned_no_good(&mut self, learned: LearnedNoGood) -> Result<(), EvalError> {
+        if self.covers_learned_no_good(&learned)? {
+            return Ok(());
+        }
+        for existing in &mut self.delta.learned_no_goods {
+            if existing.branch_context == learned.branch_context
+                && existing.assumption == learned.assumption
+                && existing.resolver == learned.resolver
+                && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())?
+                && errors_equal_for_learning(&existing.error, &learned.error)?
+            {
+                let existing_end_plus_one = existing.end_index.saturating_add(1);
+                let learned_end_plus_one = learned.end_index.saturating_add(1);
+                let ranges_touch_or_overlap = existing.start_index <= learned_end_plus_one
+                    && learned.start_index <= existing_end_plus_one;
+                if ranges_touch_or_overlap {
+                    existing.start_index = existing.start_index.min(learned.start_index);
+                    existing.end_index = existing.end_index.max(learned.end_index);
+                    return Ok(());
+                }
+            }
+        }
+        self.delta.learned_no_goods.push(learned);
+        Ok(())
+    }
+
+    fn record_learned_search_no_good(
+        &mut self,
+        learned: LearnedSearchNoGood,
+    ) -> Result<(), EvalError> {
+        for existing in &mut self.delta.learned_search_no_goods {
+            if existing.branch_context == learned.branch_context
+                && existing.assumption == learned.assumption
+                && existing.resolver == learned.resolver
+                && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())?
+            {
+                if errors_equal_for_learning(&existing.error, &learned.error)? {
+                    return Ok(());
+                }
+                *existing = learned;
+                return Ok(());
+            }
+        }
+        if self.base.learned_search_no_goods.iter().any(|existing| {
+            existing.branch_context == learned.branch_context
+                && existing.assumption == learned.assumption
+                && existing.resolver == learned.resolver
+                && candidate_lists_equal(existing.candidates.as_ref(), learned.candidates.as_ref())
+                    .is_ok_and(|equal| equal)
+                && errors_equal_for_learning(&existing.error, &learned.error)
+                    .is_ok_and(|equal| equal)
+        }) {
+            return Ok(());
+        }
+        self.delta.learned_search_no_goods.push(learned);
+        Ok(())
+    }
+
+    fn enqueue_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        node_id: EvalNodeId,
+        pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
+    ) -> EvalQueuedWork {
+        let work = EvalQueuedWork {
+            id: self.allocator.alloc_work_id(),
+            kind,
+            node_id,
+            pending,
+        };
+        self.queued.push(ReadyTaskRecord {
+            work: work.clone(),
+            task,
+            branch_context,
+        });
+        work
+    }
+}
+
 pub(super) enum ParallelWorkerMessage {
     Completion(Result<EvalWorkCompletion, EvalError>),
     Panic(Box<dyn Any + Send + 'static>),
@@ -163,14 +794,6 @@ impl EvalScheduler {
             completed_invalidated: false,
             recorded_delta: None,
         }
-    }
-
-    pub(super) fn begin_recording_delta(&mut self) {
-        self.recorded_delta = Some(Box::default());
-    }
-
-    pub(super) fn take_recorded_delta(&mut self) -> Option<EvalSchedulerDelta> {
-        self.recorded_delta.take().map(|delta| delta.into_delta())
     }
 
     fn record_allocated_ids(&mut self) {
@@ -1301,150 +1924,133 @@ impl EvalScheduler {
     }
 }
 
+impl EvalWorkerScheduler for EvalScheduler {
+    fn alloc_node_id(&mut self) -> EvalNodeId {
+        Self::alloc_node_id(self)
+    }
+
+    fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
+        Self::record_dependency(self, parent, child);
+    }
+
+    fn record_node(&mut self, record: EvalNodeRecord) {
+        Self::record_node(self, record);
+    }
+
+    fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
+        Self::record_node_state(self, node_id, state);
+    }
+
+    fn alloc_pending(&mut self, description: Arc<str>) -> PendingRef {
+        Self::alloc_pending(self, description)
+    }
+
+    fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
+        Self::alloc_child_dependency_pending(self, dependency)
+    }
+
+    fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
+        Self::pending_kind(self, pending)
+    }
+
+    fn register_suspension(&mut self, suspension: EvalSuspension) {
+        Self::register_suspension(self, suspension);
+    }
+
+    fn remember_expr_task(
+        &mut self,
+        node_id: EvalNodeId,
+        scheduled: ScheduledExpr,
+        branch_context: EvalBranchContext,
+    ) {
+        Self::remember_expr_task(self, node_id, scheduled, branch_context);
+    }
+
+    fn demand_keyed_node(
+        &mut self,
+        resolver: FunctionRef,
+        key: Value,
+        joined: Value,
+        branch_context: EvalBranchContext,
+        source: SourceSpan,
+    ) -> Result<EvalNodeId, EvalError> {
+        Self::demand_keyed_node(self, resolver, key, joined, branch_context, source)
+    }
+
+    fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError> {
+        Self::finalize_keyed_completion(self, node_id)
+    }
+
+    fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>> {
+        Self::keyed_resolution(self, node_id)
+    }
+
+    fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
+        Self::keyed_node(self, node_id)
+    }
+
+    fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        Self::node_state(self, node_id)
+    }
+
+    fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        Self::node_record(self, node_id)
+    }
+
+    fn learned_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        index: usize,
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError> {
+        Self::learned_no_good(
+            self,
+            branch_context,
+            assumption,
+            candidates,
+            index,
+            resolver,
+        )
+    }
+
+    fn learned_search_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError> {
+        Self::learned_search_no_good(self, branch_context, assumption, candidates, resolver)
+    }
+
+    fn record_learned_no_good(&mut self, learned: LearnedNoGood) -> Result<(), EvalError> {
+        Self::record_learned_no_good(self, learned)
+    }
+
+    fn record_learned_search_no_good(
+        &mut self,
+        learned: LearnedSearchNoGood,
+    ) -> Result<(), EvalError> {
+        Self::record_learned_search_no_good(self, learned)
+    }
+
+    fn enqueue_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        node_id: EvalNodeId,
+        pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
+    ) -> EvalQueuedWork {
+        Self::enqueue_ready_task(self, task, kind, node_id, pending, branch_context)
+    }
+}
+
 fn lease_scoped_id(namespace: u64, local: u64) -> u64 {
     const LEASE_FLAG: u64 = 1 << 63;
     LEASE_FLAG | (namespace << 32) | local
-}
-
-impl EvalSchedulerDelta {
-    pub(super) fn from_diff(before: &EvalScheduler, after: &EvalScheduler) -> Self {
-        let node_records = after
-            .node_record_ids()
-            .into_iter()
-            .filter_map(|node_id| {
-                let record = after
-                    .node_record(node_id)
-                    .expect("node record id should resolve to a record");
-                (!matches!(before.node_record(node_id), Some(existing) if existing == record))
-                    .then(|| record.clone())
-            })
-            .collect();
-        let node_states = after
-            .node_state_ids()
-            .into_iter()
-            .filter_map(|node_id| {
-                let state = after
-                    .node_state(node_id)
-                    .expect("node state id should resolve to a state");
-                (!matches!(before.node_state(node_id), Some(existing) if existing == state))
-                    .then(|| (node_id, state.clone()))
-            })
-            .collect();
-        let keyed_nodes = after
-            .keyed_nodes
-            .iter()
-            .filter_map(|(node_id, keyed)| {
-                (!matches!(before.keyed_nodes.get(node_id), Some(existing) if existing == keyed))
-                    .then(|| keyed.clone())
-            })
-            .collect();
-        let dependency_edges = after.dependency_edges[before.dependency_edges.len()..].to_vec();
-        let queued = after
-            .ready_queue
-            .iter()
-            .skip(before.ready_queue.len())
-            .filter_map(|work_id| after.ready_tasks.get(work_id).cloned())
-            .collect();
-        let pending_resumes = after
-            .pending_resumes
-            .iter()
-            .flat_map(|(pending_id, suspensions)| {
-                let before_suspensions = before.pending_resumes.get(pending_id);
-                suspensions
-                    .iter()
-                    .filter(move |suspension| {
-                        !before_suspensions.is_some_and(|existing| existing.contains(suspension))
-                    })
-                    .cloned()
-                    .map(|suspension| (*pending_id, suspension))
-            })
-            .collect();
-        let pending_kinds = after
-            .pending_kinds
-            .iter()
-            .filter_map(|(pending_id, kind)| {
-                (!matches!(before.pending_kinds.get(pending_id), Some(existing) if existing == kind))
-                    .then(|| (*pending_id, *kind))
-            })
-            .collect();
-        let retained_exprs = after
-            .retained_exprs
-            .iter()
-            .filter_map(|(node_id, retained)| {
-                (!matches!(before.retained_exprs.get(node_id), Some(existing) if existing == retained))
-                    .then(|| (*node_id, retained.clone()))
-            })
-            .collect();
-        let learned_no_goods = after
-            .learned_no_goods
-            .iter()
-            .filter(|learned| !before.learned_no_goods.contains(*learned))
-            .cloned()
-            .collect();
-        let learned_search_no_goods = after
-            .learned_search_no_goods
-            .iter()
-            .filter(|learned| !before.learned_search_no_goods.contains(*learned))
-            .cloned()
-            .collect();
-        Self {
-            next_id: after.next_id,
-            next_work_id: after.next_work_id,
-            node_records,
-            keyed_nodes,
-            node_states,
-            dependency_edges,
-            queued,
-            pending_resumes,
-            pending_kinds,
-            retained_exprs,
-            learned_no_goods,
-            learned_search_no_goods,
-        }
-    }
-
-    pub(super) fn retain_changes_against(&mut self, before: &EvalScheduler) {
-        self.node_records.retain(|record| {
-            !matches!(
-                before.node_records.get(&record.node_id),
-                Some(existing) if existing == record
-            )
-        });
-        self.node_states.retain(|(node_id, state)| {
-            !matches!(
-                before.node_states.get(node_id),
-                Some(existing) if existing == state
-            )
-        });
-        self.keyed_nodes.retain(|keyed| {
-            !matches!(
-                before.keyed_nodes.get(&keyed.node_id),
-                Some(existing) if existing == keyed
-            )
-        });
-        self.pending_kinds.retain(|(pending_id, kind)| {
-            !matches!(
-                before.pending_kinds.get(pending_id),
-                Some(existing) if existing == kind
-            )
-        });
-        self.pending_resumes.retain(|(pending_id, suspension)| {
-            !before
-                .pending_resumes
-                .get(pending_id)
-                .is_some_and(|existing| existing.contains(suspension))
-        });
-        self.retained_exprs.retain(|(node_id, retained)| {
-            !matches!(
-                before.retained_exprs.get(node_id),
-                Some(existing) if existing == retained
-            )
-        });
-        self.learned_no_goods
-            .retain(|learned| !before.learned_no_goods.contains(learned));
-        self.learned_search_no_goods
-            .retain(|learned| !before.learned_search_no_goods.contains(learned));
-    }
 }
 
 pub(super) fn execute_ready_task(
@@ -1464,10 +2070,8 @@ pub(super) fn execute_ready_task(
     ),
     EvalError,
 > {
-    let validate_recorded_delta = std::env::var_os("VX_EVAL2_VALIDATE_RECORDED_DELTAS").is_some();
-    let mut after = scheduler;
-    let before = validate_recorded_delta.then(|| after.clone());
-    after.begin_recording_delta();
+    let base = scheduler;
+    let mut prepared_scheduler = EvalPreparedScheduler::new(&base);
     let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
         program.as_ref(),
@@ -1476,7 +2080,7 @@ pub(super) fn execute_ready_task(
         runtime,
         place,
         &mut trace,
-        &mut after,
+        &mut prepared_scheduler,
         Some(record.work.id),
         true,
         call_profiling,
@@ -1739,23 +2343,13 @@ pub(super) fn execute_ready_task(
         }
     };
 
-    let mut recorded_delta = after
-        .take_recorded_delta()
-        .expect("worker scheduler should record a delta");
-    recorded_delta.next_id = after.next_id;
-    recorded_delta.next_work_id = after.next_work_id;
-    if let Some(before) = before {
-        let mut filtered_delta = recorded_delta.clone();
-        filtered_delta.retain_changes_against(&before);
-        let diff_delta = EvalSchedulerDelta::from_diff(&before, &after);
-        debug_assert_eq!(filtered_delta, diff_delta);
-    }
+    let (recorded_delta, completed_invalidated) = prepared_scheduler.finish();
 
     Ok((
         EvalSessionDelta {
             scheduler: recorded_delta,
             trace_events: trace.events,
-            completed_invalidated: after.completed_invalidated,
+            completed_invalidated,
         },
         outcome,
         invocation,

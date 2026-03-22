@@ -75,6 +75,64 @@ pub trait RuntimeHooks: Send + Sync {
     }
 }
 
+trait EvalWorkerScheduler {
+    fn alloc_node_id(&mut self) -> EvalNodeId;
+    fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId);
+    fn record_node(&mut self, record: EvalNodeRecord);
+    fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState);
+    fn alloc_pending(&mut self, description: Arc<str>) -> PendingRef;
+    fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef;
+    fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind>;
+    fn register_suspension(&mut self, suspension: EvalSuspension);
+    fn remember_expr_task(
+        &mut self,
+        node_id: EvalNodeId,
+        scheduled: ScheduledExpr,
+        branch_context: EvalBranchContext,
+    );
+    fn demand_keyed_node(
+        &mut self,
+        resolver: FunctionRef,
+        key: Value,
+        joined: Value,
+        branch_context: EvalBranchContext,
+        source: SourceSpan,
+    ) -> Result<EvalNodeId, EvalError>;
+    fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError>;
+    fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>>;
+    fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo>;
+    fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState>;
+    fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord>;
+    fn learned_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        index: usize,
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError>;
+    fn learned_search_no_good(
+        &self,
+        branch_context: &EvalBranchContext,
+        assumption: &Arc<str>,
+        candidates: &[Value],
+        resolver: &FunctionRef,
+    ) -> Result<Option<EvalError>, EvalError>;
+    fn record_learned_no_good(&mut self, learned: LearnedNoGood) -> Result<(), EvalError>;
+    fn record_learned_search_no_good(
+        &mut self,
+        learned: LearnedSearchNoGood,
+    ) -> Result<(), EvalError>;
+    fn enqueue_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        node_id: EvalNodeId,
+        pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
+    ) -> EvalQueuedWork;
+}
+
 struct NoRuntime;
 
 impl RuntimeHooks for NoRuntime {
