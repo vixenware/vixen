@@ -1531,25 +1531,16 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
         candidates,
         (() => (
           let version = branch_assumption(version_assumption_name(request));
-          let chosen =
-            keyed(
-              registry_entry_key(package_name, version),
-              [version],
-              ((ctx) => resolve_registry_entry(package_name, array_first(ctx.joined))),
-            );
-          let facts =
-            keyed(
-              registry_candidate_facts_key(package_name, version),
-              [version],
-              ((ctx) => resolve_registry_candidate_facts(chosen) where { config }),
-            );
-          let crate = activate_package_facts(facts, request) where { target };
-          validate_package_graph(crate) where {
-            config,
-            lock,
-            target,
-            workspace,
-          }
+          keyed(
+            registry_candidate_package_key(request, version),
+            [request],
+            ((ctx) => resolve_registry_candidate_package(merge_joined_requests(ctx.joined), version) where {
+              config,
+              lock,
+              target,
+              workspace,
+            }),
+          )
         )),
       )
     ),
@@ -1776,6 +1767,10 @@ fn registry_candidate_facts_key(package_name: String, version: String) -> String
   `candidate:registry:{package_name}@{version}`
 )
 
+fn registry_candidate_package_key(request: DependencyRequest, version: String) -> String (
+  `package:{request_key(request)}:{version}`
+)
+
 fn resolve_registry_entries(package_name: String) -> Array[IndexEntry] (
   parse_sparse_entries(Http.get(sparse_index_url(package_name)))
 )
@@ -1835,10 +1830,39 @@ fn resolve_registry_candidate_facts(chosen: IndexEntry) where {
   }
 )
 
+fn resolve_registry_candidate_package(request: DependencyRequest, version: String) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> ResolvedCrate (
+  let package_name = request.package_name.unwrap_or(request.name);
+  let chosen =
+    keyed(
+      registry_entry_key(package_name, version),
+      [version],
+      ((ctx) => resolve_registry_entry(package_name, array_first(ctx.joined))),
+    );
+  let facts =
+    keyed(
+      registry_candidate_facts_key(package_name, version),
+      [version],
+      ((ctx) => resolve_registry_candidate_facts(chosen) where { config }),
+    );
+  let crate = activate_package_facts(facts, request) where { target };
+  validate_package_graph(crate) where {
+    config,
+    lock,
+    target,
+    workspace,
+  }
+)
+
 fn search_registry_candidate(request: DependencyRequest) where {
   config: SparseConfig,
   lock: CargoLock?,
   target: BuildTarget,
+  workspace: Tree,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
   let candidates =
@@ -1855,18 +1879,16 @@ fn search_registry_candidate(request: DependencyRequest) where {
         candidates,
         (() => (
           let version = branch_assumption(version_assumption_name(request));
-          let chosen =
-            keyed(
-              registry_entry_key(package_name, version),
-              [version],
-              ((ctx) => resolve_registry_entry(package_name, array_first(ctx.joined))),
-            );
-          activate_package_facts(
-            resolve_registry_candidate_facts(chosen) where {
+          keyed(
+            registry_candidate_package_key(request, version),
+            [request],
+            ((ctx) => resolve_registry_candidate_package(merge_joined_requests(ctx.joined), version) where {
               config,
-            },
-            request,
-          ) where { target }
+              lock,
+              target,
+              workspace,
+            }),
+          )
         )),
       )
     ),
@@ -1948,6 +1970,7 @@ fn resolve_request(request: DependencyRequest) where {
         config,
         lock,
         target,
+        workspace,
       }
     ),
     DependencySource.LocalPath { base: _, path: _ } =>
