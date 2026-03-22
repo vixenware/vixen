@@ -1,5 +1,5 @@
 use super::*;
-use vx_parser::MatchExpr;
+use vx_parser::{MatchExpr, PathLiteralExpr};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -409,6 +409,9 @@ pub(super) fn eval_expr_with_node_id(
     let result = match expr {
         Expr::Block(block) => eval_block(state, block, env),
         Expr::Literal(literal) => eval_literal(state, literal).map(EvalStep::Ready),
+        Expr::PathLiteral(path_literal) => {
+            eval_path_literal(state, path_literal).map(EvalStep::Ready)
+        }
         Expr::Paren(paren) => match paren.expr() {
             Some(inner) => match eval_child_expr(state, &inner, env)? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
@@ -790,6 +793,9 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
     match (&receiver.rep, field_name) {
         (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Blob" => {
             Some("Blob.utf8")
+        }
+        (ValueRep::External(external), "file") if external.kind.as_ref() == "Tree" => {
+            Some("Tree.file")
         }
         (ValueRep::String(_), "len") => Some("String.len"),
         (ValueRep::String(_), "is_empty") => Some("String.is_empty"),
@@ -3023,6 +3029,7 @@ pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
     match expr {
         Expr::Block(_) => EvalExprKind::Block,
         Expr::Literal(_) => EvalExprKind::Literal,
+        Expr::PathLiteral(_) => EvalExprKind::Literal,
         Expr::Paren(_) => EvalExprKind::Paren,
         Expr::Closure(_) => EvalExprKind::Closure,
         Expr::NameRef(_) => EvalExprKind::NameRef,
@@ -3488,4 +3495,41 @@ pub(super) fn eval_literal(
             format!("unsupported literal token: {other:?}"),
         )),
     }
+}
+
+pub(super) fn eval_path_literal(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    path_literal: &PathLiteralExpr,
+) -> Result<Value, EvalError> {
+    let path_source = state.span_for_node(path_literal);
+    let text = path_literal.syntax().text().to_string();
+    let descriptor = if let Some(path) = text.strip_prefix('@') {
+        if let Some(template) = path.strip_prefix('(') {
+            let Some(inner) = template.strip_suffix(')') else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "path literal template was missing closing ')'",
+                ));
+            };
+            if inner.contains('{') {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "interpolated path literals are not supported yet",
+                ));
+            }
+            inner.to_string()
+        } else {
+            path.to_string()
+        }
+    } else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "path literal text was missing '@' prefix",
+        ));
+    };
+
+    Ok(Value::external("Path", descriptor)
+        .with_provenance(Provenance::literal(path_source))
+        .with_reuse(ReuseClass::Stable)
+        .with_crossing(CrossingPolicy::ByValue))
 }

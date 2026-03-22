@@ -20,6 +20,7 @@ enum CargoDependencySpec {
     features: Array[String] = [],
     default_features: Bool = true,
     optional: Bool = false,
+    workspace: Bool = false,
     path: String?,
     git: String?,
     package: String?,
@@ -34,12 +35,21 @@ struct CargoManifest {
   build_dependencies: Map[String, CargoDependencySpec] = %{},
   features: Map[String, Array[String]] = %{},
   target: Map[String, CargoTargetTable] = %{},
+  workspace: CargoWorkspace?,
 }
 
 struct CargoPackage {
   name: String,
   version: String,
   edition: String = "2021",
+}
+
+struct CargoWorkspace {
+  dependencies: Map[String, CargoDependencySpec] = %{},
+}
+
+struct CargoWorkspaceRootManifest {
+  workspace: CargoWorkspace,
 }
 
 #[rename_all = "kebab-case"]
@@ -58,6 +68,10 @@ struct LockedPackage {
   version: String,
   source: String?,
   checksum: String?,
+}
+
+struct WorkspaceDependencyMissing {
+  name: String,
 }
 
 struct DependencyRequest {
@@ -330,23 +344,43 @@ fn crate_download_url(config: SparseConfig, name: String, version: String, check
 fn manifest_requests(manifest: CargoManifest) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
+  manifest_requests_with_workspace(manifest, %{}) where { target }
+)
+
+fn manifest_requests_with_workspace(
+  manifest: CargoManifest,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
   [
     ..manifest.dependencies
-      .map((name, dep) => request_from_dep(name, dep, "normal"))
+      .map((name, dep) => request_from_dep_with_workspace(name, dep, "normal", workspace_dependencies))
       .to_array(),
     ..manifest.dev_dependencies
-      .map((name, dep) => request_from_dep(name, dep, "dev"))
+      .map((name, dep) => request_from_dep_with_workspace(name, dep, "dev", workspace_dependencies))
       .to_array(),
     ..manifest.build_dependencies
-      .map((name, dep) => request_from_dep(name, dep, "build"))
+      .map((name, dep) => request_from_dep_with_workspace(name, dep, "build", workspace_dependencies))
       .to_array(),
     ..manifest.target
-      .map((selector, table) => target_requests(selector, table) where { target })
+      .map((selector, table) => (
+        target_requests_with_workspace(selector, table, workspace_dependencies) where { target }
+      ))
       .flatten(),
   ]
 )
 
 fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> DependencyRequest (
+  request_from_dep_with_workspace(name, dep, kind, %{})
+)
+
+fn request_from_dep_with_workspace(
+  name: String,
+  dep: CargoDependencySpec,
+  kind: String,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) -> DependencyRequest (
   match dep (
     Version { value } => DependencyRequest {
       name,
@@ -364,34 +398,73 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
       features,
       default_features,
       optional,
+      workspace,
       path,
       git,
       package,
     } => (
-      DependencyRequest {
-        name,
-        package_name: package,
-        version_req:
-          match version (
-            Some { value } => Some(parse_semver_req(value)),
-            None => None,
-          ),
-        features,
-        default_features,
-        optional,
-        kind,
-        target: None,
-        source:
-          match path (
-            Some { value } => DependencySource.Path { path: value },
-            None => (
-              match git (
-                Some { value } => DependencySource.Git { url: value },
-                None => DependencySource.Registry,
-              )
+      if workspace (
+        if workspace_dependencies.has(name) (
+          let inherited =
+            request_from_dep_with_workspace(name, workspace_dependencies.get(name), kind, %{})
+          ;
+          DependencyRequest {
+            name,
+            package_name:
+              match package (
+                Some { value } => Some(value),
+                None => inherited.package_name,
+              ),
+            version_req:
+              match version (
+                Some { value } => Some(parse_semver_req(value)),
+                None => inherited.version_req,
+              ),
+            features: [..inherited.features, ..features],
+            default_features: inherited.default_features && default_features,
+            optional: inherited.optional || optional,
+            kind,
+            target: None,
+            source:
+              match path (
+                Some { value } => DependencySource.Path { path: value },
+                None => (
+                  match git (
+                    Some { value } => DependencySource.Git { url: value },
+                    None => inherited.source,
+                  )
+                ),
+              ),
+          }
+        ) else (
+          fail WorkspaceDependencyMissing { name }
+        )
+      ) else (
+        DependencyRequest {
+          name,
+          package_name: package,
+          version_req:
+            match version (
+              Some { value } => Some(parse_semver_req(value)),
+              None => None,
             ),
-          ),
-      }
+          features,
+          default_features,
+          optional,
+          kind,
+          target: None,
+          source:
+            match path (
+              Some { value } => DependencySource.Path { path: value },
+              None => (
+                match git (
+                  Some { value } => DependencySource.Git { url: value },
+                  None => DependencySource.Registry,
+                )
+              ),
+            ),
+        }
+      )
     ),
   )
 )
@@ -746,17 +819,27 @@ fn split_top_level_args(s: String) -> Array[String] (
 fn target_requests(selector: String, table: CargoTargetTable) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
+  target_requests_with_workspace(selector, table, %{}) where { target }
+)
+
+fn target_requests_with_workspace(
+  selector: String,
+  table: CargoTargetTable,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
   if selector_matches(target, parse_target_selector(selector)) (
     [
       ..table.dependencies
         .map((name, dep) => (
-          let req = request_from_dep(name, dep, "normal");
+          let req = request_from_dep_with_workspace(name, dep, "normal", workspace_dependencies);
           DependencyRequest { ..req, target: selector }
         ))
         .to_array(),
       ..table.build_dependencies
         .map((name, dep) => (
-          let req = request_from_dep(name, dep, "build");
+          let req = request_from_dep_with_workspace(name, dep, "build", workspace_dependencies);
           DependencyRequest { ..req, target: selector }
         ))
         .to_array(),
@@ -764,6 +847,14 @@ fn target_requests(selector: String, table: CargoTargetTable) where {
   ) else (
     []
   )
+)
+
+fn workspace_root_dependencies_from_blob(blob: Blob) -> Map[String, CargoDependencySpec] (
+  Toml.parse[CargoWorkspaceRootManifest](blob).workspace.dependencies
+)
+
+fn workspace_root_dependencies(workspace: Tree) -> Map[String, CargoDependencySpec] (
+  workspace_root_dependencies_from_blob(workspace.file(@Cargo.toml))
 )
 
 fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
@@ -1266,7 +1357,9 @@ fn resolve_request(request: DependencyRequest) where {
     DependencySource.Path { path } => (
       let dep_root = Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
-      let dependency_requests = manifest_requests(dep_manifest) where { target };
+      let dependency_requests =
+        manifest_requests_with_workspace(dep_manifest, workspace_root_dependencies(workspace))
+          where { target };
       let features = unify_features(
         dep_manifest.features,
         optional_dependency_names(dependency_requests),
@@ -1329,7 +1422,9 @@ fn resolve_manifest(manifest: CargoManifest) where {
   workspace: Tree,
 } #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
-  let requests = manifest_requests(manifest) where { target };
+  let requests =
+    manifest_requests_with_workspace(manifest, workspace_root_dependencies(workspace))
+      where { target };
   resolve_graph(requests) where { config, lock, target, workspace }
 )
 

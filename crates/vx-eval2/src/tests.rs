@@ -281,6 +281,54 @@ impl RuntimeHooks for CargoSketchRuntime {
                         .with_crossing(CrossingPolicy::ByValue),
                 ))
             }
+            "Tree.file" => {
+                if args.len() != 2 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Tree.file() requires receiver and one path-like argument",
+                    ));
+                }
+                let ValueRep::External(tree) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Tree.file() receiver must evaluate to Tree",
+                    ));
+                };
+                if tree.kind.as_ref() != "Tree" {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Tree.file() receiver must evaluate to Tree",
+                    ));
+                }
+                let rel_path = match &args[1].rep {
+                    ValueRep::String(path) => path.clone(),
+                    ValueRep::External(external) if external.kind.as_ref() == "Path" => {
+                        external.descriptor.clone()
+                    }
+                    _ => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            "Tree.file() path must evaluate to String or Path",
+                        ));
+                    }
+                };
+                let full_path = self
+                    .root_dir
+                    .join(tree.descriptor.as_ref())
+                    .join(rel_path.as_ref());
+                let contents = fs::read_to_string(&full_path).map_err(|error| {
+                    EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("Tree.file() failed for {}: {error}", full_path.display()),
+                    )
+                })?;
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
             "Http.get" => {
                 if args.len() != 1 {
                     return Err(EvalError::new(
@@ -2267,6 +2315,7 @@ fn zoo_cargo_manifest_requests_execute_against_real_manifest() {
                 "main.vx",
                 r#"
 struct Summary {
+  has_eyre: Bool,
   has_flate2: Bool,
   has_dev_deps: Bool,
   has_build_deps: Bool,
@@ -2274,7 +2323,11 @@ struct Summary {
 
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
-  let requests = manifest_requests(manifest) where {
+  let requests =
+    manifest_requests_with_workspace(
+      manifest,
+      workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+    ) where {
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
       cfg: [
@@ -2291,6 +2344,7 @@ fn build() {
     },
   };
   Summary {
+    has_eyre: requests.any($.name == "eyre"),
     has_flate2: requests.any($.name == "flate2"),
     has_dev_deps: requests.any($.kind == "dev"),
     has_build_deps: requests.any($.kind == "build"),
@@ -2314,6 +2368,7 @@ fn build() {
         panic!("expected ready zoo cargo manifest_requests result, got {resolution:?}");
     };
 
+    assert_eq!(struct_field(&value, "has_eyre").rep, ValueRep::Bool(true));
     assert_eq!(struct_field(&value, "has_flate2").rep, ValueRep::Bool(true));
     assert_eq!(
         struct_field(&value, "has_dev_deps").rep,
@@ -2343,7 +2398,11 @@ struct Summary {
 
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
-  let requests = manifest_requests(manifest) where {
+  let requests =
+    manifest_requests_with_workspace(
+      manifest,
+      workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+    ) where {
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
       cfg: [
@@ -2415,7 +2474,10 @@ fn zoo_cargo_resolve_request_executes_real_registry_path() {
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
   let request =
-    (manifest_requests(manifest) where {
+    (manifest_requests_with_workspace(
+      manifest,
+      workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+    ) where {
       target: BuildTarget {
         triple: "aarch64-apple-darwin",
         cfg: [
