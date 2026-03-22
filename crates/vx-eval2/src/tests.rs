@@ -161,6 +161,64 @@ fn maybe_print_session_profile(name: &str, session: &EvalSession<'_, impl Runtim
     }
 }
 
+fn ready_root_ids(value: &Value) -> Vec<&str> {
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected roots array, got {value:?}");
+    };
+    items
+        .iter()
+        .map(|item| match &struct_field(item, "value").rep {
+            ValueRep::String(text) => text.as_ref(),
+            other => panic!("expected PackageId string value, got {other:?}"),
+        })
+        .collect()
+}
+
+fn keyed_ready_resolved_crates<'a>(snapshot: &'a crate::EvalGraphSnapshot) -> Vec<&'a Value> {
+    snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.keyed.is_some())
+        .filter_map(|node| match &node.state {
+            Some(EvalNodeState::Ready(value)) => {
+                let ValueRep::Struct(struct_value) = &value.rep else {
+                    return None;
+                };
+                (struct_value.type_name.as_ref() == "ResolvedCrate").then_some(value)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn resolved_crates_contain_name(snapshot: &crate::EvalGraphSnapshot, name: &str) -> bool {
+    keyed_ready_resolved_crates(snapshot)
+        .iter()
+        .any(|crate_value| {
+            matches!(
+                &struct_field(crate_value, "name").rep,
+                ValueRep::String(text) if text.as_ref() == name
+            )
+        })
+}
+
+fn resolved_crate_version(snapshot: &crate::EvalGraphSnapshot, name: &str) -> Option<Arc<str>> {
+    keyed_ready_resolved_crates(snapshot)
+        .into_iter()
+        .find(|crate_value| {
+            matches!(
+                &struct_field(crate_value, "name").rep,
+                ValueRep::String(text) if text.as_ref() == name
+            )
+        })
+        .map(
+            |crate_value| match &struct_field(crate_value, "version").rep {
+                ValueRep::String(text) => text.clone(),
+                other => panic!("expected crate version string, got {other:?}"),
+            },
+        )
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -2736,15 +2794,9 @@ fn zoo_cargo_resolve_manifest_backtracks_from_bad_locked_registry_candidate() {
             (
                 "main.vx",
                 r##"
-struct Summary {
-  root_logger: Bool,
-  logger_version: String,
-  has_helper: Bool,
-}
-
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/registry_real/cargo-backtrack-root.toml"));
-  let resolution = resolve_manifest(manifest) where {
+  demand_manifest(manifest) where {
     lock:
       Some {
         value:
@@ -2774,16 +2826,6 @@ fn build() {
       ],
     },
     workspace: Tree("."),
-  };
-
-  Summary {
-    root_logger: resolution.roots.any($.value == "registry:logger@1.1.0"),
-    logger_version:
-      match resolution.packages.find($.name == "logger") (
-        Some { value } => value.version,
-        None => "missing",
-      ),
-    has_helper: resolution.packages.any($.name == "helper"),
   }
 }
 "##,
@@ -2821,19 +2863,15 @@ fn build() {
             format_session_diagnostics(&session, &resolution)
         );
     };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
 
+    assert!(roots.contains(&"registry:logger@1.1.0"));
     assert_eq!(
-        struct_field(&value, "root_logger").rep,
-        ValueRep::Bool(true)
+        resolved_crate_version(&snapshot, "logger"),
+        Some(Arc::from("1.1.0"))
     );
-    assert_eq!(
-        struct_field(&value, "logger_version").rep,
-        ValueRep::String("1.1.0".into())
-    );
-    assert_eq!(
-        struct_field(&value, "has_helper").rep,
-        ValueRep::Bool(false)
-    );
+    assert!(!resolved_crates_contain_name(&snapshot, "helper"));
 }
 
 #[test]
@@ -2940,21 +2978,9 @@ fn zoo_cargo_resolve_manifest_executes_local_workspace_manifest_with_real_regist
             (
                 "main.vx",
                 r##"
-struct Summary {
-  root_rowan: Bool,
-  has_rowan: Bool,
-  has_countme: Bool,
-  has_hashbrown: Bool,
-  has_rustc_hash: Bool,
-  has_text_size: Bool,
-  has_serde: Bool,
-  has_ahash: Bool,
-  has_allocator_api2: Bool,
-}
-
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("crates/vx-parser/Cargo.toml"));
-  let resolution = resolve_manifest_at(manifest, @crates/vx-parser) where {
+  demand_manifest_at(manifest, @crates/vx-parser) where {
     lock: None,
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
@@ -2971,18 +2997,6 @@ fn build() {
       ],
     },
     workspace: Tree("."),
-  };
-
-  Summary {
-    root_rowan: resolution.roots.any($.value == "registry:rowan@0.16.1"),
-    has_rowan: resolution.packages.any($.name == "rowan"),
-    has_countme: resolution.packages.any($.name == "countme"),
-    has_hashbrown: resolution.packages.any($.name == "hashbrown"),
-    has_rustc_hash: resolution.packages.any($.name == "rustc-hash"),
-    has_text_size: resolution.packages.any($.name == "text-size"),
-    has_serde: resolution.packages.any($.name == "serde"),
-    has_ahash: resolution.packages.any($.name == "ahash"),
-    has_allocator_api2: resolution.packages.any($.name == "allocator-api2"),
   }
 }
 "##,
@@ -3055,31 +3069,18 @@ fn build() {
             format_session_diagnostics(&session, &resolution)
         );
     };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
 
-    assert_eq!(struct_field(&value, "root_rowan").rep, ValueRep::Bool(true));
-    assert_eq!(struct_field(&value, "has_rowan").rep, ValueRep::Bool(true));
-    assert_eq!(
-        struct_field(&value, "has_countme").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_hashbrown").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_rustc_hash").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_text_size").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(struct_field(&value, "has_serde").rep, ValueRep::Bool(false));
-    assert_eq!(struct_field(&value, "has_ahash").rep, ValueRep::Bool(false));
-    assert_eq!(
-        struct_field(&value, "has_allocator_api2").rep,
-        ValueRep::Bool(false)
-    );
+    assert!(roots.contains(&"registry:rowan@0.16.1"));
+    assert!(resolved_crates_contain_name(&snapshot, "rowan"));
+    assert!(resolved_crates_contain_name(&snapshot, "countme"));
+    assert!(resolved_crates_contain_name(&snapshot, "hashbrown"));
+    assert!(resolved_crates_contain_name(&snapshot, "rustc-hash"));
+    assert!(resolved_crates_contain_name(&snapshot, "text-size"));
+    assert!(!resolved_crates_contain_name(&snapshot, "serde"));
+    assert!(!resolved_crates_contain_name(&snapshot, "ahash"));
+    assert!(!resolved_crates_contain_name(&snapshot, "allocator-api2"));
 }
 
 #[test]
@@ -3097,21 +3098,9 @@ fn zoo_cargo_resolve_manifest_executes_local_workspace_manifest_from_local_spars
             (
                 "main.vx",
                 r##"
-struct Summary {
-  root_rowan: Bool,
-  has_rowan: Bool,
-  has_countme: Bool,
-  has_hashbrown: Bool,
-  has_rustc_hash: Bool,
-  has_text_size: Bool,
-  has_serde: Bool,
-  has_ahash: Bool,
-  has_allocator_api2: Bool,
-}
-
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("crates/vx-parser/Cargo.toml"));
-  let resolution = resolve_manifest_at(manifest, @crates/vx-parser) where {
+  demand_manifest_at(manifest, @crates/vx-parser) where {
     lock: None,
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
@@ -3128,18 +3117,6 @@ fn build() {
       ],
     },
     workspace: Tree("."),
-  };
-
-  Summary {
-    root_rowan: resolution.roots.any($.value == "registry:rowan@0.16.1"),
-    has_rowan: resolution.packages.any($.name == "rowan"),
-    has_countme: resolution.packages.any($.name == "countme"),
-    has_hashbrown: resolution.packages.any($.name == "hashbrown"),
-    has_rustc_hash: resolution.packages.any($.name == "rustc-hash"),
-    has_text_size: resolution.packages.any($.name == "text-size"),
-    has_serde: resolution.packages.any($.name == "serde"),
-    has_ahash: resolution.packages.any($.name == "ahash"),
-    has_allocator_api2: resolution.packages.any($.name == "allocator-api2"),
   }
 }
 "##,
@@ -3202,31 +3179,18 @@ fn build() {
             format_session_diagnostics(&session, &resolution)
         );
     };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
 
-    assert_eq!(struct_field(&value, "root_rowan").rep, ValueRep::Bool(true));
-    assert_eq!(struct_field(&value, "has_rowan").rep, ValueRep::Bool(true));
-    assert_eq!(
-        struct_field(&value, "has_countme").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_hashbrown").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_rustc_hash").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_text_size").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(struct_field(&value, "has_serde").rep, ValueRep::Bool(false));
-    assert_eq!(struct_field(&value, "has_ahash").rep, ValueRep::Bool(false));
-    assert_eq!(
-        struct_field(&value, "has_allocator_api2").rep,
-        ValueRep::Bool(false)
-    );
+    assert!(roots.contains(&"registry:rowan@0.16.1"));
+    assert!(resolved_crates_contain_name(&snapshot, "rowan"));
+    assert!(resolved_crates_contain_name(&snapshot, "countme"));
+    assert!(resolved_crates_contain_name(&snapshot, "hashbrown"));
+    assert!(resolved_crates_contain_name(&snapshot, "rustc-hash"));
+    assert!(resolved_crates_contain_name(&snapshot, "text-size"));
+    assert!(!resolved_crates_contain_name(&snapshot, "serde"));
+    assert!(!resolved_crates_contain_name(&snapshot, "ahash"));
+    assert!(!resolved_crates_contain_name(&snapshot, "allocator-api2"));
 }
 
 #[test]
@@ -3332,19 +3296,9 @@ fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
             (
                 "main.vx",
                 r##"
-struct Summary {
-  root_crc32fast: Bool,
-  root_miniz_oxide: Bool,
-  has_crc32fast: Bool,
-  has_cfg_if: Bool,
-  has_miniz_oxide: Bool,
-  has_adler2: Bool,
-  has_simd_adler32: Bool,
-}
-
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/registry_real/cargo-transitive-root.toml"));
-  let resolution = resolve_manifest(manifest) where {
+  demand_manifest(manifest) where {
     lock: None,
     target: BuildTarget {
       triple: "x86_64-unknown-linux-gnu",
@@ -3361,16 +3315,6 @@ fn build() {
       ],
     },
     workspace: Tree("."),
-  };
-
-  Summary {
-    root_crc32fast: resolution.roots.any($.value == "registry:crc32fast@1.5.0"),
-    root_miniz_oxide: resolution.roots.any($.value == "registry:miniz_oxide@0.8.9"),
-    has_crc32fast: resolution.packages.any($.name == "crc32fast"),
-    has_cfg_if: resolution.packages.any($.name == "cfg-if"),
-    has_miniz_oxide: resolution.packages.any($.name == "miniz_oxide"),
-    has_adler2: resolution.packages.any($.name == "adler2"),
-    has_simd_adler32: resolution.packages.any($.name == "simd-adler32"),
   }
 }
 "##,
@@ -3443,29 +3387,16 @@ fn build() {
             format_session_diagnostics(&session, &resolution)
         );
     };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
 
-    assert_eq!(
-        struct_field(&value, "root_crc32fast").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "root_miniz_oxide").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(
-        struct_field(&value, "has_crc32fast").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(struct_field(&value, "has_cfg_if").rep, ValueRep::Bool(true));
-    assert_eq!(
-        struct_field(&value, "has_miniz_oxide").rep,
-        ValueRep::Bool(true)
-    );
-    assert_eq!(struct_field(&value, "has_adler2").rep, ValueRep::Bool(true));
-    assert_eq!(
-        struct_field(&value, "has_simd_adler32").rep,
-        ValueRep::Bool(true)
-    );
+    assert!(roots.contains(&"registry:crc32fast@1.5.0"));
+    assert!(roots.contains(&"registry:miniz_oxide@0.8.9"));
+    assert!(resolved_crates_contain_name(&snapshot, "crc32fast"));
+    assert!(resolved_crates_contain_name(&snapshot, "cfg-if"));
+    assert!(resolved_crates_contain_name(&snapshot, "miniz_oxide"));
+    assert!(resolved_crates_contain_name(&snapshot, "adler2"));
+    assert!(resolved_crates_contain_name(&snapshot, "simd-adler32"));
 }
 
 #[test]
