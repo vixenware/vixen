@@ -5482,6 +5482,123 @@ fn build() {
     );
 }
 
+#[test]
+fn session_call_profile_isolates_cargo_parse_semver_version() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r#"
+fn build() {
+  [
+    parse_semver_version("1.2.3"),
+    parse_semver_version("1.2.3"),
+    parse_semver_version("1.2.3"),
+    parse_semver_version("1.2.3"),
+    parse_semver_version("1.2.3"),
+    parse_semver_version("1.2.3"),
+  ]
+}
+"#,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = UnsupportedRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+    session.set_call_profiling_enabled(true);
+
+    let Resolution::Ready(value) = session.run().expect("run isolated semver version profile")
+    else {
+        panic!("expected ready isolated semver version profile result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {value:?}");
+    };
+    assert_eq!(items.len(), 6);
+    maybe_print_session_profile(
+        "session_call_profile_isolates_cargo_parse_semver_version",
+        &session,
+    );
+
+    let summary = session.call_profile().summary;
+    let entry = summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "parse_semver_version")
+        .expect("parse_semver_version summary entry");
+    assert_eq!(entry.runs, 6);
+    assert_eq!(entry.distinct_input_count, 1);
+    assert_eq!(entry.repeated_input_count, 5);
+}
+
+#[test]
+fn session_call_profile_isolates_cargo_parse_semver_req() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r#"
+fn build() {
+  [
+    parse_semver_req("^1.2.3"),
+    parse_semver_req("^1.2.3"),
+    parse_semver_req("^1.2.3"),
+    parse_semver_req("^1.2.3"),
+    parse_semver_req("^1.2.3"),
+    parse_semver_req("^1.2.3"),
+  ]
+}
+"#,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = UnsupportedRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+    session.set_call_profiling_enabled(true);
+
+    let Resolution::Ready(value) = session.run().expect("run isolated semver req profile") else {
+        panic!("expected ready isolated semver req profile result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {value:?}");
+    };
+    assert_eq!(items.len(), 6);
+    maybe_print_session_profile(
+        "session_call_profile_isolates_cargo_parse_semver_req",
+        &session,
+    );
+
+    let profile = session.call_profile();
+    let req = profile
+        .summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "parse_semver_req")
+        .expect("parse_semver_req summary entry");
+    assert_eq!(req.runs, 6);
+    assert_eq!(req.distinct_input_count, 1);
+    assert_eq!(req.repeated_input_count, 5);
+
+    let version = profile
+        .summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "parse_semver_version")
+        .expect("parse_semver_version summary entry");
+    assert_eq!(version.runs, 6);
+    assert_eq!(version.distinct_input_count, 1);
+    assert_eq!(version.repeated_input_count, 5);
+}
+
 struct UnsupportedRuntime;
 
 impl RuntimeHooks for UnsupportedRuntime {
