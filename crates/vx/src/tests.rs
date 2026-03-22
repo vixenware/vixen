@@ -1,6 +1,7 @@
 use super::*;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use vx_eval2::ValueRep;
 
 #[test]
@@ -137,4 +138,56 @@ fn cargo_sketch_runtime_build_materializes_local_vendor_tree() {
     assert!(root.join("vendor/helper-local-0.1.0/src/lib.rs").is_file());
     assert!(!root.join("vendor/vendor").exists());
     assert!(!root.join("vendor/{pkg.name}-{pkg.version}").exists());
+}
+
+#[test]
+fn build_sketch_runtime_compiles_and_runs_rustc_hello() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/rustc-hello.vx"),
+    )
+    .expect("read zoo/rustc-hello.vx");
+    let runtime = build_eval_runtime(
+        "build-sketch",
+        std::env::current_dir().expect("source dir"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    )
+    .expect("build build-sketch eval runtime");
+    let resolution = vx_eval2::eval_source_entry_at_place_with_args_with_source_id(
+        &zoo_source,
+        "build-sketch-rustc-hello",
+        "build",
+        &[
+            parse_eval_arg(r#"{"$path":"."}"#).expect("parse workspace path"),
+            parse_eval_arg("[]").expect("parse empty args"),
+            parse_eval_arg("{}").expect("parse empty env"),
+        ],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate rustc hello build");
+    let Resolution::Ready(tree) = resolution else {
+        panic!("expected ready build tree, got {resolution:?}");
+    };
+    let ValueRep::External(external) = &tree.rep else {
+        panic!("expected external tree, got {:?}", tree.rep);
+    };
+    assert_eq!(external.kind.as_ref(), "Tree");
+
+    let root = PathBuf::from(external.descriptor.as_ref());
+    let binary = root.join("out/hello");
+    assert!(
+        binary.is_file(),
+        "expected built binary at {}",
+        binary.display()
+    );
+
+    let output = Command::new(&binary).output().expect("run built hello");
+    assert!(
+        output.status.success(),
+        "built hello should run successfully"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "hello from vx eval\n"
+    );
 }

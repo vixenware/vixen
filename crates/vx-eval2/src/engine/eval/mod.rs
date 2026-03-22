@@ -824,11 +824,35 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Blob" => {
             Some("Blob.utf8")
         }
+        (ValueRep::External(external), "blob") if external.kind.as_ref() == "Bytes" => {
+            Some("Bytes.blob")
+        }
+        (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Bytes" => {
+            Some("Bytes.utf8")
+        }
+        (ValueRep::External(external), "utf8_lossy") if external.kind.as_ref() == "Bytes" => {
+            Some("Bytes.utf8_lossy")
+        }
         (ValueRep::External(external), "to_string") if external.kind.as_ref() == "Path" => {
             Some("Path.to_string")
         }
         (ValueRep::External(external), "file") if external.kind.as_ref() == "Tree" => {
             Some("Tree.file")
+        }
+        (ValueRep::External(external), "subtree") if external.kind.as_ref() == "Tree" => {
+            Some("Tree.subtree")
+        }
+        (ValueRep::External(external), "collect")
+            if external.kind.as_ref().starts_with("Stream[") =>
+        {
+            Some("Stream.collect")
+        }
+        (ValueRep::External(external), "os") if external.kind.as_ref() == "Host" => Some("Host.os"),
+        (ValueRep::External(external), "arch") if external.kind.as_ref() == "Host" => {
+            Some("Host.arch")
+        }
+        (ValueRep::External(external), "which") if external.kind.as_ref() == "Host" => {
+            Some("Host.which")
         }
         (ValueRep::String(_), "len") => Some("String.len"),
         (ValueRep::String(_), "is_empty") => Some("String.is_empty"),
@@ -1175,6 +1199,7 @@ pub(super) fn continue_call_from_args(
         state,
         node_id,
         parent_id,
+        function,
         &callee_name,
         call_source.clone(),
         &type_args,

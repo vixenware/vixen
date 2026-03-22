@@ -10,6 +10,23 @@ pub struct RuntimeReady {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeExecRequest {
+    pub args: Vec<Value>,
+    pub env: Vec<(Arc<str>, Value)>,
+    pub mounts: Vec<(Value, Value)>,
+    pub writable: Vec<Value>,
+    pub create_dirs: Vec<Value>,
+    pub executor: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeExecReady {
+    pub process: Value,
+    pub vfs: Value,
+    pub events: Vec<EvalEventKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCallOutcome {
     Unsupported,
     Ready(Value),

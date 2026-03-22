@@ -48,6 +48,18 @@ pub trait RuntimeHooks: Send + Sync {
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError>;
 
+    fn exec(
+        &self,
+        _place: &str,
+        _request: &RuntimeExecRequest,
+        _source: &SourceSpan,
+    ) -> Result<RuntimeExecReady, EvalError> {
+        Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "exec is not supported by this runtime",
+        ))
+    }
+
     fn prepare_slot(
         &self,
         _place: &str,

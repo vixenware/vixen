@@ -2,6 +2,7 @@ use std::fs;
 use std::future::Future;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use eyre::{Result, bail, eyre};
@@ -10,8 +11,9 @@ use tar::Archive;
 use tempfile::Builder;
 use tokio::runtime::{Builder as RuntimeBuilder, Handle};
 use vx_eval2::{
-    CrossingPolicy, EvalError, EvalErrorKind, FunctionRef, Provenance, ReuseClass,
-    RuntimeCallOutcome, RuntimeHooks, SourceSpan, Value as EvalValue, ValueRep,
+    Claim, CrossingPolicy, EvalError, EvalErrorKind, FunctionRef, Provenance, ReuseClass,
+    RuntimeCallOutcome, RuntimeExecReady, RuntimeExecRequest, RuntimeHooks, SourceSpan,
+    Value as EvalValue, ValueRep,
 };
 
 pub(crate) enum EvalCliRuntime {
@@ -36,10 +38,14 @@ pub(crate) fn build_eval_runtime(
         "local" => Ok(EvalCliRuntime::Local(LocalEvalRuntime {
             root_dir: source_dir,
         })),
-        "cargo-sketch" | "cargo_sketch" => Ok(EvalCliRuntime::CargoSketch(CargoSketchRuntime {
-            root_dir: cwd,
-        })),
-        other => bail!("unsupported eval runtime {other:?} (expected `local` or `cargo-sketch`)"),
+        "cargo-sketch" | "cargo_sketch" | "build-sketch" | "build_sketch" => {
+            Ok(EvalCliRuntime::CargoSketch(CargoSketchRuntime {
+                root_dir: cwd,
+            }))
+        }
+        other => bail!(
+            "unsupported eval runtime {other:?} (expected `local`, `cargo-sketch`, or `build-sketch`)"
+        ),
     }
 }
 
@@ -54,6 +60,21 @@ impl RuntimeHooks for EvalCliRuntime {
         match self {
             Self::Local(runtime) => runtime.call(place, callee, args, source),
             Self::CargoSketch(runtime) => runtime.call(place, callee, args, source),
+        }
+    }
+
+    fn exec(
+        &self,
+        place: &str,
+        request: &RuntimeExecRequest,
+        source: &SourceSpan,
+    ) -> Result<RuntimeExecReady, EvalError> {
+        match self {
+            Self::Local(_) => Err(EvalError::new(
+                EvalErrorKind::Internal,
+                "exec is not supported by the local eval runtime",
+            )),
+            Self::CargoSketch(runtime) => runtime.exec(place, request, source),
         }
     }
 }
@@ -76,7 +97,7 @@ impl RuntimeHooks for LocalEvalRuntime {
 impl RuntimeHooks for CargoSketchRuntime {
     fn call(
         &self,
-        _place: &str,
+        place: &str,
         callee: &FunctionRef,
         args: &[EvalValue],
         source: &SourceSpan,
@@ -86,10 +107,27 @@ impl RuntimeHooks for CargoSketchRuntime {
             "Path" => runtime_path(args, source),
             "Tree" => self.runtime_tree(args, source),
             "Tree.file" => self.runtime_tree_file(args, source),
+            "Tree.subtree" => self.runtime_tree_subtree(args, source),
+            "Host.os" | "host_os" => self.runtime_host_os(place, callee, args, source),
+            "Host.arch" | "host_arch" => self.runtime_host_arch(place, callee, args, source),
+            "Host.which" | "host_which" => self.runtime_host_which(place, callee, args, source),
+            "Stream.collect" => self.runtime_stream_collect(callee, args, source),
+            "Bytes.blob" => self.runtime_bytes_blob(callee, args, source),
+            "Bytes.utf8" => self.runtime_bytes_utf8(callee, args, source),
+            "Bytes.utf8_lossy" => self.runtime_bytes_utf8(callee, args, source),
             "Http.get" => self.runtime_http_get(args, source),
             "acquire" => self.runtime_acquire(callee, args, source),
             _ => Ok(RuntimeCallOutcome::Unsupported),
         }
+    }
+
+    fn exec(
+        &self,
+        _place: &str,
+        request: &RuntimeExecRequest,
+        source: &SourceSpan,
+    ) -> Result<RuntimeExecReady, EvalError> {
+        self.runtime_exec(request, source)
     }
 }
 
@@ -159,6 +197,226 @@ impl CargoSketchRuntime {
             runtime_external("Blob", contents, source)
                 .with_reuse(ReuseClass::Observed)
                 .with_crossing(CrossingPolicy::ByValue),
+        ))
+    }
+
+    fn runtime_tree_subtree(
+        &self,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 2 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Tree.subtree() requires receiver and one path-like argument",
+            ));
+        }
+        let ValueRep::External(tree) = &args[0].rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Tree.subtree() receiver must evaluate to Tree",
+            ));
+        };
+        if tree.kind.as_ref() != "Tree" {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Tree.subtree() receiver must evaluate to Tree",
+            ));
+        }
+        let rel_path = path_like_descriptor(&args[1], "Tree.subtree() path")?;
+        let base = runtime_tree_root(&self.root_dir, tree);
+        let full_path = base.join(rel_path);
+        Ok(RuntimeCallOutcome::Ready(runtime_external(
+            "Tree",
+            full_path.to_string_lossy().into_owned(),
+            source,
+        )))
+    }
+
+    fn runtime_host_os(
+        &self,
+        place: &str,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Host.os() requires receiver",
+            ));
+        }
+        let _executor = host_executor_arg(&args[0], "Host.os")?;
+        let os = canonical_host_os();
+        Ok(RuntimeCallOutcome::Ready(
+            EvalValue::string(os.clone())
+                .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                .with_reuse(ReuseClass::Observed)
+                .with_crossing(CrossingPolicy::ByValue)
+                .with_claim(Claim::Os { value: os }),
+        ))
+    }
+
+    fn runtime_host_arch(
+        &self,
+        place: &str,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Host.arch() requires receiver",
+            ));
+        }
+        let _executor = host_executor_arg(&args[0], "Host.arch")?;
+        let arch = canonical_host_arch();
+        Ok(RuntimeCallOutcome::Ready(
+            EvalValue::string(arch.clone())
+                .with_provenance(Provenance::host_probe(source.clone(), place, "host_arch"))
+                .with_reuse(ReuseClass::Observed)
+                .with_crossing(CrossingPolicy::ByValue)
+                .with_claim(Claim::Arch { value: arch }),
+        ))
+    }
+
+    fn runtime_host_which(
+        &self,
+        place: &str,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 2 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Host.which() requires receiver and one string argument",
+            ));
+        }
+        let _executor = host_executor_arg(&args[0], "Host.which")?;
+        let ValueRep::String(name) = &args[1].rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Host.which() argument must evaluate to String",
+            ));
+        };
+        let resolved = resolve_host_tool(name.as_ref()).map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("Host.which({name}) failed: {error}"),
+            )
+        })?;
+        Ok(RuntimeCallOutcome::Ready(
+            EvalValue::string(resolved.clone())
+                .with_provenance(Provenance::host_probe(source.clone(), place, "host_which"))
+                .with_reuse(ReuseClass::Observed)
+                .with_crossing(CrossingPolicy::ByValue)
+                .with_claim(Claim::Which {
+                    name: name.to_string(),
+                    expected_path: Some(resolved),
+                }),
+        ))
+    }
+
+    fn runtime_stream_collect(
+        &self,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.collect() requires receiver",
+            ));
+        }
+        let ValueRep::External(stream) = &args[0].rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.collect() receiver must evaluate to Stream",
+            ));
+        };
+        if !stream.kind.as_ref().starts_with("Stream[") {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.collect() receiver must evaluate to Stream",
+            ));
+        }
+        Ok(RuntimeCallOutcome::Ready(runtime_external(
+            "Bytes",
+            stream.descriptor.clone(),
+            source,
+        )))
+    }
+
+    fn runtime_bytes_blob(
+        &self,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.blob() requires receiver",
+            ));
+        }
+        let ValueRep::External(bytes) = &args[0].rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.blob() receiver must evaluate to Bytes",
+            ));
+        };
+        if bytes.kind.as_ref() != "Bytes" {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.blob() receiver must evaluate to Bytes",
+            ));
+        }
+        let contents = fs::read_to_string(bytes.descriptor.as_ref()).map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("Bytes.blob() failed for {}: {error}", bytes.descriptor),
+            )
+        })?;
+        Ok(RuntimeCallOutcome::Ready(runtime_external(
+            "Blob", contents, source,
+        )))
+    }
+
+    fn runtime_bytes_utf8(
+        &self,
+        _callee: &FunctionRef,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.utf8() requires receiver",
+            ));
+        }
+        let ValueRep::External(bytes) = &args[0].rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.utf8() receiver must evaluate to Bytes",
+            ));
+        };
+        if bytes.kind.as_ref() != "Bytes" {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Bytes.utf8() receiver must evaluate to Bytes",
+            ));
+        }
+        let contents = fs::read_to_string(bytes.descriptor.as_ref()).map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("Bytes.utf8() failed for {}: {error}", bytes.descriptor),
+            )
+        })?;
+        Ok(RuntimeCallOutcome::Ready(
+            EvalValue::string(contents).with_provenance(Provenance::unknown(source.clone())),
         ))
     }
 
@@ -326,6 +584,123 @@ impl CargoSketchRuntime {
             )
         })?;
         Ok(single_root_dir(&dir))
+    }
+
+    fn runtime_exec(
+        &self,
+        request: &RuntimeExecRequest,
+        source: &SourceSpan,
+    ) -> Result<RuntimeExecReady, EvalError> {
+        let ValueRep::External(executor) = &request.executor.rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "exec().executor must evaluate to ExecutorClass",
+            ));
+        };
+        if executor.kind.as_ref() != "ExecutorClass" {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "exec().executor must evaluate to ExecutorClass",
+            ));
+        }
+        if executor.descriptor.as_ref() != "default" {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!(
+                    "vx eval build runtime only supports executor_class(\"default\") for now, got {:?}",
+                    executor.descriptor
+                ),
+            ));
+        }
+        if request.args.is_empty() {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "exec() requires at least one program argument",
+            ));
+        }
+
+        let sandbox_root = alloc_eval_tempdir("exec")?;
+        for (mount_path, mount_value) in &request.mounts {
+            let rel = path_like_descriptor(mount_path, "exec().mounts key")?;
+            let dest = sandbox_root.join(rel);
+            materialize_tree_entry(&self.root_dir, mount_value, &dest)?;
+        }
+        for writable in &request.writable {
+            fs::create_dir_all(
+                sandbox_root.join(path_like_descriptor(writable, "exec().writable entry")?),
+            )
+            .map_err(io_error)?;
+        }
+        for dir in &request.create_dirs {
+            fs::create_dir_all(
+                sandbox_root.join(path_like_descriptor(dir, "exec().create_dirs entry")?),
+            )
+            .map_err(io_error)?;
+        }
+
+        let program = render_exec_value(&request.args[0], &sandbox_root, "exec program")?;
+        let mut command = sandboxed_eval_command(&program, &sandbox_root);
+        hermetic_eval_env(&mut command, &sandbox_root);
+        command.current_dir(&sandbox_root);
+        for arg in request.args.iter().skip(1) {
+            command.arg(render_exec_value(arg, &sandbox_root, "exec arg")?);
+        }
+        for (name, value) in &request.env {
+            command.env(
+                name.as_ref(),
+                render_exec_value(value, &sandbox_root, "exec env value")?,
+            );
+        }
+
+        let output = command.output().map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("failed to execute {program}: {error}"),
+            )
+        })?;
+
+        let stdout_path = sandbox_root.join(".vx-stdout");
+        fs::write(&stdout_path, &output.stdout).map_err(io_error)?;
+        let stderr_path = sandbox_root.join(".vx-stderr");
+        fs::write(&stderr_path, &output.stderr).map_err(io_error)?;
+
+        let exit_code = output
+            .status
+            .code()
+            .unwrap_or_else(|| if output.status.success() { 0 } else { 1 });
+        let process = EvalValue::structure(
+            "Process",
+            [
+                (
+                    Arc::from("stdout"),
+                    runtime_external(
+                        "Stream[Bytes]",
+                        stdout_path.to_string_lossy().into_owned(),
+                        source,
+                    ),
+                ),
+                (
+                    Arc::from("stderr"),
+                    runtime_external(
+                        "Stream[Bytes]",
+                        stderr_path.to_string_lossy().into_owned(),
+                        source,
+                    ),
+                ),
+                (
+                    Arc::from("exit_code"),
+                    EvalValue::u64(exit_code as u64)
+                        .with_provenance(Provenance::unknown(source.clone())),
+                ),
+            ],
+        )
+        .with_provenance(Provenance::unknown(source.clone()));
+        let vfs = runtime_external("Tree", sandbox_root.to_string_lossy().into_owned(), source);
+        Ok(RuntimeExecReady {
+            process,
+            vfs,
+            events: Vec::new(),
+        })
     }
 }
 
@@ -535,6 +910,259 @@ fn copy_tree_contents(source: &Path, dest: &Path) -> Result<(), EvalError> {
         }
     }
     Ok(())
+}
+
+fn runtime_tree_root(root_dir: &Path, tree: &vx_eval2::ExternalValue) -> PathBuf {
+    let source = Path::new(tree.descriptor.as_ref());
+    if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        root_dir.join(source)
+    }
+}
+
+fn host_executor_arg(value: &EvalValue, context: &str) -> Result<Arc<str>, EvalError> {
+    let ValueRep::External(external) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{context}() receiver must evaluate to Host"),
+        ));
+    };
+    if external.kind.as_ref() != "Host" {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{context}() receiver must evaluate to Host"),
+        ));
+    }
+    if external.descriptor.as_ref() != "default" {
+        return Err(EvalError::new(
+            EvalErrorKind::UserFail,
+            format!("{context}() only supports executor_class(\"default\") in vx eval for now"),
+        ));
+    }
+    Ok(external.descriptor.clone())
+}
+
+fn canonical_host_os() -> String {
+    match std::env::consts::OS {
+        "macos" => "darwin".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn canonical_host_arch() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
+fn resolve_host_tool(name: &str) -> Result<String> {
+    if name == "rustc"
+        && let Some(path) = rustup_which("rustc")?
+    {
+        return Ok(path);
+    }
+    path_search_tool(name)?
+        .ok_or_else(|| eyre!("could not find {name} on PATH"))
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn rustup_which(name: &str) -> Result<Option<String>> {
+    let Ok(output) = Command::new("rustup").args(["which", name]).output() else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8(output.stdout)
+        .map_err(|error| eyre!("rustup which {name} produced non-utf8 output: {error}"))?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn path_search_tool(name: &str) -> Result<Option<PathBuf>> {
+    let direct = PathBuf::from(name);
+    if direct.components().count() > 1 || direct.is_absolute() {
+        return Ok(direct
+            .exists()
+            .then_some(fs::canonicalize(&direct).unwrap_or(direct)));
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return Ok(None);
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(Some(fs::canonicalize(&candidate).unwrap_or(candidate)));
+        }
+    }
+    Ok(None)
+}
+
+fn alloc_eval_tempdir(prefix: &str) -> Result<PathBuf, EvalError> {
+    let cache_root = eval_cache_root().join(prefix);
+    fs::create_dir_all(&cache_root).map_err(|error| {
+        EvalError::new(
+            EvalErrorKind::UserFail,
+            format!(
+                "failed to create eval {prefix} cache at {}: {error}",
+                cache_root.display()
+            ),
+        )
+    })?;
+    Builder::new()
+        .prefix(&format!("{prefix}-"))
+        .tempdir_in(&cache_root)
+        .map(|dir| dir.keep())
+        .map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("failed to allocate eval {prefix} directory: {error}"),
+            )
+        })
+}
+
+fn render_exec_value(
+    value: &EvalValue,
+    sandbox_root: &Path,
+    context: &str,
+) -> Result<String, EvalError> {
+    match &value.rep {
+        ValueRep::String(text) => Ok(text.to_string()),
+        ValueRep::External(external) if external.kind.as_ref() == "Path" => Ok(sandbox_root
+            .join(external.descriptor.as_ref())
+            .to_string_lossy()
+            .into_owned()),
+        ValueRep::External(external) if external.kind.as_ref() == "ExecPath" => Ok(sandbox_root
+            .join(external.descriptor.as_ref())
+            .to_string_lossy()
+            .into_owned()),
+        _ => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{context} must evaluate to String or Path"),
+        )),
+    }
+}
+
+fn hermetic_eval_env(command: &mut Command, write_root: &Path) {
+    command.env_clear();
+    for var in [
+        "PATH",
+        "HOME",
+        "LIB",
+        "INCLUDE",
+        "LIBPATH",
+        "WindowsSdkDir",
+        "WindowsSDKVersion",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            command.env(var, value);
+        }
+    }
+    command.env("TMPDIR", write_root);
+    command.env("TMP", write_root);
+    command.env("TEMP", write_root);
+}
+
+#[cfg(target_os = "macos")]
+const EVAL_SEATBELT_PROFILE_BASE: &str = r#"(version 1)
+(debug deny)
+(deny default)
+(import "system.sb")
+(allow process-fork)
+(allow process-exec (subpath (param "VFS_ROOT")))
+(allow process-exec (subpath (param "VFS_ROOT_ALT")))
+(allow process-exec (subpath "/bin"))
+(allow process-exec (subpath "/usr/bin"))
+(allow process-exec (subpath "/Library/Developer/CommandLineTools"))
+(allow file-read* (subpath (param "VFS_ROOT")))
+(allow file-read* (subpath (param "VFS_ROOT_ALT")))
+(allow file-read* (subpath "/bin"))
+(allow file-read* (subpath "/usr/bin"))
+(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
+(allow file-read* (subpath "/usr"))
+(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/Library"))
+(allow file-read* (subpath "/private"))
+(allow file-write* (subpath (param "WRITE_DIR")))
+(allow file-write* (subpath (param "WRITE_DIR_ALT")))
+(allow file-write* (subpath "/private/var/folders"))
+(deny network*)"#;
+
+#[cfg(target_os = "macos")]
+fn sbpl_literal(path: &str) -> String {
+    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(target_os = "macos")]
+fn additional_host_read_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+    {
+        if cargo_home.exists() {
+            roots.push(cargo_home);
+        }
+    }
+    if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
+    {
+        if rustup_home.exists() {
+            roots.push(rustup_home);
+        }
+    }
+    roots
+}
+
+#[cfg(target_os = "macos")]
+fn sandboxed_eval_command(program: &str, sandbox_root: &Path) -> Command {
+    let mut profile = String::from(EVAL_SEATBELT_PROFILE_BASE);
+    let program_path = PathBuf::from(program);
+    if program_path.is_absolute() {
+        let program_text = program_path.to_string_lossy();
+        profile.push('\n');
+        profile.push_str("(allow process-exec (literal ");
+        profile.push_str(&sbpl_literal(&program_text));
+        profile.push_str("))");
+        profile.push('\n');
+        profile.push_str("(allow file-read* (literal ");
+        profile.push_str(&sbpl_literal(&program_text));
+        profile.push_str("))");
+    }
+    for root in additional_host_read_roots() {
+        let root_text = root.to_string_lossy();
+        profile.push('\n');
+        profile.push_str("(allow file-read* (subpath ");
+        profile.push_str(&sbpl_literal(&root_text));
+        profile.push_str("))");
+    }
+
+    let mut command = Command::new("/usr/bin/sandbox-exec");
+    command.arg("-p").arg(profile);
+    let write_dir = sandbox_root.to_string_lossy().into_owned();
+    let write_dir_alt = write_dir.replace("/tmp", "/private/tmp");
+    command.arg("-D").arg(format!("WRITE_DIR={write_dir}"));
+    command
+        .arg("-D")
+        .arg(format!("WRITE_DIR_ALT={write_dir_alt}"));
+    command.arg("-D").arg(format!("VFS_ROOT={write_dir}"));
+    command
+        .arg("-D")
+        .arg(format!("VFS_ROOT_ALT={write_dir_alt}"));
+    command.arg(program);
+    command
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sandboxed_eval_command(program: &str, _sandbox_root: &Path) -> Command {
+    Command::new(program)
 }
 
 fn io_error(error: std::io::Error) -> EvalError {

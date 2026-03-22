@@ -818,6 +818,7 @@ pub(in crate::engine) fn continue_builtin_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
+    function: &FunctionRef,
     callee_name: &str,
     call_source: SourceSpan,
     type_args: &[Ty],
@@ -834,12 +835,37 @@ pub(in crate::engine) fn continue_builtin_call(
             args,
             call_source.clone(),
         );
-        emit_authored_call_started(state, node_id, parent_id, call_source, &frame, args.len());
+        emit_authored_call_started(
+            state,
+            node_id,
+            parent_id,
+            call_source.clone(),
+            &frame,
+            args.len(),
+        );
         return state.with_authored_call(frame, |state| {
-            continue_builtin_call_inner(state, node_id, parent_id, callee_name, type_args, args)
+            continue_builtin_call_inner(
+                state,
+                node_id,
+                parent_id,
+                function,
+                callee_name,
+                call_source.clone(),
+                type_args,
+                args,
+            )
         });
     }
-    continue_builtin_call_inner(state, node_id, parent_id, callee_name, type_args, args)
+    continue_builtin_call_inner(
+        state,
+        node_id,
+        parent_id,
+        function,
+        callee_name,
+        call_source,
+        type_args,
+        args,
+    )
 }
 
 fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
@@ -849,6 +875,11 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Toml.parse"
             | "Json.serialize"
             | "Toml.serialize"
+            | "executor_class"
+            | "discover"
+            | "exec"
+            | "Blob"
+            | "Bytes"
             | "Blob.utf8"
             | "Path.to_string"
             | "String.len"
@@ -931,15 +962,103 @@ fn normalize_path_descriptor(path: &str) -> Arc<str> {
     Arc::from(normalized)
 }
 
+fn builtin_capture<'a>(function: &'a FunctionRef, name: &str) -> Option<&'a Value> {
+    function
+        .captures()
+        .iter()
+        .find_map(|(capture, value)| (capture.as_ref() == name).then_some(value))
+}
+
+fn builtin_capture_array(function: &FunctionRef, name: &str) -> Result<Vec<Value>, EvalError> {
+    let Some(value) = builtin_capture(function, name) else {
+        return Ok(Vec::new());
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{name} capture must evaluate to an array"),
+        ));
+    };
+    Ok(items.iter().cloned().collect())
+}
+
+fn builtin_capture_map(
+    function: &FunctionRef,
+    name: &str,
+) -> Result<Vec<(Value, Value)>, EvalError> {
+    let Some(value) = builtin_capture(function, name) else {
+        return Ok(Vec::new());
+    };
+    let ValueRep::Map(map) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("{name} capture must evaluate to a map"),
+        ));
+    };
+    Ok(map.entries.iter().cloned().collect())
+}
+
 fn continue_builtin_call_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
+    function: &FunctionRef,
     callee_name: &str,
+    call_source: SourceSpan,
     type_args: &[Ty],
     args: &[Value],
 ) -> Result<Option<EvalStep>, EvalError> {
     match callee_name {
+        "Blob" => {
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob() does not accept type arguments",
+                ));
+            }
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob() requires exactly one string argument",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Blob() argument must evaluate to String",
+                ));
+            };
+            let value = Value::external("Blob", text.clone())
+                .with_provenance(args[0].meta.provenance.clone())
+                .with_reuse(ReuseClass::Stable)
+                .with_crossing(CrossingPolicy::ByValue);
+            Ok(ready_builtin_value(value))
+        }
+        "Bytes" => {
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Bytes() does not accept type arguments",
+                ));
+            }
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Bytes() requires exactly one string argument",
+                ));
+            }
+            let ValueRep::String(text) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Bytes() argument must evaluate to String",
+                ));
+            };
+            let value = Value::external("Bytes", text.clone())
+                .with_provenance(args[0].meta.provenance.clone())
+                .with_reuse(ReuseClass::Stable)
+                .with_crossing(CrossingPolicy::ByValue);
+            Ok(ready_builtin_value(value))
+        }
         "Json.parse" | "Toml.parse" => {
             if args.len() != 1 {
                 return Err(EvalError::new(
@@ -982,6 +1101,140 @@ fn continue_builtin_call_inner(
             };
             let value = serialize_value_as_blob(format, &args[0])?;
             Ok(ready_builtin_value(value))
+        }
+        "executor_class" => {
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "executor_class() does not accept type arguments",
+                ));
+            }
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "executor_class() requires exactly one string argument",
+                ));
+            }
+            let ValueRep::String(label) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "executor_class() argument must evaluate to String",
+                ));
+            };
+            let value = Value::external("ExecutorClass", label.clone()).with_provenance(
+                Provenance::binding(call_source, "executor_class".to_string()),
+            );
+            Ok(ready_builtin_value(value))
+        }
+        "discover" => {
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "discover() does not accept type arguments",
+                ));
+            }
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "discover() requires executor and probe arguments",
+                ));
+            }
+            let ValueRep::External(executor) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "discover() executor must evaluate to ExecutorClass",
+                ));
+            };
+            if executor.kind.as_ref() != "ExecutorClass" {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "discover() executor must evaluate to ExecutorClass",
+                ));
+            }
+            let host = Value::external("Host", executor.descriptor.clone()).with_provenance(
+                Provenance::binding(call_source.clone(), "discover".to_string()),
+            );
+            continue_call_from_args(
+                state,
+                node_id,
+                parent_id,
+                args[1].clone(),
+                call_source,
+                Arc::from([]),
+                vec![host],
+                Vec::new(),
+                empty_env(),
+            )
+            .map(Some)
+        }
+        "exec" => {
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "exec() does not accept type arguments",
+                ));
+            }
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "exec() requires exactly one args array",
+                ));
+            }
+            let ValueRep::Array(exec_args) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "exec() args must evaluate to Array[ExecInput]",
+                ));
+            };
+            let Some(observer) = builtin_capture(function, "observer") else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "exec() requires an observer keyword capture",
+                ));
+            };
+            let request = RuntimeExecRequest {
+                args: exec_args.iter().cloned().collect(),
+                env: builtin_capture_map(function, "env")?
+                    .into_iter()
+                    .map(|(key, value)| match key.rep {
+                        ValueRep::String(name) => Ok((name, value)),
+                        _ => Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            "exec().env keys must evaluate to String",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                mounts: builtin_capture_map(function, "mounts")?,
+                writable: builtin_capture_array(function, "writable")?,
+                create_dirs: builtin_capture_array(function, "create_dirs")?,
+                executor: builtin_capture(function, "executor")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Value::external("ExecutorClass", "default").with_provenance(
+                            Provenance::binding(call_source.clone(), "executor_class".to_string()),
+                        )
+                    }),
+            };
+            let RuntimeExecReady {
+                process,
+                vfs,
+                events,
+            } = state.runtime.exec(state.place, &request, &call_source)?;
+            for event in events {
+                state.emit(node_id, parent_id, Some(call_source.clone()), event);
+            }
+            continue_call_from_args(
+                state,
+                node_id,
+                parent_id,
+                observer.clone(),
+                call_source,
+                Arc::from([]),
+                vec![process, vfs],
+                Vec::new(),
+                empty_env(),
+            )
+            .map(Some)
         }
         "Blob.utf8" => {
             if args.len() != 1 {
