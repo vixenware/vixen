@@ -1386,17 +1386,7 @@ fn activate_package_facts(facts: PackageFacts, request: DependencyRequest) where
 )
 
 fn request_key(req: DependencyRequest) -> String (
-  let source =
-    match req.source (
-      DependencySource.Registry => `registry:{req.package_name.unwrap_or(req.name)}`,
-      DependencySource.LocalPath { base: _, path } => `path:{path}`,
-      DependencySource.Git { url, rev } => (
-        match rev (
-          Some { value } => `git:{url}#{value}`,
-          None => `git:{url}`,
-        )
-      ),
-    );
+  let source = dependency_request_source_key(req);
 
   let target =
     match req.target (
@@ -1405,6 +1395,29 @@ fn request_key(req: DependencyRequest) -> String (
     );
 
   `{source}:{req.kind}{target}`
+)
+
+fn dependency_source_key(source: DependencySource) -> String (
+  match source (
+    DependencySource.Registry => fail "dependency_source_key requires a concrete non-registry source",
+    DependencySource.LocalPath { base: _, path } => `path:{path}`,
+    DependencySource.Git { url, rev } => (
+      match rev (
+        Some { value } => `git:{url}#{value}`,
+        None => `git:{url}`,
+      )
+    ),
+  )
+)
+
+fn dependency_request_source_key(req: DependencyRequest) -> String (
+  let source =
+    match req.source (
+      DependencySource.Registry => `registry:{req.package_name.unwrap_or(req.name)}`,
+      DependencySource.LocalPath { base: _, path: _ } => dependency_source_key(req.source),
+      DependencySource.Git { url: _, rev: _ } => dependency_source_key(req.source),
+    );
+  source
 )
 
 fn conjoin_semver(left: SemverReq?, right: SemverReq?) -> SemverReq? (
@@ -1516,13 +1529,12 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
           let version = branch_assumption(version_assumption_name(request));
           let facts =
             keyed(
-              registry_candidate_facts_key(request, version),
-              [request],
+              registry_candidate_facts_key(package_name, version),
+              [package_name],
               ((ctx) =>
-                resolve_registry_candidate_facts(entries, merge_joined_requests(ctx.joined), version)
+                resolve_registry_candidate_facts(entries, array_first(ctx.joined), version)
                   where {
                     config,
-                    target,
                   }
               ),
             );
@@ -1553,12 +1565,9 @@ fn resolve_non_registry_package_node(request: DependencyRequest) where {
 } -> ResolvedCrate (
   let facts =
     keyed(
-      package_facts_key(request),
-      [request],
-      ((ctx) => resolve_non_registry_facts(merge_joined_requests(ctx.joined)) where {
-        target,
-        workspace,
-      }),
+      package_facts_key(request.source),
+      [request.source],
+      ((ctx) => resolve_non_registry_facts(array_first(ctx.joined)) where { workspace }),
     );
   let crate = activate_package_facts(facts, request) where { target };
   validate_package_graph(crate) where {
@@ -1742,23 +1751,21 @@ fn version_assumption_name(request: DependencyRequest) -> String (
   `version:{request_key(request)}`
 )
 
-fn package_facts_key(request: DependencyRequest) -> String (
-  `facts:{request_key(request)}`
+fn package_facts_key(source: DependencySource) -> String (
+  `facts:{dependency_source_key(source)}`
 )
 
-fn registry_candidate_facts_key(request: DependencyRequest, version: String) -> String (
-  `candidate:{request_key(request)}:{version}`
+fn registry_candidate_facts_key(package_name: String, version: String) -> String (
+  `candidate:registry:{package_name}@{version}`
 )
 
 fn resolve_registry_candidate_facts(
   entries: Array[IndexEntry],
-  request: DependencyRequest,
+  package_name: String,
   version: String,
 ) where {
   config: SparseConfig,
-  target: BuildTarget,
 } -> PackageFacts (
-  let package_name = request.package_name.unwrap_or(request.name);
   let chosen =
     match entries.find($.vers == version) (
       Some { value } => value,
@@ -1808,9 +1815,8 @@ fn search_registry_candidate(
         (() => (
           let version = branch_assumption(version_assumption_name(request));
           activate_package_facts(
-            resolve_registry_candidate_facts(entries, request, version) where {
+            resolve_registry_candidate_facts(entries, package_name, version) where {
               config,
-              target,
             },
             request,
           ) where { target }
@@ -1826,13 +1832,12 @@ fn search_registry_candidate(
   )
 )
 
-fn resolve_non_registry_facts(request: DependencyRequest) where {
-  target: BuildTarget,
+fn resolve_non_registry_facts(source: DependencySource) where {
   workspace: Tree,
 } #discover -> PackageFacts (
   let workspace_package = workspace_root_package(workspace);
 
-  match request.source (
+  match source (
     DependencySource.LocalPath { base, path } => (
       let dep_root = base / Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
@@ -1899,10 +1904,10 @@ fn resolve_request(request: DependencyRequest) where {
       }
     ),
     DependencySource.LocalPath { base: _, path: _ } =>
-      activate_package_facts(resolve_non_registry_facts(request) where { target, workspace }, request)
+      activate_package_facts(resolve_non_registry_facts(request.source) where { workspace }, request)
         where { target },
     DependencySource.Git { url: _, rev: _ } =>
-      activate_package_facts(resolve_non_registry_facts(request) where { target, workspace }, request)
+      activate_package_facts(resolve_non_registry_facts(request.source) where { workspace }, request)
         where { target },
   )
 )
