@@ -1627,14 +1627,16 @@ fn materialize_package_graph(
   )
 )
 
-fn resolve_graph(roots: Array[DependencyRequest]) where {
+fn materialize_resolution(
+  roots: Array[DependencyRequest],
+  root_ids: Array[PackageId],
+) where {
   config: SparseConfig,
   lock: CargoLock?,
   target: BuildTarget,
   workspace: Tree,
-} #discover -> RegistryResolution (
+} -> RegistryResolution (
   let demanded = canonical_requests(roots);
-  let roots = demand_graph(demanded) where { config, lock, target, workspace };
   let state =
     array_fold(
       demanded,
@@ -1666,7 +1668,7 @@ fn resolve_graph(roots: Array[DependencyRequest]) where {
       )),
     );
   RegistryResolution {
-    roots: roots,
+    roots: root_ids,
     packages: state.packages.to_array().map($.get("value")).to_array(),
   }
 )
@@ -1948,7 +1950,8 @@ fn resolve_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
   let requests =
     root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
-  resolve_graph(requests) where { config, lock, target, workspace }
+  let roots = demand_graph(requests) where { config, lock, target, workspace };
+  materialize_resolution(requests, roots) where { config, lock, target, workspace }
 )
 
 fn demand_manifest(manifest: CargoManifest) where {
