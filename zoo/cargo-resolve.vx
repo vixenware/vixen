@@ -1517,12 +1517,6 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
   workspace: Tree,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
-  let entries =
-    keyed(
-      registry_entries_key(package_name),
-      [package_name],
-      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
-    );
   let candidates =
     keyed(
       registry_candidates_key(request),
@@ -1537,16 +1531,17 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
         candidates,
         (() => (
           let version = branch_assumption(version_assumption_name(request));
+          let chosen =
+            keyed(
+              registry_entry_key(package_name, version),
+              [version],
+              ((ctx) => resolve_registry_entry(package_name, array_first(ctx.joined))),
+            );
           let facts =
             keyed(
               registry_candidate_facts_key(package_name, version),
-              [package_name],
-              ((ctx) =>
-                resolve_registry_candidate_facts(entries, array_first(ctx.joined), version)
-                  where {
-                    config,
-                  }
-              ),
+              [version],
+              ((ctx) => resolve_registry_candidate_facts(chosen) where { config }),
             );
           let crate = activate_package_facts(facts, request) where { target };
           validate_package_graph(crate) where {
@@ -1769,6 +1764,10 @@ fn registry_candidates_key(request: DependencyRequest) -> String (
   `candidates:{request_key(request)}`
 )
 
+fn registry_entry_key(package_name: String, version: String) -> String (
+  `entry:registry:{package_name}@{version}`
+)
+
 fn package_facts_key(source: DependencySource) -> String (
   `facts:{dependency_source_key(source)}`
 )
@@ -1794,23 +1793,28 @@ fn resolve_registry_candidates(request: DependencyRequest) where {
   ordered_candidate_versions(entries, request, lock_entry(lock, package_name))
 )
 
-fn resolve_registry_candidate_facts(
-  entries: Array[IndexEntry],
-  package_name: String,
-  version: String,
-) where {
+fn resolve_registry_entry(package_name: String, version: String) -> IndexEntry (
+  let entries =
+    keyed(
+      registry_entries_key(package_name),
+      [package_name],
+      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
+    );
+
+  match entries.find($.vers == version) (
+    Some { value } => value,
+    None =>
+      fail Conflict {
+        package: package_name,
+        version: version,
+        reason: "missing-candidate",
+      },
+  )
+)
+
+fn resolve_registry_candidate_facts(chosen: IndexEntry) where {
   config: SparseConfig,
 } -> PackageFacts (
-  let chosen =
-    match entries.find($.vers == version) (
-      Some { value } => value,
-      None =>
-        fail Conflict {
-          package: package_name,
-          version: version,
-          reason: "missing-candidate",
-        },
-    );
   let dependencies =
     chosen.deps
       .map(request_from_index_dep($))
@@ -1837,12 +1841,6 @@ fn search_registry_candidate(request: DependencyRequest) where {
   target: BuildTarget,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
-  let entries =
-    keyed(
-      registry_entries_key(package_name),
-      [package_name],
-      ((ctx) => resolve_registry_entries(array_first(ctx.joined))),
-    );
   let candidates =
     keyed(
       registry_candidates_key(request),
@@ -1857,8 +1855,14 @@ fn search_registry_candidate(request: DependencyRequest) where {
         candidates,
         (() => (
           let version = branch_assumption(version_assumption_name(request));
+          let chosen =
+            keyed(
+              registry_entry_key(package_name, version),
+              [version],
+              ((ctx) => resolve_registry_entry(package_name, array_first(ctx.joined))),
+            );
           activate_package_facts(
-            resolve_registry_candidate_facts(entries, package_name, version) where {
+            resolve_registry_candidate_facts(chosen) where {
               config,
             },
             request,
