@@ -1894,6 +1894,7 @@ pub(in crate::engine) fn continue_keyed_builtin(
                     pending,
                     branch_context: state.branch_context.clone(),
                     frames: Vec::new(),
+                    call_stack: state.call_stack.clone(),
                 }))
             }
             Err(error) => {

@@ -159,6 +159,14 @@ fn maybe_print_session_profile(name: &str, session: &EvalSession<'_, impl Runtim
         eprintln!("vx-eval2 profile test={name}");
         eprintln!("{}", session.profile_report(limit));
     }
+    if env::var_os("VX_EVAL2_PRINT_CALL_PROFILE").is_some() {
+        let limit = env::var("VX_EVAL2_PRINT_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20);
+        eprintln!("vx-eval2 call profile test={name}");
+        eprintln!("{}", session.call_profile_report(limit));
+    }
 }
 
 fn ready_root_ids(value: &Value) -> Vec<&str> {
@@ -5301,6 +5309,124 @@ fn session_profile_reports_elapsed_work_by_node() {
     assert!(report.contains("eval2 profile total="));
     assert!(report.contains("summary_entries="));
     assert!(report.contains("work=EvaluateExpr"));
+}
+
+#[test]
+fn session_call_profile_tracks_nested_authored_calls_across_pending_resume() {
+    struct ProfilePendingRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for ProfilePendingRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &str,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee) {
+                ("win", "host_wait_bool") => {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for profile predicate".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "host_wait_bool",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = ProfilePendingRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn leaf(value: U64) {
+  if host_wait_bool() ( value ) else ( 0 )
+}
+
+fn outer(value: U64) {
+  leaf(value)
+}
+
+fn build() {
+  [outer(7), outer(7)]
+}
+"#,
+        "session-call-profile",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+    session.set_call_profiling_enabled(true);
+
+    let Resolution::Pending(pending) = session.run().expect("start profiled session") else {
+        panic!("expected pending profiled session");
+    };
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve profiled pending call");
+
+    let Resolution::Ready(value) = session.run().expect("finish profiled session") else {
+        panic!("expected ready profiled session");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected build array result, got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+
+    let profile = session.call_profile();
+    assert!(!profile.runs.is_empty());
+    assert_eq!(profile.roots.len(), 1);
+    assert_eq!(profile.roots[0].callee.as_ref(), "build");
+
+    let build = &profile.roots[0];
+    let outer = build
+        .children
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "outer")
+        .expect("build should call outer");
+    assert_eq!(outer.runs, 2);
+    assert_eq!(outer.distinct_input_count, 1);
+    assert_eq!(outer.repeated_input_count, 1);
+
+    let leaf = outer
+        .children
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "leaf")
+        .expect("outer should call leaf");
+    assert_eq!(leaf.runs, 2);
+    assert_eq!(leaf.distinct_input_count, 1);
+    assert_eq!(leaf.repeated_input_count, 1);
+
+    let summary = profile
+        .summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "leaf")
+        .expect("leaf summary entry");
+    assert_eq!(summary.runs, 2);
+    assert_eq!(summary.distinct_input_count, 1);
+    assert_eq!(summary.repeated_input_count, 1);
+
+    let report = session.call_profile_report(8);
+    assert!(report.contains("eval2 call profile attributed="));
+    assert!(report.contains("call tree:"));
+    assert!(report.contains("callee=build"));
+    assert!(report.contains("callee=outer"));
+    assert!(report.contains("callee=leaf"));
 }
 
 struct UnsupportedRuntime;

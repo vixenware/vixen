@@ -8,6 +8,9 @@ command = { command-line = "scripts/nextest-systemd-run.sh", relative-to = "work
 [profile.default]
 slow-timeout = { period = "5s", terminate-after = 6 }
 
+[profile.patient]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [profile.systemd]
 slow-timeout = { period = "5s", terminate-after = 6 }
 

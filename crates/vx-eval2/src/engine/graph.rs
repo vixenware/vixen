@@ -122,6 +122,7 @@ pub struct EvalCompletedWork {
     pub work: EvalQueuedWork,
     pub outcome: EvalCompletedWorkOutcome,
     pub elapsed: Duration,
+    pub invocation: Option<EvalAuthoredCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +348,26 @@ pub struct EvalSessionStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalAuthoredCallFrame {
+    pub root_node_id: EvalNodeId,
+    pub root_work_id: Option<EvalWorkId>,
+    pub callee: Arc<str>,
+    pub args_fingerprint: Arc<str>,
+    pub source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalAuthoredCall {
+    pub root_node_id: EvalNodeId,
+    pub root_work_id: Option<EvalWorkId>,
+    pub caller_node_id: Option<EvalNodeId>,
+    pub caller_work_id: Option<EvalWorkId>,
+    pub callee: Arc<str>,
+    pub args_fingerprint: Arc<str>,
+    pub source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalProfileEntry {
     pub node_id: EvalNodeId,
     pub work_kind: EvalWorkKind,
@@ -380,6 +401,48 @@ pub struct EvalSessionProfileSummary {
     pub entries: Vec<EvalProfileSummaryEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalCallProfileRun {
+    pub invocation: EvalAuthoredCall,
+    pub work_count: usize,
+    pub self_time: Duration,
+    pub total_time: Duration,
+    pub max_work_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalCallProfileSummaryEntry {
+    pub callee: Arc<str>,
+    pub source: Option<SourceSpan>,
+    pub runs: usize,
+    pub distinct_input_count: usize,
+    pub repeated_input_count: usize,
+    pub self_time: Duration,
+    pub total_time: Duration,
+    pub max_total_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalCallTreeEntry {
+    pub callee: Arc<str>,
+    pub source: Option<SourceSpan>,
+    pub runs: usize,
+    pub distinct_input_count: usize,
+    pub repeated_input_count: usize,
+    pub self_time: Duration,
+    pub total_time: Duration,
+    pub max_total_time: Duration,
+    pub children: Vec<EvalCallTreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSessionCallProfile {
+    pub attributed_time: Duration,
+    pub runs: Vec<EvalCallProfileRun>,
+    pub summary: Vec<EvalCallProfileSummaryEntry>,
+    pub roots: Vec<EvalCallTreeEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
     pub(super) branch_context: EvalBranchContext,
@@ -400,6 +463,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) lease_sequence: u64,
     pub(super) scheduler: EvalScheduler,
     pub(super) record: ReadyTaskRecord,
+    pub(super) call_profiling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +475,7 @@ pub struct EvalWorkCompletion {
     pub(super) outcome: EvalCompletedWorkOutcome,
     pub(super) delta: EvalSessionDelta,
     pub(super) elapsed: Duration,
+    pub(super) invocation: Option<EvalAuthoredCall>,
 }
 
 #[derive(Debug, Clone)]

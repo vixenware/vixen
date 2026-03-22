@@ -113,6 +113,7 @@ pub(super) struct ScheduledResume {
 pub(super) struct ScheduledExpr {
     pub(super) expr: ExprHandle,
     pub(super) env: EvalEnv,
+    pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1454,7 +1455,15 @@ pub(super) fn execute_ready_task(
     place: &str,
     scheduler: EvalScheduler,
     record: ReadyTaskRecord,
-) -> Result<(EvalSessionDelta, EvalCompletedWorkOutcome), EvalError> {
+    call_profiling: bool,
+) -> Result<
+    (
+        EvalSessionDelta,
+        EvalCompletedWorkOutcome,
+        Option<EvalAuthoredCall>,
+    ),
+    EvalError,
+> {
     let validate_recorded_delta = std::env::var_os("VX_EVAL2_VALIDATE_RECORDED_DELTAS").is_some();
     let mut after = scheduler;
     let before = validate_recorded_delta.then(|| after.clone());
@@ -1470,7 +1479,9 @@ pub(super) fn execute_ready_task(
         &mut after,
         Some(record.work.id),
         true,
+        call_profiling,
     );
+    let mut invocation = None;
 
     let outcome = match record.task {
         ReadyTask::StartEntry => {
@@ -1487,13 +1498,34 @@ pub(super) fn execute_ready_task(
                 node_id,
                 parent_id: Some(ENTRY_WORK_NODE_ID),
                 kind: EvalNodeKind::Expr { kind: body_kind },
-                source: Some(body_source),
+                source: Some(body_source.clone()),
             });
+            let call_stack = if call_profiling {
+                let frame = authored_call_frame(
+                    &state,
+                    node_id,
+                    Arc::from(entry),
+                    args,
+                    body_source.clone(),
+                );
+                emit_authored_call_started(
+                    &mut state,
+                    node_id,
+                    Some(ENTRY_WORK_NODE_ID),
+                    body_source,
+                    &frame,
+                    args.len(),
+                );
+                vec![frame]
+            } else {
+                Vec::new()
+            };
             let scheduled = ScheduledExpr {
                 expr: ExprHandle {
                     key: ProgramNodeHandle::for_node(prepared.source, &prepared.body),
                 },
                 env: prepared.env,
+                call_stack,
             };
             state.scheduler.remember_expr_task(
                 node_id,
@@ -1526,9 +1558,19 @@ pub(super) fn execute_ready_task(
         ReadyTask::EvaluateExpr(scheduled) => {
             let mut env = scheduled.env;
             let expr = state.program.resolve_expr(scheduled.expr.key)?;
-            match state.with_source(scheduled.expr.key.source(), |state| {
-                eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
-            }) {
+            let step = if scheduled.call_stack.is_empty() {
+                state.with_source(scheduled.expr.key.source(), |state| {
+                    eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
+                })
+            } else {
+                state.with_call_stack(scheduled.call_stack, |state| {
+                    state.with_source(scheduled.expr.key.source(), |state| {
+                        eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
+                    })
+                })
+            };
+            invocation = state.work_invocation.clone();
+            match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {
                     let pending = suspension.pending.clone();
@@ -1560,42 +1602,111 @@ pub(super) fn execute_ready_task(
             }
         }
         ReadyTask::EvaluateKeyed(node_id) => {
-            let prepared = prepare_keyed_call(&mut state, node_id)?;
-            let mut env = prepared.env;
-            match state.with_source(prepared.source, |state| {
-                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
-            })? {
-                EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
-                EvalStep::Suspended(suspension) => {
-                    let pending = suspension.pending.clone();
-                    state.scheduler.register_suspension(suspension);
-                    match state.scheduler.pending_kind(&pending) {
-                        Some(PendingKind::External) => {
-                            state.scheduler.record_node_state(
-                                node_id,
-                                EvalNodeState::Pending(pending.clone()),
-                            );
-                            EvalCompletedWorkOutcome::Pending(pending)
+            if !call_profiling {
+                let prepared = prepare_keyed_call(&mut state, node_id)?;
+                let mut env = prepared.env;
+                match state.with_source(prepared.source, |state| {
+                    eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                })? {
+                    EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
+                    EvalStep::Suspended(suspension) => {
+                        let pending = suspension.pending.clone();
+                        state.scheduler.register_suspension(suspension);
+                        match state.scheduler.pending_kind(&pending) {
+                            Some(PendingKind::External) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::Pending(pending.clone()),
+                                );
+                                EvalCompletedWorkOutcome::Pending(pending)
+                            }
+                            Some(PendingKind::ChildDependency { dependency }) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::BlockedOnNode { dependency },
+                                );
+                                EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                            }
+                            None => {
+                                return Err(EvalError::new(
+                                    EvalErrorKind::Internal,
+                                    format!(
+                                        "pending node {} has no registered kind",
+                                        pending.node_id
+                                    ),
+                                ));
+                            }
                         }
-                        Some(PendingKind::ChildDependency { dependency }) => {
-                            state.scheduler.record_node_state(
-                                node_id,
-                                EvalNodeState::BlockedOnNode { dependency },
-                            );
-                            EvalCompletedWorkOutcome::BlockedOnNode(dependency)
-                        }
-                        None => {
-                            return Err(EvalError::new(
-                                EvalErrorKind::Internal,
-                                format!("pending node {} has no registered kind", pending.node_id),
-                            ));
+                    }
+                }
+            } else {
+                let (resolver_name, joined, source) = {
+                    let memo = state.scheduler.keyed_node(node_id).ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("keyed node {:?} is not registered", node_id),
+                        )
+                    })?;
+                    let source = state
+                        .scheduler
+                        .node_record(node_id)
+                        .and_then(|record| record.source.clone())
+                        .unwrap_or_else(|| SourceSpan::synthetic("<keyed>"));
+                    (
+                        memo.resolver.name.clone(),
+                        keyed_context_value(memo.key.clone(), memo.joined.clone()),
+                        source,
+                    )
+                };
+                let frame =
+                    authored_call_frame(&state, node_id, resolver_name, &[joined], source.clone());
+                emit_authored_call_started(&mut state, node_id, None, source, &frame, 1);
+                let prepared = prepare_keyed_call(&mut state, node_id)?;
+                let mut env = prepared.env;
+                let step = state.with_authored_call(frame, |state| {
+                    state.with_source(prepared.source, |state| {
+                        eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                    })
+                });
+                invocation = state.work_invocation.clone();
+                match step? {
+                    EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
+                    EvalStep::Suspended(suspension) => {
+                        let pending = suspension.pending.clone();
+                        state.scheduler.register_suspension(suspension);
+                        match state.scheduler.pending_kind(&pending) {
+                            Some(PendingKind::External) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::Pending(pending.clone()),
+                                );
+                                EvalCompletedWorkOutcome::Pending(pending)
+                            }
+                            Some(PendingKind::ChildDependency { dependency }) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::BlockedOnNode { dependency },
+                                );
+                                EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                            }
+                            None => {
+                                return Err(EvalError::new(
+                                    EvalErrorKind::Internal,
+                                    format!(
+                                        "pending node {} has no registered kind",
+                                        pending.node_id
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
             }
         }
         ReadyTask::Resume(ready) => {
-            match resume_suspension(&mut state, ready.suspension, ready.result) {
+            let step = resume_suspension(&mut state, ready.suspension, ready.result);
+            invocation = state.work_invocation.clone();
+            match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {
                     let pending = suspension.pending.clone();
@@ -1647,5 +1758,6 @@ pub(super) fn execute_ready_task(
             completed_invalidated: after.completed_invalidated,
         },
         outcome,
+        invocation,
     ))
 }

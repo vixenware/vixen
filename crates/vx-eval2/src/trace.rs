@@ -45,6 +45,13 @@ pub enum EvalEventKind {
     BindArgument {
         label: Arc<str>,
     },
+    AuthoredCallStarted {
+        callee: Arc<str>,
+        argc: u32,
+        args_fingerprint: Arc<str>,
+        caller_node_id: Option<EvalNodeId>,
+        caller_work_id: Option<EvalWorkId>,
+    },
     DependOn {
         dependency: EvalNodeId,
     },

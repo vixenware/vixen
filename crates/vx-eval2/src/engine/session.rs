@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::env;
 use std::time::{Duration, Instant};
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
@@ -15,6 +16,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     completed: Option<Result<Value, EvalError>>,
     history: Vec<EvalSessionCheckpoint>,
     generation: u64,
+    call_profiling: bool,
 }
 
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
@@ -85,6 +87,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completed: None,
             history: Vec::new(),
             generation: 0,
+            call_profiling: env::var_os("VX_EVAL2_PROFILE_CALLS").is_some(),
         }
     }
 
@@ -204,6 +207,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn pending_nodes(&self) -> Vec<PendingRef> {
         self.scheduler.pending_nodes()
+    }
+
+    pub fn set_call_profiling_enabled(&mut self, enabled: bool) {
+        self.call_profiling = enabled;
+    }
+
+    pub fn call_profiling_enabled(&self) -> bool {
+        self.call_profiling
     }
 
     pub fn branch_context(&self) -> &EvalBranchContext {
@@ -392,6 +403,92 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
     }
 
+    pub fn call_profile(&self) -> EvalSessionCallProfile {
+        let mut runs = BTreeMap::<(Option<EvalWorkId>, EvalNodeId), EvalCallProfileRun>::new();
+        let mut attributed_time = Duration::default();
+
+        for completed in &self.completed_work {
+            let Some(invocation) = completed.invocation.clone() else {
+                continue;
+            };
+            attributed_time += completed.elapsed;
+            let key = (invocation.root_work_id, invocation.root_node_id);
+            let run = runs.entry(key).or_insert_with(|| EvalCallProfileRun {
+                invocation,
+                work_count: 0,
+                self_time: Duration::default(),
+                total_time: Duration::default(),
+                max_work_time: Duration::default(),
+            });
+            run.work_count += 1;
+            run.self_time += completed.elapsed;
+            run.max_work_time = run.max_work_time.max(completed.elapsed);
+        }
+
+        let mut runs = runs.into_values().collect::<Vec<_>>();
+        let index_by_key = runs
+            .iter()
+            .enumerate()
+            .map(|(index, run)| {
+                (
+                    (run.invocation.root_work_id, run.invocation.root_node_id),
+                    index,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut children_by_parent =
+            BTreeMap::<Option<(Option<EvalWorkId>, EvalNodeId)>, Vec<usize>>::new();
+
+        for (index, run) in runs.iter().enumerate() {
+            let parent_key = run
+                .invocation
+                .caller_node_id
+                .map(|node_id| (run.invocation.caller_work_id, node_id));
+            let bucket = parent_key
+                .filter(|key| index_by_key.contains_key(key))
+                .map(Some)
+                .unwrap_or(None);
+            children_by_parent.entry(bucket).or_default().push(index);
+        }
+
+        let root_indices = children_by_parent.remove(&None).unwrap_or_default();
+        let mut total_cache = BTreeMap::<usize, Duration>::new();
+        for root_index in &root_indices {
+            compute_call_run_total_time(*root_index, &runs, &children_by_parent, &mut total_cache);
+        }
+        for (index, run) in runs.iter_mut().enumerate() {
+            run.total_time = *total_cache.get(&index).unwrap_or(&run.self_time);
+        }
+        let roots = build_call_tree_entries(&root_indices, &runs, &children_by_parent);
+        runs.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.self_time.cmp(&left.self_time))
+                .then_with(|| left.invocation.callee.cmp(&right.invocation.callee))
+        });
+
+        let mut summary = summarize_call_runs(&runs);
+        summary.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.self_time.cmp(&left.self_time))
+                .then_with(|| left.callee.cmp(&right.callee))
+        });
+
+        EvalSessionCallProfile {
+            attributed_time,
+            runs,
+            summary,
+            roots,
+        }
+    }
+
+    pub fn call_profile_report(&self, limit: usize) -> String {
+        format_call_profile_report(&self.call_profile(), limit)
+    }
+
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
         &self.completed_work
     }
@@ -461,6 +558,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             lease_sequence: lease.lease_sequence,
             scheduler: self.scheduler.clone_for_lease(lease.namespace),
             record: lease.record,
+            call_profiling: self.call_profiling,
         }))
     }
 
@@ -716,13 +814,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             lease_sequence,
             scheduler,
             record,
+            call_profiling,
         } = self;
         #[cfg(test)]
         if let Some(error) = injected_worker_error(&branch_context, &record.work) {
             return Err(error);
         }
         let started = Instant::now();
-        let (delta, outcome) = execute_ready_task(
+        let (delta, outcome, invocation) = execute_ready_task(
             program,
             &entry,
             &args,
@@ -730,6 +829,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             &place,
             scheduler,
             record.clone(),
+            call_profiling,
         )?;
         Ok(EvalWorkCompletion {
             branch_context,
@@ -739,6 +839,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             outcome,
             delta,
             elapsed: started.elapsed(),
+            invocation,
         })
     }
 }
@@ -829,6 +930,7 @@ fn commit_completion(
             work: completion.work,
             outcome: completion.outcome,
             elapsed: completion.elapsed,
+            invocation: completion.invocation,
         });
         return Ok(EvalSessionStep::Progressed);
     }
@@ -846,6 +948,7 @@ fn commit_completion(
         work: completion.work.clone(),
         outcome: completion.outcome.clone(),
         elapsed: completion.elapsed,
+        invocation: completion.invocation.clone(),
     });
     if keyed_stale {
         return Ok(EvalSessionStep::Progressed);
@@ -924,6 +1027,195 @@ fn format_profile_summary_report(profile: &EvalSessionProfileSummary, limit: usi
     }
 
     lines.join("\n")
+}
+
+fn compute_call_run_total_time(
+    index: usize,
+    runs: &[EvalCallProfileRun],
+    children_by_parent: &BTreeMap<Option<(Option<EvalWorkId>, EvalNodeId)>, Vec<usize>>,
+    cache: &mut BTreeMap<usize, Duration>,
+) -> Duration {
+    if let Some(cached) = cache.get(&index) {
+        return *cached;
+    }
+    let run = &runs[index];
+    let key = Some((run.invocation.root_work_id, run.invocation.root_node_id));
+    let mut total = run.self_time;
+    if let Some(children) = children_by_parent.get(&key) {
+        for child in children {
+            total += compute_call_run_total_time(*child, runs, children_by_parent, cache);
+        }
+    }
+    cache.insert(index, total);
+    total
+}
+
+fn summarize_call_runs(runs: &[EvalCallProfileRun]) -> Vec<EvalCallProfileSummaryEntry> {
+    let mut entries = BTreeMap::<Arc<str>, EvalCallProfileSummaryEntry>::new();
+    let mut inputs = BTreeMap::<Arc<str>, BTreeSet<Arc<str>>>::new();
+
+    for run in runs {
+        let key = run.invocation.callee.clone();
+        let entry = entries
+            .entry(key.clone())
+            .or_insert_with(|| EvalCallProfileSummaryEntry {
+                callee: run.invocation.callee.clone(),
+                source: Some(run.invocation.source.clone()),
+                runs: 0,
+                distinct_input_count: 0,
+                repeated_input_count: 0,
+                self_time: Duration::default(),
+                total_time: Duration::default(),
+                max_total_time: Duration::default(),
+            });
+        entry.runs += 1;
+        entry.self_time += run.self_time;
+        entry.total_time += run.total_time;
+        entry.max_total_time = entry.max_total_time.max(run.total_time);
+        if entry.source.as_ref() != Some(&run.invocation.source) {
+            entry.source = None;
+        }
+        inputs
+            .entry(key)
+            .or_default()
+            .insert(run.invocation.args_fingerprint.clone());
+    }
+
+    let mut entries = entries.into_values().collect::<Vec<_>>();
+    for entry in &mut entries {
+        let key = entry.callee.clone();
+        let distinct_input_count = inputs.get(&key).map_or(0, BTreeSet::len);
+        entry.distinct_input_count = distinct_input_count;
+        entry.repeated_input_count = entry.runs.saturating_sub(distinct_input_count);
+    }
+    entries
+}
+
+fn build_call_tree_entries(
+    indices: &[usize],
+    runs: &[EvalCallProfileRun],
+    children_by_parent: &BTreeMap<Option<(Option<EvalWorkId>, EvalNodeId)>, Vec<usize>>,
+) -> Vec<EvalCallTreeEntry> {
+    let mut grouped = BTreeMap::<Arc<str>, Vec<usize>>::new();
+    for index in indices {
+        let run = &runs[*index];
+        grouped
+            .entry(run.invocation.callee.clone())
+            .or_default()
+            .push(*index);
+    }
+
+    let mut entries = grouped
+        .into_iter()
+        .map(|(_, group)| {
+            let first = &runs[group[0]];
+            let mut input_fingerprints = BTreeSet::new();
+            let mut child_indices = Vec::new();
+            let mut self_time = Duration::default();
+            let mut total_time = Duration::default();
+            let mut max_total_time = Duration::default();
+            let mut source = Some(first.invocation.source.clone());
+            for index in &group {
+                let run = &runs[*index];
+                self_time += run.self_time;
+                total_time += run.total_time;
+                max_total_time = max_total_time.max(run.total_time);
+                input_fingerprints.insert(run.invocation.args_fingerprint.clone());
+                if source.as_ref() != Some(&run.invocation.source) {
+                    source = None;
+                }
+                let key = Some((run.invocation.root_work_id, run.invocation.root_node_id));
+                if let Some(children) = children_by_parent.get(&key) {
+                    child_indices.extend(children.iter().copied());
+                }
+            }
+            let mut children = build_call_tree_entries(&child_indices, runs, children_by_parent);
+            children.sort_by(|left, right| {
+                right
+                    .total_time
+                    .cmp(&left.total_time)
+                    .then_with(|| right.self_time.cmp(&left.self_time))
+                    .then_with(|| left.callee.cmp(&right.callee))
+            });
+            EvalCallTreeEntry {
+                callee: first.invocation.callee.clone(),
+                source,
+                runs: group.len(),
+                distinct_input_count: input_fingerprints.len(),
+                repeated_input_count: group.len().saturating_sub(input_fingerprints.len()),
+                self_time,
+                total_time,
+                max_total_time,
+                children,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .total_time
+            .cmp(&left.total_time)
+            .then_with(|| right.self_time.cmp(&left.self_time))
+            .then_with(|| left.callee.cmp(&right.callee))
+    });
+    entries
+}
+
+fn format_call_profile_report(profile: &EvalSessionCallProfile, limit: usize) -> String {
+    let mut lines = vec![format!(
+        "eval2 call profile attributed={} runs={} summary_entries={} roots={}",
+        format_profile_duration(profile.attributed_time),
+        profile.runs.len(),
+        profile.summary.len(),
+        profile.roots.len(),
+    )];
+
+    if !profile.summary.is_empty() {
+        lines.push("hot callsites:".to_string());
+        for entry in profile.summary.iter().take(limit) {
+            lines.push(format!(
+                "  total={} self={} max={} runs={} inputs={}/{} callee={} source={:?}",
+                format_profile_duration(entry.total_time),
+                format_profile_duration(entry.self_time),
+                format_profile_duration(entry.max_total_time),
+                entry.runs,
+                entry.distinct_input_count,
+                entry.runs,
+                entry.callee,
+                entry.source,
+            ));
+        }
+    }
+
+    if !profile.roots.is_empty() {
+        lines.push("call tree:".to_string());
+        format_call_tree_entries(&mut lines, &profile.roots, 1, limit);
+    }
+
+    lines.join("\n")
+}
+
+fn format_call_tree_entries(
+    lines: &mut Vec<String>,
+    entries: &[EvalCallTreeEntry],
+    depth: usize,
+    limit: usize,
+) {
+    let indent = "  ".repeat(depth);
+    for entry in entries.iter().take(limit) {
+        lines.push(format!(
+            "{indent}total={} self={} runs={} inputs={}/{} callee={} source={:?}",
+            format_profile_duration(entry.total_time),
+            format_profile_duration(entry.self_time),
+            entry.runs,
+            entry.distinct_input_count,
+            entry.runs,
+            entry.callee,
+            entry.source,
+        ));
+        if !entry.children.is_empty() {
+            format_call_tree_entries(lines, &entry.children, depth + 1, limit);
+        }
+    }
 }
 
 fn format_profile_duration(duration: Duration) -> String {

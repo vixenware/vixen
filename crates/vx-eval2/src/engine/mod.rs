@@ -276,6 +276,7 @@ fn eval_source_entry_at_place_with_args_with_source_id_with_scheduler_and_sink(
         scheduler,
         None,
         false,
+        false,
     );
     match evaluate_entry_once(&mut state, entry, args)? {
         EvalStep::Ready(value) => Ok(Resolution::Ready(value)),

@@ -10,7 +10,10 @@ pub(super) struct EvalState<'source, 'scheduler, Runtime, Sink> {
     pub(super) scheduler: &'scheduler mut EvalScheduler,
     pub(super) current_work: Option<EvalWorkId>,
     pub(super) queue_child_work: bool,
+    pub(super) track_calls: bool,
     pub(super) stack: Vec<EvalNodeId>,
+    pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
+    pub(super) work_invocation: Option<EvalAuthoredCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +22,7 @@ pub(super) struct EvalSuspension {
     pub(super) pending: PendingRef,
     pub(super) branch_context: EvalBranchContext,
     pub(super) frames: Vec<ContinuationFrame>,
+    pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,6 +413,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         scheduler: &'scheduler mut EvalScheduler,
         current_work: Option<EvalWorkId>,
         queue_child_work: bool,
+        track_calls: bool,
     ) -> Self {
         Self {
             program,
@@ -420,7 +425,10 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
             scheduler,
             current_work,
             queue_child_work,
+            track_calls,
             stack: Vec::new(),
+            call_stack: Vec::new(),
+            work_invocation: None,
         }
     }
 
@@ -434,6 +442,24 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 
     pub(super) fn current_source(&self) -> SourceId {
         self.current_source
+    }
+
+    pub(super) fn current_call(&self) -> Option<&EvalAuthoredCallFrame> {
+        self.call_stack.last()
+    }
+
+    pub(super) fn current_invocation(&self) -> Option<EvalAuthoredCall> {
+        let current = self.current_call()?;
+        let caller = self.call_stack.iter().rev().nth(1);
+        Some(EvalAuthoredCall {
+            root_node_id: current.root_node_id,
+            root_work_id: current.root_work_id,
+            caller_node_id: caller.map(|frame| frame.root_node_id),
+            caller_work_id: caller.and_then(|frame| frame.root_work_id),
+            callee: current.callee.clone(),
+            args_fingerprint: current.args_fingerprint.clone(),
+            source: current.source.clone(),
+        })
     }
 
     pub(super) fn with_source<T>(&mut self, source: SourceId, f: impl FnOnce(&mut Self) -> T) -> T {
@@ -525,6 +551,33 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         debug_assert_eq!(popped, Some(node_id));
         result
     }
+
+    pub(super) fn with_call_stack<T>(
+        &mut self,
+        call_stack: Vec<EvalAuthoredCallFrame>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = std::mem::replace(&mut self.call_stack, call_stack);
+        if let Some(invocation) = self.current_invocation() {
+            self.work_invocation = Some(invocation);
+        }
+        let result = f(self);
+        self.call_stack = previous;
+        result
+    }
+
+    pub(super) fn with_authored_call<T>(
+        &mut self,
+        frame: EvalAuthoredCallFrame,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.call_stack.push(frame);
+        self.work_invocation = self.current_invocation();
+        let result = f(self);
+        let popped = self.call_stack.pop();
+        debug_assert!(popped.is_some());
+        result
+    }
 }
 
 pub(super) fn record_ready_step(
@@ -587,6 +640,7 @@ pub(super) fn record_poison_step(
 }
 
 pub(super) fn wrap_suspended(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     branch_context: EvalBranchContext,
     pending: PendingRef,
     resume_node: EvalNodeId,
@@ -597,6 +651,7 @@ pub(super) fn wrap_suspended(
         pending,
         branch_context,
         frames: vec![frame],
+        call_stack: state.call_stack.clone(),
     })
 }
 

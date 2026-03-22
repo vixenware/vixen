@@ -18,15 +18,16 @@ mod decode;
 
 mod engine;
 pub use engine::{
-    EvalActiveWave, EvalBranchContext, EvalBufferedWork, EvalCompletedWork,
+    EvalActiveWave, EvalAuthoredCall, EvalAuthoredCallFrame, EvalBranchContext, EvalBufferedWork,
+    EvalCallProfileRun, EvalCallProfileSummaryEntry, EvalCallTreeEntry, EvalCompletedWork,
     EvalCompletedWorkOutcome, EvalDependencyEdge, EvalExplainTerminal, EvalGraphNode,
     EvalGraphSnapshot, EvalKeyedNode, EvalKeyedNodeUpdateReason, EvalLeasedWork,
     EvalLeasedWorkState, EvalNodeExplanation, EvalNodeKind, EvalNodeRecord, EvalNodeState,
     EvalPreparedWork, EvalProfileEntry, EvalProfileSummaryEntry, EvalQueuedWork, EvalRunnableNode,
-    EvalSession, EvalSessionCheckpoint, EvalSessionProfile, EvalSessionProfileSummary,
-    EvalSessionStats, EvalSessionStep, EvalWaveId, EvalWorkCompletion, EvalWorkId, EvalWorkKind,
-    EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks, RuntimeReady,
-    RuntimeSlotPrepare, eval_source_entry, eval_source_entry_at_place,
+    EvalSession, EvalSessionCallProfile, EvalSessionCheckpoint, EvalSessionProfile,
+    EvalSessionProfileSummary, EvalSessionStats, EvalSessionStep, EvalWaveId, EvalWorkCompletion,
+    EvalWorkId, EvalWorkKind, EvalWorkRecord, EvalWorkState, RuntimeCallOutcome, RuntimeHooks,
+    RuntimeReady, RuntimeSlotPrepare, eval_source_entry, eval_source_entry_at_place,
     eval_source_entry_at_place_with_args, eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_at_place_with_args_with_source_id_with_sink,

@@ -280,6 +280,56 @@ pub(super) fn prepare_function_call(
     }))
 }
 
+pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
+    let items = args
+        .iter()
+        .map(|value| format!("{:?}", value.rep))
+        .collect::<Vec<_>>();
+    Arc::from(format!("[{}]", items.join(", ")))
+}
+
+pub(super) fn authored_call_frame(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    callee: Arc<str>,
+    args: &[Value],
+    source: SourceSpan,
+) -> EvalAuthoredCallFrame {
+    EvalAuthoredCallFrame {
+        root_node_id: node_id,
+        root_work_id: state.current_work,
+        callee,
+        args_fingerprint: profile_args_fingerprint(args),
+        source,
+    }
+}
+
+pub(super) fn emit_authored_call_started(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    source: SourceSpan,
+    frame: &EvalAuthoredCallFrame,
+    argc: usize,
+) {
+    if !state.track_calls {
+        return;
+    }
+    let caller = state.current_call();
+    state.emit(
+        node_id,
+        parent_id,
+        Some(source),
+        EvalEventKind::AuthoredCallStarted {
+            callee: frame.callee.clone(),
+            argc: argc as u32,
+            args_fingerprint: frame.args_fingerprint.clone(),
+            caller_node_id: caller.map(|current| current.root_node_id),
+            caller_work_id: caller.and_then(|current| current.root_work_id),
+        },
+    );
+}
+
 pub(super) fn keyed_context_value(key: Value, joined: Value) -> Value {
     let fields = vec![(Arc::from("key"), key), (Arc::from("joined"), joined)];
     let meta = aggregate_child_meta(
@@ -1005,9 +1055,32 @@ pub(super) fn continue_call_from_args(
     };
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
         let mut env = prepared.env;
-        return state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
-        });
+        return if !state.track_calls {
+            state.with_source(prepared.source, |state| {
+                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            })
+        } else {
+            let frame = authored_call_frame(
+                state,
+                node_id,
+                function.name.clone(),
+                &args,
+                call_source.clone(),
+            );
+            emit_authored_call_started(
+                state,
+                node_id,
+                parent_id,
+                call_source.clone(),
+                &frame,
+                args.len(),
+            );
+            state.with_authored_call(frame, |state| {
+                state.with_source(prepared.source, |state| {
+                    eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                })
+            })
+        };
     }
     if let Some(field_names) = enum_constructor_field_names(function) {
         if field_names.len() != args.len() {
@@ -1156,6 +1229,7 @@ pub(super) fn continue_call_from_args(
                 },
             );
             Ok(wrap_suspended(
+                state,
                 state.branch_context.clone(),
                 pending,
                 node_id,
@@ -2826,6 +2900,11 @@ pub(super) fn queue_child_expr_handle(
     let scheduled = ScheduledExpr {
         expr,
         env: Arc::clone(env),
+        call_stack: if state.track_calls {
+            state.call_stack.clone()
+        } else {
+            Vec::new()
+        },
     };
     state
         .scheduler
@@ -2859,6 +2938,7 @@ pub(super) fn wait_on_child_dependency(
         pending,
         branch_context: state.branch_context.clone(),
         frames,
+        call_stack: state.call_stack.clone(),
     })
 }
 

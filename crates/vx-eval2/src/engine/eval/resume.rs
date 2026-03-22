@@ -5,38 +5,79 @@ pub(in crate::engine) fn resume_suspension(
     suspension: EvalSuspension,
     result: Result<Value, EvalError>,
 ) -> Result<EvalStep, EvalError> {
-    let mut current = result;
-    let resume_node = suspension.resume_node;
-    let parent_id = state
-        .scheduler
-        .node_record(resume_node)
-        .and_then(|record| record.parent_id);
-    let frames = suspension.frames;
-    let mut index = 0;
-    while index < frames.len() {
-        match resume_frame(state, frames[index].clone(), current)? {
-            ResumeOutcome::Continue(next) => current = next,
-            ResumeOutcome::Suspended(mut new_suspension) => {
-                new_suspension
-                    .frames
-                    .extend(frames[index + 1..].iter().cloned());
-                return Ok(EvalStep::Suspended(new_suspension));
+    let EvalSuspension {
+        resume_node,
+        pending: _,
+        branch_context: _,
+        frames,
+        call_stack,
+    } = suspension;
+    if call_stack.is_empty() {
+        let mut current = result;
+        let parent_id = state
+            .scheduler
+            .node_record(resume_node)
+            .and_then(|record| record.parent_id);
+        let mut index = 0;
+        while index < frames.len() {
+            match resume_frame(state, frames[index].clone(), current)? {
+                ResumeOutcome::Continue(next) => current = next,
+                ResumeOutcome::Suspended(mut new_suspension) => {
+                    new_suspension
+                        .frames
+                        .extend(frames[index + 1..].iter().cloned());
+                    return Ok(EvalStep::Suspended(new_suspension));
+                }
+            }
+            index += 1;
+        }
+        if !matches!(
+            state.scheduler.node_state(resume_node),
+            Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
+        ) {
+            match &current {
+                Ok(value) => record_ready_step(state, resume_node, parent_id, value),
+                Err(error) => record_poison_step(state, resume_node, parent_id, error),
             }
         }
-        index += 1;
-    }
-    if !matches!(
-        state.scheduler.node_state(resume_node),
-        Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
-    ) {
-        match &current {
-            Ok(value) => record_ready_step(state, resume_node, parent_id, value),
-            Err(error) => record_poison_step(state, resume_node, parent_id, error),
+        match current {
+            Ok(value) => Ok(EvalStep::Ready(value)),
+            Err(error) => Err(error),
         }
-    }
-    match current {
-        Ok(value) => Ok(EvalStep::Ready(value)),
-        Err(error) => Err(error),
+    } else {
+        state.with_call_stack(call_stack, |state| {
+            let mut current = result;
+            let parent_id = state
+                .scheduler
+                .node_record(resume_node)
+                .and_then(|record| record.parent_id);
+            let mut index = 0;
+            while index < frames.len() {
+                match resume_frame(state, frames[index].clone(), current)? {
+                    ResumeOutcome::Continue(next) => current = next,
+                    ResumeOutcome::Suspended(mut new_suspension) => {
+                        new_suspension
+                            .frames
+                            .extend(frames[index + 1..].iter().cloned());
+                        return Ok(EvalStep::Suspended(new_suspension));
+                    }
+                }
+                index += 1;
+            }
+            if !matches!(
+                state.scheduler.node_state(resume_node),
+                Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
+            ) {
+                match &current {
+                    Ok(value) => record_ready_step(state, resume_node, parent_id, value),
+                    Err(error) => record_poison_step(state, resume_node, parent_id, error),
+                }
+            }
+            match current {
+                Ok(value) => Ok(EvalStep::Ready(value)),
+                Err(error) => Err(error),
+            }
+        })
     }
 }
 
@@ -143,6 +184,7 @@ pub(in crate::engine) fn resume_frame(
                                         type_args: Arc::clone(&type_args),
                                         child_nodes: child_nodes.clone(),
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         }
@@ -321,6 +363,7 @@ pub(in crate::engine) fn resume_frame(
                                         child_nodes: child_nodes.clone(),
                                         array_source: array_source.clone(),
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         }
@@ -386,6 +429,7 @@ pub(in crate::engine) fn resume_frame(
                                         child_nodes: child_nodes.clone(),
                                         tuple_source: tuple_source.clone(),
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         }
@@ -466,6 +510,7 @@ pub(in crate::engine) fn resume_frame(
                                                     string_source: string_source.clone(),
                                                 },
                                             ],
+                                            call_stack: state.call_stack.clone(),
                                         }));
                                     }
                                 }
@@ -553,6 +598,7 @@ pub(in crate::engine) fn resume_frame(
                                         range_source: range_source.clone(),
                                         inclusive_end,
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         },
@@ -579,6 +625,7 @@ pub(in crate::engine) fn resume_frame(
                                         range_source: range_source.clone(),
                                         inclusive_end,
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         },
@@ -918,6 +965,7 @@ pub(in crate::engine) fn resume_frame(
                                         child_nodes: child_nodes.clone(),
                                         struct_source: struct_source.clone(),
                                     }],
+                                    call_stack: state.call_stack.clone(),
                                 }));
                             }
                         }
