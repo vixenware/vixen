@@ -109,6 +109,11 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
     },
+    Fallible {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        fallible_source: SourceSpan,
+    },
     RuntimeCall {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,

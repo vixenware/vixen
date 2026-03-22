@@ -97,6 +97,16 @@ pub(in crate::engine) fn resume_frame(
                 ResumeOutcome::Continue(Err(error))
             }
         }),
+        ContinuationFrame::Fallible {
+            node_id,
+            parent_id,
+            fallible_source,
+        } => Ok(conclude_resumed_node(
+            state,
+            node_id,
+            parent_id,
+            Ok(wrap_fallible_result(input, fallible_source)),
+        )),
         ContinuationFrame::RuntimeCall {
             node_id,
             parent_id,

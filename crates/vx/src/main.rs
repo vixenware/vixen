@@ -5,6 +5,7 @@
 mod build_json;
 mod cli;
 mod diagnostics;
+mod eval_runtime;
 mod progress_listener;
 mod tui;
 mod types;
@@ -23,8 +24,7 @@ use roam_core::Driver;
 use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
 use vx_eval2::{
-    CrossingPolicy, EvalError, EvalErrorKind, EvalSession, PendingRef, Provenance, Resolution,
-    ReuseClass, RuntimeCallOutcome, RuntimeHooks, SourceSpan, Value as EvalValue, ValueRep,
+    EvalError, EvalSession, PendingRef, Resolution, RuntimeHooks, Value as EvalValue,
     value_to_envelope,
 };
 use vx_eval2_proto::ValueEnvelope;
@@ -37,6 +37,7 @@ use vxd_proto::{BuildRequest, PsResult, VxdClient};
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, EvalArgs, KillArgs, StartArgs},
+    eval_runtime::build_eval_runtime,
     progress_listener::ProgressListenerImpl,
 };
 use vx_io::boot::BootStatusState;
@@ -220,51 +221,6 @@ impl std::ops::Deref for ConnectedVxd {
 
     fn deref(&self) -> &Self::Target {
         &self.client
-    }
-}
-
-struct LocalEvalRuntime {
-    root_dir: PathBuf,
-}
-
-impl RuntimeHooks for LocalEvalRuntime {
-    fn call(
-        &self,
-        _place: &str,
-        callee: &str,
-        args: &[EvalValue],
-        source: &SourceSpan,
-    ) -> std::result::Result<RuntimeCallOutcome, EvalError> {
-        match callee {
-            "read_file" => {
-                if args.len() != 1 {
-                    return Err(EvalError::new(
-                        EvalErrorKind::TypeError,
-                        "read_file() requires exactly one string argument",
-                    ));
-                }
-                let ValueRep::String(path) = &args[0].rep else {
-                    return Err(EvalError::new(
-                        EvalErrorKind::TypeError,
-                        "read_file() argument must evaluate to String",
-                    ));
-                };
-                let full_path = self.root_dir.join(path.as_ref());
-                let contents = fs::read_to_string(&full_path).map_err(|error| {
-                    EvalError::new(
-                        EvalErrorKind::UserFail,
-                        format!("read_file() failed for {}: {error}", full_path.display()),
-                    )
-                })?;
-                Ok(RuntimeCallOutcome::Ready(
-                    EvalValue::external("Blob", contents)
-                        .with_provenance(Provenance::unknown(source.clone()))
-                        .with_reuse(ReuseClass::Observed)
-                        .with_crossing(CrossingPolicy::ByValue),
-                ))
-            }
-            _ => Ok(RuntimeCallOutcome::Unsupported),
-        }
     }
 }
 
@@ -456,6 +412,32 @@ fn facet_value_to_eval_value(value: &FacetValue) -> Result<EvalValue> {
             .map(EvalValue::array);
     }
     if let Some(entries) = value.as_object() {
+        let entries = entries.iter().collect::<Vec<_>>();
+        if entries.len() == 1 && entries[0].0.as_str() == "$path" {
+            let Some(path) = entries[0].1.as_string() else {
+                bail!("`$path` JSON arguments must be strings");
+            };
+            return Ok(EvalValue::external("Path", path.as_str()));
+        }
+        if entries.len() == 1 && entries[0].0.as_str() == "$external" {
+            let Some(object) = entries[0].1.as_object() else {
+                bail!("`$external` JSON arguments must be objects");
+            };
+            let object_entries = object.iter().collect::<Vec<_>>();
+            let kind = object_entries
+                .iter()
+                .find(|(key, _)| key.as_str() == "kind")
+                .and_then(|(_, value)| value.as_string())
+                .map(|value| value.as_str())
+                .ok_or_else(|| eyre!("`$external.kind` must be a string"))?;
+            let descriptor = object_entries
+                .iter()
+                .find(|(key, _)| key.as_str() == "descriptor")
+                .and_then(|(_, value)| value.as_string())
+                .map(|value| value.as_str())
+                .ok_or_else(|| eyre!("`$external.descriptor` must be a string"))?;
+            return Ok(EvalValue::external(kind, descriptor));
+        }
         return entries
             .iter()
             .map(|(key, value)| {
@@ -511,7 +493,7 @@ fn print_eval_resolution(mode: &CliMode, resolution: &EvalCliResolution) -> Resu
     Ok(())
 }
 
-fn print_eval_reports(args: &EvalArgs, session: &EvalSession<'_, LocalEvalRuntime>) {
+fn print_eval_reports<Runtime: RuntimeHooks>(args: &EvalArgs, session: &EvalSession<'_, Runtime>) {
     if args.profile {
         eprintln!("{}", session.profile_report(args.profile_limit));
     }
@@ -602,8 +584,9 @@ impl CliContext {
     // ─── Commands ───────────────────────────────────────────────────────
 
     async fn cmd_eval(&mut self, args: EvalArgs) -> Result<()> {
-        let (source, source_id, root_dir) = read_eval_source(&args.file)?;
-        let runtime = LocalEvalRuntime { root_dir };
+        let (source, source_id, source_dir) = read_eval_source(&args.file)?;
+        let cwd = std::env::current_dir()?;
+        let runtime = build_eval_runtime(&args.runtime, source_dir, cwd)?;
         let eval_args = parse_eval_args(&args.arg_json)?;
         let mut session = EvalSession::new(
             source,

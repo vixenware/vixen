@@ -16,11 +16,11 @@ use roam_types::MessageFamily;
 use tempfile::TempDir;
 use vx_eval2::{
     Claim, CrossingPolicy, EvalError, EvalErrorKind, EvalEventKind, EvalProgram, EvalProgramImport,
-    EvalProgramSource, EvalSession, EvalTrace, ProjectionStep, Provenance, ProvenanceRoot,
-    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
-    RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotResolved, SlotStore,
-    SlotStoreReason, SlotVerification, SourcePoint, SourceSpan, Value, ValueRep, envelope_to_value,
-    resolution_to_outcome, value_to_envelope,
+    EvalProgramSource, EvalSession, EvalTrace, FunctionRef, ProjectionStep, Provenance,
+    ProvenanceRoot, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind,
+    RuntimeReady, RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotResolved,
+    SlotStore, SlotStoreReason, SlotVerification, SourcePoint, SourceSpan, Value, ValueRep,
+    envelope_to_value, resolution_to_outcome, value_to_envelope,
 };
 use vx_eval2_proto::{
     EVAL2_PROTOCOL_VERSION, Eval2Daemon, Eval2DaemonClient, Eval2DaemonDispatcher, Eval2Version,
@@ -1122,10 +1122,11 @@ impl RuntimeHooks for FixtureRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name();
         match callee {
             "read_file" => {
                 if args.len() != 1 {

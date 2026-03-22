@@ -223,6 +223,14 @@ impl FunctionRef {
         }
     }
 
+    pub fn name(&self) -> &str {
+        self.name.as_ref()
+    }
+
+    pub fn captures(&self) -> &[(Arc<str>, Value)] {
+        &self.captures
+    }
+
     pub(crate) fn capture_env(&self) -> OrdMap<String, Value> {
         self.captures
             .iter()

@@ -43,7 +43,7 @@ pub trait RuntimeHooks: Send + Sync {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError>;
@@ -140,7 +140,7 @@ impl RuntimeHooks for NoRuntime {
     fn call(
         &self,
         _place: &str,
-        _callee: &str,
+        _callee: &FunctionRef,
         _args: &[Value],
         _source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {

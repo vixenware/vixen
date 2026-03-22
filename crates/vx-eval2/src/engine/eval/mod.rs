@@ -1,5 +1,5 @@
 use super::*;
-use vx_parser::{MatchExpr, PathLiteralExpr};
+use vx_parser::{FallibleExpr, MatchExpr, PathLiteralExpr};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -459,6 +459,7 @@ pub(super) fn eval_expr_with_node_id(
         Expr::Range(range) => eval_range(state, range, env),
         Expr::Map(map) => eval_map(state, map, env),
         Expr::Fail(fail) => eval_fail(state, fail, env),
+        Expr::Fallible(fallible) => eval_fallible(state, fallible, env),
         Expr::If(if_expr) => eval_if(state, if_expr, env),
         Expr::Match(match_expr) => eval_match(state, match_expr, env),
         Expr::Where(where_expr) => eval_where(state, where_expr, env),
@@ -1035,6 +1036,33 @@ pub(super) fn continue_call_from_args(
             "call target must evaluate to a function value",
         ));
     };
+    if let Some(target) = fallible_target_function(function) {
+        let fallible_source = call_source.clone();
+        return match continue_call_from_args(
+            state,
+            node_id,
+            parent_id,
+            Value::function(target),
+            call_source,
+            type_args,
+            args,
+            Vec::new(),
+            empty_env(),
+        ) {
+            Ok(EvalStep::Ready(value)) => {
+                Ok(EvalStep::Ready(fallible_some(value, fallible_source)))
+            }
+            Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::Fallible {
+                    node_id,
+                    parent_id,
+                    fallible_source,
+                },
+            )),
+            Err(error) => Ok(wrap_fallible_result(Err(error), fallible_source)),
+        };
+    }
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
         let mut env = prepared.env;
         return if !state.track_calls {
@@ -1165,7 +1193,7 @@ pub(super) fn continue_call_from_args(
     );
     match state
         .runtime
-        .call(state.place, &callee_name, &args, &call_source)?
+        .call(state.place, function, &args, &call_source)?
     {
         RuntimeCallOutcome::Ready(value) => {
             state.emit(
@@ -1738,6 +1766,92 @@ pub(super) fn eval_fail(
         }
     };
     Err(user_fail_error(failure))
+}
+
+fn fallible_some(value: Value, source: SourceSpan) -> Value {
+    let fields = vec![(Arc::from("value"), value)];
+    let meta = aggregate_child_meta(
+        Provenance::literal(source),
+        fields.iter().map(|(_, value)| value),
+    );
+    Value::structure("Some", fields).with_meta(meta)
+}
+
+fn fallible_none(source: SourceSpan) -> Value {
+    Value::structure("None", Vec::<(Arc<str>, Value)>::new())
+        .with_provenance(Provenance::literal(source))
+}
+
+fn fallible_function_value(function: &FunctionRef, source: SourceSpan) -> Value {
+    let mut captures = function.captures().iter().cloned().collect::<Vec<_>>();
+    captures.push((
+        Arc::from("__fallible_target"),
+        Value::function(function.clone()).with_provenance(Provenance::literal(source.clone())),
+    ));
+    let wrapper = FunctionRef::new(
+        function.source_id.clone(),
+        function.name.clone(),
+        function.parameters.clone(),
+        function.has_keyword_parameters,
+        None,
+        Arc::from(captures),
+        function.self_name.clone(),
+    );
+    Value::function(wrapper).with_provenance(Provenance::literal(source))
+}
+
+fn wrap_fallible_result(result: Result<Value, EvalError>, source: SourceSpan) -> EvalStep {
+    let value = match result {
+        Ok(value) => match &value.rep {
+            ValueRep::Function(function) => fallible_function_value(function, source),
+            _ => fallible_some(value, source),
+        },
+        Err(_) => fallible_none(source),
+    };
+    EvalStep::Ready(value)
+}
+
+fn fallible_target_function(function: &FunctionRef) -> Option<FunctionRef> {
+    function
+        .captures()
+        .iter()
+        .find(|(name, _)| name.as_ref() == "__fallible_target")
+        .and_then(|(_, value)| match &value.rep {
+            ValueRep::Function(target) => Some(target.clone()),
+            _ => None,
+        })
+}
+
+pub(super) fn eval_fallible(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    fallible: &FallibleExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("fallible expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let source = state.span_for_node(fallible);
+    let Some(expr) = fallible.expr() else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "fallible expression has no operand",
+        ));
+    };
+    match eval_child_expr(state, &expr, env) {
+        Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
+        Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::Fallible {
+                node_id,
+                parent_id,
+                fallible_source: source,
+            },
+        )),
+        Err(error) => Ok(wrap_fallible_result(Err(error), source)),
+    }
 }
 
 pub(super) fn user_fail_error(value: Value) -> EvalError {
@@ -3488,10 +3602,8 @@ pub(super) fn values_equal(lhs: &ValueRep, rhs: &ValueRep) -> Result<bool, EvalE
                 },
             )
         }
-        (ValueRep::External(_), _) | (_, ValueRep::External(_)) => Err(EvalError::new(
-            EvalErrorKind::TypeError,
-            "external values do not support authored equality yet",
-        )),
+        (ValueRep::External(lhs), ValueRep::External(rhs)) => Ok(lhs == rhs),
+        (ValueRep::External(_), _) | (_, ValueRep::External(_)) => Ok(false),
         (ValueRep::Function(_), _) | (_, ValueRep::Function(_)) => Err(EvalError::new(
             EvalErrorKind::TypeError,
             "function values do not support authored equality",

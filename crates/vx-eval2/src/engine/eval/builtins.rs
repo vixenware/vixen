@@ -1,5 +1,7 @@
 use std::path::{Component, MAIN_SEPARATOR, Path as FsPath, PathBuf};
 
+use facet_value::{VArray, VObject, Value as FacetValue};
+
 use super::*;
 
 pub(in crate::engine) fn slot_builtin_action(
@@ -845,6 +847,8 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
         callee_name,
         "Json.parse"
             | "Toml.parse"
+            | "Json.serialize"
+            | "Toml.serialize"
             | "Blob.utf8"
             | "Path.to_string"
             | "String.len"
@@ -956,6 +960,27 @@ fn continue_builtin_call_inner(
             };
             let value =
                 parse_blob_as_value(format, &args[0], &type_args[0], state.program.types())?;
+            Ok(ready_builtin_value(value))
+        }
+        "Json.serialize" | "Toml.serialize" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee_name}() requires one argument"),
+                ));
+            }
+            if !type_args.is_empty() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!("{callee_name}() does not accept type arguments"),
+                ));
+            }
+            let format = match callee_name {
+                "Json.serialize" => StructuredFormat::Json,
+                "Toml.serialize" => StructuredFormat::Toml,
+                _ => unreachable!(),
+            };
+            let value = serialize_value_as_blob(format, &args[0])?;
             Ok(ready_builtin_value(value))
         }
         "Blob.utf8" => {
@@ -1837,6 +1862,133 @@ fn continue_builtin_call_inner(
         }
         _ => Ok(None),
     }
+}
+
+fn serialize_value_as_blob(format: StructuredFormat, value: &Value) -> Result<Value, EvalError> {
+    let encoded = encode_value_as_facet(value, format)?;
+    let text = match format {
+        StructuredFormat::Json => facet_json::to_string(&encoded).map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("{} failed: {error}", serialize_display_name(format)),
+            )
+        })?,
+        StructuredFormat::Toml => facet_toml::to_string(&encoded).map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("{} failed: {error}", serialize_display_name(format)),
+            )
+        })?,
+    };
+    Ok(Value::external("Blob", text)
+        .with_reuse(ReuseClass::Stable)
+        .with_crossing(CrossingPolicy::ByValue))
+}
+
+fn serialize_display_name(format: StructuredFormat) -> &'static str {
+    match format {
+        StructuredFormat::Json => "Json.serialize",
+        StructuredFormat::Toml => "Toml.serialize",
+    }
+}
+
+fn encode_value_as_facet(value: &Value, format: StructuredFormat) -> Result<FacetValue, EvalError> {
+    match &value.rep {
+        ValueRep::Unit => Ok(FacetValue::NULL),
+        ValueRep::Bool(value) => Ok(FacetValue::from(*value)),
+        ValueRep::U64(value) => Ok(FacetValue::from(*value)),
+        ValueRep::String(value) => Ok(FacetValue::from(value.as_ref())),
+        ValueRep::Array(items) | ValueRep::Tuple(items) => {
+            let mut array = VArray::new();
+            for item in items.iter() {
+                array.push(encode_value_as_facet(item, format)?);
+            }
+            Ok(array.into())
+        }
+        ValueRep::Map(map) => {
+            let mut object = VObject::new();
+            for (key, value) in map.entries.iter() {
+                let ValueRep::String(key) = &key.rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!(
+                            "{} only supports maps with String keys",
+                            serialize_display_name(format)
+                        ),
+                    ));
+                };
+                if let Some(encoded) = encode_object_entry_value(value, format)? {
+                    object.insert(key.as_ref(), encoded);
+                }
+            }
+            Ok(object.into())
+        }
+        ValueRep::Struct(struct_value) if struct_value.type_name.as_ref() == "None" => {
+            Ok(FacetValue::NULL)
+        }
+        ValueRep::Struct(struct_value) if struct_value.type_name.as_ref() == "Some" => {
+            let Some((_, inner)) = struct_value
+                .fields
+                .iter()
+                .find(|(field, _)| field.as_ref() == "value")
+            else {
+                return Err(EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!(
+                        "{} cannot serialize Some without a value field",
+                        serialize_display_name(format)
+                    ),
+                ));
+            };
+            encode_value_as_facet(inner, format)
+        }
+        ValueRep::Struct(struct_value) => {
+            let mut object = VObject::new();
+            for (field, value) in struct_value.fields.iter() {
+                if let Some(encoded) = encode_object_entry_value(value, format)? {
+                    object.insert(field.as_ref(), encoded);
+                }
+            }
+            Ok(object.into())
+        }
+        ValueRep::Range(_) => Err(EvalError::new(
+            EvalErrorKind::UserFail,
+            format!(
+                "{} does not support Range values yet",
+                serialize_display_name(format)
+            ),
+        )),
+        ValueRep::External(external) => Err(EvalError::new(
+            EvalErrorKind::UserFail,
+            format!(
+                "{} does not support external {} values yet",
+                serialize_display_name(format),
+                external.kind
+            ),
+        )),
+        ValueRep::Function(_) => Err(EvalError::new(
+            EvalErrorKind::UserFail,
+            format!(
+                "{} does not support function values",
+                serialize_display_name(format)
+            ),
+        )),
+    }
+}
+
+fn encode_object_entry_value(
+    value: &Value,
+    format: StructuredFormat,
+) -> Result<Option<FacetValue>, EvalError> {
+    if matches!(format, StructuredFormat::Toml)
+        && matches!(
+            &value.rep,
+            ValueRep::Struct(struct_value) if struct_value.type_name.as_ref() == "None"
+        )
+    {
+        return Ok(None);
+    }
+    Ok(Some(encode_value_as_facet(value, format)?))
 }
 
 fn slice_projection_path(range: &RangeValue) -> String {

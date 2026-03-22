@@ -67,7 +67,7 @@ struct CargoWorkspace {
 }
 
 struct CargoWorkspaceRootManifest {
-  workspace: CargoWorkspace,
+  workspace: CargoWorkspace? = None,
 }
 
 #[rename_all = "kebab-case"]
@@ -1048,7 +1048,10 @@ fn root_target_requests_at_with_workspace(
 )
 
 fn workspace_root_dependencies_from_blob(blob: Blob) -> Map[String, CargoDependencySpec] (
-  Toml.parse[CargoWorkspaceRootManifest](blob).workspace.dependencies
+  match Toml.parse[CargoWorkspaceRootManifest](blob).workspace (
+    Some { value } => value.dependencies,
+    None => %{},
+  )
 )
 
 fn workspace_root_dependencies(workspace: Tree) -> Map[String, CargoDependencySpec] (
@@ -1056,7 +1059,10 @@ fn workspace_root_dependencies(workspace: Tree) -> Map[String, CargoDependencySp
 )
 
 fn workspace_root_package_from_blob(blob: Blob) -> CargoWorkspacePackage? (
-  Toml.parse[CargoWorkspaceRootManifest](blob).workspace.package
+  match Toml.parse[CargoWorkspaceRootManifest](blob).workspace (
+    Some { value } => value.package,
+    None => None,
+  )
 )
 
 fn workspace_root_package(workspace: Tree) -> CargoWorkspacePackage? (
@@ -2001,7 +2007,7 @@ fn crate_source(pkg: ResolvedCrate) where {
   match pkg.source (
     ResolvedSource.Registry { checksum, download_url } => (
       acquire(download_url) where {
-        digest: `sha256:${checksum}`,
+        digest: `sha256:{checksum}`,
         extract: "tar.gz",
       }
     ),
@@ -2019,7 +2025,9 @@ fn crate_source(pkg: ResolvedCrate) where {
 fn vendored_entry(pkg: ResolvedCrate) where {
   workspace_root: Path,
 } -> (Path, Tree) (
-  (@(vendor/{pkg.name}-{pkg.version}), crate_source(pkg) where { workspace_root })
+  let name = pkg.name;
+  let version = pkg.version;
+  (Path(`{name}-{version}`), crate_source(pkg) where { workspace_root })
 )
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
@@ -2030,6 +2038,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     // a real implementation would derive this from the selected build target,
     // executor class, or explicit CLI/config inputs.
     triple: "x86_64-unknown-linux-gnu",
+    cfg: [],
   };
 
   let resolution =
@@ -2045,8 +2054,10 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   // Acquisition stays fixed-hash and cacheable.
   let vendor =
     Tree(
-      resolution.packages
-        .to_map((pkg) => vendored_entry(pkg) where { workspace_root: ws })
+      array_fold(resolution.packages, %{}, (acc, pkg) => (
+        let (path, tree) = vendored_entry(pkg) where { workspace_root: ws };
+        map_put(acc, path, tree)
+      ))
     );
   let lock_blob = emit_lockfile(resolution);
 

@@ -107,6 +107,10 @@ pub(crate) struct EvalArgs {
     #[facet(args::named, args::short = 'f')]
     pub(crate) file: String,
 
+    /// Runtime profile to expose to the evaluator
+    #[facet(args::named, default = "local")]
+    pub(crate) runtime: String,
+
     /// Function entry point to call
     #[facet(args::named, default = "build")]
     pub(crate) entry: String,

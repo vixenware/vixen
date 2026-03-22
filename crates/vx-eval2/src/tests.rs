@@ -17,8 +17,8 @@ use crate::{
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal,
     EvalKeyedNodeUpdateReason, EvalLeasedWorkState, EvalNodeId, EvalNodeKind, EvalNodeState,
     EvalProgram, EvalProgramImport, EvalProgramSource, EvalSession, EvalSessionStep, EvalTrace,
-    EvalWorkKind, EvalWorkState, MapValue, PendingRef, ProjectionStep, Provenance, Resolution,
-    ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
+    EvalWorkKind, EvalWorkState, FunctionRef, MapValue, PendingRef, ProjectionStep, Provenance,
+    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
     RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotId, SlotResolutionKind,
     SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
     channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
@@ -324,11 +324,11 @@ impl RuntimeHooks for ReadFileRuntime {
     fn call(
         &self,
         _place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
-        match callee {
+        match callee.name.as_ref() {
             "read_file" => {
                 if args.len() != 1 {
                     return Err(EvalError::new(
@@ -470,11 +470,11 @@ impl RuntimeHooks for CargoSketchRuntime {
     fn call(
         &self,
         _place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
-        match callee {
+        match callee.name.as_ref() {
             "read_file" => {
                 if args.len() != 1 {
                     return Err(EvalError::new(
@@ -1069,6 +1069,38 @@ fn build(blob: Blob) {
         ValueRep::String(Arc::from("demo"))
     );
     assert_eq!(struct_field(&value, "port").rep, ValueRep::U64(8080));
+}
+
+#[test]
+fn toml_serialize_omits_none_fields_in_structs() {
+    let value = expect_ready(
+        eval_source_entry_with_args_with_source_id(
+            r#"
+struct Config {
+  name: String,
+  description: String?,
+}
+
+fn build() {
+  Toml.serialize(Config {
+    name: "demo",
+    description: None,
+  })
+}
+"#,
+            "toml-serialize-omits-none",
+            "build",
+            &[],
+        )
+        .expect("evaluate Toml.serialize"),
+    );
+
+    let ValueRep::External(external) = &value.rep else {
+        panic!("expected Blob result, got {value:?}");
+    };
+    assert_eq!(external.kind.as_ref(), "Blob");
+    assert!(external.descriptor.contains("name = \"demo\""));
+    assert!(!external.descriptor.contains("description"));
 }
 
 #[test]
@@ -5063,10 +5095,11 @@ fn map_entries_aggregates_metadata_from_contents() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
                     Value::string("observed")
@@ -5237,10 +5270,11 @@ fn array_rest_aggregates_metadata_from_remaining_contents() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
                     Value::string("observed")
@@ -5352,10 +5386,11 @@ fn array_push_aggregates_metadata_from_contents() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
                     Value::string("observed")
@@ -5528,10 +5563,11 @@ fn map_put_insert_preserves_observed_claim_metadata() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
                     Value::string("observed")
@@ -5591,10 +5627,11 @@ fn map_put_replace_preserves_existing_composite_metadata() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_claimed_value") => Ok(RuntimeCallOutcome::Ready(
                     Value::string("observed")
@@ -5706,10 +5743,11 @@ fn array_find_resumes_after_suspending_predicate_and_continues_search() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_wait_bool") => {
                     if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -6017,10 +6055,11 @@ fn array_fold_resumes_after_suspending_step_function() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_wait_bool") => {
                     if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -6222,10 +6261,11 @@ fn keyed_demands_resume_cleanly_after_pending_resolution() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_wait_bool") => {
                     if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -6525,10 +6565,11 @@ fn session_call_profile_tracks_nested_authored_calls_across_pending_resume() {
         fn call(
             &self,
             place: &str,
-            callee: &str,
+            callee: &FunctionRef,
             _args: &[Value],
             source: &SourceSpan,
         ) -> Result<RuntimeCallOutcome, EvalError> {
+            let callee = callee.name.as_ref();
             match (place, callee) {
                 ("win", "host_wait_bool") => {
                     if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -6809,7 +6850,7 @@ impl RuntimeHooks for UnsupportedRuntime {
     fn call(
         &self,
         _place: &str,
-        _callee: &str,
+        _callee: &FunctionRef,
         _args: &[Value],
         _source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
@@ -6908,10 +6949,11 @@ impl RuntimeHooks for SlotBuiltinRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (callee, args) {
             ("host_which", [value]) => {
                 let ValueRep::String(name) = &value.rep else {
@@ -7120,6 +7162,217 @@ fn stdlib_style_declaration_without_body_uses_runtime_hooks() {
         panic!("expected ready imported runtime-backed result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::String("windows".into()));
+}
+
+#[test]
+fn runtime_hooks_receive_where_keyword_bindings_in_callee_captures() {
+    struct KeywordRuntime;
+
+    impl RuntimeHooks for KeywordRuntime {
+        fn call(
+            &self,
+            _place: &str,
+            callee: &FunctionRef,
+            args: &[Value],
+            _source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            if callee.name() != "acquire" {
+                return Ok(RuntimeCallOutcome::Unsupported);
+            }
+            let [url] = args else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "acquire() should receive one positional argument",
+                ));
+            };
+            let ValueRep::String(url) = &url.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "acquire() url should evaluate to String",
+                ));
+            };
+            let digest = callee
+                .captures()
+                .iter()
+                .find(|(name, _)| name.as_ref() == "digest")
+                .map(|(_, value)| value)
+                .expect("digest capture");
+            let extract = callee
+                .captures()
+                .iter()
+                .find(|(name, _)| name.as_ref() == "extract")
+                .map(|(_, value)| value)
+                .expect("extract capture");
+            Ok(RuntimeCallOutcome::Ready(Value::string(format!(
+                "{url}|{:?}|{:?}",
+                digest.rep, extract.rep
+            ))))
+        }
+    }
+
+    let resolution = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn build() {
+  acquire("https://example.test/src.tar.gz") where {
+    digest: "sha256:00112233",
+    extract: "tar.gz",
+  }
+}
+"#,
+        "runtime-where-keywords",
+        "build",
+        &[],
+        &KeywordRuntime,
+        "local",
+    )
+    .expect("evaluate runtime call with where bindings");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready runtime capture result, got {resolution:?}");
+    };
+    assert_eq!(
+        value.rep,
+        ValueRep::String(
+            "https://example.test/src.tar.gz|String(\"sha256:00112233\")|String(\"tar.gz\")".into()
+        )
+    );
+}
+
+#[test]
+fn fallible_operator_wraps_ready_runtime_values_in_some() {
+    let resolution = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_os();
+
+fn build() {
+  host_os()?
+}
+"#,
+        "fallible-runtime-ready",
+        "build",
+        &[],
+        &TestRuntime,
+        "win",
+    )
+    .expect("evaluate fallible ready runtime call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready fallible runtime result, got {resolution:?}");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected Some option, got {:?}", value.rep);
+    };
+    assert_eq!(option.type_name.as_ref(), "Some");
+    assert_eq!(
+        struct_field(&value, "value").rep,
+        ValueRep::String("windows".into())
+    );
+}
+
+#[test]
+fn fallible_operator_converts_runtime_errors_into_none() {
+    let resolution = eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn host_missing();
+
+fn build() {
+  host_missing()?
+}
+"#,
+        "fallible-runtime-error",
+        "build",
+        &[],
+        &TestRuntime,
+        "win",
+    )
+    .expect("evaluate fallible missing runtime call");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready fallible none result, got {resolution:?}");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected None option, got {:?}", value.rep);
+    };
+    assert_eq!(option.type_name.as_ref(), "None");
+}
+
+#[test]
+fn fallible_operator_resumes_pending_runtime_values_into_some() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn build() {
+  host_wait()?
+}
+"#,
+        "fallible-runtime-pending-ready",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start fallible pending runtime call")
+    else {
+        panic!("expected pending fallible runtime call");
+    };
+
+    session
+        .resolve_pending(&pending, Value::string("windows"))
+        .expect("resolve fallible pending value");
+
+    let Resolution::Ready(value) = session.run().expect("finish fallible pending runtime call")
+    else {
+        panic!("expected ready fallible runtime result");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected Some option, got {:?}", value.rep);
+    };
+    assert_eq!(option.type_name.as_ref(), "Some");
+    assert_eq!(
+        struct_field(&value, "value").rep,
+        ValueRep::String("windows".into())
+    );
+}
+
+#[test]
+fn fallible_operator_converts_pending_runtime_poison_into_none() {
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+
+fn build() {
+  host_wait()?
+}
+"#,
+        "fallible-runtime-pending-poison",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start fallible pending runtime call")
+    else {
+        panic!("expected pending fallible runtime call");
+    };
+
+    session
+        .poison_pending(
+            &pending,
+            EvalError::new(EvalErrorKind::UserFail, "host observation failed"),
+        )
+        .expect("poison fallible pending value");
+
+    let Resolution::Ready(value) = session.run().expect("finish fallible pending runtime call")
+    else {
+        panic!("expected ready fallible none result");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected None option, got {:?}", value.rep);
+    };
+    assert_eq!(option.type_name.as_ref(), "None");
 }
 
 #[test]
@@ -7677,6 +7930,39 @@ fn generic_external_values_cover_boundary_cases_without_build_nouns() {
 }
 
 #[test]
+fn external_values_support_authored_equality_by_kind_and_descriptor() {
+    let equal = eval_source_entry_with_args_with_source_id(
+        "fn build(left: Path, right: Path) { left == right }",
+        "external-equality-equal",
+        "build",
+        &[
+            Value::external("Path", "src/main.rs"),
+            Value::external("Path", "src/main.rs"),
+        ],
+    )
+    .expect("evaluate external equality");
+    let Resolution::Ready(equal) = equal else {
+        panic!("expected ready equality result, got {equal:?}");
+    };
+    assert_eq!(equal.rep, ValueRep::Bool(true));
+
+    let unequal = eval_source_entry_with_args_with_source_id(
+        "fn build(left: Path, right: Path) { left == right }",
+        "external-equality-unequal",
+        "build",
+        &[
+            Value::external("Path", "src/main.rs"),
+            Value::external("Path", "src/lib.rs"),
+        ],
+    )
+    .expect("evaluate external inequality");
+    let Resolution::Ready(unequal) = unequal else {
+        panic!("expected ready inequality result, got {unequal:?}");
+    };
+    assert_eq!(unequal.rep, ValueRep::Bool(false));
+}
+
+#[test]
 fn wire_round_trip_preserves_value_shape_and_metadata() {
     let value = Value::structure(
         "Toolchain",
@@ -8220,10 +8506,11 @@ impl RuntimeHooks for TestRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee, args) {
             ("win", "host_os", []) => Ok(RuntimeCallOutcome::Ready(
                 Value::string("windows")
@@ -8248,10 +8535,11 @@ impl RuntimeHooks for CountingRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         _args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee) {
             ("win", "host_os") => {
                 self.host_os_calls.fetch_add(1, Ordering::SeqCst);
@@ -8283,10 +8571,11 @@ impl RuntimeHooks for DoublePendingRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         _args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee) {
             ("win", "host_os") => {
                 self.host_os_calls.fetch_add(1, Ordering::SeqCst);
@@ -8323,10 +8612,11 @@ impl RuntimeHooks for ParallelObserveRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         _args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee) {
             ("win", "host_os") => {
                 let active = self.active_calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -8351,10 +8641,11 @@ impl RuntimeHooks for StaggeredRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         _args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee) {
             ("win", "slow_value") => {
                 thread::sleep(Duration::from_millis(50));
@@ -8393,10 +8684,11 @@ impl RuntimeHooks for PanicRuntime {
     fn call(
         &self,
         place: &str,
-        callee: &str,
+        callee: &FunctionRef,
         _args: &[Value],
         source: &SourceSpan,
     ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
         match (place, callee) {
             ("win", "panic_now") => panic!("panic runtime hook exploded"),
             ("win", "host_os") => Ok(RuntimeCallOutcome::Ready(
