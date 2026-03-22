@@ -242,6 +242,15 @@ struct ResolvedCrate {
   dependencies: Array[DependencyRequest] = [],
 }
 
+struct PackageFacts {
+  id: PackageId,
+  name: String,
+  version: String,
+  source: ResolvedSource,
+  feature_graph: Map[String, Array[String]] = %{},
+  dependencies: Array[DependencyRequest] = [],
+}
+
 enum ResolvedSource {
   struct Registry {
     checksum: String,
@@ -1346,6 +1355,23 @@ fn apply_feature_requests(deps: Array[DependencyRequest], features: UnifiedFeatu
   )
 )
 
+fn activate_package_facts(facts: PackageFacts, request: DependencyRequest) -> ResolvedCrate (
+  let features = unify_features(
+    facts.feature_graph,
+    optional_dependency_names(facts.dependencies),
+    request,
+  );
+
+  ResolvedCrate {
+    id: facts.id,
+    name: facts.name,
+    version: facts.version,
+    source: facts.source,
+    features: features.local,
+    dependencies: apply_feature_requests(facts.dependencies, features),
+  }
+)
+
 fn request_key(req: DependencyRequest) -> String (
   let source =
     match req.source (
@@ -1487,7 +1513,8 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
                   }
               ),
             );
-          validate_package_graph(facts) where {
+          let crate = activate_package_facts(facts, request);
+          validate_package_graph(crate) where {
             config,
             lock,
             target,
@@ -1520,7 +1547,8 @@ fn resolve_non_registry_package_node(request: DependencyRequest) where {
         workspace,
       }),
     );
-  validate_package_graph(facts) where {
+  let crate = activate_package_facts(facts, request);
+  validate_package_graph(crate) where {
     config,
     lock,
     target,
@@ -1716,7 +1744,7 @@ fn resolve_registry_candidate_facts(
 ) where {
   config: SparseConfig,
   target: BuildTarget,
-} -> ResolvedCrate (
+} -> PackageFacts (
   let package_name = request.package_name.unwrap_or(request.name);
   let chosen =
     match entries.find($.vers == version) (
@@ -1734,24 +1762,19 @@ fn resolve_registry_candidate_facts(
       .map(request_from_index_dep($))
       .filter(dependency_target_matches(target, $))
       .to_array();
-  let features = unify_features(
-    merged_entry_features(chosen),
-    optional_dependency_names(dependencies),
-    request,
-  );
   let source =
     ResolvedSource.Registry {
       checksum: chosen.cksum,
       download_url: crate_download_url(config, chosen.name, chosen.vers, chosen.cksum),
     };
 
-  ResolvedCrate {
+  PackageFacts {
     id: PackageId(`registry:{chosen.name}@{chosen.vers}`),
     name: chosen.name,
     version: chosen.vers,
-    features: features.local,
-    dependencies: apply_feature_requests(dependencies, features),
     source,
+    feature_graph: merged_entry_features(chosen),
+    dependencies,
   }
 )
 
@@ -1773,10 +1796,13 @@ fn search_registry_candidate(
         candidates,
         (() => (
           let version = branch_assumption(version_assumption_name(request));
-          resolve_registry_candidate_facts(entries, request, version) where {
-            config,
-            target,
-          }
+          activate_package_facts(
+            resolve_registry_candidate_facts(entries, request, version) where {
+              config,
+              target,
+            },
+            request,
+          )
         )),
       )
     ),
@@ -1792,7 +1818,7 @@ fn search_registry_candidate(
 fn resolve_non_registry_facts(request: DependencyRequest) where {
   target: BuildTarget,
   workspace: Tree,
-} #discover -> ResolvedCrate (
+} #discover -> PackageFacts (
   let workspace_package = workspace_root_package(workspace);
 
   match request.source (
@@ -1802,19 +1828,15 @@ fn resolve_non_registry_facts(request: DependencyRequest) where {
       let dependency_requests =
         root_requests_at_with_workspace(dep_manifest, dep_root, workspace_root_dependencies(workspace))
           where { target };
-      let features = unify_features(
-        dep_manifest.features,
-        optional_dependency_names(dependency_requests),
-        request,
-      );
       let source = ResolvedSource.LocalPath { path: dep_root };
-      ResolvedCrate {
+
+      PackageFacts {
         id: PackageId(`path:{path}`),
         name: dep_manifest.package.name,
         version: package_version(dep_manifest.package, workspace_package),
-        features: features.local,
-        dependencies: apply_feature_requests(dependency_requests, features),
         source,
+        feature_graph: dep_manifest.features,
+        dependencies: dependency_requests,
       }
     ),
     DependencySource.Git { url, rev } => (
@@ -1825,11 +1847,6 @@ fn resolve_non_registry_facts(request: DependencyRequest) where {
         );
       let dep_manifest = Toml.parse[CargoManifest](Http.get(github_raw_manifest_url(url, exact_rev)));
       let dependency_requests = root_requests_at_with_workspace(dep_manifest, @., %{}) where { target };
-      let features = unify_features(
-        dep_manifest.features,
-        optional_dependency_names(dependency_requests),
-        request,
-      );
       let source =
         ResolvedSource.Git {
           url,
@@ -1837,13 +1854,14 @@ fn resolve_non_registry_facts(request: DependencyRequest) where {
           checksum: None,
           archive_url: Some(github_archive_url(url, exact_rev)),
         };
-      ResolvedCrate {
+
+      PackageFacts {
         id: PackageId(`git:{url}#{exact_rev}`),
         name: dep_manifest.package.name,
         version: package_version(dep_manifest.package, None),
-        features: features.local,
-        dependencies: apply_feature_requests(dependency_requests, features),
         source,
+        feature_graph: dep_manifest.features,
+        dependencies: dependency_requests,
       }
     ),
     DependencySource.Registry => fail "resolve_non_registry_facts called for registry request",
@@ -1867,9 +1885,9 @@ fn resolve_request(request: DependencyRequest) where {
       }
     ),
     DependencySource.LocalPath { base: _, path: _ } =>
-      resolve_non_registry_facts(request) where { target, workspace },
+      activate_package_facts(resolve_non_registry_facts(request) where { target, workspace }, request),
     DependencySource.Git { url: _, rev: _ } =>
-      resolve_non_registry_facts(request) where { target, workspace },
+      activate_package_facts(resolve_non_registry_facts(request) where { target, workspace }, request),
   )
 )
 
