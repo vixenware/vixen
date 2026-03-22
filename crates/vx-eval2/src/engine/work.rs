@@ -8,16 +8,12 @@ pub(super) struct EvalScheduler {
     pub(super) next_lease_namespace: u64,
     pub(super) next_lease_sequence: u64,
     pub(super) active_wave: Option<EvalWaveId>,
-    pub(super) lease_namespace: Option<LeaseNamespace>,
     pub(super) node_states: Arc<BTreeMap<EvalNodeId, EvalNodeState>>,
     pub(super) node_records: Arc<BTreeMap<EvalNodeId, EvalNodeRecord>>,
-    pub(super) node_state_overrides: BTreeMap<EvalNodeId, EvalNodeState>,
-    pub(super) node_record_overrides: BTreeMap<EvalNodeId, EvalNodeRecord>,
     pub(super) keyed_nodes: Arc<BTreeMap<EvalNodeId, KeyedNodeMemo>>,
     pub(super) dependency_edges: Arc<Vec<EvalDependencyEdge>>,
     pub(super) ready_queue: VecDeque<EvalWorkId>,
     pub(super) ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
-    pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
     pub(super) in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
     pub(super) buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
     pub(super) pending_resumes: Arc<BTreeMap<u64, Vec<EvalSuspension>>>,
@@ -26,7 +22,6 @@ pub(super) struct EvalScheduler {
     pub(super) learned_no_goods: Arc<Vec<LearnedNoGood>>,
     pub(super) learned_search_no_goods: Arc<Vec<LearnedSearchNoGood>>,
     pub(super) completed_invalidated: bool,
-    pub(super) recorded_delta: Option<Box<RecordedSchedulerDelta>>,
 }
 
 pub(super) const ENTRY_WORK_NODE_ID: EvalNodeId = EvalNodeId(0);
@@ -40,16 +35,12 @@ impl Default for EvalScheduler {
             next_lease_namespace: 1,
             next_lease_sequence: 1,
             active_wave: None,
-            lease_namespace: None,
             node_states: Arc::new(BTreeMap::new()),
             node_records: Arc::new(BTreeMap::new()),
-            node_state_overrides: BTreeMap::new(),
-            node_record_overrides: BTreeMap::new(),
             keyed_nodes: Arc::new(BTreeMap::new()),
             dependency_edges: Arc::new(Vec::new()),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
-            baseline_ready_tasks: BTreeSet::new(),
             in_flight_tasks: BTreeMap::new(),
             buffered_completions: BTreeMap::new(),
             pending_resumes: Arc::new(BTreeMap::new()),
@@ -58,7 +49,6 @@ impl Default for EvalScheduler {
             learned_no_goods: Arc::new(Vec::new()),
             learned_search_no_goods: Arc::new(Vec::new()),
             completed_invalidated: false,
-            recorded_delta: None,
         }
     }
 }
@@ -110,9 +100,15 @@ enum EvalPreparedIdAllocator {
 }
 
 impl EvalPreparedIdAllocator {
-    fn from_base(base: &EvalScheduler) -> Self {
+    fn from_base(base: &EvalPreparedSnapshot) -> Self {
         match base.lease_namespace {
-            Some(namespace) => Self::Scoped { namespace },
+            Some(id) => Self::Scoped {
+                namespace: LeaseNamespace {
+                    id,
+                    next_node_local: 1,
+                    next_work_local: 1,
+                },
+            },
             None => Self::Direct {
                 next_node_id: base.next_id,
                 next_work_id: base.next_work_id,
@@ -150,14 +146,14 @@ impl EvalPreparedIdAllocator {
         }
     }
 
-    fn owner_next_id(&self, base: &EvalScheduler) -> u64 {
+    fn owner_next_id(&self, base: &EvalPreparedSnapshot) -> u64 {
         match self {
             Self::Direct { next_node_id, .. } => *next_node_id,
             Self::Scoped { .. } => base.next_id,
         }
     }
 
-    fn owner_next_work_id(&self, base: &EvalScheduler) -> u64 {
+    fn owner_next_work_id(&self, base: &EvalPreparedSnapshot) -> u64 {
         match self {
             Self::Direct { next_work_id, .. } => *next_work_id,
             Self::Scoped { .. } => base.next_work_id,
@@ -166,7 +162,7 @@ impl EvalPreparedIdAllocator {
 }
 
 struct EvalPreparedScheduler<'a> {
-    base: &'a EvalScheduler,
+    base: &'a EvalPreparedSnapshot,
     allocator: EvalPreparedIdAllocator,
     delta: RecordedSchedulerDelta,
     queued: Vec<ReadyTaskRecord>,
@@ -174,7 +170,7 @@ struct EvalPreparedScheduler<'a> {
 }
 
 impl<'a> EvalPreparedScheduler<'a> {
-    fn new(base: &'a EvalScheduler) -> Self {
+    fn new(base: &'a EvalPreparedSnapshot) -> Self {
         Self {
             base,
             allocator: EvalPreparedIdAllocator::from_base(base),
@@ -238,7 +234,6 @@ impl<'a> EvalPreparedScheduler<'a> {
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
         self.queued.iter().any(|record| record.work.id == work_id)
-            || self.base.ready_tasks.contains_key(&work_id)
             || self.base.baseline_ready_tasks.contains(&work_id)
     }
 
@@ -761,53 +756,31 @@ pub(super) enum PendingKind {
     ChildDependency { dependency: EvalNodeId },
 }
 
+impl EvalPreparedSnapshot {
+    fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
+        self.node_records.get(&node_id)
+    }
+
+    fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
+        self.node_states.get(&node_id)
+    }
+}
+
 impl EvalScheduler {
-    pub(super) fn clone_for_lease(&self, namespace: Option<u64>) -> Self {
-        Self {
+    pub(super) fn prepared_snapshot(&self, namespace: Option<u64>) -> EvalPreparedSnapshot {
+        EvalPreparedSnapshot {
             next_id: self.next_id,
             next_work_id: self.next_work_id,
-            next_wave_id: self.next_wave_id,
-            next_lease_namespace: self.next_lease_namespace,
-            next_lease_sequence: self.next_lease_sequence,
-            active_wave: None,
-            lease_namespace: namespace.map(|id| LeaseNamespace {
-                id,
-                next_node_local: 1,
-                next_work_local: 1,
-            }),
+            lease_namespace: namespace,
             node_states: Arc::clone(&self.node_states),
             node_records: Arc::clone(&self.node_records),
-            node_state_overrides: BTreeMap::new(),
-            node_record_overrides: BTreeMap::new(),
             keyed_nodes: Arc::clone(&self.keyed_nodes),
             dependency_edges: Arc::clone(&self.dependency_edges),
-            ready_queue: VecDeque::new(),
-            ready_tasks: BTreeMap::new(),
             baseline_ready_tasks: self.ready_tasks.keys().copied().collect(),
-            in_flight_tasks: BTreeMap::new(),
-            buffered_completions: BTreeMap::new(),
-            pending_resumes: Arc::clone(&self.pending_resumes),
             pending_kinds: Arc::clone(&self.pending_kinds),
             retained_exprs: Arc::clone(&self.retained_exprs),
             learned_no_goods: Arc::clone(&self.learned_no_goods),
             learned_search_no_goods: Arc::clone(&self.learned_search_no_goods),
-            completed_invalidated: false,
-            recorded_delta: None,
-        }
-    }
-
-    fn record_allocated_ids(&mut self) {
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta.next_id = self.next_id;
-            delta.next_work_id = self.next_work_id;
-        }
-    }
-
-    fn record_keyed_node_delta(&mut self, node_id: EvalNodeId) {
-        if let Some(delta) = self.recorded_delta.as_mut()
-            && let Some(keyed) = self.keyed_nodes.get(&node_id)
-        {
-            delta.keyed_nodes.insert(node_id, keyed.clone());
         }
     }
 
@@ -816,9 +789,7 @@ impl EvalScheduler {
     }
 
     pub(super) fn node_record(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
-        self.node_record_overrides
-            .get(&node_id)
-            .or_else(|| self.node_records.get(&node_id))
+        self.node_records.get(&node_id)
     }
 
     pub(super) fn node_records(&self) -> Vec<EvalNodeRecord> {
@@ -829,15 +800,11 @@ impl EvalScheduler {
     }
 
     pub(super) fn node_record_ids(&self) -> BTreeSet<EvalNodeId> {
-        let mut ids = self.node_records.keys().copied().collect::<BTreeSet<_>>();
-        ids.extend(self.node_record_overrides.keys().copied());
-        ids
+        self.node_records.keys().copied().collect()
     }
 
     pub(super) fn node_state_ids(&self) -> BTreeSet<EvalNodeId> {
-        let mut ids = self.node_states.keys().copied().collect::<BTreeSet<_>>();
-        ids.extend(self.node_state_overrides.keys().copied());
-        ids
+        self.node_states.keys().copied().collect()
     }
 
     pub(super) fn node_record_count(&self) -> usize {
@@ -850,30 +817,14 @@ impl EvalScheduler {
 
     pub(super) fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
-        if self.lease_namespace.is_some() {
-            if self.node_record(node_id).is_none() {
-                self.node_record_overrides.insert(node_id, record.clone());
-                if let Some(delta) = self.recorded_delta.as_mut() {
-                    delta.node_records.insert(node_id, record);
-                }
-            }
-            return;
-        }
         let node_records = Arc::make_mut(&mut self.node_records);
         if let Entry::Vacant(entry) = node_records.entry(node_id) {
-            entry.insert(record.clone());
-            if let Some(delta) = self.recorded_delta.as_mut() {
-                delta.node_records.insert(node_id, record);
-            }
+            entry.insert(record);
         }
     }
 
     pub(super) fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
-        let edge = EvalDependencyEdge { parent, child };
-        Arc::make_mut(&mut self.dependency_edges).push(edge.clone());
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta.dependency_edges.push(edge);
-        }
+        Arc::make_mut(&mut self.dependency_edges).push(EvalDependencyEdge { parent, child });
     }
 
     pub(super) fn queued_work(&self) -> Vec<EvalQueuedWork> {
@@ -969,16 +920,8 @@ impl EvalScheduler {
     }
 
     pub(super) fn alloc_node_id(&mut self) -> EvalNodeId {
-        let node_id = if let Some(namespace) = &mut self.lease_namespace {
-            let node_id = EvalNodeId(lease_scoped_id(namespace.id, namespace.next_node_local));
-            namespace.next_node_local += 1;
-            node_id
-        } else {
-            let node_id = EvalNodeId(self.next_id);
-            self.next_id += 1;
-            node_id
-        };
-        self.record_allocated_ids();
+        let node_id = EvalNodeId(self.next_id);
+        self.next_id += 1;
         node_id
     }
 
@@ -987,11 +930,6 @@ impl EvalScheduler {
         let description = description.into();
         let pending = PendingRef::new(pending_id.0, description.clone());
         Arc::make_mut(&mut self.pending_kinds).insert(pending.node_id, PendingKind::External);
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta
-                .pending_kinds
-                .insert(pending.node_id, PendingKind::External);
-        }
         self.record_node(EvalNodeRecord {
             node_id: pending_id,
             parent_id: None,
@@ -1005,11 +943,6 @@ impl EvalScheduler {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
         Arc::make_mut(&mut self.pending_kinds)
             .insert(pending.node_id, PendingKind::ChildDependency { dependency });
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta
-                .pending_kinds
-                .insert(pending.node_id, PendingKind::ChildDependency { dependency });
-        }
         pending
     }
 
@@ -1073,9 +1006,7 @@ impl EvalScheduler {
     }
 
     pub(super) fn node_state(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
-        self.node_state_overrides
-            .get(&node_id)
-            .or_else(|| self.node_states.get(&node_id))
+        self.node_states.get(&node_id)
     }
 
     pub(super) fn keyed_node(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
@@ -1109,7 +1040,7 @@ impl EvalScheduler {
     }
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
-        self.ready_tasks.contains_key(&work_id) || self.baseline_ready_tasks.contains(&work_id)
+        self.ready_tasks.contains_key(&work_id)
     }
 
     pub(super) fn remember_expr_task(
@@ -1124,14 +1055,6 @@ impl EvalScheduler {
                 scheduled,
                 branch_context,
             });
-        if let Some(delta) = self.recorded_delta.as_mut()
-            && let Some(retained) = self.retained_exprs.get(&node_id)
-        {
-            delta
-                .retained_exprs
-                .entry(node_id)
-                .or_insert(retained.clone());
-        }
     }
 
     pub(super) fn learned_no_good(
@@ -1221,17 +1144,11 @@ impl EvalScheduler {
                 if errors_equal_for_learning(&existing.error, &learned.error)? {
                     return Ok(());
                 }
-                *existing = learned.clone();
-                if let Some(delta) = self.recorded_delta.as_mut() {
-                    delta.learned_search_no_goods.push(existing.clone());
-                }
+                *existing = learned;
                 return Ok(());
             }
         }
-        learned_search_no_goods.push(learned.clone());
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta.learned_search_no_goods.push(learned);
-        }
+        learned_search_no_goods.push(learned);
         Ok(())
     }
 
@@ -1257,17 +1174,11 @@ impl EvalScheduler {
                 if ranges_touch_or_overlap {
                     existing.start_index = existing.start_index.min(learned.start_index);
                     existing.end_index = existing.end_index.max(learned.end_index);
-                    if let Some(delta) = self.recorded_delta.as_mut() {
-                        delta.learned_no_goods.push(existing.clone());
-                    }
                     return Ok(());
                 }
             }
         }
-        learned_no_goods.push(learned.clone());
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta.learned_no_goods.push(learned);
-        }
+        learned_no_goods.push(learned);
         Ok(())
     }
 
@@ -1385,7 +1296,6 @@ impl EvalScheduler {
             .expect("keyed node must still exist");
         keyed.active_revision = Some(keyed.revision);
         keyed.evaluated_revision = None;
-        self.record_keyed_node_delta(node_id);
         Ok(())
     }
 
@@ -1422,7 +1332,6 @@ impl EvalScheduler {
                     }
                     _ => {}
                 }
-                self.record_keyed_node_delta(node_id);
             }
             return Ok(node_id);
         }
@@ -1451,7 +1360,6 @@ impl EvalScheduler {
                 last_update: EvalKeyedNodeUpdateReason::Created,
             },
         );
-        self.record_keyed_node_delta(node_id);
         self.enqueue_keyed_work(node_id)?;
         Ok(node_id)
     }
@@ -1479,7 +1387,6 @@ impl EvalScheduler {
             .expect("keyed node must exist");
         memo.evaluated_revision = Some(active_revision);
         memo.active_revision = None;
-        self.record_keyed_node_delta(node_id);
         Ok(false)
     }
 
@@ -1534,17 +1441,7 @@ impl EvalScheduler {
     }
 
     pub(super) fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
-        if self.lease_namespace.is_some() {
-            self.node_state_overrides.insert(node_id, state.clone());
-            if let Some(delta) = self.recorded_delta.as_mut() {
-                delta.node_states.insert(node_id, state);
-            }
-            return;
-        }
-        Arc::make_mut(&mut self.node_states).insert(node_id, state.clone());
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta.node_states.insert(node_id, state);
-        }
+        Arc::make_mut(&mut self.node_states).insert(node_id, state);
     }
 
     pub(super) fn resolve_pending(
@@ -1643,14 +1540,7 @@ impl EvalScheduler {
         Arc::make_mut(&mut self.pending_resumes)
             .entry(suspension.pending.node_id)
             .or_default()
-            .push(suspension.clone());
-        if let Some(delta) = self.recorded_delta.as_mut() {
-            delta
-                .pending_resumes
-                .entry(suspension.pending.node_id)
-                .or_default()
-                .push(suspension);
-        }
+            .push(suspension);
     }
 
     pub(super) fn lease_ready_task(&mut self) -> Result<Option<ReadyTaskLease>, EvalError> {
@@ -1891,20 +1781,12 @@ impl EvalScheduler {
         branch_context: EvalBranchContext,
     ) -> EvalQueuedWork {
         let work = EvalQueuedWork {
-            id: EvalWorkId(if let Some(namespace) = &mut self.lease_namespace {
-                let work_id = lease_scoped_id(namespace.id, namespace.next_work_local);
-                namespace.next_work_local += 1;
-                work_id
-            } else {
-                let work_id = self.next_work_id;
-                self.next_work_id += 1;
-                work_id
-            }),
+            id: EvalWorkId(self.next_work_id),
             kind,
             node_id,
             pending,
         };
-        self.record_allocated_ids();
+        self.next_work_id += 1;
         self.ready_queue.push_back(work.id);
         self.ready_tasks.insert(
             work.id,
@@ -1914,12 +1796,6 @@ impl EvalScheduler {
                 branch_context,
             },
         );
-        self.baseline_ready_tasks.remove(&work.id);
-        if let Some(delta) = self.recorded_delta.as_mut()
-            && let Some(record) = self.ready_tasks.get(&work.id)
-        {
-            delta.queued.push(record.clone());
-        }
         work
     }
 }
@@ -2059,7 +1935,7 @@ pub(super) fn execute_ready_task(
     args: &[Value],
     runtime: &impl RuntimeHooks,
     place: &str,
-    scheduler: EvalScheduler,
+    snapshot: EvalPreparedSnapshot,
     record: ReadyTaskRecord,
     call_profiling: bool,
 ) -> Result<
@@ -2070,8 +1946,7 @@ pub(super) fn execute_ready_task(
     ),
     EvalError,
 > {
-    let base = scheduler;
-    let mut prepared_scheduler = EvalPreparedScheduler::new(&base);
+    let mut prepared_scheduler = EvalPreparedScheduler::new(&snapshot);
     let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
         program.as_ref(),

@@ -556,7 +556,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             branch_context: lease.record.branch_context.clone(),
             wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
-            scheduler: self.scheduler.clone_for_lease(lease.namespace),
+            scheduler: self.scheduler.prepared_snapshot(lease.namespace),
             record: lease.record,
             call_profiling: self.call_profiling,
         }))
