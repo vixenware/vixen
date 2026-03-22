@@ -9,13 +9,25 @@ mod progress_listener;
 mod tui;
 mod types;
 
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
 use camino::Utf8PathBuf;
 use eyre::{Result, bail, eyre};
+use facet::Facet;
+use facet_value::Value as FacetValue;
 use figue as args;
 use owo_colors::OwoColorize;
 use roam_core::Driver;
 use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
+use vx_eval2::{
+    CrossingPolicy, EvalError, EvalErrorKind, EvalSession, PendingRef, Provenance, Resolution,
+    ReuseClass, RuntimeCallOutcome, RuntimeHooks, SourceSpan, Value as EvalValue, ValueRep,
+    value_to_envelope,
+};
+use vx_eval2_proto::ValueEnvelope;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
@@ -24,7 +36,7 @@ use vxd_proto::{BuildRequest, PsResult, VxdClient};
 
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
-    cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, KillArgs, StartArgs},
+    cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, EvalArgs, KillArgs, StartArgs},
     progress_listener::ProgressListenerImpl,
 };
 use vx_io::boot::BootStatusState;
@@ -81,6 +93,7 @@ async fn async_main() {
         CliCommand::Clean(args) => cx.cmd_clean(args).await,
         CliCommand::Doctor(_args) => cx.cmd_doctor().await,
         CliCommand::Debug(args) => cx.cmd_debug(args).await,
+        CliCommand::Eval(args) => cx.cmd_eval(args).await,
     };
 
     if let Err(e) = result {
@@ -210,6 +223,75 @@ impl std::ops::Deref for ConnectedVxd {
     }
 }
 
+struct LocalEvalRuntime {
+    root_dir: PathBuf,
+}
+
+impl RuntimeHooks for LocalEvalRuntime {
+    fn call(
+        &self,
+        _place: &str,
+        callee: &str,
+        args: &[EvalValue],
+        source: &SourceSpan,
+    ) -> std::result::Result<RuntimeCallOutcome, EvalError> {
+        match callee {
+            "read_file" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() argument must evaluate to String",
+                    ));
+                };
+                let full_path = self.root_dir.join(path.as_ref());
+                let contents = fs::read_to_string(&full_path).map_err(|error| {
+                    EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("read_file() failed for {}: {error}", full_path.display()),
+                    )
+                })?;
+                Ok(RuntimeCallOutcome::Ready(
+                    EvalValue::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+#[derive(Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+#[allow(dead_code)]
+enum EvalCliResolution {
+    Ready {
+        value: ValueEnvelope,
+    },
+    Pending {
+        node_id: u64,
+        description: String,
+    },
+    Waiting,
+    Poison {
+        kind: String,
+        message: String,
+        detail: Option<ValueEnvelope>,
+    },
+}
+
+fn eval_error_report(error: EvalError) -> eyre::Report {
+    eyre!("{:?}: {}", error.kind, error.message)
+}
+
 /// Extract the leading "indent" from a line that may contain ANSI escapes.
 ///
 /// Returns `(prefix, visible_width)` where `prefix` is the byte slice
@@ -316,6 +398,131 @@ fn find_wrap_point(s: &str, max_width: usize) -> usize {
     last_space.unwrap_or(orig_pos)
 }
 
+fn read_eval_source(file: &str) -> Result<(String, String, PathBuf)> {
+    if file == "-" {
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| eyre!("failed to read stdin: {error}"))?;
+        let root_dir = std::env::current_dir()?;
+        return Ok((source, "<stdin>".to_string(), root_dir));
+    }
+
+    let cwd = std::env::current_dir()?;
+    let path = PathBuf::from(file);
+    let full_path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    let source = fs::read_to_string(&full_path)
+        .map_err(|error| eyre!("failed to read {}: {error}", full_path.display()))?;
+    let root_dir = full_path.parent().map(Path::to_path_buf).unwrap_or(cwd);
+    Ok((source, full_path.display().to_string(), root_dir))
+}
+
+fn parse_eval_args(arg_json: &[String]) -> Result<Vec<EvalValue>> {
+    arg_json.iter().map(|arg| parse_eval_arg(arg)).collect()
+}
+
+fn parse_eval_arg(arg: &str) -> Result<EvalValue> {
+    let value = facet_json::from_str::<FacetValue>(arg)
+        .map_err(|error| eyre!("failed to parse --arg-json value {arg:?}: {error}"))?;
+    facet_value_to_eval_value(&value)
+}
+
+fn facet_value_to_eval_value(value: &FacetValue) -> Result<EvalValue> {
+    if value.is_null() {
+        return Ok(EvalValue::unit());
+    }
+    if let Some(value) = value.as_bool() {
+        return Ok(EvalValue::bool(value));
+    }
+    if let Some(value) = value.as_string() {
+        return Ok(EvalValue::string(value.as_str()));
+    }
+    if let Some(value) = value.as_number() {
+        return value
+            .to_u64()
+            .map(EvalValue::u64)
+            .ok_or_else(|| eyre!("only non-negative integer JSON numbers are supported"));
+    }
+    if let Some(items) = value.as_array() {
+        return items
+            .as_slice()
+            .iter()
+            .map(facet_value_to_eval_value)
+            .collect::<Result<Vec<_>>>()
+            .map(EvalValue::array);
+    }
+    if let Some(entries) = value.as_object() {
+        return entries
+            .iter()
+            .map(|(key, value)| {
+                Ok((
+                    EvalValue::string(key.as_str()),
+                    facet_value_to_eval_value(value)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(EvalValue::map);
+    }
+
+    Err(eyre!(
+        "unsupported JSON argument type: {:?}",
+        value.value_type()
+    ))
+}
+
+fn eval_cli_resolution(resolution: Resolution) -> Result<EvalCliResolution> {
+    match resolution {
+        Resolution::Ready(value) => Ok(EvalCliResolution::Ready {
+            value: value_to_envelope(&value).map_err(eval_error_report)?,
+        }),
+        Resolution::Pending(PendingRef {
+            node_id,
+            description,
+        }) => Ok(EvalCliResolution::Pending {
+            node_id,
+            description: description.to_string(),
+        }),
+        Resolution::Waiting => Ok(EvalCliResolution::Waiting),
+        Resolution::Poison(error) => Ok(EvalCliResolution::Poison {
+            kind: format!("{:?}", error.kind),
+            message: error.message.to_string(),
+            detail: error
+                .detail
+                .as_ref()
+                .map(value_to_envelope)
+                .transpose()
+                .map_err(eval_error_report)?,
+        }),
+    }
+}
+
+fn print_eval_resolution(mode: &CliMode, resolution: &EvalCliResolution) -> Result<()> {
+    let output = match mode {
+        CliMode::Json => facet_json::to_string(resolution)
+            .map_err(|error| eyre!("serialize eval output: {error}"))?,
+        CliMode::Text | CliMode::Tui(_) => facet_json::to_string_pretty(resolution)
+            .map_err(|error| eyre!("serialize eval output: {error}"))?,
+    };
+    println!("{output}");
+    Ok(())
+}
+
+fn print_eval_reports(args: &EvalArgs, session: &EvalSession<'_, LocalEvalRuntime>) {
+    if args.profile {
+        eprintln!("{}", session.profile_report(args.profile_limit));
+    }
+    if args.call_profile || session.call_profiling_enabled() {
+        eprintln!("{}", session.call_profile_report(args.profile_limit));
+    }
+    if args.trace {
+        eprintln!("{:#?}", session.trace());
+    }
+}
+
 // ─── CliContext methods ─────────────────────────────────────────────────────
 
 impl CliContext {
@@ -393,6 +600,35 @@ impl CliContext {
     }
 
     // ─── Commands ───────────────────────────────────────────────────────
+
+    async fn cmd_eval(&mut self, args: EvalArgs) -> Result<()> {
+        let (source, source_id, root_dir) = read_eval_source(&args.file)?;
+        let runtime = LocalEvalRuntime { root_dir };
+        let eval_args = parse_eval_args(&args.arg_json)?;
+        let mut session = EvalSession::new(
+            source,
+            source_id,
+            args.entry.clone(),
+            eval_args,
+            &runtime,
+            args.place.clone(),
+        );
+        if args.call_profile {
+            session.set_call_profiling_enabled(true);
+        }
+
+        let resolution = session.run().map_err(eval_error_report)?;
+        let cli_resolution = eval_cli_resolution(resolution.clone())?;
+        print_eval_resolution(&self.mode, &cli_resolution)?;
+        print_eval_reports(&args, &session);
+
+        match resolution {
+            Resolution::Ready(_) => Ok(()),
+            Resolution::Pending(_) | Resolution::Waiting | Resolution::Poison(_) => {
+                std::process::exit(1);
+            }
+        }
+    }
 
     async fn cmd_build(&mut self, args: BuildArgs) -> Result<()> {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
@@ -882,3 +1118,6 @@ fn is_infrastructure_node(kind: &str) -> bool {
         || kind.starts_with("zig.toolchain.")
         || kind == "registry.acquire"
 }
+
+#[cfg(test)]
+mod tests;

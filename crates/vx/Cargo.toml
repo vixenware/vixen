@@ -16,6 +16,7 @@ moire = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
 facet-json = { workspace = true }
+facet-value = { workspace = true }
 eyre = { workspace = true }
 libc = { workspace = true }
 owo-colors = { workspace = true }
@@ -32,6 +33,8 @@ vxd-proto = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
+vx-eval2 = { workspace = true }
+vx-eval2-proto = { workspace = true }
 vx-vfs = { workspace = true }
 margin = { workspace = true }
 margin-term = { workspace = true }

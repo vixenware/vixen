@@ -39,6 +39,7 @@ vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-eval = { path = "crates/vx-eval" }
+vx-eval2 = { path = "crates/vx-eval2" }
 vx-eval2-proto = { path = "crates/vx-eval2-proto" }
 
 # facet ecosystem

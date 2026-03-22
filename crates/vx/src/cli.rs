@@ -47,6 +47,9 @@ pub(crate) enum CliCommand {
 
     /// Collect live diagnostic snapshots from all vixen processes
     Debug(DebugArgs),
+
+    /// Evaluate a single Vixen source file locally
+    Eval(EvalArgs),
 }
 
 /// Arguments for the `build` subcommand
@@ -96,3 +99,39 @@ pub(crate) struct DebugArgs {}
 /// Arguments for the `doctor` subcommand
 #[derive(Facet, Debug)]
 pub(crate) struct DoctorArgs {}
+
+/// Arguments for the `eval` subcommand
+#[derive(Facet, Debug)]
+pub(crate) struct EvalArgs {
+    /// Vixen source file to evaluate, or `-` for stdin
+    #[facet(args::named, args::short = 'f')]
+    pub(crate) file: String,
+
+    /// Function entry point to call
+    #[facet(args::named, default = "build")]
+    pub(crate) entry: String,
+
+    /// Place label exposed to runtime hooks
+    #[facet(args::named, default = "local")]
+    pub(crate) place: String,
+
+    /// JSON argument passed to the entry function
+    #[facet(args::named, default)]
+    pub(crate) arg_json: Vec<String>,
+
+    /// Print eval2 trace events to stderr
+    #[facet(args::named)]
+    pub(crate) trace: bool,
+
+    /// Print eval2 work profile to stderr
+    #[facet(args::named)]
+    pub(crate) profile: bool,
+
+    /// Print eval2 authored call profile to stderr
+    #[facet(args::named)]
+    pub(crate) call_profile: bool,
+
+    /// Max entries to print in profiler reports
+    #[facet(args::named, default = 20)]
+    pub(crate) profile_limit: usize,
+}
