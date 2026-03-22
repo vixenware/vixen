@@ -584,71 +584,55 @@ fn parse_semver_version(s: String) -> SemverVersion (
   )
 )
 
-fn parse_semver_req(s: String) -> SemverReq (
-  if s.starts_with("^") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.Caret,
-          version: parse_semver_version(s.slice(1..)),
-        },
-      ],
+fn parse_semver_comparator(s: String) -> Comparator (
+  let trimmed = trim_spaces(s);
+  if trimmed.starts_with("^") (
+    Comparator {
+      op: ComparatorOp.Caret,
+      version: parse_semver_version(trimmed.slice(1..)),
     }
-  ) else if s.starts_with("~") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.Tilde,
-          version: parse_semver_version(s.slice(1..)),
-        },
-      ],
+  ) else if trimmed.starts_with("~") (
+    Comparator {
+      op: ComparatorOp.Tilde,
+      version: parse_semver_version(trimmed.slice(1..)),
     }
-  ) else if s.starts_with(">=") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.GreaterEq,
-          version: parse_semver_version(s.slice(2..)),
-        },
-      ],
+  ) else if trimmed.starts_with(">=") (
+    Comparator {
+      op: ComparatorOp.GreaterEq,
+      version: parse_semver_version(trimmed.slice(2..)),
     }
-  ) else if s.starts_with("<=") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.LessEq,
-          version: parse_semver_version(s.slice(2..)),
-        },
-      ],
+  ) else if trimmed.starts_with("<=") (
+    Comparator {
+      op: ComparatorOp.LessEq,
+      version: parse_semver_version(trimmed.slice(2..)),
     }
-  ) else if s.starts_with(">") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.Greater,
-          version: parse_semver_version(s.slice(1..)),
-        },
-      ],
+  ) else if trimmed.starts_with(">") (
+    Comparator {
+      op: ComparatorOp.Greater,
+      version: parse_semver_version(trimmed.slice(1..)),
     }
-  ) else if s.starts_with("<") (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.Less,
-          version: parse_semver_version(s.slice(1..)),
-        },
-      ],
+  ) else if trimmed.starts_with("<") (
+    Comparator {
+      op: ComparatorOp.Less,
+      version: parse_semver_version(trimmed.slice(1..)),
+    }
+  ) else if trimmed.starts_with("=") (
+    Comparator {
+      op: ComparatorOp.Exact,
+      version: parse_semver_version(trimmed.slice(1..)),
     }
   ) else (
-    SemverReq {
-      comparators: [
-        Comparator {
-          op: ComparatorOp.Caret,
-          version: parse_semver_version(s),
-        },
-      ],
+    Comparator {
+      op: ComparatorOp.Caret,
+      version: parse_semver_version(trimmed),
     }
   )
+)
+
+fn parse_semver_req(s: String) -> SemverReq (
+  SemverReq {
+    comparators: split_top_level_args(s).map(parse_semver_comparator($)).to_array(),
+  }
 )
 
 fn matches_semver(req: SemverReq?, version: SemverVersion) -> Bool (

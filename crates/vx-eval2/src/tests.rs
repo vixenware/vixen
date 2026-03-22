@@ -2647,6 +2647,63 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_semver_req_supports_comma_separated_bounds() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+struct Summary {
+  matches_58: Bool,
+  matches_60: Bool,
+  matches_61: Bool,
+  matches_62: Bool,
+}
+
+fn build() {
+  let req = parse_semver_req(">=0.59, <=0.61");
+  Summary {
+    matches_58: matches_semver(Some { value: req }, parse_semver_version("0.58.0")),
+    matches_60: matches_semver(Some { value: req }, parse_semver_version("0.60.0")),
+    matches_61: matches_semver(Some { value: req }, parse_semver_version("0.61.0")),
+    matches_62: matches_semver(Some { value: req }, parse_semver_version("0.62.0")),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = ReadFileRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo comma-separated semver req");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready zoo cargo comma-separated semver req result, got {resolution:?}");
+    };
+
+    assert_eq!(
+        struct_field(&value, "matches_58").rep,
+        ValueRep::Bool(false)
+    );
+    assert_eq!(struct_field(&value, "matches_60").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "matches_61").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "matches_62").rep,
+        ValueRep::Bool(false)
+    );
+}
+
+#[test]
 fn zoo_cargo_resolve_request_executes_real_registry_path() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
@@ -3291,6 +3348,198 @@ fn build() {
         )
     });
     assert!(has_tracing_subscriber);
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_executes_workspace_inherited_registry_dependency() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo_workspace_inherited_registry/crates/member/Cargo.toml"));
+  demand_manifest_at(manifest, @specs/eval/run/cargo_workspace_inherited_registry/crates/member) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("specs/eval/run/cargo_workspace_inherited_registry"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/tr/ac/tracing-subscriber".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/tracing-subscriber-0.3.22.jsonl"),
+        )
+        .expect("read real tracing-subscriber sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ma/tc/matchers".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/matchers-0.2.0.jsonl"),
+        )
+        .expect("read real matchers sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/re/ge/regex-automata".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/regex-automata-0.4.14.jsonl"),
+        )
+        .expect("read real regex-automata sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/re/ge/regex-syntax".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/regex-syntax-0.8.10.jsonl"),
+        )
+        .expect("read real regex-syntax sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/nu/-a/nu-ansi-term".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/nu-ansi-term-0.50.3.jsonl"),
+        )
+        .expect("read real nu-ansi-term sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/on/ce/once_cell".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/once_cell-1.21.3.jsonl"),
+        )
+        .expect("read real once_cell sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/sh/ar/sharded-slab".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/sharded-slab-0.1.7.jsonl"),
+        )
+        .expect("read real sharded-slab sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/la/zy/lazy_static".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/lazy_static-1.5.0.jsonl"),
+        )
+        .expect("read real lazy_static sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/th/re/thread_local".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/thread_local-1.1.9.jsonl"),
+        )
+        .expect("read real thread_local sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/cf/g-/cfg-if".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/cfg-if-1.0.4.jsonl"),
+        )
+        .expect("read real cfg-if sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/tr/ac/tracing".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/tracing-0.1.44.jsonl"),
+        )
+        .expect("read real tracing sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/tr/ac/tracing-core".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/tracing-core-0.1.36.jsonl"),
+        )
+        .expect("read real tracing-core sparse index entry"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/pi/n-/pin-project-lite".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/pin-project-lite-0.2.17.jsonl"),
+        )
+        .expect("read real pin-project-lite sparse index entry"),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest against workspace inherited registry dependency");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_manifest_executes_workspace_inherited_registry_dependency",
+        &session,
+    );
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo workspace inherited registry result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert!(roots.contains(&"registry:tracing-subscriber@0.3.22"));
+    assert!(resolved_crates_contain_name(
+        &snapshot,
+        "tracing-subscriber"
+    ));
+    assert!(resolved_crates_contain_name(&snapshot, "matchers"));
+    assert!(resolved_crates_contain_name(&snapshot, "regex-automata"));
+    assert!(resolved_crates_contain_name(&snapshot, "regex-syntax"));
+    assert!(resolved_crates_contain_name(&snapshot, "nu-ansi-term"));
+    assert!(resolved_crates_contain_name(&snapshot, "once_cell"));
+    assert!(resolved_crates_contain_name(&snapshot, "sharded-slab"));
+    assert!(resolved_crates_contain_name(&snapshot, "lazy_static"));
+    assert!(resolved_crates_contain_name(&snapshot, "thread_local"));
+    assert!(resolved_crates_contain_name(&snapshot, "cfg-if"));
+    assert!(resolved_crates_contain_name(&snapshot, "tracing"));
+    assert!(resolved_crates_contain_name(&snapshot, "tracing-core"));
+    assert!(resolved_crates_contain_name(&snapshot, "pin-project-lite"));
+    assert!(!resolved_crates_contain_name(&snapshot, "smallvec"));
+    assert!(!resolved_crates_contain_name(&snapshot, "tracing-log"));
+    assert!(!resolved_crates_contain_name(&snapshot, "log"));
+    assert!(!resolved_crates_contain_name(&snapshot, "windows-sys"));
 }
 
 #[test]
