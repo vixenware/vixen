@@ -286,6 +286,36 @@ fn cargo_workspace_inherited_registry_http_responses() -> HashMap<String, String
     http_responses
 }
 
+fn cargo_sha2_hello_http_responses() -> HashMap<String, String> {
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    for (name, file_name) in [
+        ("sha2", "sha2-0.10.9.jsonl"),
+        ("digest", "digest-0.10.7.jsonl"),
+        ("cpufeatures", "cpufeatures-0.2.17.jsonl"),
+        ("crypto-common", "crypto-common-0.1.7.jsonl"),
+        ("block-buffer", "block-buffer-0.10.4.jsonl"),
+        ("generic-array", "generic-array-0.14.7.jsonl"),
+        ("typenum", "typenum-1.19.0.jsonl"),
+        ("version_check", "version_check-0.9.5.jsonl"),
+        ("cfg-if", "cfg-if-1.0.4.jsonl"),
+    ] {
+        http_responses.insert(
+            local_sparse_package_url(name),
+            fs::read_to_string(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../specs/eval/run/registry_real")
+                    .join(file_name),
+            )
+            .unwrap_or_else(|error| panic!("read real {name} sparse index entry: {error}")),
+        );
+    }
+    http_responses
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -4344,6 +4374,78 @@ fn build() {
     assert!(resolved_crates_contain_name(&snapshot, "miniz_oxide"));
     assert!(resolved_crates_contain_name(&snapshot, "adler2"));
     assert!(resolved_crates_contain_name(&snapshot, "simd-adler32"));
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_executes_sha2_hello_vertical_slice() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo_sha2_hello/Cargo.toml"));
+  resolve_manifest_at(manifest, @specs/eval/run/cargo_sha2_hello) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses: cargo_sha2_hello_http_responses(),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest on sha2 hello vertical slice");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo sha2 hello result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(struct_field(&value, "roots"));
+
+    assert_eq!(roots, vec!["registry:sha2@0.10.9"]);
+    assert_eq!(
+        resolved_crate_version(&snapshot, "sha2").as_deref(),
+        Some("0.10.9")
+    );
+    assert!(resolved_crates_contain_name(&snapshot, "sha2"));
+    assert!(resolved_crates_contain_name(&snapshot, "digest"));
+    assert!(resolved_crates_contain_name(&snapshot, "cfg-if"));
+    assert!(resolved_crates_contain_name(&snapshot, "block-buffer"));
+    assert!(resolved_crates_contain_name(&snapshot, "crypto-common"));
+    assert!(resolved_crates_contain_name(&snapshot, "generic-array"));
+    assert!(resolved_crates_contain_name(&snapshot, "typenum"));
+    assert!(resolved_crates_contain_name(&snapshot, "version_check"));
+    assert!(!resolved_crates_contain_name(&snapshot, "libc"));
 }
 
 #[test]
