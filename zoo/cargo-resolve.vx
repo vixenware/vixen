@@ -23,6 +23,7 @@ enum CargoDependencySpec {
     workspace: Bool = false,
     path: String?,
     git: String?,
+    rev: String?,
     package: String?,
   },
 }
@@ -201,6 +202,7 @@ enum DependencySource {
   },
   struct Git {
     url: String,
+    rev: String?,
   },
 }
 
@@ -489,6 +491,7 @@ fn request_from_dep_at_with_workspace(
       workspace,
       path,
       git,
+      rev,
       package,
     } => (
       if workspace (
@@ -521,7 +524,7 @@ fn request_from_dep_at_with_workspace(
                 },
                 None => (
                   match git (
-                    Some { value } => DependencySource.Git { url: value },
+                    Some { value } => DependencySource.Git { url: value, rev },
                     None => inherited.source,
                   )
                 ),
@@ -552,7 +555,7 @@ fn request_from_dep_at_with_workspace(
               },
               None => (
                 match git (
-                  Some { value } => DependencySource.Git { url: value },
+                  Some { value } => DependencySource.Git { url: value, rev },
                   None => DependencySource.Registry,
                 )
               ),
@@ -1348,7 +1351,12 @@ fn request_key(req: DependencyRequest) -> String (
     match req.source (
       DependencySource.Registry => `registry:{req.package_name.unwrap_or(req.name)}`,
       DependencySource.LocalPath { base: _, path } => `path:{path}`,
-      DependencySource.Git { url } => `git:{url}`,
+      DependencySource.Git { url, rev } => (
+        match rev (
+          Some { value } => `git:{url}#{value}`,
+          None => `git:{url}`,
+        )
+      ),
     );
 
   let target =
@@ -1518,7 +1526,7 @@ fn resolve_package_node(ctx) where {
         workspace,
       }
     ),
-    DependencySource.Git { url: _ } => (
+    DependencySource.Git { url: _, rev: _ } => (
       let crate = resolve_request(request) where {
         config,
         lock,
@@ -1767,7 +1775,7 @@ fn resolve_request(request: DependencyRequest) where {
       let dep_root = base / Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
       let dependency_requests =
-        manifest_requests_at_with_workspace(dep_manifest, dep_root, workspace_root_dependencies(workspace))
+        root_requests_at_with_workspace(dep_manifest, dep_root, workspace_root_dependencies(workspace))
           where { target };
       let features = unify_features(
         dep_manifest.features,
@@ -1784,13 +1792,34 @@ fn resolve_request(request: DependencyRequest) where {
         source,
       }
     ),
-    DependencySource.Git { url } => (
-      // Under the current primitive set, git still wants a real fetch story.
-      // This could become:
-      // - an archive URL convention for known hosts, or
-      // - a future VCS fetch primitive layered over Http.get.
-      let _url = url;
-      fail "git dependency resolution omitted from sketch"
+    DependencySource.Git { url, rev } => (
+      let exact_rev =
+        match rev (
+          Some { value } => value,
+          None => fail "git dependency resolution without explicit rev omitted from sketch",
+        );
+      let dep_manifest = Toml.parse[CargoManifest](Http.get(github_raw_manifest_url(url, exact_rev)));
+      let dependency_requests = root_requests_at_with_workspace(dep_manifest, @., %{}) where { target };
+      let features = unify_features(
+        dep_manifest.features,
+        optional_dependency_names(dependency_requests),
+        request,
+      );
+      let source =
+        ResolvedSource.Git {
+          url,
+          rev: exact_rev,
+          checksum: None,
+          archive_url: Some(github_archive_url(url, exact_rev)),
+        };
+      ResolvedCrate {
+        id: PackageId(`git:{url}#{exact_rev}`),
+        name: dep_manifest.package.name,
+        version: package_version(dep_manifest.package, None),
+        features: features.local,
+        dependencies: apply_feature_requests(dependency_requests, features),
+        source,
+      }
     ),
     DependencySource.Registry => (
       let entries = parse_sparse_entries(Http.get(sparse_index_url(package_name)));
@@ -1840,6 +1869,30 @@ fn demand_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
     root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
   demand_graph(requests) where { config, lock, target, workspace }
+)
+
+fn github_repo_path(url: String) -> String (
+  if !url.starts_with("https://github.com/") (
+    fail "git dependency resolution only supports https://github.com URLs in sketch"
+  ) else (
+    let repo = url.slice(19..);
+    if repo.ends_with(".git") (
+      let end = repo.len() - 4;
+      repo.slice(0..end)
+    ) else (
+      repo
+    )
+  )
+)
+
+fn github_raw_manifest_url(url: String, rev: String) -> String (
+  let repo = github_repo_path(url);
+  `https://raw.githubusercontent.com/{repo}/{rev}/Cargo.toml`
+)
+
+fn github_archive_url(url: String, rev: String) -> String (
+  let repo = github_repo_path(url);
+  `https://codeload.github.com/{repo}/tar.gz/{rev}`
 )
 
 fn emit_lockfile(resolution: RegistryResolution) -> Blob (

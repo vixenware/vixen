@@ -3874,6 +3874,107 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_manifest_resolves_fixed_revision_github_dependency() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo-github-git-root.toml"));
+  demand_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://raw.githubusercontent.com/bearcove/tree-sitter-vixen/9fe14bea91399543282035090086fec8a868fb6c/Cargo.toml".to_string(),
+        r#"[package]
+name = "tree-sitter-vixen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.0.87"
+
+[dev-dependencies]
+ignored-devdep = { git = "https://github.com/example/ignored-devdep", rev = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" }
+"#
+        .to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/tr/ee/tree-sitter-language".to_string(),
+        r#"{"name":"tree-sitter-language","vers":"0.1.0","deps":[],"cksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/2/cc".to_string(),
+        r#"{"name":"cc","vers":"1.0.87","deps":[],"cksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo github git dependency manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo github git result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert!(
+        roots.contains(
+            &"git:https://github.com/bearcove/tree-sitter-vixen#9fe14bea91399543282035090086fec8a868fb6c",
+        )
+    );
+    assert!(resolved_crates_contain_name(&snapshot, "tree-sitter-vixen"));
+    assert!(resolved_crates_contain_name(
+        &snapshot,
+        "tree-sitter-language"
+    ));
+    assert!(resolved_crates_contain_name(&snapshot, "cc"));
+    assert!(!resolved_crates_contain_name(&snapshot, "ignored-devdep"));
+}
+
+#[test]
 fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
