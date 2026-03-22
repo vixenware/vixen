@@ -453,19 +453,43 @@ pub struct EvalSessionCheckpoint {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct EvalPreparedSnapshot {
+pub(super) struct EvalSchedulerBase {
     pub(super) next_id: u64,
     pub(super) next_work_id: u64,
-    pub(super) lease_namespace: Option<u64>,
     pub(super) node_states: OrdMap<EvalNodeId, EvalNodeState>,
     pub(super) node_records: OrdMap<EvalNodeId, EvalNodeRecord>,
     pub(super) keyed_nodes: OrdMap<EvalNodeId, KeyedNodeMemo>,
     pub(super) dependency_edges: Vector<EvalDependencyEdge>,
-    pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
+    pub(super) pending_resumes: OrdMap<u64, Vec<EvalSuspension>>,
     pub(super) pending_kinds: OrdMap<u64, PendingKind>,
     pub(super) retained_exprs: OrdMap<EvalNodeId, RetainedExprTask>,
     pub(super) learned_no_goods: Vector<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vector<LearnedSearchNoGood>,
+}
+
+impl Default for EvalSchedulerBase {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            next_work_id: 1,
+            node_states: OrdMap::new(),
+            node_records: OrdMap::new(),
+            keyed_nodes: OrdMap::new(),
+            dependency_edges: Vector::new(),
+            pending_resumes: OrdMap::new(),
+            pending_kinds: OrdMap::new(),
+            retained_exprs: OrdMap::new(),
+            learned_no_goods: Vector::new(),
+            learned_search_no_goods: Vector::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct EvalPreparedSnapshot {
+    pub(super) base: EvalSchedulerBase,
+    pub(super) lease_namespace: Option<u64>,
+    pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
 }
 
 pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {

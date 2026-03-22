@@ -288,8 +288,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     pub fn stats(&self) -> EvalSessionStats {
         let mut graph_nodes = self.scheduler.node_record_ids();
         graph_nodes.extend(self.scheduler.node_state_ids());
-        graph_nodes.extend(self.scheduler.keyed_nodes.keys().copied());
-        for edge in self.scheduler.dependency_edges.iter() {
+        graph_nodes.extend(self.scheduler.base.keyed_nodes.keys().copied());
+        for edge in self.scheduler.base.dependency_edges.iter() {
             graph_nodes.insert(edge.parent);
             graph_nodes.insert(edge.child);
         }
@@ -298,22 +298,23 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             graph_node_count: graph_nodes.len(),
             node_record_count: self.scheduler.node_record_count(),
             node_state_count: self.scheduler.node_state_count(),
-            keyed_node_count: self.scheduler.keyed_nodes.len(),
-            dependency_edge_count: self.scheduler.dependency_edges.len(),
+            keyed_node_count: self.scheduler.base.keyed_nodes.len(),
+            dependency_edge_count: self.scheduler.base.dependency_edges.len(),
             queued_work_count: self.scheduler.ready_queue.len(),
             in_flight_work_count: self.scheduler.in_flight_tasks.len(),
             buffered_work_count: self.scheduler.buffered_completions.len(),
             pending_count: self.scheduler.pending_nodes().len(),
             completed_work_count: self.completed_work.len(),
             trace_event_count: self.trace.events.len(),
-            learned_no_good_count: self.scheduler.learned_no_goods.len(),
+            learned_no_good_count: self.scheduler.base.learned_no_goods.len(),
             widened_no_good_count: self
                 .scheduler
+                .base
                 .learned_no_goods
                 .iter()
                 .filter(|learned| learned.start_index < learned.end_index)
                 .count(),
-            learned_search_no_good_count: self.scheduler.learned_search_no_goods.len(),
+            learned_search_no_good_count: self.scheduler.base.learned_search_no_goods.len(),
         }
     }
 
@@ -642,49 +643,31 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         completions: Vec<EvalWorkCompletion>,
         record_history: bool,
     ) -> Result<EvalSessionStep, EvalError> {
-        if !record_history {
-            let mut step = None;
-            for completion in completions {
-                step = Some(apply_completion_to_state(
-                    &mut self.scheduler,
-                    &mut self.trace,
-                    &mut self.completed_work,
-                    &mut self.completed,
-                    completion,
-                )?);
-            }
-            self.scheduler.clear_active_wave_if_idle();
-            self.generation += 1;
-            return Ok(
-                step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed))
-            );
-        }
-
-        let snapshot = record_history.then(|| self.checkpoint());
-        let mut scheduler = self.scheduler.clone();
-        let mut trace = self.trace.clone();
-        let mut completed_work = self.completed_work.clone();
-        let mut completed = self.completed.clone();
+        let mut snapshot = record_history.then(|| self.checkpoint());
         let mut step = None;
 
         for completion in completions {
-            step = Some(apply_completion_to_state(
-                &mut scheduler,
-                &mut trace,
-                &mut completed_work,
-                &mut completed,
+            match apply_completion_to_state(
+                &mut self.scheduler,
+                &mut self.trace,
+                &mut self.completed_work,
+                &mut self.completed,
                 completion,
-            )?);
+            ) {
+                Ok(next) => step = Some(next),
+                Err(error) => {
+                    if let Some(snapshot) = snapshot.take() {
+                        self.restore(snapshot);
+                    }
+                    return Err(error);
+                }
+            }
         }
-        scheduler.clear_active_wave_if_idle();
+        self.scheduler.clear_active_wave_if_idle();
 
         if let Some(snapshot) = snapshot {
             self.history.push(snapshot);
         }
-        self.scheduler = scheduler;
-        self.trace = trace;
-        self.completed_work = completed_work;
-        self.completed = completed;
         self.generation += 1;
         Ok(step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed)))
     }
@@ -744,8 +727,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .into_iter()
             .collect::<Vec<_>>();
         node_ids.extend(self.scheduler.node_state_ids());
-        node_ids.extend(self.scheduler.keyed_nodes.keys().copied());
-        for edge in self.scheduler.dependency_edges.iter() {
+        node_ids.extend(self.scheduler.base.keyed_nodes.keys().copied());
+        for edge in self.scheduler.base.dependency_edges.iter() {
             node_ids.push(edge.parent);
             node_ids.push(edge.child);
         }
@@ -754,7 +737,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         let mut dependencies = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
         let mut dependents = BTreeMap::<EvalNodeId, Vec<EvalNodeId>>::new();
-        for edge in self.scheduler.dependency_edges.iter() {
+        for edge in self.scheduler.base.dependency_edges.iter() {
             dependencies
                 .entry(edge.parent)
                 .or_default()
@@ -763,6 +746,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
         let mut keyed_nodes = self
             .scheduler
+            .base
             .keyed_nodes
             .iter()
             .map(|(node_id, memo)| (*node_id, memo.public()))
