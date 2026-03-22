@@ -823,6 +823,9 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Blob" => {
             Some("Blob.utf8")
         }
+        (ValueRep::External(external), "to_string") if external.kind.as_ref() == "Path" => {
+            Some("Path.to_string")
+        }
         (ValueRep::External(external), "file") if external.kind.as_ref() == "Tree" => {
             Some("Tree.file")
         }

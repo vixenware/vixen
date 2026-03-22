@@ -1396,7 +1396,7 @@ fn package_request_key(req: DependencyRequest) -> String (
 fn dependency_source_key(source: DependencySource) -> String (
   match source (
     DependencySource.Registry => fail "dependency_source_key requires a concrete non-registry source",
-    DependencySource.LocalPath { base: _, path } => `path:{path}`,
+    DependencySource.LocalPath { base, path } => `path:{(base / Path(path)).to_string()}`,
     DependencySource.Git { url, rev } => (
       match rev (
         Some { value } => `git:{url}#{value}`,
@@ -1842,7 +1842,7 @@ fn resolve_non_registry_facts(source: DependencySource) where {
       let source = ResolvedSource.LocalPath { path: dep_root };
 
       PackageFacts {
-        id: PackageId(`path:{path}`),
+        id: PackageId(`path:{dep_root.to_string()}`),
         name: dep_manifest.package.name,
         version: package_version(dep_manifest.package, workspace_package),
         source,

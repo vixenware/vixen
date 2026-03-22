@@ -1,3 +1,5 @@
+use std::path::{Component, MAIN_SEPARATOR, Path as FsPath, PathBuf};
+
 use super::*;
 
 pub(in crate::engine) fn slot_builtin_action(
@@ -844,6 +846,7 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
         "Json.parse"
             | "Toml.parse"
             | "Blob.utf8"
+            | "Path.to_string"
             | "String.len"
             | "String.is_empty"
             | "String.split_once"
@@ -876,6 +879,52 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "array_find"
             | "array_fold"
     )
+}
+
+fn normalize_path_descriptor(path: &str) -> Arc<str> {
+    let mut normalized = PathBuf::new();
+    let mut prefix = None;
+    let mut has_root = false;
+
+    for component in FsPath::new(path).components() {
+        match component {
+            Component::Prefix(value) => prefix = Some(value.as_os_str().to_owned()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| !matches!(last, Component::ParentDir))
+                {
+                    normalized.pop();
+                } else if !has_root {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+
+    let mut result = PathBuf::new();
+    if let Some(prefix) = prefix {
+        result.push(prefix);
+    }
+    if has_root {
+        result.push(PathBuf::from(std::path::MAIN_SEPARATOR.to_string()));
+    }
+    result.push(&normalized);
+
+    let normalized = if result.as_os_str().is_empty() {
+        if has_root {
+            MAIN_SEPARATOR.to_string()
+        } else {
+            ".".to_string()
+        }
+    } else {
+        result.to_string_lossy().into_owned()
+    };
+    Arc::from(normalized)
 }
 
 fn continue_builtin_call_inner(
@@ -930,6 +979,30 @@ fn continue_builtin_call_inner(
             }
             Ok(ready_builtin_value(
                 Value::string(external.descriptor.clone()).with_meta(args[0].meta.clone()),
+            ))
+        }
+        "Path.to_string" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Path.to_string() requires receiver",
+                ));
+            }
+            let ValueRep::External(external) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Path.to_string() receiver must evaluate to Path",
+                ));
+            };
+            if external.kind.as_ref() != "Path" {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Path.to_string() receiver must evaluate to Path",
+                ));
+            }
+            Ok(ready_builtin_value(
+                Value::string(normalize_path_descriptor(external.descriptor.as_ref()))
+                    .with_meta(args[0].meta.clone()),
             ))
         }
         "String.len" => {

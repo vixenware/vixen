@@ -1913,6 +1913,26 @@ fn build(blob: Blob) {
 }
 
 #[test]
+fn path_to_string_method_normalizes_lexical_segments_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(path: Path) {
+  path.to_string()
+}
+"#,
+        "path-to-string-method-runtime",
+        "build",
+        &[Value::external("Path", "./crates/./leaf")],
+    )
+    .expect("evaluate Path.to_string()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Path.to_string() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::String("crates/leaf".into()));
+}
+
+#[test]
 fn json_parse_accepts_string_argument_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -3432,6 +3452,71 @@ fn build() {
             |feature| matches!(&feature.rep, ValueRep::String(name) if name.as_ref() == "right")
         )
     );
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_joins_local_path_aliases_by_resolved_path() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo_local_path_alias/Cargo.toml"));
+  demand_manifest_at(manifest, @.) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("specs/eval/run/cargo_local_path_alias"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo demand_manifest against local path alias manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo local path alias result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert_eq!(roots, vec!["path:crates/leaf"]);
+    assert!(resolved_crates_contain_name(&snapshot, "leaf"));
 }
 
 #[test]
