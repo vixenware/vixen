@@ -2687,6 +2687,247 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_manifest_executes_local_workspace_manifest_with_real_registry_subset() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+struct Summary {
+  root_rowan: Bool,
+  has_rowan: Bool,
+  has_countme: Bool,
+  has_hashbrown: Bool,
+  has_rustc_hash: Bool,
+  has_text_size: Bool,
+  has_serde: Bool,
+  has_ahash: Bool,
+  has_allocator_api2: Bool,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("crates/vx-parser/Cargo.toml"));
+  let resolution = resolve_manifest_at(manifest, @crates/vx-parser) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  };
+
+  Summary {
+    root_rowan: resolution.roots.any($.value == "registry:rowan@0.16.1"),
+    has_rowan: resolution.packages.any($.name == "rowan"),
+    has_countme: resolution.packages.any($.name == "countme"),
+    has_hashbrown: resolution.packages.any($.name == "hashbrown"),
+    has_rustc_hash: resolution.packages.any($.name == "rustc-hash"),
+    has_text_size: resolution.packages.any($.name == "text-size"),
+    has_serde: resolution.packages.any($.name == "serde"),
+    has_ahash: resolution.packages.any($.name == "ahash"),
+    has_allocator_api2: resolution.packages.any($.name == "allocator-api2"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ro/wa/rowan".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/rowan-0.16.1.jsonl"),
+        )
+        .expect("read real rowan sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/co/un/countme".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/countme-3.0.1.jsonl"),
+        )
+        .expect("read real countme sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ha/sh/hashbrown".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/hashbrown-0.14.5.jsonl"),
+        )
+        .expect("read real hashbrown sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ru/st/rustc-hash".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/rustc-hash-1.1.0.jsonl"),
+        )
+        .expect("read real rustc-hash sparse index entries"),
+    );
+    http_responses.insert(
+        "https://index.crates.io/te/xt/text-size".to_string(),
+        fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../specs/eval/run/registry_real/text-size-1.1.1.jsonl"),
+        )
+        .expect("read real text-size sparse index entries"),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest against local workspace manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo local workspace manifest result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(struct_field(&value, "root_rowan").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "has_rowan").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_countme").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_hashbrown").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_rustc_hash").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_text_size").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(struct_field(&value, "has_serde").rep, ValueRep::Bool(false));
+    assert_eq!(struct_field(&value, "has_ahash").rep, ValueRep::Bool(false));
+    assert_eq!(
+        struct_field(&value, "has_allocator_api2").rep,
+        ValueRep::Bool(false)
+    );
+}
+
+#[test]
+fn zoo_cargo_resolve_request_executes_workspace_inherited_local_path_dependency() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("crates/vx-lsp/Cargo.toml"));
+  let request = request_from_dep_at_with_workspace(
+    "vx-tracing",
+    manifest.dependencies.get("vx-tracing"),
+    "normal",
+    @crates/vx-lsp,
+    workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+  );
+  resolve_request(request) where {
+    config: SparseConfig {
+      dl: "unused",
+    },
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses: HashMap::new(),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_request against workspace inherited local path dependency");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo workspace inherited local path result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String("vx-tracing".into())
+    );
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String("0.1.0".into())
+    );
+    let source = struct_field(&value, "source");
+    let path = struct_field(source, "path");
+    let ValueRep::External(external) = &path.rep else {
+        panic!("expected external path, got {path:?}");
+    };
+    assert_eq!(external.kind.as_ref(), "Path");
+    assert_eq!(external.descriptor.as_ref(), "./crates/vx-tracing");
+    let dependencies = struct_field(&value, "dependencies");
+    let ValueRep::Array(items) = &dependencies.rep else {
+        panic!("expected dependencies array, got {dependencies:?}");
+    };
+    let has_tracing_subscriber = items.iter().any(|dep| {
+        matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "tracing-subscriber"
+        )
+    });
+    assert!(has_tracing_subscriber);
+}
+
+#[test]
 fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
