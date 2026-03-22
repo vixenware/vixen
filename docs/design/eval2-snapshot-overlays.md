@@ -18,6 +18,30 @@ in scheduler bookkeeping:
 
 That is a design problem, not a semver problem.
 
+## Current implementation status
+
+Eval2 now implements the first real cut of this design:
+
+1. prepared work executes against an explicit immutable base snapshot
+2. worker-side mutation is recorded in overlays / deltas
+3. the session is the single committer for base scheduler state
+4. the legacy one-shot entry helpers now route through the same session engine
+
+This removed the old worker-side `Arc::make_mut` clone/drop storm and collapsed
+the hot Cargo-shaped tests from tens of seconds to sub-second runtime.
+
+Prepared work also now carries:
+
+- observed base generation
+- observed base snapshot
+- validation metadata for base reads
+
+Owner-side commit uses that to distinguish:
+
+- completions that can merge directly
+- stale completions that must be replayed
+- superseded completions that can be dropped without publishing their deltas
+
 ## Problem
 
 Today prepared work is conceptually "snapshot-like", but the implementation is
@@ -178,3 +202,22 @@ The ideal eval2 scheduler would make the model explicit:
 
 That is the architecture we should now grow into, instead of extending the
 current worker-side `Arc::make_mut` compromise.
+
+## Next seam
+
+The next step is to strengthen validation beyond the current read-set checks.
+
+What exists now is enough to validate and replay stale prepared work for:
+
+- direct node-record / node-state reads
+- pending-kind reads
+- retained-expression reads
+- keyed-node lookups
+- learned no-good lookups
+- dependency projections
+
+What still remains for the full ideal model:
+
+- richer validation metadata where lease order alone is still doing work
+- storage choices that better match dense node/work access patterns
+- possibly more explicit owner-side commit/replay diagnostics

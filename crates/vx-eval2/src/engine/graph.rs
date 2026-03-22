@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +496,46 @@ pub(super) struct EvalPreparedSnapshot {
     pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EvalKeyedLookupValidation {
+    pub(super) resolver: FunctionRef,
+    pub(super) key: Value,
+    pub(super) branch_context: EvalBranchContext,
+    pub(super) result: Option<EvalNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EvalLearnedNoGoodValidation {
+    pub(super) branch_context: EvalBranchContext,
+    pub(super) assumption: Arc<str>,
+    pub(super) candidates: Arc<[Value]>,
+    pub(super) index: usize,
+    pub(super) resolver: FunctionRef,
+    pub(super) result: Option<EvalError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EvalLearnedSearchNoGoodValidation {
+    pub(super) branch_context: EvalBranchContext,
+    pub(super) assumption: Arc<str>,
+    pub(super) candidates: Arc<[Value]>,
+    pub(super) resolver: FunctionRef,
+    pub(super) result: Option<EvalError>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct EvalSnapshotReadSet {
+    pub(super) node_records: BTreeSet<EvalNodeId>,
+    pub(super) node_states: BTreeSet<EvalNodeId>,
+    pub(super) pending_kinds: BTreeSet<u64>,
+    pub(super) keyed_nodes: BTreeSet<EvalNodeId>,
+    pub(super) retained_exprs: BTreeSet<EvalNodeId>,
+    pub(super) dependency_reads: Vec<(EvalNodeId, Vec<EvalNodeId>)>,
+    pub(super) keyed_lookups: Vec<EvalKeyedLookupValidation>,
+    pub(super) learned_no_good_lookups: Vec<EvalLearnedNoGoodValidation>,
+    pub(super) learned_search_no_good_lookups: Vec<EvalLearnedSearchNoGoodValidation>,
+}
+
 pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) program: Arc<CompiledProgram>,
     pub(super) entry: String,
@@ -516,6 +557,8 @@ pub struct EvalWorkCompletion {
     pub(super) wave_id: EvalWaveId,
     pub(super) lease_sequence: u64,
     pub(super) base_generation: u64,
+    pub(super) record: ReadyTaskRecord,
+    pub(super) snapshot: EvalPreparedSnapshot,
     pub(super) work: EvalQueuedWork,
     pub(super) outcome: EvalCompletedWorkOutcome,
     pub(super) delta: EvalSessionDelta,
@@ -526,6 +569,7 @@ pub struct EvalWorkCompletion {
 #[derive(Debug, Clone)]
 pub(super) struct EvalSessionDelta {
     pub(super) scheduler: EvalSchedulerDelta,
+    pub(super) reads: EvalSnapshotReadSet,
     pub(super) trace_events: Vec<EvalEvent>,
     pub(super) completed_invalidated: bool,
 }

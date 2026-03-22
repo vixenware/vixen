@@ -8397,6 +8397,93 @@ fn prepared_work_and_completion_report_observed_base_generation() {
 }
 
 #[test]
+fn stale_completion_requeues_leased_work_when_validation_fails() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "prepared-validation-replay",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let leased_generation = session.base_generation();
+    let first = session.prepare_step().expect("first leased sibling");
+    let first_node = first.work().node_id;
+    let second = session.prepare_step().expect("second leased sibling");
+    let second_work = second.work().clone();
+
+    let mut second_completion = second.execute().expect("second completion");
+    second_completion.inject_node_state_read_for_validation(first_node);
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("out-of-order completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+
+    let first_completion = first.execute().expect("first completion");
+    assert_eq!(
+        session
+            .apply_completion(first_completion)
+            .expect("first completion should commit and replay stale sibling"),
+        EvalSessionStep::Progressed,
+    );
+    assert!(session.buffered_work().is_empty());
+    assert!(
+        session
+            .queued_work()
+            .iter()
+            .any(|work| work.id == second_work.id),
+        "stale leased work should be requeued, got {:?}",
+        session.queued_work()
+    );
+    assert!(
+        session
+            .completed_work()
+            .iter()
+            .all(|completed| completed.work.id != second_work.id),
+        "stale completion must not commit before replay",
+    );
+
+    let replayed = session.prepare_step().expect("replayed sibling");
+    assert_eq!(replayed.work().id, second_work.id);
+    assert!(replayed.base_generation() > leased_generation);
+    assert_eq!(
+        session
+            .apply_completion(replayed.execute().expect("replayed completion"))
+            .expect("replayed completion should apply"),
+        EvalSessionStep::Progressed,
+    );
+
+    let Resolution::Ready(value) = session.run().expect("final replayed resolution") else {
+        panic!("expected ready replayed resolution");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+}
+
+#[test]
 fn preparing_twice_never_returns_the_same_work_twice() {
     let mut session = EvalSession::new(
         "fn build() { [host_os(), host_os()] }",
@@ -8827,6 +8914,99 @@ fn buffered_sibling_completions_drain_in_lease_order_once_gap_closes() {
             .iter()
             .all(|item| item.rep == ValueRep::String("windows".into()))
     );
+}
+
+#[test]
+fn stale_buffered_completion_replays_against_new_base_snapshot() {
+    let mut session = EvalSession::new(
+        r#"
+fn resolve_pkg(ctx) {
+  ctx.joined
+}
+
+fn build() {
+  [
+    keyed("logger", ["1.0.0"], resolve_pkg),
+    keyed("logger", ["1.1.0"], resolve_pkg),
+  ]
+}
+"#,
+        "prepared-replay-keyed",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let leased_generation = session.base_generation();
+    let first = session.prepare_step().expect("first keyed sibling");
+    let second = session.prepare_step().expect("second keyed sibling");
+
+    let second_completion = second.execute().expect("second completion");
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("out-of-order completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+
+    let first_completion = first.execute().expect("first completion");
+    assert_eq!(
+        session
+            .apply_completion(first_completion)
+            .expect("first completion should commit and replay stale sibling"),
+        EvalSessionStep::Progressed,
+    );
+    assert!(session.buffered_work().is_empty());
+    assert!(
+        !session.queued_work().is_empty(),
+        "stale sibling replay should leave follow-up work queued, got {:?}",
+        session.queued_work()
+    );
+    assert!(
+        session.base_generation() > leased_generation,
+        "stale sibling handling should advance the base snapshot",
+    );
+
+    let Resolution::Ready(value) = session.run().expect("final keyed resolution") else {
+        panic!("expected ready keyed resolution");
+    };
+    let ValueRep::Array(rows) = &value.rep else {
+        panic!(
+            "expected keyed build to return an array, got {:?}",
+            value.rep
+        );
+    };
+    assert_eq!(rows.len(), 2);
+    for row in rows.iter() {
+        let ValueRep::Array(items) = &row.rep else {
+            panic!("expected keyed result array, got {:?}", row.rep);
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rep, ValueRep::String("1.0.0".into()));
+        assert_eq!(items[1].rep, ValueRep::String("1.1.0".into()));
+    }
+
+    let keyed_nodes = session
+        .graph_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|node| node.keyed.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_nodes.len(), 1);
 }
 
 #[test]

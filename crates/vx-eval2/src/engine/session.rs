@@ -832,6 +832,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             return Err(error);
         }
         let started = Instant::now();
+        let snapshot = scheduler.clone();
+        let completion_record = record.clone();
         let (delta, outcome, invocation) = execute_ready_task(
             program,
             &entry,
@@ -839,7 +841,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             runtime,
             &place,
             scheduler,
-            record.clone(),
+            record,
             call_profiling,
         )?;
         Ok(EvalWorkCompletion {
@@ -847,7 +849,9 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             wave_id,
             lease_sequence,
             base_generation,
-            work: record.work,
+            record: completion_record.clone(),
+            snapshot,
+            work: completion_record.work.clone(),
             outcome,
             delta,
             elapsed: started.elapsed(),
@@ -918,14 +922,29 @@ fn apply_completion_to_state(
     )?;
 
     if scheduler.can_commit_lease_sequence(completion.lease_sequence) {
-        let _leased = scheduler.take_in_flight_task(
+        let leased = scheduler.take_in_flight_task(
             completion.work.id,
             completion.lease_sequence,
             &completion.work,
         )?;
-        let mut step = commit_completion(scheduler, trace, completed_work, completed, completion)?;
-        while let Some(buffered) = scheduler.take_next_committable_buffered_completion() {
-            step = commit_completion(scheduler, trace, completed_work, completed, buffered)?;
+        if leased != completion.record {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "leased eval work record {:?} diverged before commit",
+                    completion.work.id
+                ),
+            ));
+        }
+        let mut committed =
+            commit_completion(scheduler, trace, completed_work, completed, completion)?;
+        let mut step = committed.step;
+        while !committed.replayed {
+            let Some(buffered) = scheduler.take_next_committable_buffered_completion() else {
+                break;
+            };
+            committed = commit_completion(scheduler, trace, completed_work, completed, buffered)?;
+            step = committed.step;
         }
         Ok(step)
     } else {
@@ -956,7 +975,7 @@ fn commit_completion(
     completed_work: &mut Vec<EvalCompletedWork>,
     completed: &mut Option<Result<Value, EvalError>>,
     completion: EvalWorkCompletion,
-) -> Result<EvalSessionStep, EvalError> {
+) -> Result<CommitCompletionResult, EvalError> {
     if completion_targets_superseded_work(scheduler, &completion.work) {
         completed_work.push(EvalCompletedWork {
             work: completion.work,
@@ -965,7 +984,7 @@ fn commit_completion(
             elapsed: completion.elapsed,
             invocation: completion.invocation,
         });
-        return Ok(EvalSessionStep::Progressed);
+        return Ok(CommitCompletionResult::progressed());
     }
     if completion.base_generation > scheduler.base_generation() {
         return Err(EvalError::new(
@@ -977,6 +996,10 @@ fn commit_completion(
                 scheduler.base_generation(),
             ),
         ));
+    }
+    if scheduler.completion_reads_stale_base(&completion)? {
+        scheduler.requeue_ready_record_front(completion.record)?;
+        return Ok(CommitCompletionResult::replayed());
     }
     trace.events.extend(completion.delta.trace_events);
     let completed_invalidated = completion.delta.completed_invalidated;
@@ -996,36 +1019,66 @@ fn commit_completion(
         invocation: completion.invocation.clone(),
     });
     if keyed_stale {
-        return Ok(EvalSessionStep::Progressed);
+        return Ok(CommitCompletionResult::progressed());
     }
     match completion.outcome {
         EvalCompletedWorkOutcome::Progressed | EvalCompletedWorkOutcome::BlockedOnNode(_) => {
-            Ok(EvalSessionStep::Progressed)
+            Ok(CommitCompletionResult::progressed())
         }
-        EvalCompletedWorkOutcome::Pending(pending) => Ok(EvalSessionStep::Pending(pending)),
+        EvalCompletedWorkOutcome::Pending(pending) => Ok(CommitCompletionResult {
+            step: EvalSessionStep::Pending(pending),
+            replayed: false,
+        }),
         EvalCompletedWorkOutcome::Ready(value) => {
             if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
-                Ok(EvalSessionStep::Progressed)
+                Ok(CommitCompletionResult::progressed())
             } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
-                Ok(EvalSessionStep::Progressed)
+                Ok(CommitCompletionResult::progressed())
             } else {
                 scheduler
                     .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
                 *completed = Some(Ok(value.clone()));
-                Ok(EvalSessionStep::Ready(value))
+                Ok(CommitCompletionResult {
+                    step: EvalSessionStep::Ready(value),
+                    replayed: false,
+                })
             }
         }
         EvalCompletedWorkOutcome::Poison(error) => {
             if scheduler.resolve_child_dependency(completion.work.node_id, Err(error.clone()))? {
-                Ok(EvalSessionStep::Progressed)
+                Ok(CommitCompletionResult::progressed())
             } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
-                Ok(EvalSessionStep::Progressed)
+                Ok(CommitCompletionResult::progressed())
             } else {
                 scheduler
                     .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Poison(error.clone()));
                 *completed = Some(Err(error.clone()));
-                Ok(EvalSessionStep::Poison(error))
+                Ok(CommitCompletionResult {
+                    step: EvalSessionStep::Poison(error),
+                    replayed: false,
+                })
             }
+        }
+    }
+}
+
+struct CommitCompletionResult {
+    step: EvalSessionStep,
+    replayed: bool,
+}
+
+impl CommitCompletionResult {
+    fn progressed() -> Self {
+        Self {
+            step: EvalSessionStep::Progressed,
+            replayed: false,
+        }
+    }
+
+    fn replayed() -> Self {
+        Self {
+            step: EvalSessionStep::Progressed,
+            replayed: true,
         }
     }
 }
@@ -1349,6 +1402,10 @@ impl EvalWorkCompletion {
             task: ReadyTask::StartEntry,
             branch_context: EvalBranchContext::default(),
         });
+    }
+
+    pub(crate) fn inject_node_state_read_for_validation(&mut self, node_id: EvalNodeId) {
+        self.delta.reads.node_states.insert(node_id);
     }
 }
 
