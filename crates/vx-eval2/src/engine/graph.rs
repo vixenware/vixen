@@ -363,6 +363,23 @@ pub struct EvalSessionProfile {
     pub entries: Vec<EvalProfileEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalProfileSummaryEntry {
+    pub work_kind: EvalWorkKind,
+    pub label: Arc<str>,
+    pub source: Option<SourceSpan>,
+    pub node_count: usize,
+    pub runs: usize,
+    pub total_time: Duration,
+    pub max_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSessionProfileSummary {
+    pub total_time: Duration,
+    pub entries: Vec<EvalProfileSummaryEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
     pub(super) branch_context: EvalBranchContext,

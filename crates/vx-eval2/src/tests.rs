@@ -5185,8 +5185,17 @@ fn session_profile_reports_elapsed_work_by_node() {
             && entry.total_time >= Duration::from_millis(40)
     }));
 
+    let summary = session.profile_summary();
+    assert_eq!(summary.total_time, profile.total_time);
+    assert!(!summary.entries.is_empty());
+    assert!(summary.entries.iter().any(|entry| {
+        entry.work_kind == EvalWorkKind::EvaluateExpr
+            && entry.total_time >= Duration::from_millis(40)
+    }));
+
     let report = session.profile_report(5);
     assert!(report.contains("eval2 profile total="));
+    assert!(report.contains("summary_entries="));
     assert!(report.contains("work=EvaluateExpr"));
 }
 

@@ -348,7 +348,48 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub fn profile_report(&self, limit: usize) -> String {
-        format_profile_report(&self.profile(), limit)
+        format_profile_summary_report(&self.profile_summary(), limit)
+    }
+
+    pub fn profile_summary(&self) -> EvalSessionProfileSummary {
+        let profile = self.profile();
+        let mut entries =
+            BTreeMap::<(EvalWorkKind, Arc<str>, Option<String>), EvalProfileSummaryEntry>::new();
+
+        for entry in profile.entries {
+            let source_key = entry.source.as_ref().map(|source| format!("{source:?}"));
+            let key = (entry.work_kind, entry.label.clone(), source_key);
+            let summary = entries
+                .entry(key)
+                .or_insert_with(|| EvalProfileSummaryEntry {
+                    work_kind: entry.work_kind,
+                    label: entry.label.clone(),
+                    source: entry.source.clone(),
+                    node_count: 0,
+                    runs: 0,
+                    total_time: Duration::default(),
+                    max_time: Duration::default(),
+                });
+            summary.node_count += 1;
+            summary.runs += entry.runs;
+            summary.total_time += entry.total_time;
+            summary.max_time = summary.max_time.max(entry.max_time);
+        }
+
+        let mut entries = entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.max_time.cmp(&left.max_time))
+                .then_with(|| right.node_count.cmp(&left.node_count))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+
+        EvalSessionProfileSummary {
+            total_time: profile.total_time,
+            entries,
+        }
     }
 
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
@@ -851,9 +892,9 @@ fn profile_label_for_record(record: &EvalNodeRecord) -> Arc<str> {
     }
 }
 
-fn format_profile_report(profile: &EvalSessionProfile, limit: usize) -> String {
+fn format_profile_summary_report(profile: &EvalSessionProfileSummary, limit: usize) -> String {
     let mut lines = vec![format!(
-        "eval2 profile total={} entries={}",
+        "eval2 profile total={} summary_entries={}",
         format_profile_duration(profile.total_time),
         profile.entries.len()
     )];
@@ -870,12 +911,12 @@ fn format_profile_report(profile: &EvalSessionProfile, limit: usize) -> String {
             .map(|source| format!("{source:?}"))
             .unwrap_or_else(|| "<unknown>".to_string());
         lines.push(format!(
-            "  total={} avg={} max={} runs={} node={:?} work={:?} label={} source={}",
+            "  total={} avg={} max={} nodes={} runs={} work={:?} label={} source={}",
             format_profile_duration(entry.total_time),
             format_profile_duration(avg),
             format_profile_duration(entry.max_time),
+            entry.node_count,
             entry.runs,
-            entry.node_id,
             entry.work_kind,
             entry.label,
             source,
