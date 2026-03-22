@@ -50,6 +50,12 @@ pub(super) enum ArrayJoinItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StructLiteralPart {
+    Field { name: Arc<str>, expr: ExprHandle },
+    Spread(ExprHandle),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MatchArmPlan {
     pub(super) pattern: MatchPattern,
     pub(super) body: ExprHandle,
@@ -297,13 +303,13 @@ pub(super) enum ContinuationFrame {
         lhs: Value,
         operator: SyntaxKind,
     },
-    StructAfterField {
+    StructAfterPart {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         type_name: Arc<str>,
         fields: Vec<(Arc<str>, Value)>,
-        name: Arc<str>,
-        remaining_fields: Vec<(Arc<str>, ExprHandle)>,
+        part: StructLiteralPart,
+        remaining_parts: Vec<StructLiteralPart>,
         env: EvalEnv,
         struct_source: SourceSpan,
     },

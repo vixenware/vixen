@@ -614,6 +614,28 @@ pub(super) fn immediate_call_callee_value(
             state.span_for_token(&name_token),
         )));
     }
+    if let Some(newtype_name) = state
+        .program
+        .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
+        let source = state.span_for_token(&name_token);
+        let captures = Arc::from([(
+            Arc::from("__newtype_ctor"),
+            Value::bool(true).with_provenance(Provenance::binding(source.clone(), name.clone())),
+        )]);
+        return Ok(Some(
+            Value::function(FunctionRef::new(
+                state.program.source_id(state.current_source()),
+                newtype_name,
+                Arc::from([]),
+                false,
+                None,
+                captures,
+                Some(Arc::from(name.as_str())),
+            ))
+            .with_provenance(Provenance::binding(source, name)),
+        ));
+    }
     Ok(Some(Value::function(FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from(name.as_str()),
@@ -663,6 +685,26 @@ pub(super) fn eval_name_ref(
             constructor.fields,
             state.span_for_token(&name_token),
         ));
+    }
+    if let Some(newtype_name) = state
+        .program
+        .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
+        let source = state.span_for_token(&name_token);
+        let captures = Arc::from([(
+            Arc::from("__newtype_ctor"),
+            Value::bool(true).with_provenance(Provenance::binding(source.clone(), name.clone())),
+        )]);
+        return Ok(Value::function(FunctionRef::new(
+            state.program.source_id(state.current_source()),
+            newtype_name,
+            Arc::from([]),
+            false,
+            None,
+            captures,
+            Some(Arc::from(name.as_str())),
+        ))
+        .with_provenance(Provenance::binding(source, name)));
     }
     Err(EvalError::new(
         EvalErrorKind::Internal,
@@ -887,6 +929,14 @@ fn enum_constructor_field_names(function: &FunctionRef) -> Option<Vec<Arc<str>>>
         .collect()
 }
 
+fn newtype_constructor_name(function: &FunctionRef) -> Option<Arc<str>> {
+    let marker = function
+        .captures
+        .iter()
+        .find(|(name, _)| name.as_ref() == "__newtype_ctor")?;
+    (marker.1.rep == ValueRep::Bool(true)).then(|| function.name.clone())
+}
+
 pub(super) fn continue_call_from_args(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -967,6 +1017,21 @@ pub(super) fn continue_call_from_args(
         }
         let fields = field_names.into_iter().zip(args).collect::<Vec<_>>();
         let value = Value::structure(function.name.clone(), fields)
+            .with_provenance(Provenance::binding(call_source, function.name.to_string()));
+        return Ok(EvalStep::Ready(value));
+    }
+    if let Some(newtype_name) = newtype_constructor_name(function) {
+        if args.len() != 1 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                format!(
+                    "newtype constructor {} expected 1 argument, got {}",
+                    function.name,
+                    args.len()
+                ),
+            ));
+        }
+        let value = Value::structure(newtype_name, [(Arc::from("value"), args.remove(0))])
             .with_provenance(Provenance::binding(call_source, function.name.to_string()));
         return Ok(EvalStep::Ready(value));
     }
@@ -1118,12 +1183,7 @@ pub(super) fn eval_struct_literal(
     struct_literal: &StructLiteralExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let type_name = struct_literal
-        .name()
-        .map(|name| Arc::<str>::from(name.text()))
-        .ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "struct literal has no type name")
-        })?;
+    let type_name = struct_literal_type_name(state, struct_literal)?;
     let node_id = state
         .stack
         .last()
@@ -1132,15 +1192,24 @@ pub(super) fn eval_struct_literal(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let struct_source = state.span_for_node(struct_literal);
     let mut immediate_fields = Vec::new();
-    let mut remaining_fields = Vec::new();
+    let mut remaining_parts = Vec::new();
     for field in struct_literal.fields() {
-        let name_token = field
-            .name()
-            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct field has no name"))?;
-        let name = Arc::<str>::from(name_token.text().to_string());
         match field.expr() {
-            Some(expr) => remaining_fields.push((name, state.expr_handle(&expr))),
+            Some(expr) => {
+                if let Some(name_token) = field.name() {
+                    let name = Arc::<str>::from(name_token.text().to_string());
+                    remaining_parts.push(StructLiteralPart::Field {
+                        name,
+                        expr: state.expr_handle(&expr),
+                    });
+                } else {
+                    remaining_parts.push(StructLiteralPart::Spread(state.expr_handle(&expr)));
+                }
+            }
             None => {
+                let name_token = field.name().ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "struct field has no name")
+                })?;
                 let field_name = name_token.text();
                 let Some(value) = env.get(field_name) else {
                     return Err(EvalError::new(
@@ -1148,16 +1217,31 @@ pub(super) fn eval_struct_literal(
                         format!("struct field {field_name} has no value"),
                     ));
                 };
-                immediate_fields.push((name, value.clone()));
+                set_struct_field(
+                    &mut immediate_fields,
+                    Arc::<str>::from(name_token.text().to_string()),
+                    value.clone(),
+                );
             }
         }
     }
-    if state.queue_child_work && immediate_fields.is_empty() && !remaining_fields.is_empty() {
-        let field_names = remaining_fields
+    let joinable_fields = remaining_parts
+        .iter()
+        .map(|part| match part {
+            StructLiteralPart::Field { name, expr } => Some((name.clone(), *expr)),
+            StructLiteralPart::Spread(_) => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    if state.queue_child_work
+        && immediate_fields.is_empty()
+        && let Some(joinable_fields) = joinable_fields
+        && !joinable_fields.is_empty()
+    {
+        let field_names = joinable_fields
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
-        let child_nodes = remaining_fields
+        let child_nodes = joinable_fields
             .iter()
             .map(|(_, expr)| queue_child_expr_handle(state, *expr, env))
             .collect::<Vec<_>>();
@@ -1181,10 +1265,35 @@ pub(super) fn eval_struct_literal(
         parent_id,
         type_name,
         immediate_fields,
-        remaining_fields,
+        remaining_parts,
         env.clone(),
         struct_source,
     )
+}
+
+fn struct_literal_type_name(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    struct_literal: &StructLiteralExpr,
+) -> Result<Arc<str>, EvalError> {
+    let raw_name = struct_literal
+        .syntax()
+        .children_with_tokens()
+        .take_while(|child| child.kind() != SyntaxKind::STRUCT_LITERAL_BODY)
+        .filter_map(|child| child.into_token())
+        .filter(|token| matches!(token.kind(), SyntaxKind::UPPER_IDENT | SyntaxKind::DOT))
+        .map(|token| token.text().to_string())
+        .collect::<String>();
+    if raw_name.is_empty() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "struct literal has no type name",
+        ));
+    }
+    let short_name = raw_name.rsplit('.').next().unwrap_or(&raw_name);
+    if let Some(constructor) = state.program.resolve_variant_constructor(short_name) {
+        return Ok(constructor.name);
+    }
+    Ok(Arc::from(short_name))
 }
 
 pub(super) fn eval_block(
@@ -2805,24 +2914,29 @@ pub(super) fn continue_struct_fields(
     parent_id: Option<EvalNodeId>,
     type_name: Arc<str>,
     mut fields: Vec<(Arc<str>, Value)>,
-    remaining_fields: Vec<(Arc<str>, ExprHandle)>,
+    remaining_parts: Vec<StructLiteralPart>,
     mut env: EvalEnv,
     struct_source: SourceSpan,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_fields.into_iter();
-    while let Some((name, expr_handle)) = remaining.next() {
+    let mut remaining = remaining_parts.into_iter();
+    while let Some(part) = remaining.next() {
+        let expr_handle = match &part {
+            StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
+        };
         match eval_dependent_expr_handle(state, node_id, expr_handle, &mut env)? {
-            EvalStep::Ready(value) => fields.push((name, value)),
+            EvalStep::Ready(value) => {
+                apply_struct_literal_part(&type_name, &mut fields, part, value)?
+            }
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::StructAfterField {
+                    ContinuationFrame::StructAfterPart {
                         node_id,
                         parent_id,
                         type_name,
                         fields,
-                        name,
-                        remaining_fields: remaining.collect(),
+                        part,
+                        remaining_parts: remaining.collect(),
                         env,
                         struct_source,
                     },
@@ -2835,6 +2949,52 @@ pub(super) fn continue_struct_fields(
     Ok(EvalStep::Ready(
         Value::structure(type_name, fields).with_meta(meta),
     ))
+}
+
+fn set_struct_field(fields: &mut Vec<(Arc<str>, Value)>, name: Arc<str>, value: Value) {
+    if let Some((_, existing)) = fields
+        .iter_mut()
+        .find(|(field_name, _)| *field_name == name)
+    {
+        *existing = value;
+    } else {
+        fields.push((name, value));
+    }
+}
+
+fn apply_struct_literal_part(
+    type_name: &Arc<str>,
+    fields: &mut Vec<(Arc<str>, Value)>,
+    part: StructLiteralPart,
+    value: Value,
+) -> Result<(), EvalError> {
+    match part {
+        StructLiteralPart::Field { name, .. } => {
+            set_struct_field(fields, name, value);
+            Ok(())
+        }
+        StructLiteralPart::Spread(_) => {
+            let ValueRep::Struct(struct_value) = value.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "struct spread requires a struct value",
+                ));
+            };
+            if struct_value.type_name != *type_name {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!(
+                        "struct spread expected {}, got {}",
+                        type_name, struct_value.type_name
+                    ),
+                ));
+            }
+            for (field_name, field_value) in struct_value.fields.iter().cloned() {
+                set_struct_field(fields, field_name, field_value);
+            }
+            Ok(())
+        }
+    }
 }
 
 pub(super) fn project_struct_field(

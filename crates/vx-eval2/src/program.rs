@@ -366,6 +366,19 @@ impl CompiledProgram {
         })
     }
 
+    pub(crate) fn resolve_newtype_constructor(&self, name: &str) -> Option<Arc<str>> {
+        self.types
+            .env
+            .lookup(name)
+            .iter()
+            .copied()
+            .find(|type_id| matches!(self.types.env.get(*type_id), vx_types::TypeDef::Newtype(_)))
+            .map(|type_id| match self.types.env.get(type_id) {
+                vx_types::TypeDef::Newtype(def) => Arc::from(def.name.as_str()),
+                _ => unreachable!("checked above"),
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn parse_count(&self) -> usize {
         self.sources

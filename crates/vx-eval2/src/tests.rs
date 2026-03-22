@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
@@ -74,6 +75,80 @@ fn range_value(value: &Value) -> &crate::RangeValue {
     range
 }
 
+fn format_session_diagnostics(
+    session: &EvalSession<'_, impl RuntimeHooks>,
+    resolution: &Resolution,
+) -> String {
+    let mut lines = vec![format!("resolution: {resolution:?}")];
+    let snapshot = session.graph_snapshot();
+    let poisoned = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.state {
+            Some(EvalNodeState::Poison(error)) => Some((node, error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    lines.push(format!("poisoned nodes: {}", poisoned.len()));
+
+    for (index, (node, error)) in poisoned.iter().enumerate() {
+        lines.push(format!("poison[{index}] node_id={:?}", node.node_id));
+        lines.push(format!("  error: {error:?}"));
+        if let Some(record) = &node.record {
+            lines.push(format!("  kind: {:?}", record.kind));
+            lines.push(format!("  source: {:?}", record.source));
+        }
+        lines.push(format!("  dependencies: {:?}", node.dependencies));
+        lines.push(format!("  dependents: {:?}", node.dependents));
+        for dependency in &node.dependencies {
+            if let Some(dependency_node) = snapshot
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.node_id == dependency)
+            {
+                lines.push(format!(
+                    "  dependency {:?} state: {:?}",
+                    dependency, dependency_node.state
+                ));
+                lines.push(format!(
+                    "  dependency {:?} record: {:?}",
+                    dependency, dependency_node.record
+                ));
+            }
+        }
+        lines.push(format!(
+            "  explanation: {:?}",
+            session.explain_node(node.node_id)
+        ));
+        let node_trace = session
+            .trace()
+            .events
+            .iter()
+            .filter(|event| event.node_id == node.node_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        lines.push(format!("  trace_event_count: {}", node_trace.len()));
+        for event in node_trace.iter().rev().take(12).rev() {
+            lines.push(format!("    {event:?}"));
+        }
+    }
+
+    let recent = session
+        .trace()
+        .events
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>();
+    lines.push("recent trace:".to_string());
+    for event in recent.iter().rev() {
+        lines.push(format!("  {event:?}"));
+    }
+
+    lines.join("\n")
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -109,6 +184,124 @@ impl RuntimeHooks for ReadFileRuntime {
                 })?;
                 Ok(RuntimeCallOutcome::Ready(
                     Value::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
+struct CargoSketchRuntime {
+    root_dir: PathBuf,
+    http_responses: HashMap<String, String>,
+}
+
+impl RuntimeHooks for CargoSketchRuntime {
+    fn call(
+        &self,
+        _place: &str,
+        callee: &str,
+        args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        match callee {
+            "read_file" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "read_file() argument must evaluate to String",
+                    ));
+                };
+                let full_path = self.root_dir.join(path.as_ref());
+                let contents = fs::read_to_string(&full_path).map_err(|error| {
+                    EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("read_file() failed for {}: {error}", full_path.display()),
+                    )
+                })?;
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Blob", contents)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            "Path" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Path() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(path) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Path() argument must evaluate to String",
+                    ));
+                };
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Path", path.clone())
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            "Tree" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Tree() requires exactly one path-like argument",
+                    ));
+                }
+                let descriptor = match &args[0].rep {
+                    ValueRep::String(path) => path.clone(),
+                    ValueRep::External(external) if external.kind.as_ref() == "Path" => {
+                        external.descriptor.clone()
+                    }
+                    _ => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            "Tree() argument must evaluate to String or Path",
+                        ));
+                    }
+                };
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Tree", descriptor)
+                        .with_provenance(Provenance::unknown(source.clone()))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            "Http.get" => {
+                if args.len() != 1 {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Http.get() requires exactly one string argument",
+                    ));
+                }
+                let ValueRep::String(url) = &args[0].rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Http.get() argument must evaluate to String",
+                    ));
+                };
+                let Some(contents) = self.http_responses.get(url.as_ref()) else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::UserFail,
+                        format!("Http.get() had no fixture response for {url}"),
+                    ));
+                };
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::external("Blob", contents.clone())
                         .with_provenance(Provenance::unknown(source.clone()))
                         .with_reuse(ReuseClass::Observed)
                         .with_crossing(CrossingPolicy::ByValue),
@@ -1728,6 +1921,88 @@ fn build(flag: Bool) {
 }
 
 #[test]
+fn type_prefixed_variant_struct_literals_use_variant_runtime_type() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+enum FeatureEdge {
+  struct Local {
+    feature: String,
+  },
+}
+
+fn build() {
+  FeatureEdge.Local { feature: "rust_backend" }
+}
+"#,
+        "enum-variant-struct-literal-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate type-prefixed enum variant struct literal");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready type-prefixed enum variant struct literal result, got {resolution:?}"
+        );
+    };
+    let ValueRep::Struct(feature_edge) = &value.rep else {
+        panic!(
+            "expected struct result from type-prefixed enum variant struct literal, got {value:?}"
+        );
+    };
+    assert_eq!(feature_edge.type_name.as_ref(), "Local");
+    assert_eq!(feature_edge.fields.len(), 1);
+    assert_eq!(feature_edge.fields[0].0.as_ref(), "feature");
+    assert_eq!(
+        feature_edge.fields[0].1.rep,
+        ValueRep::String("rust_backend".into())
+    );
+}
+
+#[test]
+fn struct_literal_spread_merges_and_overrides_fields_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct FeatureExpansionState {
+  pending: Array[String] = [],
+  enabled_optional_deps: Array[String] = [],
+  dependency_features: Array[String] = [],
+}
+
+fn build() {
+  let state = FeatureExpansionState {
+    pending: ["default"],
+    enabled_optional_deps: [],
+    dependency_features: [],
+  };
+  FeatureExpansionState {
+    ..state,
+    pending: ["rust_backend"],
+  }
+}
+"#,
+        "struct-literal-spread-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate struct spread");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready struct spread result, got {resolution:?}");
+    };
+    let ValueRep::Struct(state) = &value.rep else {
+        panic!("expected struct result from spread, got {value:?}");
+    };
+    assert_eq!(state.type_name.as_ref(), "FeatureExpansionState");
+    let pending = struct_field(&value, "pending");
+    let ValueRep::Array(items) = &pending.rep else {
+        panic!("expected pending array from spread result, got {pending:?}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].rep, ValueRep::String("rust_backend".into()));
+}
+
+#[test]
 fn array_flatten_method_concatenates_nested_arrays_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -2002,8 +2277,17 @@ fn build() {
   let requests = manifest_requests(manifest) where {
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
-      os: "macos",
-      arch: "aarch64",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
     },
   };
   Summary {
@@ -2051,7 +2335,7 @@ fn zoo_cargo_selects_highest_matching_real_registry_entry() {
         [
             (
                 "main.vx",
-                r#"
+                r##"
 struct Summary {
   version: String,
   first_normal_dep_req: String,
@@ -2062,8 +2346,17 @@ fn build() {
   let requests = manifest_requests(manifest) where {
     target: BuildTarget {
       triple: "aarch64-apple-darwin",
-      os: "macos",
-      arch: "aarch64",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
     },
   };
   let request = requests.find($.name == "flate2");
@@ -2075,7 +2368,7 @@ fn build() {
     first_normal_dep_req: first_normal.req,
   }
 }
-"#,
+"##,
             ),
             ("cargo-resolve.vx", &zoo_source),
         ],
@@ -2101,6 +2394,128 @@ fn build() {
         struct_field(&value, "first_normal_dep_req").rep,
         ValueRep::String("^0.3.6".into())
     );
+}
+
+#[test]
+fn zoo_cargo_resolve_request_executes_real_registry_path() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let flate2_index = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../specs/eval/run/registry_real/flate2-two-entries.jsonl"),
+    )
+    .expect("read real flate2 sparse index entries");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
+  let request =
+    (manifest_requests(manifest) where {
+      target: BuildTarget {
+        triple: "aarch64-apple-darwin",
+        cfg: [
+          CfgFact.Name { name: "unix" },
+          CfgFact.KeyValue {
+            key: "target_os",
+            value: "macos",
+          },
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "aarch64",
+          },
+        ],
+      },
+    }).find($.name == "flate2");
+  resolve_request(request) where {
+      config: SparseConfig {
+        dl: "https://crates.io/api/v1/crates",
+      },
+      lock: None,
+      target: BuildTarget {
+        triple: "aarch64-apple-darwin",
+        cfg: [
+          CfgFact.Name { name: "unix" },
+          CfgFact.KeyValue {
+            key: "target_os",
+            value: "macos",
+          },
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "aarch64",
+          },
+        ],
+      },
+      workspace: Tree("."),
+    }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/fl/at/flate2".to_string(),
+        flate2_index,
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_request against real registry path");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo resolve_request result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String("1.1.9".into())
+    );
+
+    let source = struct_field(&value, "source");
+    assert_eq!(
+        struct_field(source, "download_url").rep,
+        ValueRep::String("https://crates.io/api/v1/crates/flate2/1.1.9/download".into())
+    );
+
+    let dependencies = struct_field(&value, "dependencies");
+    let ValueRep::Array(items) = &dependencies.rep else {
+        panic!("expected dependencies array, got {dependencies:?}");
+    };
+    let has_crc32fast = items.iter().any(|dep| {
+        matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "crc32fast"
+        )
+    });
+    let has_miniz_oxide = items.iter().any(|dep| {
+        matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "miniz_oxide"
+        )
+    });
+    let has_cloudflare = items.iter().any(|dep| {
+        matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "cloudflare-zlib-sys"
+        )
+    });
+    assert!(has_crc32fast);
+    assert!(has_miniz_oxide);
+    assert!(!has_cloudflare);
 }
 
 #[test]

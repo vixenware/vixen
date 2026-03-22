@@ -852,26 +852,30 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::StructAfterField {
+        ContinuationFrame::StructAfterPart {
             node_id,
             parent_id,
             type_name,
             mut fields,
-            name,
-            remaining_fields,
+            part,
+            remaining_parts,
             env,
             struct_source,
         } => {
             let result = match input {
                 Ok(value) => {
-                    fields.push((name, value));
+                    if let Err(error) =
+                        apply_struct_literal_part(&type_name, &mut fields, part, value)
+                    {
+                        return Ok(ResumeOutcome::Continue(Err(error)));
+                    }
                     continue_struct_fields(
                         state,
                         node_id,
                         parent_id,
                         type_name,
                         fields,
-                        remaining_fields,
+                        remaining_parts,
                         env,
                         struct_source,
                     )
