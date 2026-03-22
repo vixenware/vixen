@@ -3795,6 +3795,85 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_manifest_ignores_root_dev_dependencies_for_build_like_resolution() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo-build-root-ignores-dev-dependencies.toml"));
+  demand_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ca/rr/carrier".to_string(),
+        r#"{"name":"carrier","vers":"1.0.0","deps":[],"cksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/bu/il/builderdep".to_string(),
+        r#"{"name":"builderdep","vers":"1.0.0","deps":[],"cksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo build-like manifest resolution");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo build-like result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert!(roots.contains(&"registry:carrier@1.0.0"));
+    assert!(roots.contains(&"registry:builderdep@1.0.0"));
+    assert!(resolved_crates_contain_name(&snapshot, "carrier"));
+    assert!(resolved_crates_contain_name(&snapshot, "builderdep"));
+    assert!(!resolved_crates_contain_name(
+        &snapshot,
+        "tree-sitter-vixen"
+    ));
+}
+
+#[test]
 fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),

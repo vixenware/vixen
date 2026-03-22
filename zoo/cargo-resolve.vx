@@ -413,6 +413,33 @@ fn manifest_requests_at_with_workspace(
   ]
 )
 
+fn root_requests_at_with_workspace(
+  manifest: CargoManifest,
+  manifest_root: Path,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
+  [
+    ..manifest.dependencies
+      .map((name, dep) => (
+        request_from_dep_at_with_workspace(name, dep, "normal", manifest_root, workspace_dependencies)
+      ))
+      .to_array(),
+    ..manifest.build_dependencies
+      .map((name, dep) => (
+        request_from_dep_at_with_workspace(name, dep, "build", manifest_root, workspace_dependencies)
+      ))
+      .to_array(),
+    ..manifest.target
+      .map((selector, table) => (
+        root_target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies)
+          where { target }
+      ))
+      .flatten(),
+  ]
+)
+
 fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> DependencyRequest (
   request_from_dep_at_with_workspace(name, dep, kind, @., %{})
 )
@@ -915,6 +942,48 @@ fn target_requests_with_workspace(
 )
 
 fn target_requests_at_with_workspace(
+  selector: String,
+  table: CargoTargetTable,
+  manifest_root: Path,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
+  if selector_matches(target, parse_target_selector(selector)) (
+    [
+      ..table.dependencies
+        .map((name, dep) => (
+          let req =
+            request_from_dep_at_with_workspace(
+              name,
+              dep,
+              "normal",
+              manifest_root,
+              workspace_dependencies,
+            );
+          DependencyRequest { ..req, target: selector }
+        ))
+        .to_array(),
+      ..table.build_dependencies
+        .map((name, dep) => (
+          let req =
+            request_from_dep_at_with_workspace(
+              name,
+              dep,
+              "build",
+              manifest_root,
+              workspace_dependencies,
+            );
+          DependencyRequest { ..req, target: selector }
+        ))
+        .to_array(),
+    ]
+  ) else (
+    []
+  )
+)
+
+fn root_target_requests_at_with_workspace(
   selector: String,
   table: CargoTargetTable,
   manifest_root: Path,
@@ -1748,7 +1817,7 @@ fn resolve_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
 } #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
   let requests =
-    manifest_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
+    root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
   resolve_graph(requests) where { config, lock, target, workspace }
 )
@@ -1768,7 +1837,7 @@ fn demand_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
 } #discover -> Array[PackageId] (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
   let requests =
-    manifest_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
+    root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
   demand_graph(requests) where { config, lock, target, workspace }
 )
