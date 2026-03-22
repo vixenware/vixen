@@ -1909,6 +1909,14 @@ fn resolve_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
   materialize_resolution(roots) where { config, lock, target, workspace }
 )
 
+fn resolve_workspace_member_at(workspace: Tree, member_root: Path) where {
+  lock: CargoLock?,
+  target: BuildTarget,
+} #discover -> RegistryResolution (
+  let manifest = Toml.parse[CargoManifest](workspace.file(member_root / @Cargo.toml));
+  resolve_manifest_at(manifest, member_root) where { lock, target, workspace }
+)
+
 fn demand_manifest(manifest: CargoManifest) where {
   lock: CargoLock?,
   target: BuildTarget,
@@ -1927,6 +1935,14 @@ fn demand_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
     root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
   demand_graph(requests) where { config, lock, target, workspace }
+)
+
+fn demand_workspace_member_at(workspace: Tree, member_root: Path) where {
+  lock: CargoLock?,
+  target: BuildTarget,
+} #discover -> Array[PackageId] (
+  let manifest = Toml.parse[CargoManifest](workspace.file(member_root / @Cargo.toml));
+  demand_manifest_at(manifest, member_root) where { lock, target, workspace }
 )
 
 fn github_repo_path(url: String) -> String (
