@@ -327,6 +327,7 @@ pub(super) enum ContinuationFrame {
         items: Vec<Value>,
         predicate: FunctionRef,
         index: usize,
+        wrap_in_option: bool,
     },
     ArrayFoldAfterStep {
         node_id: EvalNodeId,

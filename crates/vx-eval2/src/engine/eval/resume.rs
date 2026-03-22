@@ -939,14 +939,20 @@ pub(in crate::engine) fn resume_frame(
             items,
             predicate,
             index,
+            wrap_in_option,
         } => {
             let result = match input {
                 Ok(result) => match result.rep {
-                    ValueRep::Bool(true) => Ok(EvalStep::Ready(
-                        items[index]
+                    ValueRep::Bool(true) => {
+                        let item = items[index]
                             .clone()
-                            .project(ProjectionStep::Index(index as u64)),
-                    )),
+                            .project(ProjectionStep::Index(index as u64));
+                        Ok(EvalStep::Ready(if wrap_in_option {
+                            Value::structure("Some", vec![(Arc::from("value"), item)])
+                        } else {
+                            item
+                        }))
+                    }
                     ValueRep::Bool(false) => continue_array_find_builtin(
                         state,
                         node_id,
@@ -954,6 +960,7 @@ pub(in crate::engine) fn resume_frame(
                         items,
                         predicate,
                         index + 1,
+                        wrap_in_option,
                     ),
                     _ => Err(EvalError::new(
                         EvalErrorKind::TypeError,

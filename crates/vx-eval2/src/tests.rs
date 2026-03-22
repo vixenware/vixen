@@ -2535,10 +2535,18 @@ fn build() {
       ],
     },
   };
-  let request = requests.find($.name == "flate2");
+  let request =
+    match requests.find($.name == "flate2") (
+      Some { value } => value,
+      None => fail "missing flate2 request",
+    );
   let entries = parse_sparse_entries(read_file("specs/eval/run/registry_real/flate2-two-entries.jsonl"));
   let best = highest_version(candidate_entries(entries, request));
-  let first_normal = best.deps.find($.kind.unwrap_or("normal") == "normal");
+  let first_normal =
+    match best.deps.find($.kind.unwrap_or("normal") == "normal") (
+      Some { value } => value,
+      None => fail "missing normal dependency",
+    );
   Summary {
     version: best.vers,
     first_normal_dep_req: first_normal.req,
@@ -2591,7 +2599,7 @@ fn zoo_cargo_resolve_request_executes_real_registry_path() {
 fn build() {
   let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
   let request =
-    (manifest_requests_with_workspace(
+    match (manifest_requests_with_workspace(
       manifest,
       workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
     ) where {
@@ -2609,7 +2617,10 @@ fn build() {
           },
         ],
       },
-    }).find($.name == "flate2");
+    }).find($.name == "flate2") (
+      Some { value } => value,
+      None => fail "missing flate2 request",
+    );
   resolve_request(request) where {
       config: SparseConfig {
         dl: "https://crates.io/api/v1/crates",
@@ -2712,6 +2723,117 @@ fn build() {
     assert!(has_miniz_oxide);
     assert!(!has_cloudflare);
     assert!(!has_targeted_miniz_oxide);
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_backtracks_from_bad_locked_registry_candidate() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+struct Summary {
+  root_logger: Bool,
+  logger_version: String,
+  has_helper: Bool,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/registry_real/cargo-backtrack-root.toml"));
+  let resolution = resolve_manifest(manifest) where {
+    lock:
+      Some {
+        value:
+          CargoLock {
+            package: [
+              LockedPackage {
+                name: "logger",
+                version: "1.0.0",
+                source: None,
+                checksum: None,
+              },
+            ],
+          },
+    },
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  };
+
+  Summary {
+    root_logger: resolution.roots.any($.value == "registry:logger@1.1.0"),
+    logger_version:
+      match resolution.packages.find($.name == "logger") (
+        Some { value } => value.version,
+        None => "missing",
+      ),
+    has_helper: resolution.packages.any($.name == "helper"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/lo/gg/logger".to_string(),
+        r#"{"name":"logger","vers":"1.0.0","deps":[{"name":"helper","req":"2","package":null,"features":[],"optional":false,"default_features":true,"target":null,"kind":null}],"cksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","features":{},"features2":{},"yanked":false,"rust_version":null}
+{"name":"logger","vers":"1.1.0","deps":[],"cksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","features":{},"features2":{},"yanked":false,"rust_version":null}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/he/lp/helper".to_string(),
+        r#"{"name":"helper","vers":"1.0.0","deps":[],"cksum":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","features":{},"features2":{},"yanked":false,"rust_version":null}"#.to_string(),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest backtracking test");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo backtracking result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(
+        struct_field(&value, "root_logger").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "logger_version").rep,
+        ValueRep::String("1.1.0".into())
+    );
+    assert_eq!(
+        struct_field(&value, "has_helper").rep,
+        ValueRep::Bool(false)
+    );
 }
 
 #[test]
@@ -4586,6 +4708,57 @@ fn build() {
             .message
             .contains("array_find() predicate must return Bool")
     );
+}
+
+#[test]
+fn array_method_find_returns_some_on_match() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  ["logger", "codec", "codec"].find((value) => value == "codec")
+}
+"#,
+        "array-method-find-some",
+        "build",
+        &[],
+    )
+    .expect("evaluate Array.find with match");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.find result, got {resolution:?}");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected Some(..), got {value:?}");
+    };
+    assert_eq!(option.type_name.as_ref(), "Some");
+    assert_eq!(
+        struct_field(&value, "value").rep,
+        ValueRep::String("codec".into())
+    );
+}
+
+#[test]
+fn array_method_find_returns_none_on_no_match() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [1, 2].find((value) => value == 9)
+}
+"#,
+        "array-method-find-none",
+        "build",
+        &[],
+    )
+    .expect("evaluate Array.find without match");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.find result, got {resolution:?}");
+    };
+    let ValueRep::Struct(option) = &value.rep else {
+        panic!("expected None, got {value:?}");
+    };
+    assert_eq!(option.type_name.as_ref(), "None");
+    assert!(option.fields.is_empty());
 }
 
 #[test]

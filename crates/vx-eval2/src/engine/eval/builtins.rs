@@ -169,6 +169,14 @@ pub(in crate::engine) fn ready_builtin_value(value: Value) -> Option<EvalStep> {
     Some(EvalStep::Ready(value))
 }
 
+fn option_some(value: Value) -> Value {
+    Value::structure("Some", vec![(Arc::from("value"), value)])
+}
+
+fn option_none() -> Value {
+    Value::structure("None", Vec::<(Arc<str>, Value)>::new())
+}
+
 pub(in crate::engine) fn continue_array_find_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -176,6 +184,7 @@ pub(in crate::engine) fn continue_array_find_builtin(
     items: Vec<Value>,
     predicate: FunctionRef,
     start_index: usize,
+    wrap_in_option: bool,
 ) -> Result<EvalStep, EvalError> {
     for index in start_index..items.len() {
         let item = items[index].clone();
@@ -201,15 +210,19 @@ pub(in crate::engine) fn continue_array_find_builtin(
                         items,
                         predicate,
                         index,
+                        wrap_in_option,
                     },
                 ));
             }
         };
         match matched.rep {
             ValueRep::Bool(true) => {
-                return Ok(EvalStep::Ready(
-                    item.project(ProjectionStep::Index(index as u64)),
-                ));
+                let item = item.project(ProjectionStep::Index(index as u64));
+                return Ok(EvalStep::Ready(if wrap_in_option {
+                    option_some(item)
+                } else {
+                    item
+                }));
             }
             ValueRep::Bool(false) => {}
             _ => {
@@ -220,10 +233,14 @@ pub(in crate::engine) fn continue_array_find_builtin(
             }
         }
     }
-    Err(EvalError::new(
-        EvalErrorKind::TypeError,
-        "array_find() found no matching element",
-    ))
+    if wrap_in_option {
+        Ok(EvalStep::Ready(option_none()))
+    } else {
+        Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "array_find() found no matching element",
+        ))
+    }
 }
 
 pub(in crate::engine) fn continue_array_fold_builtin(
@@ -1394,6 +1411,7 @@ pub(in crate::engine) fn continue_builtin_call(
                 items.iter().cloned().collect(),
                 predicate.clone(),
                 0,
+                true,
             )
             .map(Some)
         }
@@ -1642,6 +1660,7 @@ pub(in crate::engine) fn continue_builtin_call(
                 items.iter().cloned().collect(),
                 predicate.clone(),
                 0,
+                false,
             )
             .map(Some)
         }
