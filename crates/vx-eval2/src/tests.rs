@@ -150,6 +150,17 @@ fn format_session_diagnostics(
     lines.join("\n")
 }
 
+fn maybe_print_session_profile(name: &str, session: &EvalSession<'_, impl RuntimeHooks>) {
+    if env::var_os("VX_EVAL2_PRINT_PROFILE").is_some() {
+        let limit = env::var("VX_EVAL2_PRINT_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20);
+        eprintln!("vx-eval2 profile test={name}");
+        eprintln!("{}", session.profile_report(limit));
+    }
+}
+
 struct ReadFileRuntime {
     root_dir: PathBuf,
 }
@@ -2641,6 +2652,10 @@ fn build() {
     let resolution = session
         .run()
         .expect("run zoo cargo resolve_request against real registry path");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_request_executes_real_registry_path",
+        &session,
+    );
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo resolve_request result\n{}",
@@ -2908,6 +2923,10 @@ fn build() {
     let resolution = session
         .run()
         .expect("run zoo cargo resolve_manifest against local workspace manifest");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_manifest_executes_local_workspace_manifest_with_real_registry_subset",
+        &session,
+    );
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo local workspace manifest result\n{}",
@@ -3051,6 +3070,10 @@ fn build() {
     let resolution = session
         .run()
         .expect("run zoo cargo resolve_manifest against local sparse cache");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_manifest_executes_local_workspace_manifest_from_local_sparse_cache",
+        &session,
+    );
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo local sparse cache result\n{}",
@@ -3288,6 +3311,10 @@ fn build() {
     let resolution = session
         .run()
         .expect("run zoo cargo resolve_manifest over transitive registry subset");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_manifest_executes_transitive_registry_subset",
+        &session,
+    );
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo resolve_manifest result\n{}",
@@ -5138,6 +5165,29 @@ fn session_stats_report_current_graph_and_work_counts() {
     assert_eq!(stats.in_flight_work_count, session.in_flight_work().len());
     assert_eq!(stats.buffered_work_count, session.buffered_work().len());
     assert_eq!(stats.pending_count, session.pending_nodes().len());
+}
+
+#[test]
+fn session_profile_reports_elapsed_work_by_node() {
+    let program = EvalProgram::single_source("session-profile", "fn build() { slow_value() }");
+    let runtime = StaggeredRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "win");
+    let Resolution::Ready(value) = session.run().expect("run profile session") else {
+        panic!("expected ready profile session result");
+    };
+    assert_eq!(value.rep, ValueRep::String("slow".into()));
+
+    let profile = session.profile();
+    assert!(profile.total_time >= Duration::from_millis(40));
+    assert!(!profile.entries.is_empty());
+    assert!(profile.entries.iter().any(|entry| {
+        entry.work_kind == EvalWorkKind::EvaluateExpr
+            && entry.total_time >= Duration::from_millis(40)
+    }));
+
+    let report = session.profile_report(5);
+    assert!(report.contains("eval2 profile total="));
+    assert!(report.contains("work=EvaluateExpr"));
 }
 
 struct UnsupportedRuntime;

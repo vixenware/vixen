@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeReady {
@@ -89,7 +90,7 @@ impl PartialEq for EvalBranchContext {
 
 impl Eq for EvalBranchContext {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EvalWorkKind {
     StartEntry,
     EvaluateExpr,
@@ -120,6 +121,7 @@ pub enum EvalCompletedWorkOutcome {
 pub struct EvalCompletedWork {
     pub work: EvalQueuedWork,
     pub outcome: EvalCompletedWorkOutcome,
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +346,23 @@ pub struct EvalSessionStats {
     pub learned_search_no_good_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalProfileEntry {
+    pub node_id: EvalNodeId,
+    pub work_kind: EvalWorkKind,
+    pub label: Arc<str>,
+    pub source: Option<SourceSpan>,
+    pub runs: usize,
+    pub total_time: Duration,
+    pub max_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSessionProfile {
+    pub total_time: Duration,
+    pub entries: Vec<EvalProfileEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
     pub(super) branch_context: EvalBranchContext,
@@ -374,6 +393,7 @@ pub struct EvalWorkCompletion {
     pub(super) work: EvalQueuedWork,
     pub(super) outcome: EvalCompletedWorkOutcome,
     pub(super) delta: EvalSessionDelta,
+    pub(super) elapsed: Duration,
 }
 
 #[derive(Debug, Clone)]

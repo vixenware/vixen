@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     program: Arc<CompiledProgram>,
@@ -302,6 +304,51 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 .count(),
             learned_search_no_good_count: self.scheduler.learned_search_no_goods.len(),
         }
+    }
+
+    pub fn profile(&self) -> EvalSessionProfile {
+        let mut entries = BTreeMap::<(EvalNodeId, EvalWorkKind), EvalProfileEntry>::new();
+        let mut total_time = Duration::default();
+
+        for completed in &self.completed_work {
+            total_time += completed.elapsed;
+            let key = (completed.work.node_id, completed.work.kind);
+            let record = self.node_record(completed.work.node_id);
+            let label = record
+                .map(profile_label_for_record)
+                .unwrap_or_else(|| Arc::from("<unknown>"));
+            let source = record.and_then(|record| record.source.clone());
+            let entry = entries.entry(key).or_insert_with(|| EvalProfileEntry {
+                node_id: completed.work.node_id,
+                work_kind: completed.work.kind,
+                label,
+                source,
+                runs: 0,
+                total_time: Duration::default(),
+                max_time: Duration::default(),
+            });
+            entry.runs += 1;
+            entry.total_time += completed.elapsed;
+            entry.max_time = entry.max_time.max(completed.elapsed);
+        }
+
+        let mut entries = entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.max_time.cmp(&left.max_time))
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+
+        EvalSessionProfile {
+            total_time,
+            entries,
+        }
+    }
+
+    pub fn profile_report(&self, limit: usize) -> String {
+        format_profile_report(&self.profile(), limit)
     }
 
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
@@ -633,6 +680,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
         if let Some(error) = injected_worker_error(&branch_context, &record.work) {
             return Err(error);
         }
+        let started = Instant::now();
         let (delta, outcome) = execute_ready_task(
             program,
             &entry,
@@ -649,6 +697,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             work: record.work,
             outcome,
             delta,
+            elapsed: started.elapsed(),
         })
     }
 }
@@ -690,6 +739,10 @@ impl EvalWorkCompletion {
 
     pub fn lease_sequence(&self) -> u64 {
         self.lease_sequence
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
     }
 }
 
@@ -734,6 +787,7 @@ fn commit_completion(
         completed_work.push(EvalCompletedWork {
             work: completion.work,
             outcome: completion.outcome,
+            elapsed: completion.elapsed,
         });
         return Ok(EvalSessionStep::Progressed);
     }
@@ -750,6 +804,7 @@ fn commit_completion(
     completed_work.push(EvalCompletedWork {
         work: completion.work.clone(),
         outcome: completion.outcome.clone(),
+        elapsed: completion.elapsed,
     });
     if keyed_stale {
         return Ok(EvalSessionStep::Progressed);
@@ -783,6 +838,63 @@ fn commit_completion(
                 Ok(EvalSessionStep::Poison(error))
             }
         }
+    }
+}
+
+fn profile_label_for_record(record: &EvalNodeRecord) -> Arc<str> {
+    match &record.kind {
+        EvalNodeKind::SyntheticRoot => Arc::from("synthetic-root"),
+        EvalNodeKind::ArgumentBinding { label } => Arc::from(format!("arg:{label}")),
+        EvalNodeKind::Expr { kind } => Arc::from(format!("expr:{kind:?}")),
+        EvalNodeKind::Keyed { resolver, key: _ } => Arc::from(format!("keyed:{resolver}")),
+        EvalNodeKind::PendingToken { description } => Arc::from(format!("pending:{description}")),
+    }
+}
+
+fn format_profile_report(profile: &EvalSessionProfile, limit: usize) -> String {
+    let mut lines = vec![format!(
+        "eval2 profile total={} entries={}",
+        format_profile_duration(profile.total_time),
+        profile.entries.len()
+    )];
+
+    for entry in profile.entries.iter().take(limit) {
+        let avg = if entry.runs == 0 {
+            Duration::default()
+        } else {
+            entry.total_time / (entry.runs as u32)
+        };
+        let source = entry
+            .source
+            .as_ref()
+            .map(|source| format!("{source:?}"))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        lines.push(format!(
+            "  total={} avg={} max={} runs={} node={:?} work={:?} label={} source={}",
+            format_profile_duration(entry.total_time),
+            format_profile_duration(avg),
+            format_profile_duration(entry.max_time),
+            entry.runs,
+            entry.node_id,
+            entry.work_kind,
+            entry.label,
+            source,
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_profile_duration(duration: Duration) -> String {
+    let nanos = duration.as_nanos();
+    if nanos >= 1_000_000_000 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if nanos >= 1_000_000 {
+        format!("{:.3}ms", nanos as f64 / 1_000_000.0)
+    } else if nanos >= 1_000 {
+        format!("{:.3}us", nanos as f64 / 1_000.0)
+    } else {
+        format!("{nanos}ns")
     }
 }
 

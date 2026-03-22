@@ -119,6 +119,17 @@ fn run_case_local(
                     stats.trace_event_count,
                 );
             }
+            if std::env::var_os("VX_EVAL2_PRINT_PROFILE").is_some() {
+                eprintln!(
+                    "{}",
+                    session.profile_report(
+                        std::env::var("VX_EVAL2_PRINT_PROFILE_LIMIT")
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(20),
+                    )
+                );
+            }
             resolution_to_spec_outcome_with_trace(resolution, session.trace())
         }
         Err(error) => Ok(SpecOutcome::Poison(ObservedPoison {
