@@ -15,7 +15,6 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
     history: Vec<EvalSessionCheckpoint>,
-    generation: u64,
     call_profiling: bool,
 }
 
@@ -86,7 +85,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completed_work: Vec::new(),
             completed: None,
             history: Vec::new(),
-            generation: 0,
             call_profiling: env::var_os("VX_EVAL2_PROFILE_CALLS").is_some(),
         }
     }
@@ -191,7 +189,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
         self.scheduler.resolve_pending(pending, Ok(value))?;
-        self.generation += 1;
         Ok(())
     }
 
@@ -201,7 +198,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         error: EvalError,
     ) -> Result<(), EvalError> {
         self.scheduler.resolve_pending(pending, Err(error))?;
-        self.generation += 1;
         Ok(())
     }
 
@@ -226,7 +222,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.branch_context = branch_context;
         self.scheduler
             .replace_queued_branch_context(&previous, &self.branch_context);
-        self.generation += 1;
     }
 
     pub fn can_step_back(&self) -> bool {
@@ -283,6 +278,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn trace(&self) -> &EvalTrace {
         &self.trace
+    }
+
+    pub fn base_generation(&self) -> u64 {
+        self.scheduler.base_generation()
     }
 
     pub fn stats(&self) -> EvalSessionStats {
@@ -525,7 +524,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.trace.events.truncate(checkpoint.trace_len);
         self.completed_work.truncate(checkpoint.completed_work_len);
         self.completed = checkpoint.completed;
-        self.generation += 1;
     }
 
     pub fn prepare_step(&mut self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
@@ -547,7 +545,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         if let Some(snapshot) = snapshot {
             self.history.push(snapshot);
         }
-        self.generation += 1;
         Ok(Some(EvalPreparedWork {
             program: Arc::clone(&self.program),
             entry: self.entry.clone(),
@@ -557,6 +554,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             branch_context: lease.record.branch_context.clone(),
             wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
+            base_generation: self.scheduler.base_generation(),
             scheduler: self.scheduler.prepared_snapshot(lease.namespace),
             record: lease.record,
             call_profiling: self.call_profiling,
@@ -668,7 +666,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         if let Some(snapshot) = snapshot {
             self.history.push(snapshot);
         }
-        self.generation += 1;
         Ok(step.unwrap_or_else(|| step_without_ready_work(&self.scheduler, &self.completed)))
     }
 
@@ -786,6 +783,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
         self.lease_sequence
     }
 
+    pub fn base_generation(&self) -> u64 {
+        self.base_generation
+    }
+
     pub fn execute(self) -> Result<EvalWorkCompletion, EvalError> {
         let EvalPreparedWork {
             program,
@@ -796,6 +797,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             branch_context,
             wave_id,
             lease_sequence,
+            base_generation,
             scheduler,
             record,
             call_profiling,
@@ -819,6 +821,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             branch_context,
             wave_id,
             lease_sequence,
+            base_generation,
             work: record.work,
             outcome,
             delta,
@@ -867,6 +870,10 @@ impl EvalWorkCompletion {
         self.lease_sequence
     }
 
+    pub fn base_generation(&self) -> u64 {
+        self.base_generation
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
@@ -913,10 +920,22 @@ fn commit_completion(
         completed_work.push(EvalCompletedWork {
             work: completion.work,
             outcome: completion.outcome,
+            base_generation: completion.base_generation,
             elapsed: completion.elapsed,
             invocation: completion.invocation,
         });
         return Ok(EvalSessionStep::Progressed);
+    }
+    if completion.base_generation > scheduler.base_generation() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "eval completion for {:?} observed future base generation {} > {}",
+                completion.work.id,
+                completion.base_generation,
+                scheduler.base_generation(),
+            ),
+        ));
     }
     trace.events.extend(completion.delta.trace_events);
     let completed_invalidated = completion.delta.completed_invalidated;
@@ -931,6 +950,7 @@ fn commit_completion(
     completed_work.push(EvalCompletedWork {
         work: completion.work.clone(),
         outcome: completion.outcome.clone(),
+        base_generation: completion.base_generation,
         elapsed: completion.elapsed,
         invocation: completion.invocation.clone(),
     });

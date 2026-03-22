@@ -756,6 +756,10 @@ impl EvalPreparedSnapshot {
 }
 
 impl EvalScheduler {
+    pub(super) fn base_generation(&self) -> u64 {
+        self.base.generation
+    }
+
     pub(super) fn prepared_snapshot(&self, namespace: Option<u64>) -> EvalPreparedSnapshot {
         EvalPreparedSnapshot {
             base: self.base.clone(),
@@ -1531,6 +1535,7 @@ impl EvalScheduler {
                 },
             );
         }
+        self.base.generation += 1;
         Ok(())
     }
 
@@ -1762,6 +1767,7 @@ impl EvalScheduler {
             self.ready_queue.push_back(record.work.id);
             self.ready_tasks.insert(record.work.id, record);
         }
+        self.base.generation += 1;
         Ok(())
     }
 

@@ -121,6 +121,7 @@ pub enum EvalCompletedWorkOutcome {
 pub struct EvalCompletedWork {
     pub work: EvalQueuedWork,
     pub outcome: EvalCompletedWorkOutcome,
+    pub base_generation: u64,
     pub elapsed: Duration,
     pub invocation: Option<EvalAuthoredCall>,
 }
@@ -454,6 +455,7 @@ pub struct EvalSessionCheckpoint {
 
 #[derive(Debug, Clone)]
 pub(super) struct EvalSchedulerBase {
+    pub(super) generation: u64,
     pub(super) next_id: u64,
     pub(super) next_work_id: u64,
     pub(super) node_states: OrdMap<EvalNodeId, EvalNodeState>,
@@ -470,6 +472,7 @@ pub(super) struct EvalSchedulerBase {
 impl Default for EvalSchedulerBase {
     fn default() -> Self {
         Self {
+            generation: 0,
             next_id: 1,
             next_work_id: 1,
             node_states: OrdMap::new(),
@@ -501,6 +504,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) branch_context: EvalBranchContext,
     pub(super) wave_id: EvalWaveId,
     pub(super) lease_sequence: u64,
+    pub(super) base_generation: u64,
     pub(super) scheduler: EvalPreparedSnapshot,
     pub(super) record: ReadyTaskRecord,
     pub(super) call_profiling: bool,
@@ -511,6 +515,7 @@ pub struct EvalWorkCompletion {
     pub(super) branch_context: EvalBranchContext,
     pub(super) wave_id: EvalWaveId,
     pub(super) lease_sequence: u64,
+    pub(super) base_generation: u64,
     pub(super) work: EvalQueuedWork,
     pub(super) outcome: EvalCompletedWorkOutcome,
     pub(super) delta: EvalSessionDelta,

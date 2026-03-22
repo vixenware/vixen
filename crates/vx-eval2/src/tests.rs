@@ -8334,6 +8334,69 @@ fn old_completion_is_rejected_after_step_back_and_re_lease() {
 }
 
 #[test]
+fn prepared_work_and_completion_report_observed_base_generation() {
+    let mut session = EvalSession::new(
+        "fn build() { [host_os(), host_os()] }",
+        "prepared-base-generation",
+        "build",
+        Vec::new(),
+        &TestRuntime,
+        "win",
+    );
+
+    assert_eq!(session.base_generation(), 0);
+    assert_eq!(
+        session.step().expect("start-entry step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("root block step"),
+        EvalSessionStep::Progressed
+    );
+    assert_eq!(
+        session.step().expect("array step"),
+        EvalSessionStep::Progressed
+    );
+
+    let leased_generation = session.base_generation();
+    let first = session.prepare_step().expect("first leased sibling");
+    let second = session.prepare_step().expect("second leased sibling");
+    let first_work_id = first.work().id;
+    let second_work_id = second.work().id;
+    assert_eq!(first.base_generation(), leased_generation);
+    assert_eq!(second.base_generation(), leased_generation);
+
+    let second_completion = second.execute().expect("second completion");
+    assert_eq!(second_completion.base_generation(), leased_generation);
+    assert_eq!(
+        session
+            .apply_completion(second_completion)
+            .expect("out-of-order completion should buffer"),
+        EvalSessionStep::WaitingOnInFlight,
+    );
+    assert_eq!(session.base_generation(), leased_generation);
+
+    let first_completion = first.execute().expect("first completion");
+    assert_eq!(first_completion.base_generation(), leased_generation);
+    assert_eq!(
+        session
+            .apply_completion(first_completion)
+            .expect("first completion should commit"),
+        EvalSessionStep::Progressed,
+    );
+    assert!(session.base_generation() >= 2);
+    assert!(
+        session
+            .completed_work()
+            .iter()
+            .filter(
+                |work| matches!(work.work.id, id if id == first_work_id || id == second_work_id)
+            )
+            .all(|work| work.base_generation == leased_generation)
+    );
+}
+
+#[test]
 fn preparing_twice_never_returns_the_same_work_twice() {
     let mut session = EvalSession::new(
         "fn build() { [host_os(), host_os()] }",
