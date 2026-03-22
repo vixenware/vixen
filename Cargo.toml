@@ -56,6 +56,7 @@ figue = { version = "2.0.0" }
 
 # incremental computation
 picante = { version = "1.0.0", features = ["macros"] }
+im = "15.1.0"
 
 # RPC
 roam = "7.1.0"

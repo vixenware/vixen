@@ -14,6 +14,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 facet-json.workspace = true
 facet-toml.workspace = true
 facet-value.workspace = true
+im.workspace = true
 vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }
 vx-eval2-proto.workspace = true

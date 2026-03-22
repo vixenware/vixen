@@ -273,8 +273,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.node_records()
     }
 
-    pub fn dependency_edges(&self) -> &[EvalDependencyEdge] {
-        self.scheduler.dependency_edges()
+    pub fn dependency_edges(&self) -> Vec<EvalDependencyEdge> {
+        self.scheduler.dependency_edges().cloned().collect()
     }
 
     pub fn explain_node(&self, node_id: EvalNodeId) -> EvalNodeExplanation {

@@ -1,11 +1,12 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use im::{OrdMap, Vector};
 use vx_parser::{
     ArrayExpr, ArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr,
     FieldExpr, IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr, NameRefExpr, Pattern,

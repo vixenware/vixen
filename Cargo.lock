@@ -3981,6 +3981,7 @@ dependencies = [
  "facet-json",
  "facet-toml",
  "facet-value",
+ "im",
  "moire",
  "roam-core",
  "roam-stream",

@@ -457,15 +457,15 @@ pub(super) struct EvalPreparedSnapshot {
     pub(super) next_id: u64,
     pub(super) next_work_id: u64,
     pub(super) lease_namespace: Option<u64>,
-    pub(super) node_states: Arc<BTreeMap<EvalNodeId, EvalNodeState>>,
-    pub(super) node_records: Arc<BTreeMap<EvalNodeId, EvalNodeRecord>>,
-    pub(super) keyed_nodes: Arc<BTreeMap<EvalNodeId, KeyedNodeMemo>>,
-    pub(super) dependency_edges: Arc<Vec<EvalDependencyEdge>>,
+    pub(super) node_states: OrdMap<EvalNodeId, EvalNodeState>,
+    pub(super) node_records: OrdMap<EvalNodeId, EvalNodeRecord>,
+    pub(super) keyed_nodes: OrdMap<EvalNodeId, KeyedNodeMemo>,
+    pub(super) dependency_edges: Vector<EvalDependencyEdge>,
     pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
-    pub(super) pending_kinds: Arc<BTreeMap<u64, PendingKind>>,
-    pub(super) retained_exprs: Arc<BTreeMap<EvalNodeId, RetainedExprTask>>,
-    pub(super) learned_no_goods: Arc<Vec<LearnedNoGood>>,
-    pub(super) learned_search_no_goods: Arc<Vec<LearnedSearchNoGood>>,
+    pub(super) pending_kinds: OrdMap<u64, PendingKind>,
+    pub(super) retained_exprs: OrdMap<EvalNodeId, RetainedExprTask>,
+    pub(super) learned_no_goods: Vector<LearnedNoGood>,
+    pub(super) learned_search_no_goods: Vector<LearnedSearchNoGood>,
 }
 
 pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
