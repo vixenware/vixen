@@ -3711,6 +3711,90 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_manifest_handles_renamed_registry_dependencies() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo-renamed-dependency-root.toml"));
+  demand_manifest(manifest) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "x86_64-unknown-linux-gnu",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "linux",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        r#"{"dl":"https://crates.io/api/v1/crates"}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ca/rr/carrier".to_string(),
+        r#"{"name":"carrier","vers":"1.0.0","deps":[{"name":"renamed","req":"^1","package":"actual","features":[],"optional":true,"default_features":false,"target":null,"kind":"normal"}],"cksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","features":{},"features2":{"plus":["dep:renamed","renamed?/bonus"]},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/ac/tu/actual".to_string(),
+        r#"{"name":"actual","vers":"1.0.0","deps":[{"name":"defaultdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"},{"name":"bonusdep","req":"^1","features":[],"optional":true,"default_features":true,"target":null,"kind":"normal"}],"cksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","features":{},"features2":{"default":["dep:defaultdep"],"bonus":["dep:bonusdep"]},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/de/fa/defaultdep".to_string(),
+        r#"{"name":"defaultdep","vers":"1.0.0","deps":[],"cksum":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    http_responses.insert(
+        "https://index.crates.io/bo/nu/bonusdep".to_string(),
+        r#"{"name":"bonusdep","vers":"1.0.0","deps":[],"cksum":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","features":{},"features2":{},"yanked":false,"rust_version":null,"v":2}"#.to_string(),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo renamed dependency manifest");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo renamed dependency result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let snapshot = session.graph_snapshot();
+    let roots = ready_root_ids(&value);
+
+    assert!(roots.contains(&"registry:carrier@1.0.0"));
+    assert!(resolved_crates_contain_name(&snapshot, "carrier"));
+    assert!(resolved_crates_contain_name(&snapshot, "actual"));
+    assert!(resolved_crates_contain_name(&snapshot, "bonusdep"));
+    assert!(!resolved_crates_contain_name(&snapshot, "defaultdep"));
+}
+
+#[test]
 fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
