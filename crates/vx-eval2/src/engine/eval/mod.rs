@@ -3110,6 +3110,10 @@ pub(super) fn apply_binary_operator(
     operator: SyntaxKind,
     rhs: Value,
 ) -> Result<Value, EvalError> {
+    if let Some(path_join) = apply_path_join_operator(&lhs, operator, &rhs)? {
+        return Ok(path_join);
+    }
+
     if let Some(arithmetic) = apply_u64_arithmetic_operator(&lhs.rep, operator, &rhs.rep)? {
         return Ok(arithmetic);
     }
@@ -3166,6 +3170,59 @@ pub(super) fn apply_binary_operator(
             EvalErrorKind::Internal,
             format!("binary operator {operator:?} is not supported yet"),
         )),
+    }
+}
+
+fn apply_path_join_operator(
+    lhs: &Value,
+    operator: SyntaxKind,
+    rhs: &Value,
+) -> Result<Option<Value>, EvalError> {
+    if operator != SyntaxKind::SLASH {
+        return Ok(None);
+    }
+
+    let Some(lhs_path) = value_path_descriptor(&lhs.rep) else {
+        return Ok(None);
+    };
+
+    let rhs_segment = match value_path_descriptor(&rhs.rep) {
+        Some(path) => path,
+        None => match &rhs.rep {
+            ValueRep::String(text) => text.clone(),
+            _ => {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "right operand of / must be String or Path when left operand is Path",
+                ));
+            }
+        },
+    };
+
+    let joined = std::path::PathBuf::from(lhs_path.as_ref())
+        .join(rhs_segment.as_ref())
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(
+        Value::external("Path", joined)
+            .with_meta(lhs.meta.clone())
+            .project(ProjectionStep::Path(rhs_segment.to_string())),
+    ))
+}
+
+fn value_path_descriptor(value: &ValueRep) -> Option<Arc<str>> {
+    match value {
+        ValueRep::External(external) if external.kind.as_ref() == "Path" => {
+            Some(external.descriptor.clone())
+        }
+        ValueRep::Struct(struct_value) if struct_value.type_name.as_ref() == "Path" => struct_value
+            .fields
+            .iter()
+            .find_map(|(name, value)| match (name.as_ref(), &value.rep) {
+                ("path", ValueRep::String(path)) => Some(path.clone()),
+                _ => None,
+            }),
+        _ => None,
     }
 }
 
@@ -3502,31 +3559,37 @@ pub(super) fn eval_path_literal(
     path_literal: &PathLiteralExpr,
 ) -> Result<Value, EvalError> {
     let path_source = state.span_for_node(path_literal);
-    let text = path_literal.syntax().text().to_string();
-    let descriptor = if let Some(path) = text.strip_prefix('@') {
-        if let Some(template) = path.strip_prefix('(') {
-            let Some(inner) = template.strip_suffix(')') else {
-                return Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    "path literal template was missing closing ')'",
-                ));
-            };
-            if inner.contains('{') {
-                return Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    "interpolated path literals are not supported yet",
-                ));
-            }
-            inner.to_string()
-        } else {
-            path.to_string()
-        }
-    } else {
+    if path_literal.interpolated().is_some() {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
-            "path literal text was missing '@' prefix",
+            "interpolated path literals are not supported yet",
         ));
-    };
+    }
+
+    let descriptor = path_literal
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .filter(|token| {
+            !matches!(
+                token.kind(),
+                vx_parser::SyntaxKind::AT
+                    | vx_parser::SyntaxKind::L_PAREN
+                    | vx_parser::SyntaxKind::R_PAREN
+                    | vx_parser::SyntaxKind::WHITESPACE
+                    | vx_parser::SyntaxKind::LINE_COMMENT
+                    | vx_parser::SyntaxKind::BLOCK_COMMENT
+                    | vx_parser::SyntaxKind::DOC_COMMENT
+            )
+        })
+        .map(|token| token.text().to_string())
+        .collect::<String>();
+    if descriptor.is_empty() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "path literal had no literal payload",
+        ));
+    }
 
     Ok(Value::external("Path", descriptor)
         .with_provenance(Provenance::literal(path_source))

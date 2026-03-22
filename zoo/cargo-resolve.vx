@@ -38,14 +38,31 @@ struct CargoManifest {
   workspace: CargoWorkspace?,
 }
 
+#[untagged]
+enum CargoInheritedString {
+  struct Value {
+    value: String,
+  },
+
+  struct Workspace {
+    workspace: Bool,
+  },
+}
+
 struct CargoPackage {
   name: String,
-  version: String,
-  edition: String = "2021",
+  version: CargoInheritedString,
+  edition: CargoInheritedString? = None,
+}
+
+struct CargoWorkspacePackage {
+  version: String?,
+  edition: String?,
 }
 
 struct CargoWorkspace {
   dependencies: Map[String, CargoDependencySpec] = %{},
+  package: CargoWorkspacePackage?,
 }
 
 struct CargoWorkspaceRootManifest {
@@ -72,6 +89,10 @@ struct LockedPackage {
 
 struct WorkspaceDependencyMissing {
   name: String,
+}
+
+struct WorkspacePackageFieldMissing {
+  field: String,
 }
 
 struct DependencyRequest {
@@ -174,7 +195,8 @@ enum TargetSelector {
 
 enum DependencySource {
   struct Registry,
-  struct Path {
+  struct LocalPath {
+    base: Path,
     path: String,
   },
   struct Git {
@@ -223,8 +245,8 @@ enum ResolvedSource {
     checksum: String,
     download_url: String,
   },
-  struct Path {
-    path: String,
+  struct LocalPath {
+    path: Path,
   },
   struct Git {
     url: String,
@@ -344,7 +366,7 @@ fn crate_download_url(config: SparseConfig, name: String, version: String, check
 fn manifest_requests(manifest: CargoManifest) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
-  manifest_requests_with_workspace(manifest, %{}) where { target }
+  manifest_requests_at_with_workspace(manifest, @., %{}) where { target }
 )
 
 fn manifest_requests_with_workspace(
@@ -353,32 +375,76 @@ fn manifest_requests_with_workspace(
 ) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
+  manifest_requests_at_with_workspace(manifest, @., workspace_dependencies) where { target }
+)
+
+fn manifest_requests_at(
+  manifest: CargoManifest,
+  manifest_root: Path,
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
+  manifest_requests_at_with_workspace(manifest, manifest_root, %{}) where { target }
+)
+
+fn manifest_requests_at_with_workspace(
+  manifest: CargoManifest,
+  manifest_root: Path,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
   [
     ..manifest.dependencies
-      .map((name, dep) => request_from_dep_with_workspace(name, dep, "normal", workspace_dependencies))
+      .map((name, dep) => (
+        request_from_dep_at_with_workspace(name, dep, "normal", manifest_root, workspace_dependencies)
+      ))
       .to_array(),
     ..manifest.dev_dependencies
-      .map((name, dep) => request_from_dep_with_workspace(name, dep, "dev", workspace_dependencies))
+      .map((name, dep) => (
+        request_from_dep_at_with_workspace(name, dep, "dev", manifest_root, workspace_dependencies)
+      ))
       .to_array(),
     ..manifest.build_dependencies
-      .map((name, dep) => request_from_dep_with_workspace(name, dep, "build", workspace_dependencies))
+      .map((name, dep) => (
+        request_from_dep_at_with_workspace(name, dep, "build", manifest_root, workspace_dependencies)
+      ))
       .to_array(),
     ..manifest.target
       .map((selector, table) => (
-        target_requests_with_workspace(selector, table, workspace_dependencies) where { target }
+        target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies) where { target }
       ))
       .flatten(),
   ]
 )
 
 fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> DependencyRequest (
-  request_from_dep_with_workspace(name, dep, kind, %{})
+  request_from_dep_at_with_workspace(name, dep, kind, @., %{})
 )
 
 fn request_from_dep_with_workspace(
   name: String,
   dep: CargoDependencySpec,
   kind: String,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) -> DependencyRequest (
+  request_from_dep_at_with_workspace(name, dep, kind, @., workspace_dependencies)
+)
+
+fn request_from_dep_at(
+  name: String,
+  dep: CargoDependencySpec,
+  kind: String,
+  manifest_root: Path,
+) -> DependencyRequest (
+  request_from_dep_at_with_workspace(name, dep, kind, manifest_root, %{})
+)
+
+fn request_from_dep_at_with_workspace(
+  name: String,
+  dep: CargoDependencySpec,
+  kind: String,
+  manifest_root: Path,
   workspace_dependencies: Map[String, CargoDependencySpec],
 ) -> DependencyRequest (
   match dep (
@@ -406,7 +472,7 @@ fn request_from_dep_with_workspace(
       if workspace (
         if workspace_dependencies.has(name) (
           let inherited =
-            request_from_dep_with_workspace(name, workspace_dependencies.get(name), kind, %{})
+            request_from_dep_at_with_workspace(name, workspace_dependencies.get(name), kind, @., %{})
           ;
           DependencyRequest {
             name,
@@ -427,7 +493,10 @@ fn request_from_dep_with_workspace(
             target: None,
             source:
               match path (
-                Some { value } => DependencySource.Path { path: value },
+                Some { value } => DependencySource.LocalPath {
+                  base: manifest_root,
+                  path: value,
+                },
                 None => (
                   match git (
                     Some { value } => DependencySource.Git { url: value },
@@ -455,7 +524,10 @@ fn request_from_dep_with_workspace(
           target: None,
           source:
             match path (
-              Some { value } => DependencySource.Path { path: value },
+              Some { value } => DependencySource.LocalPath {
+                base: manifest_root,
+                path: value,
+              },
               None => (
                 match git (
                   Some { value } => DependencySource.Git { url: value },
@@ -819,7 +891,7 @@ fn split_top_level_args(s: String) -> Array[String] (
 fn target_requests(selector: String, table: CargoTargetTable) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
-  target_requests_with_workspace(selector, table, %{}) where { target }
+  target_requests_at_with_workspace(selector, table, @., %{}) where { target }
 )
 
 fn target_requests_with_workspace(
@@ -829,17 +901,42 @@ fn target_requests_with_workspace(
 ) where {
   target: BuildTarget,
 } -> Array[DependencyRequest] (
+  target_requests_at_with_workspace(selector, table, @., workspace_dependencies) where { target }
+)
+
+fn target_requests_at_with_workspace(
+  selector: String,
+  table: CargoTargetTable,
+  manifest_root: Path,
+  workspace_dependencies: Map[String, CargoDependencySpec],
+) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
   if selector_matches(target, parse_target_selector(selector)) (
     [
       ..table.dependencies
         .map((name, dep) => (
-          let req = request_from_dep_with_workspace(name, dep, "normal", workspace_dependencies);
+          let req =
+            request_from_dep_at_with_workspace(
+              name,
+              dep,
+              "normal",
+              manifest_root,
+              workspace_dependencies,
+            );
           DependencyRequest { ..req, target: selector }
         ))
         .to_array(),
       ..table.build_dependencies
         .map((name, dep) => (
-          let req = request_from_dep_with_workspace(name, dep, "build", workspace_dependencies);
+          let req =
+            request_from_dep_at_with_workspace(
+              name,
+              dep,
+              "build",
+              manifest_root,
+              workspace_dependencies,
+            );
           DependencyRequest { ..req, target: selector }
         ))
         .to_array(),
@@ -855,6 +952,53 @@ fn workspace_root_dependencies_from_blob(blob: Blob) -> Map[String, CargoDepende
 
 fn workspace_root_dependencies(workspace: Tree) -> Map[String, CargoDependencySpec] (
   workspace_root_dependencies_from_blob(workspace.file(@Cargo.toml))
+)
+
+fn workspace_root_package_from_blob(blob: Blob) -> CargoWorkspacePackage? (
+  Toml.parse[CargoWorkspaceRootManifest](blob).workspace.package
+)
+
+fn workspace_root_package(workspace: Tree) -> CargoWorkspacePackage? (
+  workspace_root_package_from_blob(workspace.file(@Cargo.toml))
+)
+
+fn resolve_inherited_string(
+  value: CargoInheritedString?,
+  workspace_value: String?,
+  field: String,
+) -> String (
+  match value (
+    Some { value } => (
+      match value (
+        CargoInheritedString.Value { value } => value,
+        CargoInheritedString.Workspace { workspace } => (
+          if workspace (
+            match workspace_value (
+              Some { value } => value,
+              None => fail WorkspacePackageFieldMissing { field },
+            )
+          ) else (
+            fail WorkspacePackageFieldMissing { field }
+          )
+        ),
+      )
+    ),
+    None => (
+      match workspace_value (
+        Some { value } => value,
+        None => fail WorkspacePackageFieldMissing { field },
+      )
+    ),
+  )
+)
+
+fn package_version(package: CargoPackage, workspace_package: CargoWorkspacePackage?) -> String (
+  let inherited =
+    match workspace_package (
+      Some { value } => value.version,
+      None => None,
+    );
+  resolve_inherited_string(Some(package.version), inherited, "version")
 )
 
 fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
@@ -1127,7 +1271,7 @@ fn request_key(req: DependencyRequest) -> String (
   let source =
     match req.source (
       DependencySource.Registry => `registry:{req.package_name.unwrap_or(req.name)}`,
-      DependencySource.Path { path } => `path:{path}`,
+      DependencySource.LocalPath { base: _, path } => `path:{path}`,
       DependencySource.Git { url } => `git:{url}`,
     );
 
@@ -1352,24 +1496,25 @@ fn resolve_request(request: DependencyRequest) where {
   workspace: Tree,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
+  let workspace_package = workspace_root_package(workspace);
 
   match request.source (
-    DependencySource.Path { path } => (
-      let dep_root = Path(path);
+    DependencySource.LocalPath { base, path } => (
+      let dep_root = base / Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
       let dependency_requests =
-        manifest_requests_with_workspace(dep_manifest, workspace_root_dependencies(workspace))
+        manifest_requests_at_with_workspace(dep_manifest, dep_root, workspace_root_dependencies(workspace))
           where { target };
       let features = unify_features(
         dep_manifest.features,
         optional_dependency_names(dependency_requests),
         request,
       );
-      let source = ResolvedSource.Path { path };
+      let source = ResolvedSource.LocalPath { path: dep_root };
       ResolvedCrate {
         id: PackageId(`path:{path}`),
         name: dep_manifest.package.name,
-        version: dep_manifest.package.version,
+        version: package_version(dep_manifest.package, workspace_package),
         features: features.local,
         dependencies: apply_feature_requests(dependency_requests, features),
         source,
@@ -1421,9 +1566,17 @@ fn resolve_manifest(manifest: CargoManifest) where {
   target: BuildTarget,
   workspace: Tree,
 } #discover -> RegistryResolution (
+  resolve_manifest_at(manifest, @.) where { lock, target, workspace }
+)
+
+fn resolve_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
   let requests =
-    manifest_requests_with_workspace(manifest, workspace_root_dependencies(workspace))
+    manifest_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
   resolve_graph(requests) where { config, lock, target, workspace }
 )
@@ -1441,13 +1594,13 @@ fn emit_lockfile(resolution: RegistryResolution) -> Blob (
                 "registry+https://github.com/rust-lang/crates.io-index",
               ResolvedSource.Git { url, rev, checksum: _, archive_url: _ } =>
                 `git+${url}#${rev}`,
-              ResolvedSource.Path { path: _ } => None,
+              ResolvedSource.LocalPath { path: _ } => None,
             ),
           checksum:
             match pkg.source (
               ResolvedSource.Registry { checksum, download_url: _ } => checksum,
               ResolvedSource.Git { url: _, rev: _, checksum, archive_url: _ } => checksum,
-              ResolvedSource.Path { path: _ } => None,
+              ResolvedSource.LocalPath { path: _ } => None,
             ),
         })
         .to_array(),
@@ -1464,7 +1617,7 @@ fn crate_source(pkg: ResolvedCrate) where {
         extract: "tar.gz",
       }
     ),
-    ResolvedSource.Path { path } => Tree(workspace_root / Path(path)),
+    ResolvedSource.LocalPath { path } => Tree(workspace_root / path),
     ResolvedSource.Git { url, rev, checksum, archive_url } => (
       let _url = url;
       let _rev = rev;

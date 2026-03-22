@@ -2594,6 +2594,99 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_resolve_request_executes_local_path_dependency() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("crates/vx-lsp/Cargo.toml"));
+  let request = request_from_dep_at_with_workspace(
+    "vx-parser",
+    manifest.dependencies.get("vx-parser"),
+    "normal",
+    @crates/vx-lsp,
+    workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+  );
+  let resolved = resolve_request(request) where {
+    config: SparseConfig {
+      dl: "unused",
+    },
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  };
+  resolved
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses: HashMap::new(),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_request against local path dependency");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo local path resolve result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(
+        struct_field(&value, "name").rep,
+        ValueRep::String("vx-parser".into())
+    );
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String("0.1.0".into())
+    );
+    let source = struct_field(&value, "source");
+    let path = struct_field(source, "path");
+    let ValueRep::External(external) = &path.rep else {
+        panic!("expected external path, got {path:?}");
+    };
+    assert_eq!(external.kind.as_ref(), "Path");
+    assert_eq!(external.descriptor.as_ref(), "crates/vx-lsp/../vx-parser");
+    let dependencies = struct_field(&value, "dependencies");
+    let ValueRep::Array(items) = &dependencies.rep else {
+        panic!("expected dependencies array, got {dependencies:?}");
+    };
+    let has_rowan = items.iter().any(|dep| {
+        matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "rowan"
+        )
+    });
+    assert!(has_rowan);
+}
+
+#[test]
 fn zoo_cargo_resolve_manifest_executes_transitive_registry_subset() {
     let zoo_source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
