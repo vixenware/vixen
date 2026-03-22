@@ -138,6 +138,83 @@ fn cargo_sketch_runtime_build_materializes_local_vendor_tree() {
     assert!(root.join("vendor/helper-local-0.1.0/src/lib.rs").is_file());
     assert!(!root.join("vendor/vendor").exists());
     assert!(!root.join("vendor/{pkg.name}-{pkg.version}").exists());
+
+    let binary = root.join("out/hello-local-build");
+    assert!(
+        binary.is_file(),
+        "expected built binary at {}",
+        binary.display()
+    );
+
+    let output = Command::new(&binary)
+        .output()
+        .expect("run built local hello");
+    assert!(
+        output.status.success(),
+        "built local hello should run successfully"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+}
+
+#[test]
+fn build_sketch_runtime_mounts_binary_tree_outputs_between_execs() {
+    let source = r#"
+fn build() -> Tree (
+  let first =
+    exec ["/bin/sh", "-euc", "cp /bin/sh out/copied"] where {
+      writable: [@out],
+      observer: (proc, vfs) => (
+        if proc.exit_code != 0 (
+          fail proc.stderr.collect().utf8_lossy()
+        ) else (
+          vfs
+        )
+      ),
+    };
+
+  exec ["/bin/sh", "-euc", "test -f prev/out/copied && cp prev/out/copied out/copied2"] where {
+    mounts: %{ @prev => first },
+    writable: [@out],
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail proc.stderr.collect().utf8_lossy()
+      ) else (
+        vfs.subtree(@out)
+      )
+    ),
+  }
+)
+"#;
+    let runtime = build_eval_runtime(
+        "build-sketch",
+        std::env::current_dir().expect("source dir"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    )
+    .expect("build build-sketch eval runtime");
+    let resolution = vx_eval2::eval_source_entry_at_place_with_args_with_source_id(
+        source,
+        "build-sketch-binary-tree-handoff",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate binary tree handoff");
+    let Resolution::Ready(tree) = resolution else {
+        panic!("expected ready build tree, got {resolution:?}");
+    };
+    let ValueRep::External(external) = &tree.rep else {
+        panic!("expected external tree, got {:?}", tree.rep);
+    };
+    assert_eq!(external.kind.as_ref(), "Tree");
+
+    let root = PathBuf::from(external.descriptor.as_ref());
+    let copied = root.join("copied2");
+    assert!(
+        copied.is_file(),
+        "expected copied binary at {}",
+        copied.display()
+    );
 }
 
 #[test]

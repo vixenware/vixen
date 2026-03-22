@@ -245,6 +245,7 @@ struct ResolvedCrate {
   source: ResolvedSource,
   features: Array[String] = [],
   dependencies: Array[DependencyRequest] = [],
+  resolved_dependencies: Array[PackageId] = [],
 }
 
 struct PackageFacts {
@@ -279,6 +280,13 @@ struct RegistryResolution {
 
 struct MaterializedGraphState {
   packages: Map[String, ResolvedCrate] = %{},
+}
+
+struct CompiledRustArtifact {
+  package_id: PackageId,
+  crate_name: String,
+  mount: Path,
+  tree: Tree,
 }
 
 fn parse_lock(ws: Tree) -> CargoLock? (
@@ -1108,6 +1116,15 @@ fn package_version(package: CargoPackage, workspace_package: CargoWorkspacePacka
   resolve_inherited_string(Some(package.version), inherited, "version")
 )
 
+fn package_edition(package: CargoPackage, workspace_package: CargoWorkspacePackage?) -> String (
+  let inherited =
+    match workspace_package (
+      Some { value } => value.edition,
+      None => None,
+    );
+  resolve_inherited_string(package.edition, inherited, "edition")
+)
+
 fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
   DependencyRequest {
     name: dep.name,
@@ -1590,16 +1607,26 @@ fn materialize_package_graph(
   if state.packages.has(crate.id.value) (
     state
   ) else (
+    let dependencies =
+      canonical_requests(crate.dependencies)
+        .map((dep) => demand_package(dep) where { config, lock, target, workspace })
+        .to_array();
     let with_crate =
       MaterializedGraphState {
         ..state,
-        packages: map_put(state.packages, crate.id.value, crate),
+        packages: map_put(
+          state.packages,
+          crate.id.value,
+          ResolvedCrate {
+            ..crate,
+            resolved_dependencies: dependencies.map($.id).to_array(),
+          },
+        ),
       };
     array_fold(
-      canonical_requests(crate.dependencies),
+      dependencies,
       with_crate,
-      ((acc, dep) => (
-        let package = demand_package(dep) where { config, lock, target, workspace };
+      ((acc, package) => (
         materialize_package_graph(acc, package) where {
           config,
           lock,
@@ -2030,6 +2057,172 @@ fn vendored_entry(pkg: ResolvedCrate) where {
   (Path(`{name}-{version}`), crate_source(pkg) where { workspace_root })
 )
 
+fn resolution_package(
+  resolution: RegistryResolution,
+  id: PackageId,
+) -> ResolvedCrate (
+  match resolution.packages.find(($.id == id)) (
+    Some { value } => value,
+    None => fail `missing package {id.value} in materialized resolution`,
+  )
+)
+
+fn rust_crate_name(name: String) -> String (
+  name.replace("-", "_")
+)
+
+fn compile_mount(crate_name: String) -> Path (
+  Path(crate_name)
+)
+
+fn compile_output_name(crate_name: String) -> Path (
+  Path(`lib{crate_name}.rlib`)
+)
+
+fn compile_dep_mounts(artifacts: Array[CompiledRustArtifact]) -> Map[Path, Tree] (
+  array_fold(
+    artifacts,
+    %{},
+    ((acc, artifact) => map_put(acc, compile_mount(artifact.crate_name), artifact.tree)),
+  )
+)
+
+fn compile_dep_args(artifacts: Array[CompiledRustArtifact]) -> Array[String] (
+  array_fold(
+    artifacts,
+    [],
+    ((acc, artifact) => (
+      let mount = compile_mount(artifact.crate_name).to_string();
+      let output = compile_output_name(artifact.crate_name).to_string();
+      [
+        ..acc,
+        "-L",
+        `dependency={mount}/out`,
+        "--extern",
+        `{artifact.crate_name}={mount}/out/{output}`,
+      ]
+    )),
+  )
+)
+
+fn compile_rust_library(pkg: ResolvedCrate, resolution: RegistryResolution) where {
+  workspace_root: Path,
+  rustc: ExecPath,
+} #discover -> CompiledRustArtifact (
+  let crate_name = rust_crate_name(pkg.name);
+  let source = crate_source(pkg) where { workspace_root };
+  let manifest = Toml.parse[CargoManifest](source.file(@Cargo.toml));
+  let edition = package_edition(manifest.package, workspace_root_package(Tree(workspace_root)));
+  let dep_artifacts =
+    pkg.resolved_dependencies
+      .map((id) => compile_rust_library(resolution_package(resolution, id), resolution) where {
+        workspace_root,
+        rustc,
+      })
+      .to_array();
+  let dep_mounts = compile_dep_mounts(dep_artifacts);
+  let dep_args = compile_dep_args(dep_artifacts);
+
+  match source.file(@src/lib.rs)? (
+    Some { value: _ } => (
+      let tree =
+        exec [
+          rustc,
+          @crate/src/lib.rs,
+          "--crate-name",
+          crate_name,
+          "--crate-type",
+          "lib",
+          "--edition",
+          edition,
+          "-o",
+          Path("out") / compile_output_name(crate_name),
+          ..dep_args,
+        ] where {
+          mounts: map_put(dep_mounts, @crate, source),
+          writable: [@out],
+          observer: (proc, vfs) => (
+            if proc.exit_code != 0 (
+              fail `rustc failed compiling library {pkg.name}: {proc.stderr.collect().utf8_lossy()}`
+            ) else (
+              vfs
+            )
+          ),
+        };
+      CompiledRustArtifact {
+        package_id: pkg.id,
+        crate_name,
+        mount: compile_mount(crate_name),
+        tree,
+      }
+    ),
+    None => fail `package {pkg.name} does not have src/lib.rs`,
+  )
+)
+
+fn maybe_compile_with_rustc(
+  manifest_root: Path,
+  manifest: CargoManifest,
+  resolution: RegistryResolution,
+  workspace_root: Path,
+) #discover -> Tree? (
+  let non_local =
+    resolution.packages.any((pkg) => (
+      match pkg.source (
+        ResolvedSource.LocalPath { path: _ } => false,
+        ResolvedSource.Registry { checksum: _, download_url: _ } => true,
+        ResolvedSource.Git { url: _, rev: _, checksum: _, archive_url: _ } => true,
+      )
+    ));
+
+  if non_local (
+    None
+  ) else (
+    let class = executor_class("default");
+    let rustc = discover(class, (host) => host.which("rustc"));
+    let source = Tree(workspace_root / manifest_root);
+    let edition = package_edition(manifest.package, workspace_root_package(Tree(workspace_root)));
+    let dep_artifacts =
+      resolution.roots
+        .map((id) => compile_rust_library(resolution_package(resolution, id), resolution) where {
+          workspace_root,
+          rustc,
+        })
+        .to_array();
+    let dep_mounts = compile_dep_mounts(dep_artifacts);
+    let dep_args = compile_dep_args(dep_artifacts);
+
+    match source.file(@src/main.rs)? (
+      Some { value: _ } => (
+        Some(
+          exec [
+            rustc,
+            @crate/src/main.rs,
+            "--crate-name",
+            rust_crate_name(manifest.package.name),
+            "--edition",
+            edition,
+            "-o",
+            Path("out") / Path(manifest.package.name),
+            ..dep_args,
+          ] where {
+            mounts: map_put(dep_mounts, @crate, source),
+            writable: [@out],
+            observer: (proc, vfs) => (
+              if proc.exit_code != 0 (
+                fail `rustc failed compiling binary {manifest.package.name}: {proc.stderr.collect().utf8_lossy()}`
+              ) else (
+                vfs.subtree(@out)
+              )
+            ),
+          }
+        )
+      ),
+      None => None,
+    )
+  )
+)
+
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let workspace = Tree(ws);
   let lock = parse_lock(workspace);
@@ -2041,14 +2234,21 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     cfg: [],
   };
 
-  let resolution =
+  let (manifest_root, manifest) =
     match args.find((_item) => true) (
-      Some { value } => resolve_workspace_member_at(workspace, Path(value)) where { lock, target },
+      Some { value } => (
+        let manifest_root = Path(value);
+        let manifest = Toml.parse[CargoManifest](workspace.file(manifest_root / @Cargo.toml));
+        (manifest_root, manifest)
+      ),
       None => (
+        let manifest_root = @.;
         let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
-        resolve_manifest(manifest) where { lock, target, workspace }
+        (manifest_root, manifest)
       ),
     );
+  let resolution =
+    resolve_manifest_at(manifest, manifest_root) where { lock, target, workspace };
 
   // Resolution discovers exact versions and checksums.
   // Acquisition stays fixed-hash and cacheable.
@@ -2060,12 +2260,18 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       ))
     );
   let lock_blob = emit_lockfile(resolution);
+  let _env = env;
+  let compiled = maybe_compile_with_rustc(manifest_root, manifest, resolution, ws);
 
-  // Next layer, not modeled here:
-  // - parse vendored Cargo.toml files
-  // - compile the resolved crate graph by demanding root packages
-  Tree %{
-    @vendor => vendor,
-    @Cargo.lock => lock_blob,
-  }
+  match compiled (
+    Some { value } => Tree %{
+      @vendor => vendor,
+      @Cargo.lock => lock_blob,
+      @out => value,
+    },
+    None => Tree %{
+      @vendor => vendor,
+      @Cargo.lock => lock_blob,
+    },
+  )
 )
