@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
+    str,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -199,6 +200,106 @@ struct CargoSketchRuntime {
     http_responses: HashMap<String, String>,
 }
 
+fn local_crates_io_sparse_index_root() -> Option<PathBuf> {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))?;
+    let index_root = cargo_home.join("registry/index");
+    fs::read_dir(index_root)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            name.starts_with("index.crates.io-").then_some(path)
+        })
+}
+
+fn local_sparse_package_rel_path(name: &str) -> String {
+    match name.len() {
+        0 => String::new(),
+        1 => format!("1/{name}"),
+        2 => format!("2/{name}"),
+        3 => format!("3/{}/{name}", &name[0..1]),
+        _ => format!("{}/{}/{}", &name[0..2], &name[2..4], name),
+    }
+}
+
+fn local_sparse_package_url(name: &str) -> String {
+    format!(
+        "https://index.crates.io/{}",
+        local_sparse_package_rel_path(name)
+    )
+}
+
+fn sparse_cache_entry_to_jsonl(bytes: &[u8]) -> Option<String> {
+    let mut entries = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index <= bytes.len() {
+        if index == bytes.len() || bytes[index] == 0 {
+            if start < index && bytes[start] == b'{' {
+                entries.push(String::from_utf8(bytes[start..index].to_vec()).ok()?);
+            }
+            start = index.saturating_add(1);
+        }
+        index += 1;
+    }
+    (!entries.is_empty()).then(|| entries.join("\n"))
+}
+
+fn sparse_cache_subset_to_jsonl(bytes: &[u8], versions: &[&str]) -> Option<String> {
+    let mut slices = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index <= bytes.len() {
+        if index == bytes.len() || bytes[index] == 0 {
+            slices.push(&bytes[start..index]);
+            start = index.saturating_add(1);
+        }
+        index += 1;
+    }
+
+    let mut entries = Vec::new();
+    for pair in slices.windows(2) {
+        let Ok(version) = str::from_utf8(pair[0]) else {
+            continue;
+        };
+        if !versions.iter().any(|candidate| candidate == &version) {
+            continue;
+        }
+        let Ok(json) = String::from_utf8(pair[1].to_vec()) else {
+            continue;
+        };
+        if json.starts_with('{') {
+            entries.push(json);
+        }
+    }
+
+    (!entries.is_empty()).then(|| entries.join("\n"))
+}
+
+fn local_sparse_package_subset_jsonl(name: &str, versions: &[&str]) -> Option<String> {
+    let root = local_crates_io_sparse_index_root()?;
+    let bytes = fs::read(
+        root.join(".cache")
+            .join(local_sparse_package_rel_path(name)),
+    )
+    .ok()?;
+    sparse_cache_subset_to_jsonl(&bytes, versions)
+}
+
+fn local_sparse_index_http_response(url: &str) -> Option<String> {
+    let root = local_crates_io_sparse_index_root()?;
+    let rel = url.strip_prefix("https://index.crates.io/")?;
+    if rel == "config.json" {
+        return fs::read_to_string(root.join("config.json")).ok();
+    }
+
+    let bytes = fs::read(root.join(".cache").join(rel)).ok()?;
+    sparse_cache_entry_to_jsonl(&bytes)
+}
+
 impl RuntimeHooks for CargoSketchRuntime {
     fn call(
         &self,
@@ -342,14 +443,19 @@ impl RuntimeHooks for CargoSketchRuntime {
                         "Http.get() argument must evaluate to String",
                     ));
                 };
-                let Some(contents) = self.http_responses.get(url.as_ref()) else {
-                    return Err(EvalError::new(
-                        EvalErrorKind::UserFail,
-                        format!("Http.get() had no fixture response for {url}"),
-                    ));
-                };
+                let contents = self
+                    .http_responses
+                    .get(url.as_ref())
+                    .cloned()
+                    .or_else(|| local_sparse_index_http_response(url.as_ref()))
+                    .ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::UserFail,
+                            format!("Http.get() had no fixture response for {url}"),
+                        )
+                    })?;
                 Ok(RuntimeCallOutcome::Ready(
-                    Value::external("Blob", contents.clone())
+                    Value::external("Blob", contents)
                         .with_provenance(Provenance::unknown(source.clone()))
                         .with_reuse(ReuseClass::Observed)
                         .with_crossing(CrossingPolicy::ByValue),
@@ -2805,6 +2911,149 @@ fn build() {
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo local workspace manifest result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+
+    assert_eq!(struct_field(&value, "root_rowan").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "has_rowan").rep, ValueRep::Bool(true));
+    assert_eq!(
+        struct_field(&value, "has_countme").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_hashbrown").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_rustc_hash").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(
+        struct_field(&value, "has_text_size").rep,
+        ValueRep::Bool(true)
+    );
+    assert_eq!(struct_field(&value, "has_serde").rep, ValueRep::Bool(false));
+    assert_eq!(struct_field(&value, "has_ahash").rep, ValueRep::Bool(false));
+    assert_eq!(
+        struct_field(&value, "has_allocator_api2").rep,
+        ValueRep::Bool(false)
+    );
+}
+
+#[test]
+fn zoo_cargo_resolve_manifest_executes_local_workspace_manifest_from_local_sparse_cache() {
+    if local_crates_io_sparse_index_root().is_none() {
+        return;
+    }
+
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r##"
+struct Summary {
+  root_rowan: Bool,
+  has_rowan: Bool,
+  has_countme: Bool,
+  has_hashbrown: Bool,
+  has_rustc_hash: Bool,
+  has_text_size: Bool,
+  has_serde: Bool,
+  has_ahash: Bool,
+  has_allocator_api2: Bool,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("crates/vx-parser/Cargo.toml"));
+  let resolution = resolve_manifest_at(manifest, @crates/vx-parser) where {
+    lock: None,
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      cfg: [
+        CfgFact.Name { name: "unix" },
+        CfgFact.KeyValue {
+          key: "target_os",
+          value: "macos",
+        },
+        CfgFact.KeyValue {
+          key: "target_arch",
+          value: "aarch64",
+        },
+      ],
+    },
+    workspace: Tree("."),
+  };
+
+  Summary {
+    root_rowan: resolution.roots.any($.value == "registry:rowan@0.16.1"),
+    has_rowan: resolution.packages.any($.name == "rowan"),
+    has_countme: resolution.packages.any($.name == "countme"),
+    has_hashbrown: resolution.packages.any($.name == "hashbrown"),
+    has_rustc_hash: resolution.packages.any($.name == "rustc-hash"),
+    has_text_size: resolution.packages.any($.name == "text-size"),
+    has_serde: resolution.packages.any($.name == "serde"),
+    has_ahash: resolution.packages.any($.name == "ahash"),
+    has_allocator_api2: resolution.packages.any($.name == "allocator-api2"),
+  }
+}
+"##,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let mut http_responses = HashMap::new();
+    http_responses.insert(
+        "https://index.crates.io/config.json".to_string(),
+        fs::read_to_string(
+            local_crates_io_sparse_index_root()
+                .expect("local sparse index root")
+                .join("config.json"),
+        )
+        .expect("read local sparse config"),
+    );
+    http_responses.insert(
+        local_sparse_package_url("rowan"),
+        local_sparse_package_subset_jsonl("rowan", &["0.16.1"])
+            .expect("read local sparse subset for rowan"),
+    );
+    http_responses.insert(
+        local_sparse_package_url("countme"),
+        local_sparse_package_subset_jsonl("countme", &["3.0.1"])
+            .expect("read local sparse subset for countme"),
+    );
+    http_responses.insert(
+        local_sparse_package_url("hashbrown"),
+        local_sparse_package_subset_jsonl("hashbrown", &["0.14.5"])
+            .expect("read local sparse subset for hashbrown"),
+    );
+    http_responses.insert(
+        local_sparse_package_url("rustc-hash"),
+        local_sparse_package_subset_jsonl("rustc-hash", &["1.1.0"])
+            .expect("read local sparse subset for rustc-hash"),
+    );
+    http_responses.insert(
+        local_sparse_package_url("text-size"),
+        local_sparse_package_subset_jsonl("text-size", &["1.1.1"])
+            .expect("read local sparse subset for text-size"),
+    );
+    let runtime = CargoSketchRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        http_responses,
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo resolve_manifest against local sparse cache");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo local sparse cache result\n{}",
             format_session_diagnostics(&session, &resolution)
         );
     };
