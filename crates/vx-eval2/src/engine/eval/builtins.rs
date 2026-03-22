@@ -1368,6 +1368,35 @@ pub(in crate::engine) fn continue_builtin_call(
             )
             .map(Some)
         }
+        "Array.find" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.find() requires receiver and predicate",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.find() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(predicate) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.find() predicate must evaluate to a function value",
+                ));
+            };
+            continue_array_find_builtin(
+                state,
+                node_id,
+                parent_id,
+                items.iter().cloned().collect(),
+                predicate.clone(),
+                0,
+            )
+            .map(Some)
+        }
         "Array.flatten" => {
             if args.len() != 1 {
                 return Err(EvalError::new(

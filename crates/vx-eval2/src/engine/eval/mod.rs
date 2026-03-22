@@ -110,9 +110,8 @@ fn compile_adapter_parameters(
 
 fn builtin_adapter_arg_index(function_name: &str, arg_index: usize) -> bool {
     match function_name {
-        "Array.any" | "Array.filter" | "Array.map" | "Array.filter_map" | "Map.map" => {
-            arg_index == 0
-        }
+        "Array.any" | "Array.find" | "Array.filter" | "Array.map" | "Array.filter_map"
+        | "Map.map" => arg_index == 0,
         "array_find" => arg_index == 1,
         "array_fold" => arg_index == 2,
         _ => false,
@@ -762,6 +761,7 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "starts_with") => Some("String.starts_with"),
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Array(_), "any") => Some("Array.any"),
+        (ValueRep::Array(_), "find") => Some("Array.find"),
         (ValueRep::Array(_), "filter_map") => Some("Array.filter_map"),
         (ValueRep::Array(_), "flatten") => Some("Array.flatten"),
         (ValueRep::Array(_), "filter") => Some("Array.filter"),
@@ -2893,7 +2893,14 @@ pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalErr
         .find(|kind| {
             matches!(
                 kind,
-                SyntaxKind::AMP2 | SyntaxKind::PIPE2 | SyntaxKind::EQ2 | SyntaxKind::BANG_EQ
+                SyntaxKind::AMP2
+                    | SyntaxKind::PIPE2
+                    | SyntaxKind::EQ2
+                    | SyntaxKind::BANG_EQ
+                    | SyntaxKind::LT
+                    | SyntaxKind::LT_EQ
+                    | SyntaxKind::GT
+                    | SyntaxKind::GT_EQ
             )
         })
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
@@ -2932,6 +2939,7 @@ pub(super) fn apply_binary_operator(
     rhs: Value,
 ) -> Result<Value, EvalError> {
     let equals = values_equal(&lhs.rep, &rhs.rep)?;
+    let ordering = values_order(&lhs.rep, &rhs.rep);
     match operator {
         SyntaxKind::AMP2 => {
             let ValueRep::Bool(lhs) = lhs.rep else {
@@ -2965,9 +2973,33 @@ pub(super) fn apply_binary_operator(
         }
         SyntaxKind::EQ2 => Ok(Value::bool(equals)),
         SyntaxKind::BANG_EQ => Ok(Value::bool(!equals)),
+        SyntaxKind::LT => Ok(Value::bool(matches!(ordering?, std::cmp::Ordering::Less))),
+        SyntaxKind::LT_EQ => Ok(Value::bool(matches!(
+            ordering?,
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+        ))),
+        SyntaxKind::GT => Ok(Value::bool(matches!(
+            ordering?,
+            std::cmp::Ordering::Greater
+        ))),
+        SyntaxKind::GT_EQ => Ok(Value::bool(matches!(
+            ordering?,
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+        ))),
         _ => Err(EvalError::new(
             EvalErrorKind::Internal,
             format!("binary operator {operator:?} is not supported yet"),
+        )),
+    }
+}
+
+fn values_order(lhs: &ValueRep, rhs: &ValueRep) -> Result<std::cmp::Ordering, EvalError> {
+    match (lhs, rhs) {
+        (ValueRep::U64(lhs), ValueRep::U64(rhs)) => Ok(lhs.cmp(rhs)),
+        (ValueRep::String(lhs), ValueRep::String(rhs)) => Ok(lhs.cmp(rhs)),
+        _ => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            format!("cannot compare {lhs:?} and {rhs:?} with ordering operators"),
         )),
     }
 }

@@ -2042,6 +2042,68 @@ fn build() {
 }
 
 #[test]
+fn zoo_cargo_selects_highest_matching_real_registry_entry() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r#"
+struct Summary {
+  version: String,
+  first_normal_dep_req: String,
+}
+
+fn build() {
+  let manifest = Toml.parse[CargoManifest](read_file("xtask/Cargo.toml"));
+  let requests = manifest_requests(manifest) where {
+    target: BuildTarget {
+      triple: "aarch64-apple-darwin",
+      os: "macos",
+      arch: "aarch64",
+    },
+  };
+  let request = requests.find($.name == "flate2");
+  let entries = parse_sparse_entries(read_file("specs/eval/run/registry_real/flate2-two-entries.jsonl"));
+  let best = highest_version(candidate_entries(entries, request));
+  let first_normal = best.deps.find($.kind.unwrap_or("normal") == "normal");
+  Summary {
+    version: best.vers,
+    first_normal_dep_req: first_normal.req,
+  }
+}
+"#,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = ReadFileRuntime {
+        root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    };
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+
+    let resolution = session
+        .run()
+        .expect("run zoo cargo highest-version selection");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready zoo cargo highest-version result, got {resolution:?}");
+    };
+
+    assert_eq!(
+        struct_field(&value, "version").rep,
+        ValueRep::String("1.1.9".into())
+    );
+    assert_eq!(
+        struct_field(&value, "first_normal_dep_req").rep,
+        ValueRep::String("^0.3.6".into())
+    );
+}
+
+#[test]
 fn array_spread_flattens_array_items_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -2154,6 +2216,38 @@ fn build() {
         panic!("expected ready dollar adapter Array.any() result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn ordering_binary_operators_work_for_u64_and_string_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Summary {
+  u64_lt: Bool,
+  u64_ge: Bool,
+  string_lt: Bool,
+}
+
+fn build() {
+  Summary {
+    u64_lt: 1 < 2,
+    u64_ge: 3 >= 3,
+    string_lt: "apple" < "banana",
+  }
+}
+"#,
+        "ordering-binary-operators-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate ordering binary operators");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready ordering result, got {resolution:?}");
+    };
+    assert_eq!(struct_field(&value, "u64_lt").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "u64_ge").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "string_lt").rep, ValueRep::Bool(true));
 }
 
 #[test]

@@ -229,7 +229,7 @@ fn parse_sparse_entries(blob: Blob) -> Array[IndexEntry] (
   blob.utf8()
     .lines()
     .filter(!$.is_empty())
-    .map(Json.parse[IndexEntry](Blob($)))
+    .map(Json.parse[IndexEntry]($))
     .to_array()
 )
 
@@ -326,7 +326,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
     Version { value } => DependencyRequest {
       name,
       package_name: None,
-      version_req: parse_semver_req(value),
+      version_req: Some(parse_semver_req(value)),
       kind,
       optional: false,
       target: None,
@@ -345,7 +345,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
         package_name: package,
         version_req:
           match version (
-            Some { value } => parse_semver_req(value),
+            Some { value } => Some(parse_semver_req(value)),
             None => None,
           ),
         features,
@@ -484,22 +484,75 @@ fn parse_semver_req(s: String) -> SemverReq (
 )
 
 fn matches_semver(req: SemverReq?, version: SemverVersion) -> Bool (
-  // Sketch only:
-  // - empty requirement means "any version"
-  // - otherwise all comparators must match
-  let _req = req;
-  let _version = version;
-  fail "semver matching omitted from sketch"
+  match req (
+    None => true,
+    Some { value } =>
+      !value.comparators.any((cmp) => !matches_comparator(cmp, version)),
+  )
 )
 
-fn compare_semver(a: SemverVersion, b: SemverVersion) -> I64 (
-  // Sketch only:
-  // - compare major/minor/patch numerically
-  // - stable releases sort after prereleases of the same base version
-  // - prerelease ordering follows Cargo/semver rules
-  let _a = a;
-  let _b = b;
-  fail "semver comparison omitted from sketch"
+fn matches_comparator(cmp: Comparator, version: SemverVersion) -> Bool (
+  let ordering = compare_semver(version, cmp.version);
+  match cmp.op (
+    ComparatorOp.Exact => ordering == 1,
+    ComparatorOp.Greater => ordering == 2,
+    ComparatorOp.GreaterEq => ordering != 0,
+    ComparatorOp.Less => ordering == 0,
+    ComparatorOp.LessEq => ordering != 2,
+    ComparatorOp.Caret => (
+      if cmp.version.major == 0 (
+        version.major == 0 &&
+        version.minor == cmp.version.minor &&
+        ordering != 0
+      ) else (
+        version.major == cmp.version.major &&
+        ordering != 0
+      )
+    ),
+    ComparatorOp.Tilde =>
+      version.major == cmp.version.major &&
+      version.minor == cmp.version.minor &&
+      ordering != 0,
+  )
+)
+
+fn compare_semver(a: SemverVersion, b: SemverVersion) -> U64 (
+  if a.major < b.major (
+    0
+  ) else if a.major > b.major (
+    2
+  ) else if a.minor < b.minor (
+    0
+  ) else if a.minor > b.minor (
+    2
+  ) else if a.patch < b.patch (
+    0
+  ) else if a.patch > b.patch (
+    2
+  ) else (
+    match a.pre (
+      Some { value: a_pre } => (
+        match b.pre (
+          Some { value: b_pre } => (
+            if a_pre < b_pre (
+              0
+            ) else if a_pre > b_pre (
+              2
+            ) else (
+              1
+            )
+          ),
+          None => 0,
+        )
+      ),
+      None => (
+        match b.pre (
+          Some { value: _ } => 2,
+          None => 1,
+        )
+      ),
+    )
+  )
 )
 
 fn candidate_entries(entries: Array[IndexEntry], request: DependencyRequest) -> Array[IndexEntry] (
@@ -512,10 +565,17 @@ fn candidate_entries(entries: Array[IndexEntry], request: DependencyRequest) -> 
 )
 
 fn highest_version(entries: Array[IndexEntry]) -> IndexEntry (
-  // Sketch only:
-  // choose the entry whose parsed version wins under `compare_semver`
-  let _entries = entries;
-  fail "highest-version selection omitted from sketch"
+  array_fold(
+    array_rest(entries),
+    array_first(entries),
+    ((best, entry) =>
+      if compare_semver(parse_semver_version(entry.vers), parse_semver_version(best.vers)) == 2 (
+        entry
+      ) else (
+        best
+      )
+    ),
+  )
 )
 
 fn parse_cfg_expr(s: String) -> CfgExpr (
@@ -582,7 +642,7 @@ fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
   DependencyRequest {
     name: dep.name,
     package_name: dep.package,
-    version_req: parse_semver_req(dep.req),
+    version_req: Some(parse_semver_req(dep.req)),
     features: dep.features,
     default_features: dep.default_features,
     optional: dep.optional,
