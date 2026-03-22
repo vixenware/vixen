@@ -141,7 +141,7 @@ impl EvalPreparedIdAllocator {
 }
 
 fn find_keyed_node_in_keyed_nodes(
-    keyed_nodes: &OrdMap<EvalNodeId, KeyedNodeMemo>,
+    keyed_nodes: &EvalNodeTable<KeyedNodeMemo>,
     resolver: &FunctionRef,
     key: &Value,
     branch_context: &EvalBranchContext,
@@ -150,7 +150,7 @@ fn find_keyed_node_in_keyed_nodes(
         .iter()
         .find_map(|(node_id, memo)| {
             if memo.resolver == *resolver && memo.branch_context == *branch_context {
-                Some(values_equal(&memo.key.rep, &key.rep).map(|equal| equal.then_some(*node_id)))
+                Some(values_equal(&memo.key.rep, &key.rep).map(|equal| equal.then_some(node_id)))
             } else {
                 None
             }
@@ -435,8 +435,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             .find_map(|(node_id, memo)| {
                 if memo.resolver == *resolver && memo.branch_context == *branch_context {
                     Some(
-                        values_equal(&memo.key.rep, &key.rep)
-                            .map(|equal| equal.then_some(*node_id)),
+                        values_equal(&memo.key.rep, &key.rep).map(|equal| equal.then_some(node_id)),
                     )
                 } else {
                     None
@@ -1102,11 +1101,11 @@ impl EvalScheduler {
     }
 
     pub(super) fn node_record_ids(&self) -> BTreeSet<EvalNodeId> {
-        self.base.node_records.keys().copied().collect()
+        self.base.node_records.keys().collect()
     }
 
     pub(super) fn node_state_ids(&self) -> BTreeSet<EvalNodeId> {
-        self.base.node_states.keys().copied().collect()
+        self.base.node_states.keys().collect()
     }
 
     pub(super) fn node_record_count(&self) -> usize {
@@ -1119,8 +1118,8 @@ impl EvalScheduler {
 
     pub(super) fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
-        if let im::ordmap::Entry::Vacant(entry) = self.base.node_records.entry(node_id) {
-            entry.insert(record);
+        if self.base.node_records.get(&node_id).is_none() {
+            self.base.node_records.insert(node_id, record);
         }
     }
 
@@ -1343,13 +1342,15 @@ impl EvalScheduler {
         scheduled: ScheduledExpr,
         branch_context: EvalBranchContext,
     ) {
-        self.base
-            .retained_exprs
-            .entry(node_id)
-            .or_insert(RetainedExprTask {
-                scheduled,
-                branch_context,
-            });
+        if self.base.retained_exprs.get(&node_id).is_none() {
+            self.base.retained_exprs.insert(
+                node_id,
+                RetainedExprTask {
+                    scheduled,
+                    branch_context,
+                },
+            );
+        }
     }
 
     pub(super) fn learned_no_good(

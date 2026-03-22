@@ -312,7 +312,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     pub fn stats(&self) -> EvalSessionStats {
         let mut graph_nodes = self.scheduler.node_record_ids();
         graph_nodes.extend(self.scheduler.node_state_ids());
-        graph_nodes.extend(self.scheduler.base.keyed_nodes.keys().copied());
+        graph_nodes.extend(self.scheduler.base.keyed_nodes.keys());
         for edge in self.scheduler.base.dependency_edges.iter() {
             graph_nodes.insert(edge.parent);
             graph_nodes.insert(edge.child);
@@ -749,7 +749,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .into_iter()
             .collect::<Vec<_>>();
         node_ids.extend(self.scheduler.node_state_ids());
-        node_ids.extend(self.scheduler.base.keyed_nodes.keys().copied());
+        node_ids.extend(self.scheduler.base.keyed_nodes.keys());
         for edge in self.scheduler.base.dependency_edges.iter() {
             node_ids.push(edge.parent);
             node_ids.push(edge.child);
@@ -771,7 +771,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             .base
             .keyed_nodes
             .iter()
-            .map(|(node_id, memo)| (*node_id, memo.public()))
+            .map(|(node_id, memo)| (node_id, memo.public()))
             .collect::<BTreeMap<_, _>>();
 
         EvalGraphSnapshot {

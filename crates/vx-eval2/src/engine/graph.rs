@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
+use std::mem;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,18 +455,113 @@ pub struct EvalSessionCheckpoint {
     pub(super) completed: Option<Result<Value, EvalError>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EvalNodeTable<T: Clone> {
+    dense: Vector<Option<T>>,
+    sparse: OrdMap<EvalNodeId, T>,
+    len: usize,
+}
+
+impl<T: Clone> Default for EvalNodeTable<T> {
+    fn default() -> Self {
+        Self {
+            dense: Vector::new(),
+            sparse: OrdMap::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: Clone> EvalNodeTable<T> {
+    fn is_dense(node_id: EvalNodeId) -> bool {
+        (node_id.0 >> 63) == 0
+    }
+
+    fn ensure_dense_len(&mut self, len: usize) {
+        while self.dense.len() < len {
+            self.dense.push_back(None);
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(super) fn get(&self, node_id: &EvalNodeId) -> Option<&T> {
+        if Self::is_dense(*node_id) {
+            self.dense.get(node_id.0 as usize)?.as_ref()
+        } else {
+            self.sparse.get(node_id)
+        }
+    }
+
+    pub(super) fn get_mut(&mut self, node_id: &EvalNodeId) -> Option<&mut T> {
+        if Self::is_dense(*node_id) {
+            self.dense.get_mut(node_id.0 as usize)?.as_mut()
+        } else {
+            self.sparse.get_mut(node_id)
+        }
+    }
+
+    pub(super) fn insert(&mut self, node_id: EvalNodeId, value: T) -> Option<T> {
+        if Self::is_dense(node_id) {
+            let index = node_id.0 as usize;
+            self.ensure_dense_len(index + 1);
+            let slot = self
+                .dense
+                .get_mut(index)
+                .expect("dense node slot must exist after extending");
+            let previous = slot.replace(value);
+            if previous.is_none() {
+                self.len += 1;
+            }
+            previous
+        } else if let Some(existing) = self.sparse.get_mut(&node_id) {
+            Some(mem::replace(existing, value))
+        } else {
+            self.sparse.insert(node_id, value);
+            self.len += 1;
+            None
+        }
+    }
+
+    pub(super) fn contains_key(&self, node_id: &EvalNodeId) -> bool {
+        self.get(node_id).is_some()
+    }
+
+    pub(super) fn keys(&self) -> impl Iterator<Item = EvalNodeId> + '_ {
+        let dense = self
+            .dense
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| value.as_ref().map(|_| EvalNodeId(index as u64)));
+        let sparse = self.sparse.keys().copied();
+        dense.chain(sparse)
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = (EvalNodeId, &T)> + '_ {
+        let dense = self.dense.iter().enumerate().filter_map(|(index, value)| {
+            value
+                .as_ref()
+                .map(|value| (EvalNodeId(index as u64), value))
+        });
+        let sparse = self.sparse.iter().map(|(node_id, value)| (*node_id, value));
+        dense.chain(sparse)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct EvalSchedulerBase {
     pub(super) generation: u64,
     pub(super) next_id: u64,
     pub(super) next_work_id: u64,
-    pub(super) node_states: OrdMap<EvalNodeId, EvalNodeState>,
-    pub(super) node_records: OrdMap<EvalNodeId, EvalNodeRecord>,
-    pub(super) keyed_nodes: OrdMap<EvalNodeId, KeyedNodeMemo>,
+    pub(super) node_states: EvalNodeTable<EvalNodeState>,
+    pub(super) node_records: EvalNodeTable<EvalNodeRecord>,
+    pub(super) keyed_nodes: EvalNodeTable<KeyedNodeMemo>,
     pub(super) dependency_edges: Vector<EvalDependencyEdge>,
     pub(super) pending_resumes: OrdMap<u64, Vec<EvalSuspension>>,
     pub(super) pending_kinds: OrdMap<u64, PendingKind>,
-    pub(super) retained_exprs: OrdMap<EvalNodeId, RetainedExprTask>,
+    pub(super) retained_exprs: EvalNodeTable<RetainedExprTask>,
     pub(super) learned_no_goods: Vector<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vector<LearnedSearchNoGood>,
 }
@@ -476,13 +572,13 @@ impl Default for EvalSchedulerBase {
             generation: 0,
             next_id: 1,
             next_work_id: 1,
-            node_states: OrdMap::new(),
-            node_records: OrdMap::new(),
-            keyed_nodes: OrdMap::new(),
+            node_states: EvalNodeTable::default(),
+            node_records: EvalNodeTable::default(),
+            keyed_nodes: EvalNodeTable::default(),
             dependency_edges: Vector::new(),
             pending_resumes: OrdMap::new(),
             pending_kinds: OrdMap::new(),
-            retained_exprs: OrdMap::new(),
+            retained_exprs: EvalNodeTable::default(),
             learned_no_goods: Vector::new(),
             learned_search_no_goods: Vector::new(),
         }
