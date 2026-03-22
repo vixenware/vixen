@@ -2515,6 +2515,41 @@ fn ready_interpolated_string_value(segments: Vec<String>, string_source: SourceS
     ))
 }
 
+fn decode_string_literal(text: &str) -> Result<String, EvalError> {
+    let inner = text
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("invalid string literal token: {text}"),
+            )
+        })?;
+    let mut decoded = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let escaped = chars.next().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("unterminated string escape in literal: {text}"),
+            )
+        })?;
+        match escaped {
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            other => decoded.push(other),
+        }
+    }
+    Ok(decoded)
+}
+
 pub(super) fn let_pattern_from_ast(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     pattern: &Pattern,
@@ -2845,10 +2880,8 @@ fn literal_pattern_value(
         SyntaxKind::FALSE_KW => Ok(Value::bool(false).with_provenance(Provenance::literal(source))),
         SyntaxKind::STRING => {
             let text = token.text();
-            Ok(
-                Value::string(&text[1..text.len() - 1])
-                    .with_provenance(Provenance::literal(source)),
-            )
+            Ok(Value::string(decode_string_literal(text)?)
+                .with_provenance(Provenance::literal(source)))
         }
         other => Err(EvalError::new(
             EvalErrorKind::Internal,
@@ -3612,7 +3645,7 @@ pub(super) fn eval_literal(
         }
         vx_parser::SyntaxKind::STRING => {
             let text = token.text();
-            Ok(Value::string(&text[1..text.len() - 1])
+            Ok(Value::string(decode_string_literal(text)?)
                 .with_provenance(Provenance::literal(literal_source)))
         }
         other => Err(EvalError::new(

@@ -1957,6 +1957,42 @@ fn build(name: String) {
 }
 
 #[test]
+fn string_literals_decode_escapes_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [
+    "line\nbreak",
+    "tab\tstop",
+    "quote:\"",
+    "slash:\\",
+    match "quote:\"" (
+      "quote:\"" => true,
+      _ => false,
+    ),
+  ]
+}
+"#,
+        "string-literal-escapes-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate escaped string literals");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready escaped string literal result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {value:?}");
+    };
+    assert_eq!(items[0].rep, ValueRep::String("line\nbreak".into()));
+    assert_eq!(items[1].rep, ValueRep::String("tab\tstop".into()));
+    assert_eq!(items[2].rep, ValueRep::String("quote:\"".into()));
+    assert_eq!(items[3].rep, ValueRep::String("slash:\\".into()));
+    assert_eq!(items[4].rep, ValueRep::Bool(true));
+}
+
+#[test]
 fn blob_utf8_method_returns_string_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -4439,6 +4475,7 @@ fn build() {
     );
     assert!(resolved_crates_contain_name(&snapshot, "sha2"));
     assert!(resolved_crates_contain_name(&snapshot, "digest"));
+    assert!(resolved_crates_contain_name(&snapshot, "cpufeatures"));
     assert!(resolved_crates_contain_name(&snapshot, "cfg-if"));
     assert!(resolved_crates_contain_name(&snapshot, "block-buffer"));
     assert!(resolved_crates_contain_name(&snapshot, "crypto-common"));
@@ -4446,6 +4483,132 @@ fn build() {
     assert!(resolved_crates_contain_name(&snapshot, "typenum"));
     assert!(resolved_crates_contain_name(&snapshot, "version_check"));
     assert!(!resolved_crates_contain_name(&snapshot, "libc"));
+}
+
+#[test]
+fn zoo_cargo_dependency_target_matches_any_arch_cfg_expression() {
+    let zoo_source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx"),
+    )
+    .expect("read zoo/cargo-resolve.vx");
+    let program = test_program(
+        [
+            (
+                "main.vx",
+                r#"
+fn build() {
+  let dep = request_from_index_dep(IndexDependency {
+    name: "cpufeatures",
+    package: None,
+    req: "^0.2",
+    features: [],
+    optional: false,
+    default_features: true,
+    target: Some {
+      value: "cfg(any(target_arch = \"aarch64\", target_arch = \"x86_64\", target_arch = \"x86\"))",
+    },
+    kind: Some { value: "normal" },
+  });
+
+  [
+    selector_matches(
+      BuildTarget {
+        triple: "x86_64-unknown-linux-gnu",
+        cfg: [
+          CfgFact.Name { name: "unix" },
+          CfgFact.KeyValue {
+            key: "target_os",
+            value: "linux",
+          },
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "x86_64",
+          },
+        ],
+      },
+      TargetSelector.Cfg {
+        expr: CfgExpr.KeyValue {
+          key: "target_arch",
+          value: "x86_64",
+        },
+      },
+    ),
+    selector_matches(
+      BuildTarget {
+        triple: "x86_64-unknown-linux-gnu",
+        cfg: [
+          CfgFact.Name { name: "unix" },
+          CfgFact.KeyValue {
+            key: "target_os",
+            value: "linux",
+          },
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "x86_64",
+          },
+        ],
+      },
+      parse_target_selector("cfg(target_arch = \"x86_64\")"),
+    ),
+    dependency_target_matches(
+      BuildTarget {
+        triple: "x86_64-unknown-linux-gnu",
+        cfg: [
+          CfgFact.Name { name: "unix" },
+          CfgFact.KeyValue {
+            key: "target_os",
+            value: "linux",
+          },
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "x86_64",
+          },
+        ],
+      },
+      dep,
+    ),
+    dependency_target_matches(
+      BuildTarget {
+        triple: "wasm32-unknown-unknown",
+        cfg: [
+          CfgFact.KeyValue {
+            key: "target_arch",
+            value: "wasm32",
+          },
+        ],
+      },
+      dep,
+    ),
+  ]
+}
+"#,
+            ),
+            ("cargo-resolve.vx", &zoo_source),
+        ],
+        vec![EvalProgramImport { from: 0, to: 1 }],
+    );
+    let runtime = UnsupportedRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
+    let resolution = session
+        .run()
+        .expect("run zoo cargo target selector match proof");
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready zoo cargo target selector match result\n{}",
+            format_session_diagnostics(&session, &resolution)
+        );
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {value:?}");
+    };
+    let bools = items
+        .iter()
+        .map(|item| match item.rep {
+            ValueRep::Bool(value) => value,
+            ref other => panic!("expected bool result, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bools, vec![true, true, true, false]);
 }
 
 #[test]
