@@ -268,7 +268,7 @@ pub(super) fn prepare_function_call(
             ),
         ));
     }
-    let mut env = Arc::new(function.capture_env());
+    let mut env = function.capture_env();
     if let Some(self_name) = &function.self_name {
         env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
@@ -2905,7 +2905,7 @@ pub(super) fn queue_child_expr_handle(
     });
     let scheduled = ScheduledExpr {
         expr,
-        env: Arc::clone(env),
+        env: env.clone(),
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {

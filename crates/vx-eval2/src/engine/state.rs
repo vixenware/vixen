@@ -398,7 +398,7 @@ pub(super) enum ResumeOutcome {
     Suspended(EvalSuspension),
 }
 
-pub(super) type EvalEnv = Arc<BTreeMap<String, Value>>;
+pub(super) type EvalEnv = OrdMap<String, Value>;
 
 impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     EvalState<'source, 'scheduler, Runtime, Sink>
@@ -686,11 +686,11 @@ pub(super) fn conclude_resumed_node(
 }
 
 pub(super) fn empty_env() -> EvalEnv {
-    Arc::new(BTreeMap::new())
+    OrdMap::new()
 }
 
-pub(super) fn env_mut(env: &mut EvalEnv) -> &mut BTreeMap<String, Value> {
-    Arc::make_mut(env)
+pub(super) fn env_mut(env: &mut EvalEnv) -> &mut OrdMap<String, Value> {
+    env
 }
 
 pub(super) fn eval_dependent_expr(

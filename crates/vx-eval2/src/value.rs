@@ -1,6 +1,8 @@
 //! Runtime value payloads.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+
+use im::OrdMap;
 
 use crate::{
     Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
@@ -221,7 +223,7 @@ impl FunctionRef {
         }
     }
 
-    pub(crate) fn capture_env(&self) -> BTreeMap<String, Value> {
+    pub(crate) fn capture_env(&self) -> OrdMap<String, Value> {
         self.captures
             .iter()
             .map(|(name, value)| (name.to_string(), value.clone()))
