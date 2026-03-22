@@ -3057,6 +3057,11 @@ pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalErr
                     | SyntaxKind::PIPE2
                     | SyntaxKind::EQ2
                     | SyntaxKind::BANG_EQ
+                    | SyntaxKind::PLUS
+                    | SyntaxKind::MINUS
+                    | SyntaxKind::STAR
+                    | SyntaxKind::SLASH
+                    | SyntaxKind::PERCENT
                     | SyntaxKind::LT
                     | SyntaxKind::LT_EQ
                     | SyntaxKind::GT
@@ -3098,6 +3103,10 @@ pub(super) fn apply_binary_operator(
     operator: SyntaxKind,
     rhs: Value,
 ) -> Result<Value, EvalError> {
+    if let Some(arithmetic) = apply_u64_arithmetic_operator(&lhs.rep, operator, &rhs.rep)? {
+        return Ok(arithmetic);
+    }
+
     let equals = values_equal(&lhs.rep, &rhs.rep)?;
     let ordering = values_order(&lhs.rep, &rhs.rep);
     match operator {
@@ -3151,6 +3160,58 @@ pub(super) fn apply_binary_operator(
             format!("binary operator {operator:?} is not supported yet"),
         )),
     }
+}
+
+fn apply_u64_arithmetic_operator(
+    lhs: &ValueRep,
+    operator: SyntaxKind,
+    rhs: &ValueRep,
+) -> Result<Option<Value>, EvalError> {
+    let (ValueRep::U64(lhs), ValueRep::U64(rhs)) = (lhs, rhs) else {
+        return Ok(None);
+    };
+
+    let value = match operator {
+        SyntaxKind::PLUS => lhs.checked_add(*rhs).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "u64 addition overflowed at runtime",
+            )
+        })?,
+        SyntaxKind::MINUS => lhs.checked_sub(*rhs).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "u64 subtraction underflowed at runtime",
+            )
+        })?,
+        SyntaxKind::STAR => lhs.checked_mul(*rhs).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "u64 multiplication overflowed at runtime",
+            )
+        })?,
+        SyntaxKind::SLASH => {
+            if *rhs == 0 {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "u64 division by zero at runtime",
+                ));
+            }
+            lhs / rhs
+        }
+        SyntaxKind::PERCENT => {
+            if *rhs == 0 {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "u64 remainder by zero at runtime",
+                ));
+            }
+            lhs % rhs
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some(Value::u64(value)))
 }
 
 fn values_order(lhs: &ValueRep, rhs: &ValueRep) -> Result<std::cmp::Ordering, EvalError> {

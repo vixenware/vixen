@@ -2513,9 +2513,22 @@ fn build() {
             ValueRep::String(name) if name.as_ref() == "cloudflare-zlib-sys"
         )
     });
+    let has_targeted_miniz_oxide = items.iter().any(|dep| {
+        if !matches!(
+            &struct_field(dep, "name").rep,
+            ValueRep::String(name) if name.as_ref() == "miniz_oxide"
+        ) {
+            return false;
+        }
+        match &struct_field(dep, "target").rep {
+            ValueRep::Struct(value) => value.type_name.as_ref() == "Some",
+            _ => false,
+        }
+    });
     assert!(has_crc32fast);
     assert!(has_miniz_oxide);
     assert!(!has_cloudflare);
+    assert!(!has_targeted_miniz_oxide);
 }
 
 #[test]
@@ -2806,6 +2819,44 @@ fn build() {
     assert_eq!(struct_field(&value, "u64_lt").rep, ValueRep::Bool(true));
     assert_eq!(struct_field(&value, "u64_ge").rep, ValueRep::Bool(true));
     assert_eq!(struct_field(&value, "string_lt").rep, ValueRep::Bool(true));
+}
+
+#[test]
+fn arithmetic_binary_operators_work_for_u64_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+struct Summary {
+  plus: U64,
+  minus: U64,
+  times: U64,
+  slash: U64,
+  remainder: U64,
+}
+
+fn build() {
+  Summary {
+    plus: 2 + 3,
+    minus: 7 - 2,
+    times: 4 * 3,
+    slash: 8 / 2,
+    remainder: 7 % 3,
+  }
+}
+"#,
+        "arithmetic-binary-operators-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate arithmetic binary operators");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready arithmetic result, got {resolution:?}");
+    };
+    assert_eq!(struct_field(&value, "plus").rep, ValueRep::U64(5));
+    assert_eq!(struct_field(&value, "minus").rep, ValueRep::U64(5));
+    assert_eq!(struct_field(&value, "times").rep, ValueRep::U64(12));
+    assert_eq!(struct_field(&value, "slash").rep, ValueRep::U64(4));
+    assert_eq!(struct_field(&value, "remainder").rep, ValueRep::U64(1));
 }
 
 #[test]

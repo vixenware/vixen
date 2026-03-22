@@ -607,21 +607,49 @@ fn highest_version(entries: Array[IndexEntry]) -> IndexEntry (
 )
 
 fn parse_cfg_expr(s: String) -> CfgExpr (
-  // Sketch only:
-  // parse Cargo cfg selectors such as:
-  // - `unix`
-  // - `target_os = "linux"`
-  // - `all(unix, target_env = "gnu")`
-  // - `any(windows, target_os = "macos")`
-  // - `not(target_arch = "wasm32")`
-  let _s = s;
-  fail "cfg parser omitted from sketch"
+  let trimmed = trim_spaces(s);
+  if trimmed.starts_with("all(") && trimmed.ends_with(")") (
+    let end = trimmed.len() - 1;
+    CfgExpr.All {
+      exprs:
+        split_top_level_args(trimmed.slice(4..end))
+          .map(parse_cfg_expr($))
+          .to_array(),
+    }
+  ) else if trimmed.starts_with("any(") && trimmed.ends_with(")") (
+    let end = trimmed.len() - 1;
+    CfgExpr.Any {
+      exprs:
+        split_top_level_args(trimmed.slice(4..end))
+          .map(parse_cfg_expr($))
+          .to_array(),
+    }
+  ) else if trimmed.starts_with("not(") && trimmed.ends_with(")") (
+    let end = trimmed.len() - 1;
+    CfgExpr.Not {
+      expr: parse_cfg_expr(trimmed.slice(4..end)),
+    }
+  ) else (
+    match trimmed.split_once("=") (
+      Some { value } => (
+        let (key, value) = value;
+        CfgExpr.KeyValue {
+          key: trim_spaces(key),
+          value: unquote(trim_spaces(value)),
+        }
+      ),
+      None => CfgExpr.Name {
+        name: trimmed,
+      },
+    )
+  )
 )
 
 fn parse_target_selector(s: String) -> TargetSelector (
   if s.starts_with("cfg(") (
+    let end = s.len() - 1;
     TargetSelector.Cfg {
-      expr: parse_cfg_expr(s.slice(4..s.len() - 1)),
+      expr: parse_cfg_expr(s.slice(4..end)),
     }
   ) else (
     TargetSelector.Triple { triple: s }
@@ -629,17 +657,89 @@ fn parse_target_selector(s: String) -> TargetSelector (
 )
 
 fn cfg_matches(target: BuildTarget, expr: CfgExpr) -> Bool (
-  // Sketch only:
-  // evaluate `expr` against `target.cfg`
-  let _target = target;
-  let _expr = expr;
-  fail "cfg evaluation omitted from sketch"
+  match expr (
+    CfgExpr.Name { name } => target.cfg.any((fact) => (
+      match fact (
+        CfgFact.Name { name: value } => value == name,
+        CfgFact.KeyValue { key: _, value: _ } => false,
+      )
+    )),
+    CfgExpr.KeyValue { key, value } => target.cfg.any((fact) => (
+      match fact (
+        CfgFact.Name { name: _ } => false,
+        CfgFact.KeyValue {
+          key: fact_key,
+          value: fact_value,
+        } => fact_key == key && fact_value == value,
+      )
+    )),
+    CfgExpr.Not { expr } => !cfg_matches(target, expr),
+    CfgExpr.Any { exprs } => exprs.any(cfg_matches(target, $)),
+    CfgExpr.All { exprs } => !exprs.any(!cfg_matches(target, $)),
+  )
 )
 
 fn selector_matches(target: BuildTarget, selector: TargetSelector) -> Bool (
   match selector (
     TargetSelector.Triple { triple } => target.triple == triple,
     TargetSelector.Cfg { expr } => cfg_matches(target, expr),
+  )
+)
+
+fn trim_spaces(s: String) -> String (
+  if s.starts_with(" ") (
+    trim_spaces(s.slice(1..))
+  ) else if s.ends_with(" ") (
+    let end = s.len() - 1;
+    trim_spaces(s.slice(0..end))
+  ) else (
+    s
+  )
+)
+
+fn unquote(s: String) -> String (
+  if s.starts_with("\"") && s.ends_with("\"") (
+    let end = s.len() - 1;
+    s.slice(1..end)
+  ) else (
+    s
+  )
+)
+
+fn split_top_level_args_rec(
+  s: String,
+  idx: U64,
+  depth: U64,
+  start: U64,
+  acc: Array[String],
+) -> Array[String] (
+  if idx == s.len() (
+    [..acc, trim_spaces(s.slice(start..idx))]
+  ) else (
+    let ch = s.slice(idx..idx + 1);
+    if ch == "(" (
+      split_top_level_args_rec(s, idx + 1, depth + 1, start, acc)
+    ) else if ch == ")" (
+      split_top_level_args_rec(s, idx + 1, depth - 1, start, acc)
+    ) else if ch == "," && depth == 0 (
+      split_top_level_args_rec(
+        s,
+        idx + 1,
+        depth,
+        idx + 1,
+        [..acc, trim_spaces(s.slice(start..idx))],
+      )
+    ) else (
+      split_top_level_args_rec(s, idx + 1, depth, start, acc)
+    )
+  )
+)
+
+fn split_top_level_args(s: String) -> Array[String] (
+  if trim_spaces(s).is_empty() (
+    []
+  ) else (
+    split_top_level_args_rec(s, 0, 0, 0, [])
   )
 )
 
@@ -680,6 +780,13 @@ fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
   }
 )
 
+fn dependency_target_matches(target: BuildTarget, dep: DependencyRequest) -> Bool (
+  match dep.target (
+    Some { value } => selector_matches(target, parse_target_selector(value)),
+    None => true,
+  )
+)
+
 enum FeatureEdge {
   struct Local {
     feature: String,
@@ -704,8 +811,9 @@ fn parse_feature_edge(s: String) -> FeatureEdge (
       Some { value } => (
         let (dep, feat) = value;
         if dep.ends_with("?") (
+          let end = dep.len() - 1;
           FeatureEdge.DependencyFeature {
-            dependency: dep.slice(0..dep.len() - 1),
+            dependency: dep.slice(0..end),
             feature: feat,
             weak: true,
           }
@@ -1190,6 +1298,7 @@ fn resolve_request(request: DependencyRequest) where {
     chosen.deps
       .filter($.kind.unwrap_or("normal") == request.kind)
       .map(request_from_index_dep($))
+      .filter(dependency_target_matches(target, $))
       .to_array();
   let features = unify_features(
     merged_entry_features(chosen),
