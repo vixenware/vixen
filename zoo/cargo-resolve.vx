@@ -1438,7 +1438,7 @@ fn demand_dependency_package(
   ok
 )
 
-fn ensure_dependency_graph(crate: ResolvedCrate) where {
+fn validate_package_graph(crate: ResolvedCrate) where {
   config: SparseConfig,
   lock: CargoLock?,
   target: BuildTarget,
@@ -1473,19 +1473,27 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
       search_assumption(
         version_assumption_name(request),
         candidates,
-        (() =>
-          ensure_dependency_graph(
-            resolve_registry_candidate(entries, request) where {
-              config,
-              target,
-            }
-          ) where {
+        (() => (
+          let version = branch_assumption(version_assumption_name(request));
+          let facts =
+            keyed(
+              registry_candidate_facts_key(request, version),
+              [request],
+              ((ctx) =>
+                resolve_registry_candidate_facts(entries, merge_joined_requests(ctx.joined), version)
+                  where {
+                    config,
+                    target,
+                  }
+              ),
+            );
+          validate_package_graph(facts) where {
             config,
             lock,
             target,
             workspace,
           }
-        ),
+        )),
       )
     ),
     None =>
@@ -1495,6 +1503,29 @@ fn resolve_registry_package_node(request: DependencyRequest) where {
         reason: "no-candidate",
       },
   )
+)
+
+fn resolve_non_registry_package_node(request: DependencyRequest) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} -> ResolvedCrate (
+  let facts =
+    keyed(
+      package_facts_key(request),
+      [request],
+      ((ctx) => resolve_non_registry_facts(merge_joined_requests(ctx.joined)) where {
+        target,
+        workspace,
+      }),
+    );
+  validate_package_graph(facts) where {
+    config,
+    lock,
+    target,
+    workspace,
+  }
 )
 
 fn resolve_package_node(ctx) where {
@@ -1512,34 +1543,20 @@ fn resolve_package_node(ctx) where {
         target,
         workspace,
       },
-    DependencySource.LocalPath { base: _, path: _ } => (
-      let crate = resolve_request(request) where {
+    DependencySource.LocalPath { base: _, path: _ } =>
+      resolve_non_registry_package_node(request) where {
         config,
         lock,
         target,
         workspace,
-      };
-      ensure_dependency_graph(crate) where {
+      },
+    DependencySource.Git { url: _, rev: _ } =>
+      resolve_non_registry_package_node(request) where {
         config,
         lock,
         target,
         workspace,
-      }
-    ),
-    DependencySource.Git { url: _, rev: _ } => (
-      let crate = resolve_request(request) where {
-        config,
-        lock,
-        target,
-        workspace,
-      };
-      ensure_dependency_graph(crate) where {
-        config,
-        lock,
-        target,
-        workspace,
-      }
-    ),
+      },
   )
 )
 
@@ -1684,15 +1701,23 @@ fn version_assumption_name(request: DependencyRequest) -> String (
   `version:{request_key(request)}`
 )
 
-fn resolve_registry_candidate(
+fn package_facts_key(request: DependencyRequest) -> String (
+  `facts:{request_key(request)}`
+)
+
+fn registry_candidate_facts_key(request: DependencyRequest, version: String) -> String (
+  `candidate:{request_key(request)}:{version}`
+)
+
+fn resolve_registry_candidate_facts(
   entries: Array[IndexEntry],
   request: DependencyRequest,
+  version: String,
 ) where {
   config: SparseConfig,
   target: BuildTarget,
 } -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
-  let version = branch_assumption(version_assumption_name(request));
   let chosen =
     match entries.find($.vers == version) (
       Some { value } => value,
@@ -1746,10 +1771,13 @@ fn search_registry_candidate(
       search_assumption(
         version_assumption_name(request),
         candidates,
-        (() => resolve_registry_candidate(entries, request) where {
-          config,
-          target,
-        }),
+        (() => (
+          let version = branch_assumption(version_assumption_name(request));
+          resolve_registry_candidate_facts(entries, request, version) where {
+            config,
+            target,
+          }
+        )),
       )
     ),
     None =>
@@ -1761,13 +1789,10 @@ fn search_registry_candidate(
   )
 )
 
-fn resolve_request(request: DependencyRequest) where {
-  config: SparseConfig,
-  lock: CargoLock?,
+fn resolve_non_registry_facts(request: DependencyRequest) where {
   target: BuildTarget,
   workspace: Tree,
 } #discover -> ResolvedCrate (
-  let package_name = request.package_name.unwrap_or(request.name);
   let workspace_package = workspace_root_package(workspace);
 
   match request.source (
@@ -1821,6 +1846,19 @@ fn resolve_request(request: DependencyRequest) where {
         source,
       }
     ),
+    DependencySource.Registry => fail "resolve_non_registry_facts called for registry request",
+  )
+)
+
+fn resolve_request(request: DependencyRequest) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} #discover -> ResolvedCrate (
+  let package_name = request.package_name.unwrap_or(request.name);
+
+  match request.source (
     DependencySource.Registry => (
       let entries = parse_sparse_entries(Http.get(sparse_index_url(package_name)));
       search_registry_candidate(entries, request, lock) where {
@@ -1828,6 +1866,10 @@ fn resolve_request(request: DependencyRequest) where {
         target,
       }
     ),
+    DependencySource.LocalPath { base: _, path: _ } =>
+      resolve_non_registry_facts(request) where { target, workspace },
+    DependencySource.Git { url: _, rev: _ } =>
+      resolve_non_registry_facts(request) where { target, workspace },
   )
 )
 
