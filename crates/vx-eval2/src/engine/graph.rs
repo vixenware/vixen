@@ -529,6 +529,23 @@ impl<T: Clone> EvalNodeTable<T> {
         self.get(node_id).is_some()
     }
 
+    pub(super) fn remove(&mut self, node_id: &EvalNodeId) -> Option<T> {
+        if Self::is_dense(*node_id) {
+            let slot = self.dense.get_mut(node_id.0 as usize)?;
+            let previous = slot.take();
+            if previous.is_some() {
+                self.len -= 1;
+            }
+            previous
+        } else {
+            let previous = self.sparse.remove(node_id);
+            if previous.is_some() {
+                self.len -= 1;
+            }
+            previous
+        }
+    }
+
     pub(super) fn keys(&self) -> impl Iterator<Item = EvalNodeId> + '_ {
         let dense = self
             .dense
@@ -559,8 +576,8 @@ pub(super) struct EvalSchedulerBase {
     pub(super) node_records: EvalNodeTable<EvalNodeRecord>,
     pub(super) keyed_nodes: EvalNodeTable<KeyedNodeMemo>,
     pub(super) dependency_edges: Vector<EvalDependencyEdge>,
-    pub(super) pending_resumes: OrdMap<u64, Vec<EvalSuspension>>,
-    pub(super) pending_kinds: OrdMap<u64, PendingKind>,
+    pub(super) pending_resumes: EvalNodeTable<Vec<EvalSuspension>>,
+    pub(super) pending_kinds: EvalNodeTable<PendingKind>,
     pub(super) retained_exprs: EvalNodeTable<RetainedExprTask>,
     pub(super) learned_no_goods: Vector<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vector<LearnedSearchNoGood>,
@@ -576,8 +593,8 @@ impl Default for EvalSchedulerBase {
             node_records: EvalNodeTable::default(),
             keyed_nodes: EvalNodeTable::default(),
             dependency_edges: Vector::new(),
-            pending_resumes: OrdMap::new(),
-            pending_kinds: OrdMap::new(),
+            pending_resumes: EvalNodeTable::default(),
+            pending_kinds: EvalNodeTable::default(),
             retained_exprs: EvalNodeTable::default(),
             learned_no_goods: Vector::new(),
             learned_search_no_goods: Vector::new(),
@@ -623,7 +640,7 @@ pub(super) struct EvalLearnedSearchNoGoodValidation {
 pub(super) struct EvalSnapshotReadSet {
     pub(super) node_records: BTreeSet<EvalNodeId>,
     pub(super) node_states: BTreeSet<EvalNodeId>,
-    pub(super) pending_kinds: BTreeSet<u64>,
+    pub(super) pending_kinds: BTreeSet<EvalNodeId>,
     pub(super) keyed_nodes: BTreeSet<EvalNodeId>,
     pub(super) retained_exprs: BTreeSet<EvalNodeId>,
     pub(super) dependency_reads: Vec<(EvalNodeId, Vec<EvalNodeId>)>,
@@ -679,8 +696,8 @@ pub(super) struct EvalSchedulerDelta {
     pub(super) node_states: Vec<(EvalNodeId, EvalNodeState)>,
     pub(super) dependency_edges: Vec<EvalDependencyEdge>,
     pub(super) queued: Vec<ReadyTaskRecord>,
-    pub(super) pending_resumes: Vec<(u64, EvalSuspension)>,
-    pub(super) pending_kinds: Vec<(u64, PendingKind)>,
+    pub(super) pending_resumes: Vec<(EvalNodeId, EvalSuspension)>,
+    pub(super) pending_kinds: Vec<(EvalNodeId, PendingKind)>,
     pub(super) retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
     pub(super) learned_no_goods: Vec<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
@@ -695,8 +712,8 @@ pub(super) struct RecordedSchedulerDelta {
     pub(super) node_states: BTreeMap<EvalNodeId, EvalNodeState>,
     pub(super) dependency_edges: Vec<EvalDependencyEdge>,
     pub(super) queued: Vec<ReadyTaskRecord>,
-    pub(super) pending_resumes: BTreeMap<u64, Vec<EvalSuspension>>,
-    pub(super) pending_kinds: BTreeMap<u64, PendingKind>,
+    pub(super) pending_resumes: BTreeMap<EvalNodeId, Vec<EvalSuspension>>,
+    pub(super) pending_kinds: BTreeMap<EvalNodeId, PendingKind>,
     pub(super) retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
     pub(super) learned_no_goods: Vec<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,

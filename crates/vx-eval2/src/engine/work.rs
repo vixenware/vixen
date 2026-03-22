@@ -261,7 +261,7 @@ impl<'a> EvalPreparedScheduler<'a> {
         self.reads.borrow_mut().node_states.insert(node_id);
     }
 
-    fn record_pending_kind_read(&self, pending_id: u64) {
+    fn record_pending_kind_read(&self, pending_id: EvalNodeId) {
         self.reads.borrow_mut().pending_kinds.insert(pending_id);
     }
 
@@ -363,7 +363,7 @@ impl<'a> EvalPreparedScheduler<'a> {
         }
     }
 
-    fn pending_kind_local(&self, pending_id: u64) -> Option<PendingKind> {
+    fn pending_kind_local(&self, pending_id: EvalNodeId) -> Option<PendingKind> {
         if let Some(kind) = self.delta.pending_kinds.get(&pending_id).copied() {
             Some(kind)
         } else {
@@ -625,7 +625,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         let pending = PendingRef::new(pending_id.0, description.clone());
         self.delta
             .pending_kinds
-            .insert(pending.node_id, PendingKind::External);
+            .insert(pending_id, PendingKind::External);
         self.record_node(EvalNodeRecord {
             node_id: pending_id,
             parent_id: None,
@@ -639,18 +639,18 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
         self.delta
             .pending_kinds
-            .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+            .insert(dependency, PendingKind::ChildDependency { dependency });
         pending
     }
 
     fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
-        self.pending_kind_local(pending.node_id)
+        self.pending_kind_local(EvalNodeId(pending.node_id))
     }
 
     fn register_suspension(&mut self, suspension: EvalSuspension) {
         self.delta
             .pending_resumes
-            .entry(suspension.pending.node_id)
+            .entry(EvalNodeId(suspension.pending.node_id))
             .or_default()
             .push(suspension);
     }
@@ -1233,7 +1233,7 @@ impl EvalScheduler {
         let pending = PendingRef::new(pending_id.0, description.clone());
         self.base
             .pending_kinds
-            .insert(pending.node_id, PendingKind::External);
+            .insert(pending_id, PendingKind::External);
         self.record_node(EvalNodeRecord {
             node_id: pending_id,
             parent_id: None,
@@ -1247,18 +1247,20 @@ impl EvalScheduler {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
         self.base
             .pending_kinds
-            .insert(pending.node_id, PendingKind::ChildDependency { dependency });
+            .insert(dependency, PendingKind::ChildDependency { dependency });
         pending
     }
 
     pub(super) fn pending_nodes(&self) -> Vec<PendingRef> {
         self.base
             .pending_resumes
-            .values()
-            .filter_map(|suspensions| {
+            .iter()
+            .filter_map(|(_, suspensions)| {
                 let suspension = suspensions.first()?;
                 matches!(
-                    self.base.pending_kinds.get(&suspension.pending.node_id),
+                    self.base
+                        .pending_kinds
+                        .get(&EvalNodeId(suspension.pending.node_id)),
                     Some(PendingKind::External)
                 )
                 .then(|| suspension.pending.clone())
@@ -1267,7 +1269,10 @@ impl EvalScheduler {
     }
 
     pub(super) fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
-        self.base.pending_kinds.get(&pending.node_id).copied()
+        self.base
+            .pending_kinds
+            .get(&EvalNodeId(pending.node_id))
+            .copied()
     }
 
     pub(super) fn has_waiting_work(&self) -> bool {
@@ -1747,7 +1752,7 @@ impl EvalScheduler {
                 ));
             }
         }
-        self.resolve_registered_suspension(pending.node_id, result)
+        self.resolve_registered_suspension(EvalNodeId(pending.node_id), result)
     }
 
     pub(super) fn resolve_child_dependency(
@@ -1755,11 +1760,11 @@ impl EvalScheduler {
         dependency: EvalNodeId,
         result: Result<Value, EvalError>,
     ) -> Result<bool, EvalError> {
-        match self.base.pending_kinds.get(&dependency.0).copied() {
+        match self.base.pending_kinds.get(&dependency).copied() {
             Some(PendingKind::ChildDependency {
                 dependency: registered,
             }) if registered == dependency => {
-                self.resolve_registered_suspension(dependency.0, result)?;
+                self.resolve_registered_suspension(dependency, result)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -1768,13 +1773,13 @@ impl EvalScheduler {
 
     fn resolve_registered_suspension(
         &mut self,
-        pending_id: u64,
+        pending_id: EvalNodeId,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
         let Some(suspensions) = self.base.pending_resumes.remove(&pending_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
-                format!("pending node {pending_id} is not registered"),
+                format!("pending node {:?} is not registered", pending_id),
             ));
         };
         let Some(pending) = suspensions
@@ -1783,7 +1788,10 @@ impl EvalScheduler {
         else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
-                format!("pending node {pending_id} had no registered suspensions"),
+                format!(
+                    "pending node {:?} had no registered suspensions",
+                    pending_id
+                ),
             ));
         };
         self.base.pending_kinds.remove(&pending_id);
@@ -1818,11 +1826,14 @@ impl EvalScheduler {
     }
 
     pub(super) fn register_suspension(&mut self, suspension: EvalSuspension) {
-        self.base
-            .pending_resumes
-            .entry(suspension.pending.node_id)
-            .or_default()
-            .push(suspension);
+        let pending_id = EvalNodeId(suspension.pending.node_id);
+        if let Some(suspensions) = self.base.pending_resumes.get_mut(&pending_id) {
+            suspensions.push(suspension);
+        } else {
+            self.base
+                .pending_resumes
+                .insert(pending_id, vec![suspension]);
+        }
     }
 
     pub(super) fn lease_ready_task(&mut self) -> Result<Option<ReadyTaskLease>, EvalError> {
@@ -2003,7 +2014,7 @@ impl EvalScheduler {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
                         format!(
-                            "pending kind {} diverged during completion merge",
+                            "pending kind {:?} diverged during completion merge",
                             pending_id
                         ),
                     ));
@@ -2015,9 +2026,14 @@ impl EvalScheduler {
             }
         }
         for (pending_id, suspension) in delta.pending_resumes {
-            let suspensions = self.base.pending_resumes.entry(pending_id).or_default();
-            if !suspensions.contains(&suspension) {
-                suspensions.push(suspension);
+            if let Some(suspensions) = self.base.pending_resumes.get_mut(&pending_id) {
+                if !suspensions.contains(&suspension) {
+                    suspensions.push(suspension);
+                }
+            } else {
+                self.base
+                    .pending_resumes
+                    .insert(pending_id, vec![suspension]);
             }
         }
         for (node_id, state) in delta.node_states {
