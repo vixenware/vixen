@@ -278,7 +278,6 @@ struct RegistryResolution {
 }
 
 struct MaterializedGraphState {
-  requests: Map[String, Bool] = %{},
   packages: Map[String, ResolvedCrate] = %{},
 }
 
@@ -1469,6 +1468,24 @@ fn canonical_requests(requests: Array[DependencyRequest]) -> Array[DependencyReq
   dependency_request_values(array_fold(requests, %{}, canonical_request_insert))
 )
 
+fn demand_package(request: DependencyRequest) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} #discover -> ResolvedCrate (
+  keyed(
+    package_request_key(request),
+    [request],
+    ((ctx) => resolve_package_node(ctx) where {
+      config,
+      lock,
+      target,
+      workspace,
+    }),
+  )
+)
+
 fn demand_dependency_package(
   ok: Bool,
   dep: DependencyRequest,
@@ -1478,17 +1495,7 @@ fn demand_dependency_package(
   target: BuildTarget,
   workspace: Tree,
 } -> Bool (
-  let _package =
-    keyed(
-      package_request_key(dep),
-      [dep],
-      ((ctx) => resolve_package_node(ctx) where {
-        config,
-        lock,
-        target,
-        workspace,
-      }),
-    );
+  let _package = demand_package(dep) where { config, lock, target, workspace };
   ok
 )
 
@@ -1565,40 +1572,6 @@ fn resolve_package_node(ctx) where {
   )
 )
 
-fn materialize_dependency_graph(
-  state: MaterializedGraphState,
-  dep: DependencyRequest,
-) where {
-  config: SparseConfig,
-  lock: CargoLock?,
-  target: BuildTarget,
-  workspace: Tree,
-} -> MaterializedGraphState (
-  let key = package_request_key(dep);
-  if state.requests.has(key) (
-    state
-  ) else (
-    let crate =
-      keyed(
-        key,
-        [dep],
-        ((ctx) => resolve_package_node(ctx) where {
-          config,
-          lock,
-          target,
-          workspace,
-        }),
-      );
-    materialize_package_graph(
-      MaterializedGraphState {
-        ..state,
-        requests: map_put(state.requests, key, true),
-      },
-      crate,
-    ) where { config, lock, target, workspace }
-  )
-)
-
 fn materialize_package_graph(
   state: MaterializedGraphState,
   crate: ResolvedCrate,
@@ -1619,49 +1592,35 @@ fn materialize_package_graph(
     array_fold(
       canonical_requests(crate.dependencies),
       with_crate,
-      ((acc, dep) => materialize_dependency_graph(acc, dep) where {
-        config,
-        lock,
-        target,
-        workspace,
-      }),
+      ((acc, dep) => (
+        let package = demand_package(dep) where { config, lock, target, workspace };
+        materialize_package_graph(acc, package) where {
+          config,
+          lock,
+          target,
+          workspace,
+        }
+      )),
     )
   )
 )
 
 fn materialize_resolution(
-  roots: Array[DependencyRequest],
-  root_ids: Array[PackageId],
+  roots: Array[ResolvedCrate],
 ) where {
   config: SparseConfig,
   lock: CargoLock?,
   target: BuildTarget,
   workspace: Tree,
 } -> RegistryResolution (
-  let demanded = canonical_requests(roots);
   let state =
     array_fold(
-      demanded,
+      roots,
       MaterializedGraphState {
-        requests: %{},
         packages: %{},
       },
-      ((acc, root_request) => (
-        let root =
-          keyed(
-            package_request_key(root_request),
-            [root_request],
-            ((ctx) => resolve_package_node(ctx) where {
-              config,
-              lock,
-              target,
-              workspace,
-            }),
-          );
-        materialize_package_graph(
-          acc,
-          root,
-        ) where {
+      ((acc, root) => (
+        materialize_package_graph(acc, root) where {
           config,
           lock,
           target,
@@ -1670,9 +1629,20 @@ fn materialize_resolution(
       )),
     );
   RegistryResolution {
-    roots: root_ids,
+    roots: roots.map($.id).to_array(),
     packages: state.packages.map((key, value) => value),
   }
+)
+
+fn demand_root_packages(roots: Array[DependencyRequest]) where {
+  config: SparseConfig,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} #discover -> Array[ResolvedCrate] (
+  canonical_requests(roots)
+    .map(demand_package($) where { config, lock, target, workspace })
+    .to_array()
 )
 
 fn demand_graph(roots: Array[DependencyRequest]) where {
@@ -1681,19 +1651,8 @@ fn demand_graph(roots: Array[DependencyRequest]) where {
   target: BuildTarget,
   workspace: Tree,
 } #discover -> Array[PackageId] (
-  canonical_requests(roots)
-    .map(
-      keyed(
-        package_request_key($),
-        [$],
-        ((ctx) => resolve_package_node(ctx) where {
-          config,
-          lock,
-          target,
-          workspace,
-        }),
-      ).id
-    )
+  (demand_root_packages(roots) where { config, lock, target, workspace })
+    .map($.id)
     .to_array()
 )
 
@@ -1926,16 +1885,7 @@ fn resolve_request(request: DependencyRequest) where {
   target: BuildTarget,
   workspace: Tree,
 } #discover -> ResolvedCrate (
-  keyed(
-    package_request_key(request),
-    [request],
-    ((ctx) => resolve_package_node(ctx) where {
-      config,
-      lock,
-      target,
-      workspace,
-    }),
-  )
+  demand_package(request) where { config, lock, target, workspace }
 )
 
 fn resolve_manifest(manifest: CargoManifest) where {
@@ -1955,8 +1905,8 @@ fn resolve_manifest_at(manifest: CargoManifest, manifest_root: Path) where {
   let requests =
     root_requests_at_with_workspace(manifest, manifest_root, workspace_root_dependencies(workspace))
       where { target };
-  let roots = demand_graph(requests) where { config, lock, target, workspace };
-  materialize_resolution(requests, roots) where { config, lock, target, workspace }
+  let roots = demand_root_packages(requests) where { config, lock, target, workspace };
+  materialize_resolution(roots) where { config, lock, target, workspace }
 )
 
 fn demand_manifest(manifest: CargoManifest) where {

@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/app", "crates/leaf"]
+resolver = "2"
+
+[workspace.dependencies]
+shared = { version = "1.0.0", default-features = false, features = ["right"] }

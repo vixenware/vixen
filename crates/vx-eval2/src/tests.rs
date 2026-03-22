@@ -3339,17 +3339,17 @@ fn zoo_cargo_resolve_request_executes_workspace_inherited_local_path_dependency(
                 "main.vx",
                 r##"
 fn build() {
-  let manifest = Toml.parse[CargoManifest](read_file("crates/vx-lsp/Cargo.toml"));
+  let manifest = Toml.parse[CargoManifest](read_file("specs/eval/run/cargo_workspace_inherited_local_path/crates/app/Cargo.toml"));
   let request = request_from_dep_at_with_workspace(
-    "vx-tracing",
-    manifest.dependencies.get("vx-tracing"),
+    "leaf",
+    manifest.dependencies.get("leaf"),
     "normal",
-    @crates/vx-lsp,
-    workspace_root_dependencies_from_blob(read_file("Cargo.toml")),
+    @crates/app,
+    workspace_root_dependencies_from_blob(read_file("specs/eval/run/cargo_workspace_inherited_local_path/Cargo.toml")),
   );
   resolve_request(request) where {
     config: SparseConfig {
-      dl: "unused",
+      dl: "https://crates.io/api/v1/crates",
     },
     lock: None,
     target: BuildTarget {
@@ -3366,7 +3366,7 @@ fn build() {
         },
       ],
     },
-    workspace: Tree("."),
+    workspace: Tree("specs/eval/run/cargo_workspace_inherited_local_path"),
   }
 }
 "##,
@@ -3377,13 +3377,17 @@ fn build() {
     );
     let runtime = CargoSketchRuntime {
         root_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        http_responses: HashMap::new(),
+        http_responses: cargo_feature_join_http_responses(),
     };
     let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "local");
 
     let resolution = session
         .run()
         .expect("run zoo cargo resolve_request against workspace inherited local path dependency");
+    maybe_print_session_profile(
+        "zoo_cargo_resolve_request_executes_workspace_inherited_local_path_dependency",
+        &session,
+    );
     let Resolution::Ready(value) = resolution else {
         panic!(
             "expected ready zoo cargo workspace inherited local path result\n{}",
@@ -3393,7 +3397,7 @@ fn build() {
 
     assert_eq!(
         struct_field(&value, "name").rep,
-        ValueRep::String("vx-tracing".into())
+        ValueRep::String("leaf".into())
     );
     assert_eq!(
         struct_field(&value, "version").rep,
@@ -3405,18 +3409,29 @@ fn build() {
         panic!("expected external path, got {path:?}");
     };
     assert_eq!(external.kind.as_ref(), "Path");
-    assert_eq!(external.descriptor.as_ref(), "./crates/vx-tracing");
+    assert_eq!(external.descriptor.as_ref(), "crates/app/../leaf");
     let dependencies = struct_field(&value, "dependencies");
     let ValueRep::Array(items) = &dependencies.rep else {
         panic!("expected dependencies array, got {dependencies:?}");
     };
-    let has_tracing_subscriber = items.iter().any(|dep| {
-        matches!(
-            &struct_field(dep, "name").rep,
-            ValueRep::String(name) if name.as_ref() == "tracing-subscriber"
+    assert_eq!(items.len(), 1);
+    assert!(matches!(
+        &struct_field(&items[0], "name").rep,
+        ValueRep::String(name) if name.as_ref() == "shared"
+    ));
+    assert!(matches!(
+        &struct_field(&items[0], "default_features").rep,
+        ValueRep::Bool(false)
+    ));
+    let features = struct_field(&items[0], "features");
+    let ValueRep::Array(features) = &features.rep else {
+        panic!("expected feature array, got {features:?}");
+    };
+    assert!(
+        features.iter().any(
+            |feature| matches!(&feature.rep, ValueRep::String(name) if name.as_ref() == "right")
         )
-    });
-    assert!(has_tracing_subscriber);
+    );
 }
 
 #[test]
