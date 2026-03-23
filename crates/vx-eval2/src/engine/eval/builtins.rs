@@ -851,7 +851,7 @@ pub(in crate::engine) fn continue_array_fold_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    items: Vec<Value>,
+    items: Arc<[Value]>,
     mut accumulator: Value,
     step: FunctionRef,
     start_index: usize,
@@ -871,12 +871,10 @@ pub(in crate::engine) fn continue_array_fold_builtin(
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayFoldAfterStep {
+                    ContinuationFrame::ArrayFold {
                         node_id,
                         parent_id,
-                        items,
-                        step,
-                        index,
+                        fold: ArrayFoldState { items, step, index },
                     },
                 ));
             }
@@ -999,7 +997,7 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    items: Vec<Value>,
+    items: Arc<[Value]>,
     mapper: FunctionRef,
     mut mapped: Vec<Value>,
     mapper_result: Value,
@@ -1042,13 +1040,15 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayFilterMapAfterMapper {
+                    ContinuationFrame::ArrayFilterMap {
                         node_id,
                         parent_id,
-                        items,
-                        mapper,
-                        mapped,
-                        index: next_index,
+                        filter_map: ArrayFilterMapState {
+                            items,
+                            mapper,
+                            mapped,
+                            index: next_index,
+                        },
                     },
                 ));
             }
@@ -2362,7 +2362,7 @@ fn continue_builtin_call_inner(
                     state,
                     node_id,
                     parent_id,
-                    items,
+                    Arc::<[Value]>::from(items),
                     mapper.clone(),
                     Vec::new(),
                     result,
@@ -2371,13 +2371,15 @@ fn continue_builtin_call_inner(
                 .map(Some),
                 EvalStep::Suspended(suspension) => Ok(Some(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayFilterMapAfterMapper {
+                    ContinuationFrame::ArrayFilterMap {
                         node_id,
                         parent_id,
-                        items,
-                        mapper: mapper.clone(),
-                        mapped: Vec::new(),
-                        index: 0,
+                        filter_map: ArrayFilterMapState {
+                            items: Arc::<[Value]>::from(items),
+                            mapper: mapper.clone(),
+                            mapped: Vec::new(),
+                            index: 0,
+                        },
                     },
                 ))),
             }
@@ -3030,7 +3032,7 @@ fn continue_builtin_call_inner(
                 state,
                 node_id,
                 parent_id,
-                items.iter().cloned().collect(),
+                Arc::<[Value]>::from(items.iter().cloned().collect::<Vec<_>>()),
                 args[1].clone(),
                 step.clone(),
                 0,

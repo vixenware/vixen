@@ -964,38 +964,40 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::ArrayFoldAfterStep {
+        ContinuationFrame::ArrayFold {
             node_id,
             parent_id,
-            items,
-            step,
-            index,
+            fold,
         } => {
             let result = match input {
                 Ok(accumulator) => continue_array_fold_builtin(
                     state,
                     node_id,
                     parent_id,
-                    items,
+                    fold.items,
                     accumulator,
-                    step,
-                    index + 1,
+                    fold.step,
+                    fold.index + 1,
                 ),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::ArrayFilterMapAfterMapper {
+        ContinuationFrame::ArrayFilterMap {
             node_id,
             parent_id,
-            items,
-            mapper,
-            mapped,
-            index,
+            filter_map,
         } => {
             let result = match input {
                 Ok(value) => continue_array_filter_map_builtin(
-                    state, node_id, parent_id, items, mapper, mapped, value, index,
+                    state,
+                    node_id,
+                    parent_id,
+                    filter_map.items,
+                    filter_map.mapper,
+                    filter_map.mapped,
+                    value,
+                    filter_map.index,
                 ),
                 Err(error) => Err(error),
             };

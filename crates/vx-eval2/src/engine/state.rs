@@ -252,6 +252,21 @@ pub(super) struct ArrayAnyState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayFoldState {
+    pub(super) items: Arc<[Value]>,
+    pub(super) step: FunctionRef,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayFilterMapState {
+    pub(super) items: Arc<[Value]>,
+    pub(super) mapper: FunctionRef,
+    pub(super) mapped: Vec<Value>,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -406,20 +421,15 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         find: ArrayFindState,
     },
-    ArrayFoldAfterStep {
+    ArrayFold {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        step: FunctionRef,
-        index: usize,
+        fold: ArrayFoldState,
     },
-    ArrayFilterMapAfterMapper {
+    ArrayFilterMap {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        mapper: FunctionRef,
-        mapped: Vec<Value>,
-        index: usize,
+        filter_map: ArrayFilterMapState,
     },
     ArrayAny {
         node_id: EvalNodeId,
