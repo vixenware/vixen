@@ -2377,10 +2377,14 @@ pub(super) fn eval_map(
         state,
         node_id,
         parent_id,
-        Vec::new(),
-        entries,
-        env.clone(),
-        state.span_for_node(map),
+        MapState {
+            entries: Vec::new(),
+            key: None,
+            value_expr: None,
+            remaining_entries: entries,
+            env: env.clone(),
+            map_source: state.span_for_node(map),
+        },
     )
 }
 
@@ -3562,52 +3566,61 @@ pub(super) fn continue_map_entries(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut entries: Vec<(Value, Value)>,
-    remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-    mut env: EvalEnv,
-    map_source: SourceSpan,
+    mut map: MapState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_entries.into_iter();
-    while let Some((key_handle, value_handle)) = remaining.next() {
-        let key = match eval_dependent_expr_handle(state, node_id, key_handle, &mut env)? {
+    let mut remaining = map.remaining_entries.into_iter();
+    loop {
+        if map.key.is_none() {
+            let Some((key_handle, value_handle)) = remaining.next() else {
+                break;
+            };
+            map.value_expr = Some(value_handle);
+            match eval_dependent_expr_handle(state, node_id, key_handle, &mut map.env)? {
+                EvalStep::Ready(key) => map.key = Some(key),
+                EvalStep::Suspended(suspension) => {
+                    map.remaining_entries = remaining.collect();
+                    return Ok(extend_suspension(
+                        suspension,
+                        ContinuationFrame::Map {
+                            node_id,
+                            parent_id,
+                            map,
+                            pending: MapResumeKind::Key,
+                        },
+                    ));
+                }
+            }
+        }
+        let key = map
+            .key
+            .take()
+            .expect("map value evaluation should retain the current key");
+        let value_handle = map
+            .value_expr
+            .take()
+            .expect("map value evaluation should retain the current value expr");
+        let value = match eval_dependent_expr_handle(state, node_id, value_handle, &mut map.env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
+                map.key = Some(key);
+                map.value_expr = Some(value_handle);
+                map.remaining_entries = remaining.collect();
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::MapAfterKey {
+                    ContinuationFrame::Map {
                         node_id,
                         parent_id,
-                        entries,
-                        value_expr: value_handle,
-                        remaining_entries: remaining.collect(),
-                        env,
-                        map_source,
+                        map,
+                        pending: MapResumeKind::Value,
                     },
                 ));
             }
         };
-        let value = match eval_dependent_expr_handle(state, node_id, value_handle, &mut env)? {
-            EvalStep::Ready(value) => value,
-            EvalStep::Suspended(suspension) => {
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::MapAfterValue {
-                        node_id,
-                        parent_id,
-                        entries,
-                        key,
-                        remaining_entries: remaining.collect(),
-                        env,
-                        map_source,
-                    },
-                ));
-            }
-        };
-        entries.push((key, value));
+        map.entries.push((key, value));
     }
-    let provenance = Provenance::literal(map_source);
-    let meta = aggregate_map_entries_meta(provenance, entries.iter());
-    Ok(EvalStep::Ready(Value::map(entries).with_meta(meta)))
+    let provenance = Provenance::literal(map.map_source);
+    let meta = aggregate_map_entries_meta(provenance, map.entries.iter());
+    Ok(EvalStep::Ready(Value::map(map.entries).with_meta(meta)))
 }
 
 pub(super) fn continue_struct_fields(

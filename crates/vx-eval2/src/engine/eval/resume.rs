@@ -688,72 +688,28 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::MapAfterKey {
+        ContinuationFrame::Map {
             node_id,
             parent_id,
-            entries,
-            value_expr,
-            remaining_entries,
-            mut env,
-            map_source,
-        } => {
-            let result = match input {
-                Ok(key) => {
-                    let value =
-                        match eval_dependent_expr_handle(state, node_id, value_expr, &mut env)? {
-                            EvalStep::Ready(value) => value,
-                            EvalStep::Suspended(suspension) => {
-                                return Ok(ResumeOutcome::Suspended(extend_resume(
-                                    suspension,
-                                    ContinuationFrame::MapAfterValue {
-                                        node_id,
-                                        parent_id,
-                                        entries,
-                                        key,
-                                        remaining_entries,
-                                        env,
-                                        map_source,
-                                    },
-                                )));
-                            }
-                        };
-                    let mut entries = entries;
-                    entries.push((key, value));
-                    continue_map_entries(
-                        state,
-                        node_id,
-                        parent_id,
-                        entries,
-                        remaining_entries,
-                        env,
-                        map_source,
-                    )
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::MapAfterValue {
-            node_id,
-            parent_id,
-            mut entries,
-            key,
-            remaining_entries,
-            env,
-            map_source,
+            mut map,
+            pending,
         } => {
             let result = match input {
                 Ok(value) => {
-                    entries.push((key, value));
-                    continue_map_entries(
-                        state,
-                        node_id,
-                        parent_id,
-                        entries,
-                        remaining_entries,
-                        env,
-                        map_source,
-                    )
+                    match pending {
+                        MapResumeKind::Key => {
+                            map.key = Some(value);
+                        }
+                        MapResumeKind::Value => {
+                            let key = map
+                                .key
+                                .take()
+                                .expect("map value resume should retain the current key");
+                            map.value_expr = None;
+                            map.entries.push((key, value));
+                        }
+                    }
+                    continue_map_entries(state, node_id, parent_id, map)
                 }
                 Err(error) => Err(error),
             };
@@ -1125,12 +1081,4 @@ pub(in crate::engine) fn resume_frame(
             })
         }
     }
-}
-
-pub(in crate::engine) fn extend_resume(
-    mut suspension: EvalSuspension,
-    frame: ContinuationFrame,
-) -> EvalSuspension {
-    suspension.frames.push(frame);
-    suspension
 }

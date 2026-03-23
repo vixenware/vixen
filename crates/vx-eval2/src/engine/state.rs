@@ -162,6 +162,22 @@ pub(super) struct WhereState {
     pub(super) env: EvalEnv,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MapResumeKind {
+    Key,
+    Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MapState {
+    pub(super) entries: Vec<(Value, Value)>,
+    pub(super) key: Option<Value>,
+    pub(super) value_expr: Option<ExprHandle>,
+    pub(super) remaining_entries: Vec<(ExprHandle, ExprHandle)>,
+    pub(super) env: EvalEnv,
+    pub(super) map_source: SourceSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
@@ -285,23 +301,11 @@ pub(super) enum ContinuationFrame {
         range_source: SourceSpan,
         inclusive_end: bool,
     },
-    MapAfterKey {
+    Map {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        entries: Vec<(Value, Value)>,
-        value_expr: ExprHandle,
-        remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-        env: EvalEnv,
-        map_source: SourceSpan,
-    },
-    MapAfterValue {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        entries: Vec<(Value, Value)>,
-        key: Value,
-        remaining_entries: Vec<(ExprHandle, ExprHandle)>,
-        env: EvalEnv,
-        map_source: SourceSpan,
+        map: MapState,
+        pending: MapResumeKind,
     },
     FailMessage {
         node_id: EvalNodeId,
