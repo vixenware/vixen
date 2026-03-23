@@ -2571,6 +2571,78 @@ fn build() {
 }
 
 #[test]
+fn stream_for_each_returns_unit_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.map((item) => item.to_lower()).for_each()
+}
+"#,
+        "stream-for-each-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+        ])],
+    )
+    .expect("evaluate Stream.for_each()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Stream.for_each() result, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Unit);
+}
+
+#[test]
+fn stream_to_map_collects_entry_streams_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items.map((item) => (item, item.len())).to_map()
+}
+"#,
+        "stream-to-map-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("serde"),
+            Value::string("flate2"),
+        ])],
+    )
+    .expect("evaluate Stream.to_map()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Stream.to_map() result, got {resolution:?}");
+    };
+    let ValueRep::Map(map) = &value.rep else {
+        panic!("expected map result from Stream.to_map(), got {value:?}");
+    };
+    assert_eq!(map.entries.len(), 2);
+    assert_eq!(map.entries[0].0.rep, ValueRep::String("flate2".into()));
+    assert_eq!(map.entries[0].1.rep, ValueRep::U64(6));
+    assert_eq!(map.entries[1].0.rep, ValueRep::String("serde".into()));
+    assert_eq!(map.entries[1].1.rep, ValueRep::U64(5));
+}
+
+#[test]
+fn stream_to_map_rejects_duplicate_keys_at_runtime() {
+    let error = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  ["serde", "serde"].map((item) => (item, item.len())).to_map()
+}
+"#,
+        "stream-to-map-duplicate-runtime",
+        "build",
+        &[],
+    )
+    .expect_err("duplicate Stream.to_map() keys should fail");
+    assert!(
+        error.message.contains("duplicate key"),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn stream_flatten_flattens_mapped_arrays_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -10863,6 +10935,40 @@ fn build() {
     assert!(
         max_calls.load(Ordering::SeqCst) >= 2,
         "Array.map(...).to_array() should overlap sibling runtime calls",
+    );
+}
+
+#[test]
+fn run_parallel_array_map_to_for_each_can_overlap_runtime_steps() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  [1, 2, 3, 4].map((_item) => host_os()).for_each()
+}
+"#,
+        "parallel-array-map-for-each-stream",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::Unit);
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "Array.map(...).for_each() should overlap sibling runtime calls",
     );
 }
 

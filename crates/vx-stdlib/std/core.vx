@@ -185,6 +185,10 @@ namespace Stream[T] {
   fn flatten(self) -> T;
   /// Merge a stream of tree fragments into one tree.
   fn merge(self) -> Tree;
+  /// Force the whole stream, discarding item values.
+  fn for_each(self) -> Unit;
+  /// Collect a stream of `(key, value)` entries into a deterministic map.
+  fn to_map[K, V](self) -> Map[K, V];
   /// Collect the stream into a deterministic array value.
   fn to_array(self) -> Array[T];
   /// Collect the entire stream into a single value.

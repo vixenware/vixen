@@ -757,6 +757,39 @@ pub(in crate::engine) fn collect_stream_join_items(
     }
 }
 
+pub(in crate::engine) fn stream_map_entries(
+    values: Vec<Value>,
+    stream_provenance: Provenance,
+) -> Result<Value, EvalError> {
+    let mut entries = Vec::with_capacity(values.len());
+    for value in values {
+        let ValueRep::Tuple(items) = &value.rep else {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.to_map() items must evaluate to (key, value) tuples",
+            ));
+        };
+        if items.len() != 2 {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.to_map() items must evaluate to (key, value) tuples",
+            ));
+        }
+        entries.push((items[0].clone(), items[1].clone()));
+    }
+    entries.sort_by(|(lhs, _), (rhs, _)| compare_values(lhs, rhs));
+    for pair in entries.windows(2) {
+        if values_equal(&pair[0].0.rep, &pair[1].0.rep)? {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                "Stream.to_map() encountered duplicate key",
+            ));
+        }
+    }
+    let meta = aggregate_map_entries_meta(stream_provenance, entries.iter());
+    Ok(Value::map(entries).with_meta(meta))
+}
+
 pub(in crate::engine) fn continue_array_find_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -1446,11 +1479,13 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Array.flatten"
             | "Array.merge"
             | "Array.to_array"
+            | "Stream.for_each"
             | "Stream.flatten"
             | "Stream.filter"
             | "Stream.flat_map"
             | "Stream.map"
             | "Stream.merge"
+            | "Stream.to_map"
             | "Stream.to_array"
             | "Tree.merge"
             | "Map.map"
@@ -2559,6 +2594,87 @@ fn continue_builtin_call_inner(
                     node_id,
                     child_node_id,
                     vec![ContinuationFrame::StreamMergeJoin {
+                        node_id,
+                        parent_id,
+                        items,
+                        stream_provenance: args[0].meta.provenance.clone(),
+                    }],
+                ))),
+            }
+        }
+        "Stream.for_each" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.for_each() requires receiver",
+                ));
+            }
+            let calls = internal_stream_calls(&args[0])?;
+            let mut items = Vec::with_capacity(calls.len());
+            for call in calls {
+                items.extend(initial_stream_join_items(
+                    state,
+                    call,
+                    "Stream.for_each() can only force bodyful mapped streams",
+                )?);
+            }
+            if items.is_empty() {
+                return Ok(ready_builtin_value(
+                    Value::unit().with_meta(args[0].meta.clone()),
+                ));
+            }
+            match collect_stream_join_items(state, &mut items)? {
+                StreamJoinState::Ready(_) => Ok(ready_builtin_value(
+                    Value::unit().with_meta(args[0].meta.clone()),
+                )),
+                StreamJoinState::Waiting(child_node_id) => Ok(Some(wait_on_child_dependency(
+                    state,
+                    node_id,
+                    child_node_id,
+                    vec![ContinuationFrame::StreamForEachJoin {
+                        node_id,
+                        parent_id,
+                        items,
+                        stream_provenance: args[0].meta.provenance.clone(),
+                    }],
+                ))),
+            }
+        }
+        "Stream.to_map" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.to_map() requires receiver",
+                ));
+            }
+            let calls = internal_stream_calls(&args[0])?;
+            let mut items = Vec::with_capacity(calls.len());
+            for call in calls {
+                items.extend(initial_stream_join_items(
+                    state,
+                    call,
+                    "Stream.to_map() can only collect bodyful mapped streams",
+                )?);
+            }
+            if items.is_empty() {
+                return Ok(ready_builtin_value(
+                    Value::map(Vec::<(Value, Value)>::new()).with_meta(ValueMeta::new(
+                        args[0].meta.provenance.clone(),
+                        ReuseClass::Stable,
+                        CrossingPolicy::ByValue,
+                    )),
+                ));
+            }
+            match collect_stream_join_items(state, &mut items)? {
+                StreamJoinState::Ready(values) => Ok(ready_builtin_value(stream_map_entries(
+                    values,
+                    args[0].meta.provenance.clone(),
+                )?)),
+                StreamJoinState::Waiting(child_node_id) => Ok(Some(wait_on_child_dependency(
+                    state,
+                    node_id,
+                    child_node_id,
+                    vec![ContinuationFrame::StreamToMapJoin {
                         node_id,
                         parent_id,
                         items,

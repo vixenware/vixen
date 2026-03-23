@@ -1512,19 +1512,6 @@ fn demand_package(request: DependencyRequest) where {
   )
 )
 
-fn demand_dependency_package(
-  ok: Bool,
-  dep: DependencyRequest,
-) where {
-  config: SparseConfig,
-  lock: CargoLock?,
-  target: BuildTarget,
-  workspace: Tree,
-} -> Bool (
-  let _package = demand_package(dep) where { config, lock, target, workspace };
-  ok
-)
-
 fn validate_package_graph(crate: ResolvedCrate) where {
   config: SparseConfig,
   lock: CargoLock?,
@@ -1532,16 +1519,9 @@ fn validate_package_graph(crate: ResolvedCrate) where {
   workspace: Tree,
 } -> ResolvedCrate (
   let _validated =
-    array_fold(
-      canonical_requests(crate.dependencies),
-      true,
-      ((ok, dep) => demand_dependency_package(ok, dep) where {
-        config,
-        lock,
-        target,
-        workspace,
-      }),
-    );
+    canonical_requests(crate.dependencies)
+      .map((dep) => demand_package(dep) where { config, lock, target, workspace })
+      .for_each();
   crate
 )
 
@@ -2083,11 +2063,9 @@ fn compile_output_name(crate_name: String) -> Path (
 )
 
 fn compile_dep_mounts(artifacts: Array[CompiledRustArtifact]) -> Map[Path, Tree] (
-  array_fold(
-    artifacts,
-    %{},
-    ((acc, artifact) => map_put(acc, compile_mount(artifact.crate_name), artifact.tree)),
-  )
+  artifacts
+    .map((artifact) => (compile_mount(artifact.crate_name), artifact.tree))
+    .to_map()
 )
 
 fn compile_dep_args(artifacts: Array[CompiledRustArtifact]) -> Array[String] (
@@ -2257,10 +2235,10 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   // Acquisition stays fixed-hash and cacheable.
   let vendor =
     Tree(
-      array_fold(resolution.packages, %{}, (acc, pkg) => (
-        let (path, tree) = vendored_entry(pkg) where { workspace_root: ws };
-        map_put(acc, path, tree)
-      ))
+      resolution
+        .packages
+        .map((pkg) => vendored_entry(pkg) where { workspace_root: ws })
+        .to_map()
     );
   let lock_blob = emit_lockfile(resolution);
   let _env = env;

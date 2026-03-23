@@ -11,7 +11,7 @@ use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FallibleExpr,
     FieldExpr, IfExpr, InvokeExpr, LetStmt, LiteralExpr, MapExpr, MatchExpr, NameRefExpr,
     PartialAppExpr, Pattern, PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr,
-    SyntaxKind, WhereExpr, WithExpr, trimmed_range,
+    SyntaxKind, TupleExpr, WhereExpr, WithExpr, trimmed_range,
 };
 use vx_types::{Capability, FnSig, InferVar, ParamDef, Ty};
 
@@ -379,6 +379,7 @@ impl<'a> ExprTyper<'a> {
                 Ty::Scalar(vx_types::Scalar::String)
             }
             Expr::Array(arr) => self.infer_array(arr),
+            Expr::Tuple(tuple) => self.infer_tuple(tuple),
             Expr::Record(record) => self.infer_record(record),
             Expr::Map(map) => self.infer_map(map),
             Expr::StructLiteral(sl) => self.infer_struct_literal(sl),
@@ -1236,6 +1237,25 @@ impl<'a> ExprTyper<'a> {
                 capabilities: sig.capabilities,
             });
         }
+        if def.name == "to_map"
+            && params.is_empty()
+            && let Ty::Stream(inner) = receiver_ty
+        {
+            let Ty::Tuple(tuple) = inner.as_ref() else {
+                return None;
+            };
+            if tuple.elements.len() != 2 {
+                return None;
+            }
+            return Some(BoundMethodSig {
+                params: Vec::new(),
+                ret: Ty::Map(
+                    Box::new(tuple.elements[0].clone()),
+                    Box::new(tuple.elements[1].clone()),
+                ),
+                capabilities: sig.capabilities,
+            });
+        }
         let mut substitutions = vec![None; sig.type_params.len()];
         bind_type_params(&self_param.ty, receiver_ty, &mut substitutions);
 
@@ -1956,6 +1976,12 @@ impl<'a> ExprTyper<'a> {
             Box::new(key_ty.unwrap_or(Ty::Poison)),
             Box::new(val_ty.unwrap_or(Ty::Poison)),
         )
+    }
+
+    fn infer_tuple(&mut self, tuple: &TupleExpr) -> Ty {
+        Ty::Tuple(vx_types::TupleTy {
+            elements: tuple.items().map(|item| self.infer_expr(&item)).collect(),
+        })
     }
 
     fn infer_record(&mut self, record: &RecordExpr) -> Ty {

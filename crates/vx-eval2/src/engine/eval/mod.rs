@@ -861,6 +861,11 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         {
             Some("Stream.merge")
         }
+        (ValueRep::Struct(StructValue { type_name, .. }), "for_each")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.for_each")
+        }
         (ValueRep::Struct(StructValue { type_name, .. }), "filter")
             if type_name.as_ref() == "__Eval2Stream" =>
         {
@@ -885,6 +890,11 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
             if type_name.as_ref() == "__Eval2Stream" =>
         {
             Some("Stream.to_array")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "to_map")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.to_map")
         }
         (ValueRep::Struct(StructValue { type_name, .. }), "file")
             if type_name.as_ref() == "__Eval2MergedTree" =>

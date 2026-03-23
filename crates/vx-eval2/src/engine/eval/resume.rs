@@ -456,6 +456,75 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::StreamForEachJoin {
+            node_id,
+            parent_id,
+            mut items,
+            stream_provenance,
+        } => {
+            let result = match input {
+                Ok(_) => match collect_stream_join_items(state, &mut items) {
+                    Ok(StreamJoinState::Ready(_)) => Ok(EvalStep::Ready(
+                        Value::unit().with_provenance(stream_provenance),
+                    )),
+                    Ok(StreamJoinState::Waiting(child_node_id)) => {
+                        let pending = state
+                            .scheduler
+                            .alloc_child_dependency_pending(child_node_id);
+                        return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                            resume_node: node_id,
+                            pending,
+                            branch_context: state.branch_context.clone(),
+                            frames: vec![ContinuationFrame::StreamForEachJoin {
+                                node_id,
+                                parent_id,
+                                items: items.clone(),
+                                stream_provenance: stream_provenance.clone(),
+                            }],
+                            call_stack: state.call_stack.clone(),
+                        }));
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::StreamToMapJoin {
+            node_id,
+            parent_id,
+            mut items,
+            stream_provenance,
+        } => {
+            let result = match input {
+                Ok(_) => match collect_stream_join_items(state, &mut items) {
+                    Ok(StreamJoinState::Ready(values)) => Ok(EvalStep::Ready(stream_map_entries(
+                        values,
+                        stream_provenance,
+                    )?)),
+                    Ok(StreamJoinState::Waiting(child_node_id)) => {
+                        let pending = state
+                            .scheduler
+                            .alloc_child_dependency_pending(child_node_id);
+                        return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                            resume_node: node_id,
+                            pending,
+                            branch_context: state.branch_context.clone(),
+                            frames: vec![ContinuationFrame::StreamToMapJoin {
+                                node_id,
+                                parent_id,
+                                items: items.clone(),
+                                stream_provenance: stream_provenance.clone(),
+                            }],
+                            call_stack: state.call_stack.clone(),
+                        }));
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::TupleAfterItem {
             node_id,
             parent_id,

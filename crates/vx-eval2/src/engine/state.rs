@@ -220,6 +220,18 @@ pub(super) enum ContinuationFrame {
         items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
     },
+    StreamForEachJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<StreamJoinItem>,
+        stream_provenance: Provenance,
+    },
+    StreamToMapJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        items: Vec<StreamJoinItem>,
+        stream_provenance: Provenance,
+    },
     TupleAfterItem {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,

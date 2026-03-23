@@ -1711,6 +1711,48 @@ fn main(paths: Array[Path]) {
 }
 
 #[test]
+fn stream_for_each_typechecks_as_unit() {
+    let src = r#"
+fn main(paths: Array[Path]) {
+    paths.map((path) => Tree(path)).for_each()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let ty = find_expr_type(
+        &result,
+        src,
+        r#"paths.map((path) => Tree(path)).for_each()"#,
+    );
+    assert_eq!(ty, Some(Ty::Unit));
+}
+
+#[test]
+fn stream_to_map_typechecks_for_streams_of_entries() {
+    let src = r#"
+fn main(items: Array[String]) {
+    items.map((item) => (item, item.len())).to_map()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let ty = find_expr_type(
+        &result,
+        src,
+        r#"items.map((item) => (item, item.len())).to_map()"#,
+    );
+    assert_eq!(
+        ty,
+        Some(Ty::Map(
+            Box::new(Ty::Scalar(vx_types::Scalar::String)),
+            Box::new(Ty::Scalar(vx_types::Scalar::U64)),
+        ))
+    );
+}
+
+#[test]
 fn flat_map_typechecks_for_array_and_stream_mappers() {
     let src = r#"
 fn main(paths: Array[Path]) {
