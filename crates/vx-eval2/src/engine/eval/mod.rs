@@ -2254,10 +2254,12 @@ pub(super) fn eval_interpolated_string(
         state,
         node_id,
         parent_id,
-        Vec::new(),
-        parts,
-        env.clone(),
-        string_source,
+        InterpolatedStringState {
+            segments: Vec::new(),
+            remaining_parts: parts,
+            env: env.clone(),
+            string_source,
+        },
     )
 }
 
@@ -3139,28 +3141,25 @@ pub(super) fn continue_interpolated_string_parts(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut segments: Vec<String>,
-    remaining_parts: Vec<InterpolatedPart>,
-    mut env: EvalEnv,
-    string_source: SourceSpan,
+    mut string: InterpolatedStringState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_parts.into_iter();
+    let mut remaining = string.remaining_parts.into_iter();
     while let Some(part) = remaining.next() {
         match part {
-            InterpolatedPart::Text(text) => segments.push(text.to_string()),
+            InterpolatedPart::Text(text) => string.segments.push(text.to_string()),
             InterpolatedPart::Expr(expr) => {
-                match eval_dependent_expr_handle(state, node_id, expr, &mut env)? {
-                    EvalStep::Ready(value) => segments.push(interpolation_segment_text(&value)?),
+                match eval_dependent_expr_handle(state, node_id, expr, &mut string.env)? {
+                    EvalStep::Ready(value) => {
+                        string.segments.push(interpolation_segment_text(&value)?)
+                    }
                     EvalStep::Suspended(suspension) => {
+                        string.remaining_parts = remaining.collect();
                         return Ok(extend_suspension(
                             suspension,
-                            ContinuationFrame::InterpolatedStringAfterExpr {
+                            ContinuationFrame::InterpolatedString {
                                 node_id,
                                 parent_id,
-                                segments,
-                                remaining_parts: remaining.collect(),
-                                env,
-                                string_source,
+                                string,
                             },
                         ));
                     }
@@ -3169,8 +3168,8 @@ pub(super) fn continue_interpolated_string_parts(
         }
     }
     Ok(EvalStep::Ready(ready_interpolated_string_value(
-        segments,
-        string_source,
+        string.segments,
+        string.string_source,
     )))
 }
 

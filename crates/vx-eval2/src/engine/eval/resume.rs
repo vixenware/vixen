@@ -488,26 +488,15 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::InterpolatedStringAfterExpr {
+        ContinuationFrame::InterpolatedString {
             node_id,
             parent_id,
-            mut segments,
-            remaining_parts,
-            env,
-            string_source,
+            mut string,
         } => {
             let result = match input {
                 Ok(value) => {
-                    segments.push(interpolation_segment_text(&value)?);
-                    continue_interpolated_string_parts(
-                        state,
-                        node_id,
-                        parent_id,
-                        segments,
-                        remaining_parts,
-                        env,
-                        string_source,
-                    )
+                    string.segments.push(interpolation_segment_text(&value)?);
+                    continue_interpolated_string_parts(state, node_id, parent_id, string)
                 }
                 Err(error) => Err(error),
             };

@@ -189,6 +189,14 @@ pub(super) struct StructState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InterpolatedStringState {
+    pub(super) segments: Vec<String>,
+    pub(super) remaining_parts: Vec<InterpolatedPart>,
+    pub(super) env: EvalEnv,
+    pub(super) string_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -273,13 +281,10 @@ pub(super) enum ContinuationFrame {
         child_nodes: Vec<EvalNodeId>,
         tuple_source: SourceSpan,
     },
-    InterpolatedStringAfterExpr {
+    InterpolatedString {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        segments: Vec<String>,
-        remaining_parts: Vec<InterpolatedPart>,
-        env: EvalEnv,
-        string_source: SourceSpan,
+        string: InterpolatedStringState,
     },
     InterpolatedStringJoin {
         node_id: EvalNodeId,
