@@ -18,11 +18,11 @@ use crate::{
     SourceSpan, StructValue, Value, ValueMeta, ValueRep,
     decode::{StructuredFormat, parse_blob_as_value},
     program::{
-        ArrayExpr, ArrayItem, BinaryExpr, BlockBodyId, BlockExpr, BlockStep, CallExpr, ClosureExpr,
-        CompiledParameter, CompiledProgram, EvalProgram, Expr, ExprId, ExprKind, FailExpr,
-        FallibleExpr, FieldExpr, IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr, MatchExpr,
-        NameRefExpr, PathLiteralExpr, PrefixExpr, ProgramNodeHandle, RangeExpr, StringPart,
-        StructLiteralExpr, Token, TupleExpr, WhereExpr,
+        ArrayExpr, ArrayItem, BinaryExpr, BlockBodyId, BlockExpr, BlockStep, CallCallee, CallExpr,
+        ClosureExpr, CompiledParameter, CompiledProgram, EvalProgram, Expr, ExprId, ExprKind,
+        FailExpr, FallibleExpr, FieldExpr, IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr,
+        MatchExpr, NameRefExpr, PathLiteralExpr, PrefixExpr, ProgramNodeHandle, RangeExpr,
+        StringPart, StructLiteralExpr, Token, TupleExpr, WhereExpr,
     },
 };
 

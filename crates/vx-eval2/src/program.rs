@@ -369,9 +369,15 @@ pub(crate) struct NameRefExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallCallee {
+    NameRef(NameRefExpr),
+    Expr(ExprId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) callee: Option<ExprId>,
+    pub(crate) callee: Option<CallCallee>,
     pub(crate) type_args: Arc<[Ty]>,
     pub(crate) positional_args: Arc<[ExprId]>,
 }
@@ -1268,12 +1274,17 @@ fn compile_expr(
                 callee: call
                     .callee()
                     .as_ref()
-                    .map(|callee| {
-                        require_expr_id(
+                    .map(|callee| match callee {
+                        ParserExpr::NameRef(name_ref) => Ok(CallCallee::NameRef(NameRefExpr {
+                            handle: ProgramNodeHandle::for_node(source, name_ref),
+                            token: name_ref.token().map(|token| compile_token(source, &token)),
+                            name: Arc::from(name_ref_text_from_ast(name_ref)),
+                        })),
+                        _ => Ok(CallCallee::Expr(require_expr_id(
                             expr_ids,
                             ProgramNodeHandle::for_node(source, callee),
                             "call callee",
-                        )
+                        )?)),
                     })
                     .transpose()?,
                 type_args: Arc::from([]),

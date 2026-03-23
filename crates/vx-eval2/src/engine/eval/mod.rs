@@ -114,19 +114,7 @@ fn collect_adapter_parameters(
 ) -> Result<(), EvalError> {
     match expr.kind() {
         ExprKind::NameRef(name_ref) => {
-            let Some(token) = &name_ref.token else {
-                return Ok(());
-            };
-            if token.kind() != SyntaxKind::DOLLAR_IDENT {
-                return Ok(());
-            }
-            let Some(index) = dollar_placeholder_index(token.text()) else {
-                return Ok(());
-            };
-            if names_by_index.len() <= index {
-                names_by_index.resize(index + 1, None);
-            }
-            names_by_index[index] = Some(token.handle());
+            collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
         }
         ExprKind::Block(block) => {
             for step in program.resolve_block_body(block.body)?.steps.iter() {
@@ -144,8 +132,19 @@ fn collect_adapter_parameters(
             }
         }
         ExprKind::Call(call) => {
-            if let Some(callee) = call.callee {
-                collect_adapter_parameters(program, program.resolve_expr(callee)?, names_by_index)?;
+            if let Some(callee) = &call.callee {
+                match callee {
+                    CallCallee::NameRef(name_ref) => {
+                        collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
+                    }
+                    CallCallee::Expr(callee) => {
+                        collect_adapter_parameters(
+                            program,
+                            program.resolve_expr(*callee)?,
+                            names_by_index,
+                        )?;
+                    }
+                }
             }
             for arg in call.positional_args.iter().copied() {
                 collect_adapter_parameters(program, program.resolve_expr(arg)?, names_by_index)?;
@@ -281,6 +280,26 @@ fn collect_adapter_parameters(
         }
         ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Unsupported { .. } => {}
     }
+    Ok(())
+}
+
+fn collect_adapter_parameters_from_name_ref(
+    name_ref: &NameRefExpr,
+    names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
+) -> Result<(), EvalError> {
+    let Some(token) = &name_ref.token else {
+        return Ok(());
+    };
+    if token.kind() != SyntaxKind::DOLLAR_IDENT {
+        return Ok(());
+    }
+    let Some(index) = dollar_placeholder_index(token.text()) else {
+        return Ok(());
+    };
+    if names_by_index.len() <= index {
+        names_by_index.resize(index + 1, None);
+    }
+    names_by_index[index] = Some(token.handle());
     Ok(())
 }
 
@@ -923,6 +942,7 @@ pub(super) fn eval_call(
 ) -> Result<EvalStep, EvalError> {
     let callee = call
         .callee
+        .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.span_for_node(call);
     let node_id = state
@@ -933,8 +953,7 @@ pub(super) fn eval_call(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let type_args = Arc::clone(&call.type_args);
     let positional_args = Arc::clone(&call.positional_args);
-    let callee = state.program.resolve_expr(callee)?;
-    if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
+    if let Some(callee_value) = immediate_call_callee_value(state, callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
             let child_nodes = positional_args
                 .iter()
@@ -977,7 +996,7 @@ pub(super) fn eval_call(
             },
         );
     }
-    let callee_value = match eval_call_callee(state, &callee, env)? {
+    let callee_value = match eval_call_callee(state, callee, env)? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
@@ -1019,10 +1038,10 @@ pub(super) fn eval_call(
 
 pub(super) fn immediate_call_callee_value(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    callee: &Expr,
+    callee: &CallCallee,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
-    let ExprKind::NameRef(name_ref) = callee.kind() else {
+    let CallCallee::NameRef(name_ref) = callee else {
         return Ok(None);
     };
     let name_token = name_ref
@@ -1162,13 +1181,19 @@ fn name_ref_text(name_ref: &NameRefExpr) -> Arc<str> {
 
 pub(super) fn eval_call_callee(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    callee: &Expr,
+    callee: &CallCallee,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if let Some(value) = immediate_call_callee_value(state, callee, env)? {
         return Ok(EvalStep::Ready(value));
     }
-    eval_child_expr(state, callee, env)
+    let CallCallee::Expr(callee) = callee else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "non-immediate call callee should lower to expression id",
+        ));
+    };
+    eval_child_expr_handle(state, ExprHandle { key: *callee }, env)
 }
 
 pub(super) fn static_namespace_member_value(
@@ -2563,12 +2588,12 @@ fn eval_call_with_keyword_bindings(
     };
     let callee = call
         .callee
+        .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.span_for_node(call);
     let type_args = Arc::clone(&call.type_args);
     let positional_args = Arc::clone(&call.positional_args);
-    let callee = state.program.resolve_expr(callee)?;
-    let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
+    let Some(callee_value) = immediate_call_callee_value(state, callee, &env)? else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "where call callee must resolve immediately for now",
