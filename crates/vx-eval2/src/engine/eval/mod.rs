@@ -137,6 +137,9 @@ fn collect_adapter_parameters(
                     CallCallee::NameRef(name_ref) => {
                         collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
                     }
+                    CallCallee::Field(field) => {
+                        collect_adapter_parameters_from_field(program, field, names_by_index)?;
+                    }
                     CallCallee::Expr(callee) => {
                         collect_adapter_parameters(
                             program,
@@ -300,6 +303,17 @@ fn collect_adapter_parameters_from_name_ref(
         names_by_index.resize(index + 1, None);
     }
     names_by_index[index] = Some(token.handle());
+    Ok(())
+}
+
+fn collect_adapter_parameters_from_field(
+    program: &CompiledProgram,
+    field: &FieldExpr,
+    names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
+) -> Result<(), EvalError> {
+    if let Some(receiver) = field.receiver {
+        collect_adapter_parameters(program, program.resolve_expr(receiver)?, names_by_index)?;
+    }
     Ok(())
 }
 
@@ -1041,72 +1055,74 @@ pub(super) fn immediate_call_callee_value(
     callee: &CallCallee,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
-    let CallCallee::NameRef(name_ref) = callee else {
-        return Ok(None);
-    };
-    let name_token = name_ref
-        .token
-        .as_ref()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
-    let name = name_ref_text(name_ref);
-    if let Some(value) = env.get(name.as_ref()) {
-        return Ok(Some(value.clone()));
-    }
-    let reference = name_token.handle();
-    if let Some((resolved_name, function)) =
-        state.program.resolve_function_reference(reference, &name)?
-    {
-        return Ok(Some(Value::function(function_ref_from_compiled(
-            state,
-            resolved_name.clone(),
-            function,
-            Arc::from([]),
-            Some(resolved_name),
-        ))));
-    }
-    if let Some(constructor) = state
-        .program
-        .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
-    {
-        return Ok(Some(enum_constructor_or_value(
-            state,
-            constructor.name,
-            constructor.fields,
-            state.span_for_token(&name_token),
-        )));
-    }
-    if let Some(newtype_name) = state
-        .program
-        .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
-    {
-        let source = state.span_for_token(&name_token);
-        let captures = Arc::from([(
-            Arc::from("__newtype_ctor"),
-            Value::bool(true)
-                .with_provenance(Provenance::binding(source.clone(), name.to_string())),
-        )]);
-        return Ok(Some(
-            Value::function(FunctionRef::new(
+    match callee {
+        CallCallee::NameRef(name_ref) => {
+            let name_token = name_ref.token.as_ref().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "callee name has no token")
+            })?;
+            let name = name_ref_text(name_ref);
+            if let Some(value) = env.get(name.as_ref()) {
+                return Ok(Some(value.clone()));
+            }
+            let reference = name_token.handle();
+            if let Some((resolved_name, function)) =
+                state.program.resolve_function_reference(reference, &name)?
+            {
+                return Ok(Some(Value::function(function_ref_from_compiled(
+                    state,
+                    resolved_name.clone(),
+                    function,
+                    Arc::from([]),
+                    Some(resolved_name),
+                ))));
+            }
+            if let Some(constructor) = state
+                .program
+                .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
+            {
+                return Ok(Some(enum_constructor_or_value(
+                    state,
+                    constructor.name,
+                    constructor.fields,
+                    state.span_for_token(&name_token),
+                )));
+            }
+            if let Some(newtype_name) = state
+                .program
+                .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
+            {
+                let source = state.span_for_token(&name_token);
+                let captures = Arc::from([(
+                    Arc::from("__newtype_ctor"),
+                    Value::bool(true)
+                        .with_provenance(Provenance::binding(source.clone(), name.to_string())),
+                )]);
+                return Ok(Some(
+                    Value::function(FunctionRef::new(
+                        state.program.source_id(state.current_source()),
+                        newtype_name,
+                        Arc::from([]),
+                        false,
+                        None,
+                        captures,
+                        Some(Arc::from(name.as_ref())),
+                    ))
+                    .with_provenance(Provenance::binding(source, name.to_string())),
+                ));
+            }
+            Ok(Some(Value::function(FunctionRef::new(
                 state.program.source_id(state.current_source()),
-                newtype_name,
+                Arc::from(name.as_ref()),
                 Arc::from([]),
                 false,
                 None,
-                captures,
+                Arc::from([]),
                 Some(Arc::from(name.as_ref())),
-            ))
-            .with_provenance(Provenance::binding(source, name.to_string())),
-        ));
+            ))))
+        }
+        CallCallee::Field(field) => static_namespace_member_value(state, field, env),
+        CallCallee::Expr(_) => Ok(None),
     }
-    Ok(Some(Value::function(FunctionRef::new(
-        state.program.source_id(state.current_source()),
-        Arc::from(name.as_ref()),
-        Arc::from([]),
-        false,
-        None,
-        Arc::from([]),
-        Some(Arc::from(name.as_ref())),
-    ))))
 }
 
 pub(super) fn eval_name_ref(
@@ -1187,13 +1203,14 @@ pub(super) fn eval_call_callee(
     if let Some(value) = immediate_call_callee_value(state, callee, env)? {
         return Ok(EvalStep::Ready(value));
     }
-    let CallCallee::Expr(callee) = callee else {
-        return Err(EvalError::new(
+    match callee {
+        CallCallee::Expr(callee) => eval_child_expr_handle(state, ExprHandle { key: *callee }, env),
+        CallCallee::Field(field) => eval_field(state, field, env),
+        CallCallee::NameRef(_) => Err(EvalError::new(
             EvalErrorKind::Internal,
-            "non-immediate call callee should lower to expression id",
-        ));
-    };
-    eval_child_expr_handle(state, ExprHandle { key: *callee }, env)
+            "direct name call callee should resolve immediately",
+        )),
+    }
 }
 
 pub(super) fn static_namespace_member_value(

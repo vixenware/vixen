@@ -371,6 +371,7 @@ pub(crate) struct NameRefExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallCallee {
     NameRef(NameRefExpr),
+    Field(FieldExpr),
     Expr(ExprId),
 }
 
@@ -1280,6 +1281,9 @@ fn compile_expr(
                             token: name_ref.token().map(|token| compile_token(source, &token)),
                             name: Arc::from(name_ref_text_from_ast(name_ref)),
                         })),
+                        ParserExpr::Field(field) => Ok(CallCallee::Field(compile_field_expr_ast(
+                            source, field, expr_ids,
+                        )?)),
                         _ => Ok(CallCallee::Expr(require_expr_id(
                             expr_ids,
                             ProgramNodeHandle::for_node(source, callee),
@@ -1624,23 +1628,9 @@ fn compile_expr(
                 expr_ids,
             )?),
         }),
-        ParserExpr::Field(field) => ExprKind::Field(FieldExpr {
-            handle,
-            receiver: field
-                .receiver()
-                .as_ref()
-                .map(|expr| {
-                    require_expr_id(
-                        expr_ids,
-                        ProgramNodeHandle::for_node(source, expr),
-                        "field receiver",
-                    )
-                })
-                .transpose()?,
-            field_name: field
-                .field_name()
-                .map(|token| compile_token(source, &token)),
-        }),
+        ParserExpr::Field(field) => {
+            ExprKind::Field(compile_field_expr_ast(source, field, expr_ids)?)
+        }
         other => ExprKind::Unsupported {
             kind: other.syntax().kind(),
         },
@@ -2070,6 +2060,30 @@ fn name_ref_text_from_ast(name_ref: &vx_parser::NameRefExpr) -> String {
         })
         .map(|token| token.text().to_string())
         .collect()
+}
+
+fn compile_field_expr_ast(
+    source: SourceId,
+    field: &vx_parser::FieldExpr,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
+) -> Result<FieldExpr, EvalError> {
+    Ok(FieldExpr {
+        handle: ProgramNodeHandle::for_node(source, field),
+        receiver: field
+            .receiver()
+            .as_ref()
+            .map(|expr| {
+                require_expr_id(
+                    expr_ids,
+                    ProgramNodeHandle::for_node(source, expr),
+                    "field receiver",
+                )
+            })
+            .transpose()?,
+        field_name: field
+            .field_name()
+            .map(|token| compile_token(source, &token)),
+    })
 }
 
 fn compile_closure_parameters_ast(

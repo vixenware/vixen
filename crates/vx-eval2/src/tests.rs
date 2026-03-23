@@ -925,6 +925,35 @@ fn compiled_program_lowers_direct_name_call_callee_to_call_callee_plan() {
 }
 
 #[test]
+fn compiled_program_lowers_field_call_callee_to_call_callee_plan() {
+    let program = CompiledProgram::new(
+        "lowered-field-call-callee",
+        "fn build(value: String) { value.len() }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(call_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain call expression");
+    };
+    let expr = program
+        .resolve_expr_id(call_expr)
+        .expect("resolve call expr");
+    let ExprKind::Call(call) = expr.kind() else {
+        panic!("expected lowered step to be a call expr, got {expr:?}");
+    };
+    assert!(matches!(call.callee, Some(CallCallee::Field(_))));
+}
+
+#[test]
 fn block_local_named_function_captures_outer_binding() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build() {\n  let captured = 41;\n  fn helper() { captured }\n  helper()\n}",
