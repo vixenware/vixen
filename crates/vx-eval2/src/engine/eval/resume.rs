@@ -1038,9 +1038,8 @@ pub(in crate::engine) fn resume_frame(
             parent_id,
             field,
         } => {
-            let result = input.and_then(|receiver| {
-                project_field_or_method_value(state, receiver, field.field_name, field.field_source)
-            });
+            let result = input
+                .and_then(|receiver| project_field_expr_value(state, receiver, field.field_expr));
             Ok(match result {
                 Ok(value) => {
                     record_ready_step(state, node_id, parent_id, &value);

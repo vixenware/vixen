@@ -1345,19 +1345,6 @@ fn static_member_value(
     )))
 }
 
-fn field_state(field: &FieldExpr, field_source: SourceSpan) -> Result<FieldState, EvalError> {
-    let Some(field_name) = field.field_name.as_ref() else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "field expression has no field name",
-        ));
-    };
-    Ok(FieldState {
-        field_name: Arc::clone(field_name),
-        field_source,
-    })
-}
-
 fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {
     match (&receiver.rep, field_name) {
         (ValueRep::External(external), "utf8") if external.kind.as_ref() == "Blob" => {
@@ -2822,7 +2809,9 @@ pub(super) fn eval_field(
         EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
     })?;
     let field_source = state.program.span_for_handle(field.handle);
-    let field = field_state(field, field_source)?;
+    let field_state = FieldState {
+        field_expr: state.expr_id_for(field.handle)?,
+    };
     let receiver = match eval_child_expr_id(state, receiver, env)? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
@@ -2831,13 +2820,41 @@ pub(super) fn eval_field(
                 ContinuationFrame::Field {
                     node_id,
                     parent_id,
-                    field,
+                    field: field_state,
                 },
             ));
         }
     };
-    project_field_or_method_value(state, receiver, field.field_name, field.field_source)
+    let field_name = field.field_name.as_ref().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "field expression has no field name",
+        )
+    })?;
+    project_field_or_method_value(state, receiver, field_name.clone(), field_source)
         .map(EvalStep::Ready)
+}
+
+pub(super) fn project_field_expr_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    receiver: Value,
+    field_expr: ExprId,
+) -> Result<Value, EvalError> {
+    let field = state.program.resolve_expr_id(field_expr)?;
+    let ExprKind::Field(field) = field.kind() else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "field continuation targeted non-field expression",
+        ));
+    };
+    let field_name = field.field_name.as_ref().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "field expression has no field name",
+        )
+    })?;
+    let field_source = state.program.span_for_handle(field.handle);
+    project_field_or_method_value(state, receiver, field_name.clone(), field_source)
 }
 
 pub(super) fn eval_binary(

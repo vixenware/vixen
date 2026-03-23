@@ -122,8 +122,7 @@ pub(super) struct CallState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FieldState {
-    pub(super) field_name: Arc<str>,
-    pub(super) field_source: SourceSpan,
+    pub(super) field_expr: ExprId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
