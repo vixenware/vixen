@@ -232,27 +232,15 @@ pub(in crate::engine) fn resume_frame(
             );
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::ArrayAfterItem {
+        ContinuationFrame::Array {
             node_id,
             parent_id,
-            mut items,
-            spread,
-            remaining_items,
-            env,
-            array_source,
+            mut array,
         } => {
             let result = match input {
                 Ok(value) => {
-                    append_array_item(&mut items, value, spread)?;
-                    continue_array_items(
-                        state,
-                        node_id,
-                        parent_id,
-                        items,
-                        remaining_items,
-                        env,
-                        array_source,
-                    )
+                    append_array_item(&mut array.items, value, array.spread)?;
+                    continue_array_items(state, node_id, parent_id, array)
                 }
                 Err(error) => Err(error),
             };

@@ -43,6 +43,15 @@ pub(super) enum ArrayEvalItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayState {
+    pub(super) items: Vec<Value>,
+    pub(super) spread: bool,
+    pub(super) remaining_items: Vec<ArrayEvalItem>,
+    pub(super) env: EvalEnv,
+    pub(super) array_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ArrayJoinItem {
     Expr(EvalNodeId),
     Spread(EvalNodeId),
@@ -184,14 +193,10 @@ pub(super) enum ContinuationFrame {
         next_step_index: usize,
         pending: BlockResumeKind,
     },
-    ArrayAfterItem {
+    Array {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        spread: bool,
-        remaining_items: Vec<ArrayEvalItem>,
-        env: EvalEnv,
-        array_source: SourceSpan,
+        array: ArrayState,
     },
     ArrayJoin {
         node_id: EvalNodeId,

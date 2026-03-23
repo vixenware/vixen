@@ -2102,17 +2102,22 @@ pub(super) fn eval_array(
         state,
         node_id,
         parent_id,
-        Vec::new(),
-        array
-            .items
-            .iter()
-            .map(|item| match item {
-                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle_for(*expr)?)),
-                ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(state.expr_handle_for(*expr)?)),
-            })
-            .collect::<Result<Vec<_>, EvalError>>()?,
-        env.clone(),
-        state.span_for_node(array),
+        ArrayState {
+            items: Vec::new(),
+            spread: false,
+            remaining_items: array
+                .items
+                .iter()
+                .map(|item| match item {
+                    ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle_for(*expr)?)),
+                    ArrayItem::Spread(expr) => {
+                        Ok(ArrayEvalItem::Spread(state.expr_handle_for(*expr)?))
+                    }
+                })
+                .collect::<Result<Vec<_>, EvalError>>()?,
+            env: env.clone(),
+            array_source: state.span_for_node(array),
+        },
     )
 }
 
@@ -3027,38 +3032,33 @@ pub(super) fn continue_array_items(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut items: Vec<Value>,
-    remaining_items: Vec<ArrayEvalItem>,
-    mut env: EvalEnv,
-    array_source: SourceSpan,
+    mut array: ArrayState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_items.into_iter();
+    let mut remaining = array.remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
         let (item_handle, spread) = match item_handle {
             ArrayEvalItem::Expr(handle) => (handle, false),
             ArrayEvalItem::Spread(handle) => (handle, true),
         };
-        match eval_dependent_expr_handle(state, node_id, item_handle, &mut env)? {
-            EvalStep::Ready(value) => append_array_item(&mut items, value, spread)?,
+        match eval_dependent_expr_handle(state, node_id, item_handle, &mut array.env)? {
+            EvalStep::Ready(value) => append_array_item(&mut array.items, value, spread)?,
             EvalStep::Suspended(suspension) => {
+                array.spread = spread;
+                array.remaining_items = remaining.collect();
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayAfterItem {
+                    ContinuationFrame::Array {
                         node_id,
                         parent_id,
-                        items,
-                        spread,
-                        remaining_items: remaining.collect(),
-                        env,
-                        array_source,
+                        array,
                     },
                 ));
             }
         }
     }
-    let provenance = Provenance::literal(array_source);
-    let meta = aggregate_child_meta(provenance, items.iter());
-    Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+    let provenance = Provenance::literal(array.array_source);
+    let meta = aggregate_child_meta(provenance, array.items.iter());
+    Ok(EvalStep::Ready(Value::array(array.items).with_meta(meta)))
 }
 
 pub(super) fn continue_tuple_items(
