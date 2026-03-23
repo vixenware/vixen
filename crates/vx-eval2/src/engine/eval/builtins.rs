@@ -1736,6 +1736,7 @@ fn continue_builtin_call_inner(
                     args: vec![host],
                     remaining_args: Arc::from([]),
                     next_arg_index: 0,
+                    queued_arg_nodes: Vec::new(),
                 },
             )
             .map(Some)
@@ -1808,6 +1809,7 @@ fn continue_builtin_call_inner(
                     args: vec![process, vfs],
                     remaining_args: Arc::from([]),
                     next_arg_index: 0,
+                    queued_arg_nodes: Vec::new(),
                 },
             )
             .map(Some)

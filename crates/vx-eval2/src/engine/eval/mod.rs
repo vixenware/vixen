@@ -944,13 +944,20 @@ pub(super) fn eval_call(
                 state,
                 node_id,
                 child_nodes[0],
-                vec![ContinuationFrame::CallJoin {
+                vec![ContinuationFrame::Call {
                     node_id,
                     parent_id,
-                    callee: callee_value,
-                    call_source,
-                    type_args: Arc::clone(&type_args),
-                    child_nodes,
+                    call: CallState {
+                        call_source,
+                        type_args: Arc::clone(&type_args),
+                        env: empty_env(),
+                        callee: Some(callee_value),
+                        args: Vec::new(),
+                        remaining_args: Arc::from([]),
+                        next_arg_index: 0,
+                        queued_arg_nodes: child_nodes,
+                    },
+                    pending: CallResumeKind::JoinArgs,
                 }],
             ));
         }
@@ -966,6 +973,7 @@ pub(super) fn eval_call(
                 args: Vec::new(),
                 remaining_args: Arc::clone(&positional_args),
                 next_arg_index: 0,
+                queued_arg_nodes: Vec::new(),
             },
         );
     }
@@ -985,6 +993,7 @@ pub(super) fn eval_call(
                         args: Vec::new(),
                         remaining_args: Arc::clone(&positional_args),
                         next_arg_index: 0,
+                        queued_arg_nodes: Vec::new(),
                     },
                     pending: CallResumeKind::Callee,
                 },
@@ -1003,6 +1012,7 @@ pub(super) fn eval_call(
             args: Vec::new(),
             remaining_args: positional_args,
             next_arg_index: 0,
+            queued_arg_nodes: Vec::new(),
         },
     )
 }
@@ -1495,8 +1505,10 @@ pub(super) fn continue_call(
         type_args,
         callee,
         mut args,
+        queued_arg_nodes,
         ..
     } = call;
+    debug_assert!(queued_arg_nodes.is_empty());
     let callee = callee.expect("call should have a callee before dispatch");
     let ValueRep::Function(function) = &callee.rep else {
         return Err(EvalError::new(
@@ -1518,6 +1530,7 @@ pub(super) fn continue_call(
                 args,
                 remaining_args: Arc::from([]),
                 next_arg_index: 0,
+                queued_arg_nodes: Vec::new(),
             },
         ) {
             Ok(EvalStep::Ready(value)) => {
@@ -2571,13 +2584,20 @@ fn eval_call_with_keyword_bindings(
             state,
             node_id,
             child_nodes[0],
-            vec![ContinuationFrame::CallJoin {
+            vec![ContinuationFrame::Call {
                 node_id,
                 parent_id,
-                callee: callee_value,
-                call_source,
-                type_args: Arc::clone(&type_args),
-                child_nodes,
+                call: CallState {
+                    call_source,
+                    type_args: Arc::clone(&type_args),
+                    env: empty_env(),
+                    callee: Some(callee_value),
+                    args: Vec::new(),
+                    remaining_args: Arc::from([]),
+                    next_arg_index: 0,
+                    queued_arg_nodes: child_nodes,
+                },
+                pending: CallResumeKind::JoinArgs,
             }],
         ));
     }
@@ -2593,6 +2613,7 @@ fn eval_call_with_keyword_bindings(
             args: Vec::new(),
             remaining_args: positional_args,
             next_arg_index: 0,
+            queued_arg_nodes: Vec::new(),
         },
     )
 }

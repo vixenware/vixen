@@ -162,62 +162,6 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::CallJoin {
-            node_id,
-            parent_id,
-            callee,
-            call_source,
-            type_args,
-            child_nodes,
-        } => {
-            let result = match input {
-                Ok(_) => {
-                    let mut args = Vec::with_capacity(child_nodes.len());
-                    for child_node in &child_nodes {
-                        match state.scheduler.node_state(*child_node) {
-                            Some(EvalNodeState::Ready(value)) => args.push(value.clone()),
-                            Some(EvalNodeState::Poison(error)) => {
-                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
-                            }
-                            _ => {
-                                let pending =
-                                    state.scheduler.alloc_child_dependency_pending(*child_node);
-                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
-                                    resume_node: node_id,
-                                    pending,
-                                    branch_context: state.branch_context.clone(),
-                                    frames: vec![ContinuationFrame::CallJoin {
-                                        node_id,
-                                        parent_id,
-                                        callee: callee.clone(),
-                                        call_source,
-                                        type_args: Arc::clone(&type_args),
-                                        child_nodes: child_nodes.clone(),
-                                    }],
-                                    call_stack: state.call_stack.clone(),
-                                }));
-                            }
-                        }
-                    }
-                    continue_call(
-                        state,
-                        node_id,
-                        parent_id,
-                        CallState {
-                            call_source,
-                            type_args,
-                            env: empty_env(),
-                            callee: Some(callee),
-                            args,
-                            remaining_args: Arc::from([]),
-                            next_arg_index: 0,
-                        },
-                    )
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
         ContinuationFrame::Call {
             node_id,
             parent_id,
@@ -229,6 +173,36 @@ pub(in crate::engine) fn resume_frame(
                     match pending {
                         CallResumeKind::Callee => call.callee = Some(value),
                         CallResumeKind::Arg => call.args.push(value),
+                        CallResumeKind::JoinArgs => {
+                            let mut args = Vec::with_capacity(call.queued_arg_nodes.len());
+                            for child_node in &call.queued_arg_nodes {
+                                match state.scheduler.node_state(*child_node) {
+                                    Some(EvalNodeState::Ready(value)) => args.push(value.clone()),
+                                    Some(EvalNodeState::Poison(error)) => {
+                                        return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                                    }
+                                    _ => {
+                                        let pending = state
+                                            .scheduler
+                                            .alloc_child_dependency_pending(*child_node);
+                                        return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                            resume_node: node_id,
+                                            pending,
+                                            branch_context: state.branch_context.clone(),
+                                            frames: vec![ContinuationFrame::Call {
+                                                node_id,
+                                                parent_id,
+                                                call,
+                                                pending: CallResumeKind::JoinArgs,
+                                            }],
+                                            call_stack: state.call_stack.clone(),
+                                        }));
+                                    }
+                                }
+                            }
+                            call.args = args;
+                            call.queued_arg_nodes.clear();
+                        }
                     }
                     continue_call(state, node_id, parent_id, call)
                 }

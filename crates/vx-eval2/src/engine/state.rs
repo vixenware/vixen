@@ -94,6 +94,7 @@ pub(super) enum BlockResumeKind {
 pub(super) enum CallResumeKind {
     Callee,
     Arg,
+    JoinArgs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +106,7 @@ pub(super) struct CallState {
     pub(super) args: Vec<Value>,
     pub(super) remaining_args: Arc<[ExprId]>,
     pub(super) next_arg_index: usize,
+    pub(super) queued_arg_nodes: Vec<EvalNodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,14 +132,6 @@ pub(super) enum ContinuationFrame {
         slot_id: Arc<str>,
         witness: Value,
         action: SlotAction<Value>,
-    },
-    CallJoin {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        callee: Value,
-        call_source: SourceSpan,
-        type_args: Arc<[Ty]>,
-        child_nodes: Vec<EvalNodeId>,
     },
     Call {
         node_id: EvalNodeId,
