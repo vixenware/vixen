@@ -159,6 +159,124 @@ fn cargo_sketch_runtime_build_materializes_local_vendor_tree() {
 }
 
 #[test]
+fn build_sketch_runtime_merges_tree_streams() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("one")).expect("create workspace/one");
+    std::fs::create_dir_all(workspace.join("two")).expect("create workspace/two");
+    std::fs::write(workspace.join("one/hello.txt"), "hello from one").expect("write one");
+    std::fs::write(workspace.join("two/goodbye.txt"), "goodbye from two").expect("write two");
+
+    let runtime = build_eval_runtime(
+        "build-sketch",
+        std::env::current_dir().expect("source dir"),
+        root.path().to_path_buf(),
+    )
+    .expect("build build-sketch eval runtime");
+    let resolution = vx_eval2::eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn build() {
+  [Path("workspace/one"), Path("workspace/two")]
+    .map((path) => Tree(path))
+    .merge()
+    .file(Path("hello.txt"))
+}
+"#,
+        "build-sketch-stream-merge",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate merged tree stream");
+    let Resolution::Ready(blob) = resolution else {
+        panic!("expected ready Blob, got {resolution:?}");
+    };
+    let ValueRep::External(external) = &blob.rep else {
+        panic!("expected external blob, got {:?}", blob.rep);
+    };
+    assert_eq!(external.kind.as_ref(), "Blob");
+    assert_eq!(external.descriptor.as_ref(), "hello from one");
+}
+
+#[test]
+fn build_sketch_runtime_merges_tree_arrays() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("one")).expect("create workspace/one");
+    std::fs::create_dir_all(workspace.join("two")).expect("create workspace/two");
+    std::fs::write(workspace.join("one/hello.txt"), "hello from one").expect("write one");
+    std::fs::write(workspace.join("two/goodbye.txt"), "goodbye from two").expect("write two");
+
+    let runtime = build_eval_runtime(
+        "build-sketch",
+        std::env::current_dir().expect("source dir"),
+        root.path().to_path_buf(),
+    )
+    .expect("build build-sketch eval runtime");
+    let resolution = vx_eval2::eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn build() {
+  [Tree(Path("workspace/one")), Tree(Path("workspace/two"))]
+    .merge()
+    .file(Path("goodbye.txt"))
+}
+"#,
+        "build-sketch-array-merge",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect("evaluate merged tree array");
+    let Resolution::Ready(blob) = resolution else {
+        panic!("expected ready Blob, got {resolution:?}");
+    };
+    let ValueRep::External(external) = &blob.rep else {
+        panic!("expected external blob, got {:?}", blob.rep);
+    };
+    assert_eq!(external.kind.as_ref(), "Blob");
+    assert_eq!(external.descriptor.as_ref(), "goodbye from two");
+}
+
+#[test]
+fn build_sketch_runtime_rejects_conflicting_tree_stream_merges() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("one")).expect("create workspace/one");
+    std::fs::create_dir_all(workspace.join("two")).expect("create workspace/two");
+    std::fs::write(workspace.join("one/conflict.txt"), "one").expect("write one");
+    std::fs::write(workspace.join("two/conflict.txt"), "two").expect("write two");
+
+    let runtime = build_eval_runtime(
+        "build-sketch",
+        std::env::current_dir().expect("source dir"),
+        root.path().to_path_buf(),
+    )
+    .expect("build build-sketch eval runtime");
+    let error = vx_eval2::eval_source_entry_at_place_with_args_with_source_id(
+        r#"
+fn build() {
+  [Path("workspace/one"), Path("workspace/two")]
+    .map((path) => Tree(path))
+    .merge()
+    .file(Path("conflict.txt"))
+}
+"#,
+        "build-sketch-stream-merge-conflict",
+        "build",
+        &[],
+        &runtime,
+        "local",
+    )
+    .expect_err("conflicting merged tree stream should fail");
+    assert!(
+        error.message.contains("tree merge conflict"),
+        "expected merge conflict error, got {error:?}"
+    );
+}
+
+#[test]
 fn build_sketch_runtime_mounts_binary_tree_outputs_between_execs() {
     let source = r#"
 fn build() -> Tree (

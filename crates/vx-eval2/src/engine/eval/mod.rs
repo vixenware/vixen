@@ -9,6 +9,7 @@ pub(in crate::engine) use resume::*;
 
 pub(super) struct PreparedEntry {
     pub(super) source: SourceId,
+    pub(super) body_handle: ProgramNodeHandle,
     pub(super) body: Expr,
     pub(super) env: EvalEnv,
 }
@@ -234,6 +235,7 @@ pub(super) fn prepare_entry(
     let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
         source: body.source(),
+        body_handle: body,
         body: state.program.resolve_expr(body)?,
         env,
     })
@@ -275,6 +277,7 @@ pub(super) fn prepare_function_call(
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
     Ok(Some(PreparedEntry {
         source: body.source(),
+        body_handle: body,
         body: state.program.resolve_expr(body)?,
         env,
     }))
@@ -842,10 +845,38 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::External(external), "subtree") if external.kind.as_ref() == "Tree" => {
             Some("Tree.subtree")
         }
+        (ValueRep::External(external), "merge") if external.kind.as_ref() == "Tree" => {
+            Some("Tree.merge")
+        }
         (ValueRep::External(external), "collect")
             if external.kind.as_ref().starts_with("Stream[") =>
         {
             Some("Stream.collect")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "merge")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.merge")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "to_array")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.to_array")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "file")
+            if type_name.as_ref() == "__Eval2MergedTree" =>
+        {
+            Some("Tree.file")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "subtree")
+            if type_name.as_ref() == "__Eval2MergedTree" =>
+        {
+            Some("Tree.subtree")
+        }
+        (ValueRep::Struct(StructValue { type_name, .. }), "merge")
+            if type_name.as_ref() == "__Eval2MergedTree" =>
+        {
+            Some("Tree.merge")
         }
         (ValueRep::External(external), "os") if external.kind.as_ref() == "Host" => Some("Host.os"),
         (ValueRep::External(external), "arch") if external.kind.as_ref() == "Host" => {
@@ -870,6 +901,7 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::Array(_), "filter_map") => Some("Array.filter_map"),
         (ValueRep::Array(_), "flatten") => Some("Array.flatten"),
         (ValueRep::Array(_), "filter") => Some("Array.filter"),
+        (ValueRep::Array(_), "merge") => Some("Array.merge"),
         (ValueRep::Array(_), "map") => Some("Array.map"),
         (ValueRep::Array(_), "to_array") => Some("Array.to_array"),
         (ValueRep::Map(_), "map") => Some("Map.map"),
@@ -3060,6 +3092,52 @@ pub(super) fn queue_child_expr_handle(
     let scheduled = ScheduledExpr {
         expr,
         env: env.clone(),
+        call_stack: if state.track_calls {
+            state.call_stack.clone()
+        } else {
+            Vec::new()
+        },
+    };
+    state
+        .scheduler
+        .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(scheduled),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+        state.branch_context.clone(),
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    child_id
+}
+
+pub(super) fn queue_child_prepared_entry(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prepared: PreparedEntry,
+) -> EvalNodeId {
+    let child_id = state.alloc_node_id();
+    let resolved_source = state.program.span_for_handle(prepared.body_handle);
+    state.emit_current_dependency(child_id, Some(resolved_source.clone()));
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: expr_kind(&prepared.body),
+        },
+        source: Some(resolved_source),
+    });
+    let scheduled = ScheduledExpr {
+        expr: ExprHandle {
+            key: prepared.body_handle,
+        },
+        env: prepared.env,
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {

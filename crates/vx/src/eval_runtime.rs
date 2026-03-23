@@ -33,6 +33,9 @@ pub(crate) struct CargoSketchRuntime {
     progress: Option<EvalProgressReporter>,
 }
 
+const INTERNAL_MERGED_TREE_TYPE_NAME: &str = "__Eval2MergedTree";
+const INTERNAL_MERGED_TREE_TREES_FIELD: &str = "trees";
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_eval_runtime(
     mode: &str,
@@ -163,6 +166,10 @@ impl CargoSketchRuntime {
             ValueRep::External(external) if external.kind.as_ref() == "Path" => {
                 runtime_external("Tree", external.descriptor.clone(), source)
             }
+            ValueRep::Array(items) => {
+                let tree_path = self.materialize_tree_array(items)?;
+                runtime_external("Tree", tree_path.to_string_lossy().into_owned(), source)
+            }
             ValueRep::Map(map) => {
                 let tree_path = self.materialize_tree_map(&map.entries)?;
                 runtime_external("Tree", tree_path.to_string_lossy().into_owned(), source)
@@ -170,7 +177,7 @@ impl CargoSketchRuntime {
             _ => {
                 return Err(EvalError::new(
                     EvalErrorKind::TypeError,
-                    "Tree() argument must evaluate to String, Path, or Map",
+                    "Tree() argument must evaluate to String, Path, Array, or Map",
                 ));
             }
         };
@@ -188,20 +195,10 @@ impl CargoSketchRuntime {
                 "Tree.file() requires receiver and one path-like argument",
             ));
         }
-        let ValueRep::External(tree) = &args[0].rep else {
-            return Err(EvalError::new(
-                EvalErrorKind::TypeError,
-                "Tree.file() receiver must evaluate to Tree",
-            ));
-        };
-        if tree.kind.as_ref() != "Tree" {
-            return Err(EvalError::new(
-                EvalErrorKind::TypeError,
-                "Tree.file() receiver must evaluate to Tree",
-            ));
-        }
         let rel_path = path_like_descriptor(&args[1], "Tree.file() path")?;
-        let full_path = self.root_dir.join(tree.descriptor.as_ref()).join(rel_path);
+        let full_path = self
+            .materialize_tree_value(&args[0], "Tree.file() receiver")?
+            .join(rel_path);
         let contents = fs::read_to_string(&full_path).map_err(|error| {
             EvalError::new(
                 EvalErrorKind::UserFail,
@@ -226,20 +223,8 @@ impl CargoSketchRuntime {
                 "Tree.subtree() requires receiver and one path-like argument",
             ));
         }
-        let ValueRep::External(tree) = &args[0].rep else {
-            return Err(EvalError::new(
-                EvalErrorKind::TypeError,
-                "Tree.subtree() receiver must evaluate to Tree",
-            ));
-        };
-        if tree.kind.as_ref() != "Tree" {
-            return Err(EvalError::new(
-                EvalErrorKind::TypeError,
-                "Tree.subtree() receiver must evaluate to Tree",
-            ));
-        }
         let rel_path = path_like_descriptor(&args[1], "Tree.subtree() path")?;
-        let base = runtime_tree_root(&self.root_dir, tree);
+        let base = self.materialize_tree_value(&args[0], "Tree.subtree() receiver")?;
         let full_path = base.join(rel_path);
         Ok(RuntimeCallOutcome::Ready(runtime_external(
             "Tree",
@@ -619,6 +604,35 @@ impl CargoSketchRuntime {
         Ok(root)
     }
 
+    fn materialize_tree_array(&self, items: &[EvalValue]) -> Result<PathBuf, EvalError> {
+        let root = alloc_eval_tempdir("trees")?;
+        for item in items {
+            materialize_tree_entry(&self.root_dir, item, &root)?;
+        }
+        Ok(root)
+    }
+
+    fn materialize_tree_value(
+        &self,
+        value: &EvalValue,
+        context: &str,
+    ) -> Result<PathBuf, EvalError> {
+        match &value.rep {
+            ValueRep::External(external) if external.kind.as_ref() == "Tree" => {
+                Ok(runtime_tree_root(&self.root_dir, external))
+            }
+            ValueRep::Struct(_) if merged_tree_children(value).is_ok() => {
+                let root = alloc_eval_tempdir("trees")?;
+                materialize_tree_entry(&self.root_dir, value, &root)?;
+                Ok(root)
+            }
+            _ => Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                format!("{context} must evaluate to Tree"),
+            )),
+        }
+    }
+
     fn extract_tar_gz(&self, url: &str, digest: &str, bytes: &[u8]) -> Result<PathBuf, EvalError> {
         let cache_root = eval_cache_root().join("acquire");
         fs::create_dir_all(&cache_root).map_err(|error| {
@@ -929,6 +943,38 @@ fn path_like_descriptor(value: &EvalValue, context: &str) -> Result<PathBuf, Eva
     }
 }
 
+fn merged_tree_children(value: &EvalValue) -> Result<&[EvalValue], EvalError> {
+    let ValueRep::Struct(struct_value) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "value must evaluate to merged Tree",
+        ));
+    };
+    if struct_value.type_name.as_ref() != INTERNAL_MERGED_TREE_TYPE_NAME {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "value must evaluate to merged Tree",
+        ));
+    }
+    let Some((_, children)) = struct_value
+        .fields
+        .iter()
+        .find(|(name, _)| name.as_ref() == INTERNAL_MERGED_TREE_TREES_FIELD)
+    else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "merged Tree value is missing trees",
+        ));
+    };
+    let ValueRep::Array(items) = &children.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "merged Tree children must evaluate to Array",
+        ));
+    };
+    Ok(items)
+}
+
 fn materialize_tree_entry(
     root_dir: &Path,
     value: &EvalValue,
@@ -943,6 +989,13 @@ fn materialize_tree_entry(
                 root_dir.join(source)
             };
             copy_tree_contents(&source, dest)
+        }
+        ValueRep::Struct(_) if merged_tree_children(value).is_ok() => {
+            fs::create_dir_all(dest).map_err(io_error)?;
+            for child in merged_tree_children(value)? {
+                merge_tree_entry(root_dir, child, dest)?;
+            }
+            Ok(())
         }
         ValueRep::External(external) if external.kind.as_ref() == "Blob" => {
             if let Some(parent) = dest.parent() {
@@ -959,6 +1012,24 @@ fn materialize_tree_entry(
         _ => Err(EvalError::new(
             EvalErrorKind::TypeError,
             "Tree() map values must evaluate to Tree, Blob, or String",
+        )),
+    }
+}
+
+fn merge_tree_entry(root_dir: &Path, value: &EvalValue, dest: &Path) -> Result<(), EvalError> {
+    match &value.rep {
+        ValueRep::External(external) if external.kind.as_ref() == "Tree" => {
+            merge_tree_contents(&runtime_tree_root(root_dir, external), dest)
+        }
+        ValueRep::Struct(_) if merged_tree_children(value).is_ok() => {
+            for child in merged_tree_children(value)? {
+                merge_tree_entry(root_dir, child, dest)?;
+            }
+            Ok(())
+        }
+        _ => Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "Tree merge inputs must evaluate to Tree",
         )),
     }
 }
@@ -989,6 +1060,52 @@ fn copy_tree_contents(source: &Path, dest: &Path) -> Result<(), EvalError> {
                 EvalErrorKind::UserFail,
                 format!(
                     "unsupported filesystem entry in Tree copy: {}",
+                    entry.path().display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn merge_tree_contents(source: &Path, dest: &Path) -> Result<(), EvalError> {
+    if source.is_file() {
+        if dest.exists() {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("tree merge conflict at {}", dest.display()),
+            ));
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fs::copy(source, dest).map_err(io_error)?;
+        return Ok(());
+    }
+    fs::create_dir_all(dest).map_err(io_error)?;
+    let entries = fs::read_dir(source).map_err(io_error)?;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let file_type = entry.file_type().map_err(io_error)?;
+        let child_dest = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            merge_tree_contents(&entry.path(), &child_dest)?;
+        } else if file_type.is_file() {
+            if child_dest.exists() {
+                return Err(EvalError::new(
+                    EvalErrorKind::UserFail,
+                    format!("tree merge conflict at {}", child_dest.display()),
+                ));
+            }
+            if let Some(parent) = child_dest.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            fs::copy(entry.path(), child_dest).map_err(io_error)?;
+        } else {
+            return Err(EvalError::new(
+                EvalErrorKind::UserFail,
+                format!(
+                    "unsupported filesystem entry in Tree merge: {}",
                     entry.path().display()
                 ),
             ));

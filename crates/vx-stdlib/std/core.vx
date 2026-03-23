@@ -97,7 +97,7 @@ namespace String {
 
 namespace Array[T] {
   /// Apply `f` to each element.
-  fn map[U](self, f: Fn(T) -> U) -> Array[U];
+  fn map[U](self, f: Fn(T) -> U) -> Stream[U];
   /// Keep the elements for which `pred` returns true.
   fn filter(self, pred: Fn(T) -> Bool) -> Array[T];
   /// Map and skip empty results in one pass.
@@ -173,6 +173,10 @@ namespace Bytes {
 }
 
 namespace Stream[T] {
+  /// Merge a stream of tree fragments into one tree.
+  fn merge(self) -> Tree;
+  /// Collect the stream into a deterministic array value.
+  fn to_array(self) -> Array[T];
   /// Collect the entire stream into a single value.
   fn collect(self) -> T;
 }

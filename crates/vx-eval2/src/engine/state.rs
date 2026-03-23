@@ -183,6 +183,18 @@ pub(super) enum ContinuationFrame {
         child_nodes: Vec<ArrayJoinItem>,
         array_source: SourceSpan,
     },
+    StreamToArrayJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        child_nodes: Vec<EvalNodeId>,
+        stream_provenance: Provenance,
+    },
+    StreamMergeJoin {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        child_nodes: Vec<EvalNodeId>,
+        stream_provenance: Provenance,
+    },
     TupleAfterItem {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -354,14 +366,6 @@ pub(super) enum ContinuationFrame {
         index: usize,
     },
     ArrayFilterMapAfterMapper {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        mapper: FunctionRef,
-        mapped: Vec<Value>,
-        index: usize,
-    },
-    ArrayMapAfterMapper {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,

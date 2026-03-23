@@ -386,6 +386,90 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
+        ContinuationFrame::StreamToArrayJoin {
+            node_id,
+            parent_id,
+            child_nodes,
+            stream_provenance,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut items = Vec::new();
+                    for child_node_id in &child_nodes {
+                        match state.scheduler.node_state(*child_node_id) {
+                            Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending = state
+                                    .scheduler
+                                    .alloc_child_dependency_pending(*child_node_id);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    branch_context: state.branch_context.clone(),
+                                    frames: vec![ContinuationFrame::StreamToArrayJoin {
+                                        node_id,
+                                        parent_id,
+                                        child_nodes: child_nodes.clone(),
+                                        stream_provenance: stream_provenance.clone(),
+                                    }],
+                                    call_stack: state.call_stack.clone(),
+                                }));
+                            }
+                        }
+                    }
+                    let meta = aggregate_child_meta(stream_provenance, items.iter());
+                    Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
+        ContinuationFrame::StreamMergeJoin {
+            node_id,
+            parent_id,
+            child_nodes,
+            stream_provenance,
+        } => {
+            let result = match input {
+                Ok(_) => {
+                    let mut items = Vec::new();
+                    for child_node_id in &child_nodes {
+                        match state.scheduler.node_state(*child_node_id) {
+                            Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => {
+                                return Ok(ResumeOutcome::Continue(Err(error.clone())));
+                            }
+                            _ => {
+                                let pending = state
+                                    .scheduler
+                                    .alloc_child_dependency_pending(*child_node_id);
+                                return Ok(ResumeOutcome::Suspended(EvalSuspension {
+                                    resume_node: node_id,
+                                    pending,
+                                    branch_context: state.branch_context.clone(),
+                                    frames: vec![ContinuationFrame::StreamMergeJoin {
+                                        node_id,
+                                        parent_id,
+                                        child_nodes: child_nodes.clone(),
+                                        stream_provenance: stream_provenance.clone(),
+                                    }],
+                                    call_stack: state.call_stack.clone(),
+                                }));
+                            }
+                        }
+                    }
+                    Ok(EvalStep::Ready(internal_merged_tree_value(
+                        items,
+                        stream_provenance,
+                    )?))
+                }
+                Err(error) => Err(error),
+            };
+            Ok(conclude_resumed_node(state, node_id, parent_id, result))
+        }
         ContinuationFrame::TupleAfterItem {
             node_id,
             parent_id,
@@ -1106,31 +1190,6 @@ pub(in crate::engine) fn resume_frame(
                 Ok(value) => continue_array_filter_map_builtin(
                     state, node_id, parent_id, items, mapper, mapped, value, index,
                 ),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::ArrayMapAfterMapper {
-            node_id,
-            parent_id,
-            items,
-            mapper,
-            mut mapped,
-            index,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    mapped.push(value);
-                    continue_array_map_builtin(
-                        state,
-                        node_id,
-                        parent_id,
-                        items,
-                        mapper,
-                        mapped,
-                        index + 1,
-                    )
-                }
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

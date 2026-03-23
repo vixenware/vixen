@@ -216,7 +216,7 @@ fn generic_namespace_member_signatures_keep_namespace_type_params() {
     let file = parse_file(
         r#"
 namespace Array[T] {
-    fn map[U](self: Self, f: Fn(T) -> U) -> Array[U];
+    fn map[U](self: Self, f: Fn(T) -> U) -> Stream[U];
 }
 "#,
     );
@@ -245,7 +245,7 @@ namespace Array[T] {
     );
     assert_eq!(
         sig.ret,
-        Ty::Array(Box::new(Ty::Param(vx_types::TypeParam {
+        Ty::Stream(Box::new(Ty::Param(vx_types::TypeParam {
             name: "U".to_string(),
             index: 1,
         })))
@@ -479,7 +479,7 @@ fn main() {
     let ty = find_expr_type(&result, src, "paths.map(blobify)");
     assert_eq!(
         ty,
-        Some(Ty::Array(Box::new(nominal_ty(
+        Some(Ty::Stream(Box::new(nominal_ty(
             &collect_types_with_stdlib(&parse_file(src)),
             "Blob",
         ))))
@@ -502,7 +502,7 @@ fn main() {
     let (result, types) = type_check_with_types(src);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let ty = find_expr_type(&result, src, "paths.map(compile)");
-    assert_eq!(ty, Some(Ty::Array(Box::new(nominal_ty(&types, "Tree")))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree")))));
 }
 
 #[test]
@@ -1723,7 +1723,30 @@ fn main(paths: Array[Path]) {
         "got: {compile_ty:?}"
     );
     let ty = find_expr_type(&result, src, "paths.map(compile)");
-    assert_eq!(ty, Some(Ty::Array(Box::new(nominal_ty(&types, "Tree")))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree")))));
+}
+
+#[test]
+fn array_map_to_array_collects_stream_back_to_array() {
+    let src = r#"
+fn main(paths: Array[Path]) {
+    paths.map(Tree($)).to_array()
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let mapped_ty = find_expr_type(&result, src, "paths.map(Tree($))");
+    assert_eq!(
+        mapped_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree"))))
+    );
+
+    let collected_ty = find_expr_type(&result, src, "paths.map(Tree($)).to_array()");
+    assert_eq!(
+        collected_ty,
+        Some(Ty::Array(Box::new(nominal_ty(&types, "Tree"))))
+    );
 }
 
 #[test]
@@ -1889,6 +1912,18 @@ fn main(parts: Array[Tree]) {
 "#;
     let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "parts.merge()");
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
+}
+
+#[test]
+fn stream_merge_returns_tree() {
+    let src = r#"
+fn main(parts: Array[Path]) {
+    parts.map((part) => Tree(part)).merge()
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    let ty = find_expr_type(&result, src, "parts.map((part) => Tree(part)).merge()");
     assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
 }
 

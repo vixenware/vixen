@@ -2222,11 +2222,11 @@ fn build(items: Array[String]) {
 }
 
 #[test]
-fn array_map_method_transforms_items_at_runtime() {
+fn array_map_stream_to_array_transforms_items_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
 fn build(items: Array[String]) {
-  items.map((item) => item.to_lower())
+  items.map((item) => item.to_lower()).to_array()
 }
 "#,
         "array-map-method-runtime",
@@ -2236,13 +2236,13 @@ fn build(items: Array[String]) {
             Value::string("SeRdE"),
         ])],
     )
-    .expect("evaluate Array.map()");
+    .expect("evaluate Array.map().to_array()");
 
     let Resolution::Ready(value) = resolution else {
-        panic!("expected ready Array.map() result, got {resolution:?}");
+        panic!("expected ready Array.map().to_array() result, got {resolution:?}");
     };
     let ValueRep::Array(items) = &value.rep else {
-        panic!("expected array result from Array.map(), got {value:?}");
+        panic!("expected array result from Array.map().to_array(), got {value:?}");
     };
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
@@ -10649,7 +10649,7 @@ fn build() {
 }
 
 #[test]
-fn run_parallel_array_map_runtime_steps_remain_sequential_today() {
+fn run_parallel_array_map_to_array_can_overlap_runtime_steps() {
     let active_calls = Arc::new(AtomicUsize::new(0));
     let max_calls = Arc::new(AtomicUsize::new(0));
     let runtime = ParallelObserveRuntime {
@@ -10659,7 +10659,7 @@ fn run_parallel_array_map_runtime_steps_remain_sequential_today() {
     let mut session = EvalSession::new(
         r#"
 fn build() {
-  [1, 2, 3, 4].map((_item) => host_os())
+  [1, 2, 3, 4].map((_item) => host_os()).to_array()
 }
 "#,
         "parallel-array-map-sequential",
@@ -10684,10 +10684,9 @@ fn build() {
             .iter()
             .all(|item| item.rep == ValueRep::String("windows".into()))
     );
-    assert_eq!(
-        max_calls.load(Ordering::SeqCst),
-        1,
-        "Array.map currently drives runtime-heavy bodies one at a time",
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "Array.map(...).to_array() should overlap sibling runtime calls",
     );
 }
 

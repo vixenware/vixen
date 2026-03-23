@@ -181,6 +181,147 @@ fn option_none() -> Value {
     Value::structure("None", Vec::<(Arc<str>, Value)>::new())
 }
 
+const INTERNAL_STREAM_TYPE_NAME: &str = "__Eval2Stream";
+const INTERNAL_STREAM_CALLS_FIELD: &str = "calls";
+const INTERNAL_STREAM_CALL_TYPE_NAME: &str = "__Eval2StreamCall";
+const INTERNAL_STREAM_CALL_FUNCTION_FIELD: &str = "function";
+const INTERNAL_STREAM_CALL_ARG_FIELD: &str = "arg";
+const INTERNAL_MERGED_TREE_TYPE_NAME: &str = "__Eval2MergedTree";
+const INTERNAL_MERGED_TREE_TREES_FIELD: &str = "trees";
+
+fn internal_stream_value(calls: Vec<Value>, meta: ValueMeta) -> Value {
+    Value::structure(
+        INTERNAL_STREAM_TYPE_NAME,
+        [(Arc::from(INTERNAL_STREAM_CALLS_FIELD), Value::array(calls))],
+    )
+    .with_meta(meta)
+}
+
+fn internal_stream_map_call(function: FunctionRef, arg: Value) -> Value {
+    Value::structure(
+        INTERNAL_STREAM_CALL_TYPE_NAME,
+        [
+            (
+                Arc::from(INTERNAL_STREAM_CALL_FUNCTION_FIELD),
+                Value::function(function),
+            ),
+            (Arc::from(INTERNAL_STREAM_CALL_ARG_FIELD), arg),
+        ],
+    )
+}
+
+fn internal_stream_calls(value: &Value) -> Result<Vec<(FunctionRef, Value)>, EvalError> {
+    let ValueRep::Struct(stream) = &value.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "Stream.to_array() receiver must evaluate to Stream",
+        ));
+    };
+    if stream.type_name.as_ref() != INTERNAL_STREAM_TYPE_NAME {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "Stream.to_array() receiver must evaluate to Stream",
+        ));
+    }
+    let Some(calls) = stream
+        .fields
+        .iter()
+        .find_map(|(name, value)| (name.as_ref() == INTERNAL_STREAM_CALLS_FIELD).then_some(value))
+    else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "internal stream value is missing calls",
+        ));
+    };
+    let ValueRep::Array(calls) = &calls.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "internal stream calls must evaluate to Array",
+        ));
+    };
+    calls
+        .iter()
+        .map(|value| {
+            let ValueRep::Struct(call) = &value.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "internal stream call must evaluate to Struct",
+                ));
+            };
+            if call.type_name.as_ref() != INTERNAL_STREAM_CALL_TYPE_NAME {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "internal stream call has the wrong type",
+                ));
+            }
+            let function = call
+                .fields
+                .iter()
+                .find_map(|(name, value)| {
+                    (name.as_ref() == INTERNAL_STREAM_CALL_FUNCTION_FIELD).then_some(value)
+                })
+                .ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "internal stream call is missing a function",
+                    )
+                })?;
+            let ValueRep::Function(function) = &function.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "internal stream call function must evaluate to Function",
+                ));
+            };
+            let arg = call
+                .fields
+                .iter()
+                .find_map(|(name, value)| {
+                    (name.as_ref() == INTERNAL_STREAM_CALL_ARG_FIELD).then_some(value)
+                })
+                .ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "internal stream call is missing an argument",
+                    )
+                })?;
+            Ok((function.clone(), arg.clone()))
+        })
+        .collect()
+}
+
+pub(super) fn internal_merged_tree_value(
+    items: Vec<Value>,
+    provenance: Provenance,
+) -> Result<Value, EvalError> {
+    for item in &items {
+        if !is_tree_like_value(item) {
+            return Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Tree merge inputs must evaluate to Tree",
+            ));
+        }
+    }
+    let meta = aggregate_child_meta(provenance, items.iter());
+    Ok(Value::structure(
+        INTERNAL_MERGED_TREE_TYPE_NAME,
+        [(
+            Arc::from(INTERNAL_MERGED_TREE_TREES_FIELD),
+            Value::array(items),
+        )],
+    )
+    .with_meta(meta))
+}
+
+fn is_tree_like_value(value: &Value) -> bool {
+    match &value.rep {
+        ValueRep::External(external) => external.kind.as_ref() == "Tree",
+        ValueRep::Struct(struct_value) => {
+            struct_value.type_name.as_ref() == INTERNAL_MERGED_TREE_TYPE_NAME
+        }
+        _ => false,
+    }
+}
+
 pub(in crate::engine) fn continue_array_find_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -347,46 +488,35 @@ pub(in crate::engine) fn continue_array_filter_builtin(
 
 pub(in crate::engine) fn continue_array_map_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
     items: Vec<Value>,
     mapper: FunctionRef,
-    mut mapped: Vec<Value>,
-    start_index: usize,
+    stream_provenance: Provenance,
 ) -> Result<EvalStep, EvalError> {
-    for index in start_index..items.len() {
-        let item = items[index].clone();
-        let Some(prepared) = prepare_function_call(state, &mapper, &[item], Some(node_id))? else {
+    let mut calls = Vec::with_capacity(items.len());
+    for item in items {
+        if prepare_function_call(
+            state,
+            &mapper,
+            std::slice::from_ref(&item),
+            state.stack.last().copied(),
+        )?
+        .is_none()
+        {
             return Err(EvalError::new(
                 EvalErrorKind::TypeError,
                 "Array.map() mapper must be a bodyful Vixen function",
             ));
-        };
-        let mut env = prepared.env;
-        match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
-        })? {
-            EvalStep::Ready(result) => mapped.push(result),
-            EvalStep::Suspended(suspension) => {
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::ArrayMapAfterMapper {
-                        node_id,
-                        parent_id,
-                        items,
-                        mapper,
-                        mapped,
-                        index,
-                    },
-                ));
-            }
         }
+        calls.push(internal_stream_map_call(mapper.clone(), item));
     }
-    let meta = aggregate_child_meta(
-        Provenance::unknown(SourceSpan::synthetic("<array-map>")),
-        mapped.iter(),
-    );
-    Ok(EvalStep::Ready(Value::array(mapped).with_meta(meta)))
+    Ok(EvalStep::Ready(internal_stream_value(
+        calls,
+        ValueMeta::new(
+            stream_provenance,
+            ReuseClass::Stable,
+            CrossingPolicy::ByValue,
+        ),
+    )))
 }
 
 pub(in crate::engine) fn continue_array_any_builtin(
@@ -902,7 +1032,11 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Array.any"
             | "Array.find"
             | "Array.flatten"
+            | "Array.merge"
             | "Array.to_array"
+            | "Stream.merge"
+            | "Stream.to_array"
+            | "Tree.merge"
             | "Map.map"
             | "Map.to_array"
             | "map_get"
@@ -1707,12 +1841,9 @@ fn continue_builtin_call_inner(
             };
             continue_array_map_builtin(
                 state,
-                node_id,
-                parent_id,
                 items.iter().cloned().collect(),
                 mapper.clone(),
-                Vec::new(),
-                0,
+                args[0].meta.provenance.clone(),
             )
             .map(Some)
         }
@@ -1860,6 +1991,24 @@ fn continue_builtin_call_inner(
             let meta = aggregate_child_meta(args[0].meta.provenance.clone(), flattened.iter());
             Ok(ready_builtin_value(Value::array(flattened).with_meta(meta)))
         }
+        "Array.merge" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.merge() requires receiver",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.merge() receiver must evaluate to Array",
+                ));
+            };
+            Ok(ready_builtin_value(internal_merged_tree_value(
+                items.iter().cloned().collect(),
+                args[0].meta.provenance.clone(),
+            )?))
+        }
         "Array.to_array" => {
             if args.len() != 1 {
                 return Err(EvalError::new(
@@ -1874,6 +2023,146 @@ fn continue_builtin_call_inner(
                 ));
             };
             Ok(ready_builtin_value(args[0].clone()))
+        }
+        "Stream.to_array" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.to_array() requires receiver",
+                ));
+            }
+            let calls = internal_stream_calls(&args[0])?;
+            let mut child_nodes = Vec::with_capacity(calls.len());
+            for (function, arg) in calls {
+                let Some(prepared) = prepare_function_call(
+                    state,
+                    &function,
+                    std::slice::from_ref(&arg),
+                    Some(node_id),
+                )?
+                else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Stream.to_array() can only collect bodyful mapped streams",
+                    ));
+                };
+                child_nodes.push(queue_child_prepared_entry(state, prepared));
+            }
+            if child_nodes.is_empty() {
+                let meta = ValueMeta::new(
+                    args[0].meta.provenance.clone(),
+                    ReuseClass::Stable,
+                    CrossingPolicy::ByValue,
+                );
+                return Ok(ready_builtin_value(
+                    Value::array(Vec::new()).with_meta(meta),
+                ));
+            }
+            for child_node_id in &child_nodes {
+                match state.scheduler.node_state(*child_node_id) {
+                    Some(EvalNodeState::Ready(_)) => {}
+                    Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                    _ => {
+                        return Ok(Some(wait_on_child_dependency(
+                            state,
+                            node_id,
+                            *child_node_id,
+                            vec![ContinuationFrame::StreamToArrayJoin {
+                                node_id,
+                                parent_id,
+                                child_nodes,
+                                stream_provenance: args[0].meta.provenance.clone(),
+                            }],
+                        )));
+                    }
+                }
+            }
+            let items = child_nodes
+                .iter()
+                .filter_map(
+                    |child_node_id| match state.scheduler.node_state(*child_node_id) {
+                        Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                        _ => None,
+                    },
+                )
+                .collect::<Vec<_>>();
+            let meta = aggregate_child_meta(args[0].meta.provenance.clone(), items.iter());
+            Ok(ready_builtin_value(Value::array(items).with_meta(meta)))
+        }
+        "Stream.merge" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.merge() requires receiver",
+                ));
+            }
+            let calls = internal_stream_calls(&args[0])?;
+            let mut child_nodes = Vec::with_capacity(calls.len());
+            for (function, arg) in calls {
+                let Some(prepared) = prepare_function_call(
+                    state,
+                    &function,
+                    std::slice::from_ref(&arg),
+                    Some(node_id),
+                )?
+                else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "Stream.merge() can only merge bodyful mapped streams",
+                    ));
+                };
+                child_nodes.push(queue_child_prepared_entry(state, prepared));
+            }
+            if child_nodes.is_empty() {
+                return Ok(ready_builtin_value(internal_merged_tree_value(
+                    Vec::new(),
+                    args[0].meta.provenance.clone(),
+                )?));
+            }
+            for child_node_id in &child_nodes {
+                match state.scheduler.node_state(*child_node_id) {
+                    Some(EvalNodeState::Ready(_)) => {}
+                    Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                    _ => {
+                        return Ok(Some(wait_on_child_dependency(
+                            state,
+                            node_id,
+                            *child_node_id,
+                            vec![ContinuationFrame::StreamMergeJoin {
+                                node_id,
+                                parent_id,
+                                child_nodes,
+                                stream_provenance: args[0].meta.provenance.clone(),
+                            }],
+                        )));
+                    }
+                }
+            }
+            let items = child_nodes
+                .iter()
+                .filter_map(
+                    |child_node_id| match state.scheduler.node_state(*child_node_id) {
+                        Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                        _ => None,
+                    },
+                )
+                .collect::<Vec<_>>();
+            Ok(ready_builtin_value(internal_merged_tree_value(
+                items,
+                args[0].meta.provenance.clone(),
+            )?))
+        }
+        "Tree.merge" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Tree.merge() requires receiver and other tree",
+                ));
+            }
+            Ok(ready_builtin_value(internal_merged_tree_value(
+                vec![args[0].clone(), args[1].clone()],
+                args[0].meta.provenance.clone(),
+            )?))
         }
         "Map.map" => {
             if args.len() != 2 {
