@@ -99,7 +99,7 @@ namespace Array[T] {
   /// Apply `f` to each element.
   fn map[U](self, f: Fn(T) -> U) -> Stream[U];
   /// Keep the elements for which `pred` returns true.
-  fn filter(self, pred: Fn(T) -> Bool) -> Array[T];
+  fn filter(self, pred: Fn(T) -> Bool) -> Stream[T];
   /// Map and skip empty results in one pass.
   fn filter_map[U](self, f: Fn(T) -> Option[U]) -> Array[U];
   /// Return the first element for which `pred` returns true.
@@ -131,7 +131,7 @@ fn array_fold[T, U](items: Array[T], init: U, step: Fn(U, T) -> U) -> U;
 
 namespace Map[K, V] {
   /// Apply `f` to each `(key, value)` pair and collect the results.
-  fn map[U](self, f: Fn(K, V) -> U) -> Array[U];
+  fn map[U](self, f: Fn(K, V) -> U) -> Stream[U];
   /// Apply `f` to each value while preserving keys.
   fn map_values[U](self, f: Fn(V) -> U) -> Map[K, U];
   /// Return true if the map contains `key`.
@@ -173,6 +173,10 @@ namespace Bytes {
 }
 
 namespace Stream[T] {
+  /// Apply `f` to each stream item.
+  fn map[U](self, f: Fn(T) -> U) -> Stream[U];
+  /// Keep the items for which `pred` returns true.
+  fn filter(self, pred: Fn(T) -> Bool) -> Stream[T];
   /// Merge a stream of tree fragments into one tree.
   fn merge(self) -> Tree;
   /// Collect the stream into a deterministic array value.

@@ -306,7 +306,7 @@ fn parse_sparse_entries(blob: Blob) -> Array[IndexEntry] (
 
 fn merged_entry_features(entry: IndexEntry) -> Map[String, Array[String]] (
   array_fold(
-    entry.features2.map((key, value) => FeatureMapEntry { key, value }),
+    entry.features2.map((key, value) => FeatureMapEntry { key, value }).to_array(),
     entry.features,
     ((acc, pair) => map_put(acc, pair.key, pair.value)),
   )
@@ -432,6 +432,7 @@ fn manifest_requests_at_with_workspace(
       .map((selector, table) => (
         target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies) where { target }
       ))
+      .to_array()
       .flatten(),
   ]
 )
@@ -459,6 +460,7 @@ fn root_requests_at_with_workspace(
         root_target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies)
           where { target }
       ))
+      .to_array()
       .flatten(),
   ]
 )
@@ -483,6 +485,7 @@ fn package_dependency_requests_at_with_workspace(
       .map((selector, table) => (
         package_target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies)
       ))
+      .to_array()
       .flatten(),
   ]
 )
@@ -1484,7 +1487,7 @@ fn canonical_request_insert(
 fn dependency_request_values(
   requests: Map[String, DependencyRequest],
 ) -> Array[DependencyRequest] (
-  requests.map((key, value) => value)
+  requests.map((key, value) => value).to_array()
 )
 
 fn canonical_requests(requests: Array[DependencyRequest]) -> Array[DependencyRequest] (
@@ -1663,7 +1666,7 @@ fn materialize_resolution(
     );
   RegistryResolution {
     roots: roots.map($.id).to_array(),
-    packages: state.packages.map((key, value) => value),
+    packages: state.packages.map((key, value) => value).to_array(),
   }
 )
 

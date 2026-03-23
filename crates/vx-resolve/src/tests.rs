@@ -1566,7 +1566,7 @@ fn main(lines: Array[String]) {
     let ty = find_expr_type(&result, src, r#"lines.filter(!$.is_empty())"#);
     assert_eq!(
         ty,
-        Some(Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+        Some(Ty::Stream(Box::new(Ty::Scalar(vx_types::Scalar::String))))
     );
 }
 
@@ -1608,7 +1608,74 @@ fn main(lines: Array[String], requests: Array[Request]) {
     );
     assert_eq!(
         filtered_ty,
-        Some(Ty::Array(Box::new(nominal_ty(&types, "Request"))))
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Request"))))
+    );
+}
+
+#[test]
+fn map_map_to_array_collects_stream_back_to_array() {
+    let src = r#"
+fn main(items: Map[String, String]) {
+    items.map((name, _value) => name).to_array()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let mapped_ty = find_expr_type(&result, src, r#"items.map((name, _value) => name)"#);
+    assert_eq!(
+        mapped_ty,
+        Some(Ty::Stream(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
+
+    let collected_ty = find_expr_type(
+        &result,
+        src,
+        r#"items.map((name, _value) => name).to_array()"#,
+    );
+    assert_eq!(
+        collected_ty,
+        Some(Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
+}
+
+#[test]
+fn stream_filter_and_map_pipelines_typecheck() {
+    let src = r#"
+struct Request {
+    name: String,
+    kind: String?,
+}
+
+fn main(lines: Array[String], requests: Array[Request]) {
+    let blobs = lines.filter(!$.is_empty()).map(Blob($)).to_array();
+    let filtered =
+        requests
+          .filter($.kind.unwrap_or("normal") == "normal")
+          .filter(!$.name.is_empty())
+          .to_array();
+    (blobs, filtered)
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let mapped_ty = find_expr_type(&result, src, r#"lines.filter(!$.is_empty()).map(Blob($))"#);
+    assert_eq!(
+        mapped_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Blob"))))
+    );
+
+    let filtered_ty = find_expr_type(
+        &result,
+        src,
+        r#"requests
+          .filter($.kind.unwrap_or("normal") == "normal")
+          .filter(!$.name.is_empty())"#,
+    );
+    assert_eq!(
+        filtered_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Request"))))
     );
 }
 

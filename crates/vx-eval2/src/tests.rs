@@ -2193,11 +2193,11 @@ fn build() {
 }
 
 #[test]
-fn array_filter_method_selects_matching_items_at_runtime() {
+fn array_filter_stream_to_array_selects_matching_items_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
 fn build(items: Array[String]) {
-  items.filter((item) => item.contains("at"))
+  items.filter((item) => item.contains("at")).to_array()
 }
 "#,
         "array-filter-method-runtime",
@@ -2208,13 +2208,13 @@ fn build(items: Array[String]) {
             Value::string("wat"),
         ])],
     )
-    .expect("evaluate Array.filter()");
+    .expect("evaluate Array.filter().to_array()");
 
     let Resolution::Ready(value) = resolution else {
-        panic!("expected ready Array.filter() result, got {resolution:?}");
+        panic!("expected ready Array.filter().to_array() result, got {resolution:?}");
     };
     let ValueRep::Array(items) = &value.rep else {
-        panic!("expected array result from Array.filter(), got {value:?}");
+        panic!("expected array result from Array.filter().to_array(), got {value:?}");
     };
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
@@ -2509,7 +2509,43 @@ fn build(items: Array[String]) {
 }
 
 #[test]
-fn map_map_method_projects_entries_to_array_at_runtime() {
+fn stream_filter_and_map_pipelines_work_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items
+    .filter((item) => item.contains("A"))
+    .map((item) => item.to_lower())
+    .filter((item) => item.starts_with("wa"))
+    .to_array()
+}
+"#,
+        "stream-filter-map-pipeline-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+            Value::string("WAT"),
+        ])],
+    )
+    .expect("evaluate Stream.filter().map().filter().to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!(
+            "expected ready Stream.filter().map().filter().to_array() result, got {resolution:?}"
+        );
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!(
+            "expected array result from Stream.filter().map().filter().to_array(), got {value:?}"
+        );
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].rep, ValueRep::String("wat".into()));
+}
+
+#[test]
+fn map_map_stream_to_array_projects_entries_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
 fn build(items: Map[String, String]) {
@@ -2523,13 +2559,13 @@ fn build(items: Map[String, String]) {
             (Value::string("flate2"), Value::string("1")),
         ])],
     )
-    .expect("evaluate Map.map()");
+    .expect("evaluate Map.map().to_array()");
 
     let Resolution::Ready(value) = resolution else {
-        panic!("expected ready Map.map() result, got {resolution:?}");
+        panic!("expected ready Map.map().to_array() result, got {resolution:?}");
     };
     let ValueRep::Array(items) = &value.rep else {
-        panic!("expected array result from Map.map(), got {value:?}");
+        panic!("expected array result from Map.map().to_array(), got {value:?}");
     };
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].rep, ValueRep::String("eyre".into()));
@@ -10687,6 +10723,85 @@ fn build() {
     assert!(
         max_calls.load(Ordering::SeqCst) >= 2,
         "Array.map(...).to_array() should overlap sibling runtime calls",
+    );
+}
+
+#[test]
+fn run_parallel_array_filter_to_array_can_overlap_runtime_steps() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  [1, 2, 3, 4].filter((_item) => host_os() == "windows").to_array()
+}
+"#,
+        "parallel-array-filter-stream",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 4);
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "Array.filter(...).to_array() should overlap sibling runtime calls",
+    );
+}
+
+#[test]
+fn run_parallel_map_map_to_array_can_overlap_runtime_steps() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  %{ "a" => 1, "b" => 2, "c" => 3, "d" => 4 }.map((_name, _value) => host_os()).to_array()
+}
+"#,
+        "parallel-map-map-stream",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 4);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+    assert!(
+        max_calls.load(Ordering::SeqCst) >= 2,
+        "Map.map(...).to_array() should overlap sibling runtime calls",
     );
 }
 

@@ -54,6 +54,30 @@ pub(super) enum ArrayJoinItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StreamJoinItem {
+    Pending {
+        child_node: EvalNodeId,
+        waiting_on: StreamPendingKind,
+        remaining_stages: Vec<StreamStage>,
+    },
+    Ready(Value),
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StreamPendingKind {
+    SourceCall,
+    Map,
+    Filter { input: Value },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StreamStage {
+    Map(FunctionRef),
+    Filter(FunctionRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StructLiteralPart {
     Field { name: Arc<str>, expr: ExprHandle },
     Spread(ExprHandle),
@@ -186,13 +210,13 @@ pub(super) enum ContinuationFrame {
     StreamToArrayJoin {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        child_nodes: Vec<EvalNodeId>,
+        items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
     },
     StreamMergeJoin {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        child_nodes: Vec<EvalNodeId>,
+        items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
     },
     TupleAfterItem {
@@ -357,14 +381,6 @@ pub(super) enum ContinuationFrame {
         step: FunctionRef,
         index: usize,
     },
-    ArrayFilterAfterPredicate {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        predicate: FunctionRef,
-        kept: Vec<Value>,
-        index: usize,
-    },
     ArrayFilterMapAfterMapper {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -378,14 +394,6 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         items: Vec<Value>,
         predicate: FunctionRef,
-        index: usize,
-    },
-    MapMapAfterMapper {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        entries: Vec<(Value, Value)>,
-        mapper: FunctionRef,
-        mapped: Vec<Value>,
         index: usize,
     },
     FieldReceiver {
