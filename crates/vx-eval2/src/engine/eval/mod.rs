@@ -2337,13 +2337,17 @@ pub(super) fn eval_range(
             ),
             EvalStep::Suspended(suspension) => Ok(extend_suspension(
                 suspension,
-                ContinuationFrame::RangeAfterStart {
+                ContinuationFrame::Range {
                     node_id,
                     parent_id,
-                    end: end_handle,
-                    env: env.clone(),
-                    range_source,
-                    inclusive_end,
+                    range: RangeState {
+                        start: None,
+                        end: end_handle,
+                        env: env.clone(),
+                        range_source,
+                        inclusive_end,
+                    },
+                    pending: RangeResumeKind::Start,
                 },
             )),
         }
@@ -3117,12 +3121,17 @@ pub(super) fn continue_range_end(
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::RangeAfterEnd {
+                    ContinuationFrame::Range {
                         node_id,
                         parent_id,
-                        start,
-                        range_source,
-                        inclusive_end,
+                        range: RangeState {
+                            start,
+                            end: None,
+                            env,
+                            range_source,
+                            inclusive_end,
+                        },
+                        pending: RangeResumeKind::End,
                     },
                 ));
             }

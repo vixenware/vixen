@@ -146,6 +146,21 @@ pub(super) struct BinaryState {
     pub(super) lhs: Option<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RangeResumeKind {
+    Start,
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RangeState {
+    pub(super) start: Option<Value>,
+    pub(super) end: Option<ExprHandle>,
+    pub(super) env: EvalEnv,
+    pub(super) range_source: SourceSpan,
+    pub(super) inclusive_end: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IfState {
     pub(super) then_branch: ExprHandle,
@@ -330,20 +345,11 @@ pub(super) enum ContinuationFrame {
         expr_nodes: Vec<EvalNodeId>,
         string_source: SourceSpan,
     },
-    RangeAfterStart {
+    Range {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        end: Option<ExprHandle>,
-        env: EvalEnv,
-        range_source: SourceSpan,
-        inclusive_end: bool,
-    },
-    RangeAfterEnd {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        start: Option<Value>,
-        range_source: SourceSpan,
-        inclusive_end: bool,
+        range: RangeState,
+        pending: RangeResumeKind,
     },
     RangeJoin {
         node_id: EvalNodeId,

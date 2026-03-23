@@ -558,43 +558,31 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::RangeAfterStart {
+        ContinuationFrame::Range {
             node_id,
             parent_id,
-            end,
-            env,
-            range_source,
-            inclusive_end,
+            range,
+            pending,
         } => {
             let result = match input {
-                Ok(start) => continue_range_end(
-                    state,
-                    node_id,
-                    parent_id,
-                    Some(start),
-                    end,
-                    env,
-                    range_source,
-                    inclusive_end,
-                ),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::RangeAfterEnd {
-            node_id,
-            parent_id,
-            start,
-            range_source,
-            inclusive_end,
-        } => {
-            let result = match input {
-                Ok(end) => Ok(EvalStep::Ready(build_range_value(
-                    start,
-                    Some(end),
-                    inclusive_end,
-                    range_source,
-                )?)),
+                Ok(value) => match pending {
+                    RangeResumeKind::Start => continue_range_end(
+                        state,
+                        node_id,
+                        parent_id,
+                        Some(value),
+                        range.end,
+                        range.env,
+                        range.range_source,
+                        range.inclusive_end,
+                    ),
+                    RangeResumeKind::End => Ok(EvalStep::Ready(build_range_value(
+                        range.start,
+                        Some(value),
+                        range.inclusive_end,
+                        range.range_source,
+                    )?)),
+                },
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
