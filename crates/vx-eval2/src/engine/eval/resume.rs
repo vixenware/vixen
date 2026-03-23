@@ -774,16 +774,20 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::MatchScrutinee {
+        ContinuationFrame::Match {
             node_id,
             parent_id,
-            arms,
-            env,
+            match_state,
         } => {
             let result = match input {
-                Ok(scrutinee) => {
-                    continue_match_arms(state, node_id, parent_id, scrutinee, arms, env)
-                }
+                Ok(scrutinee) => continue_match_arms(
+                    state,
+                    node_id,
+                    parent_id,
+                    match_state.match_expr,
+                    scrutinee,
+                    match_state.env,
+                ),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

@@ -91,7 +91,6 @@ pub(super) enum StructLiteralPart {
     Spread(ExprId),
 }
 
-pub(super) type MatchArmPlan = crate::program::MatchArmPlan;
 pub(super) type LetPattern = crate::program::LetPattern;
 pub(super) type MatchFieldPattern = crate::program::MatchFieldPattern;
 pub(super) type MatchPattern = crate::program::MatchPattern;
@@ -160,6 +159,12 @@ pub(super) struct RangeState {
 pub(super) struct IfState {
     pub(super) then_branch: ExprId,
     pub(super) else_branch: ExprId,
+    pub(super) env: EvalEnv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MatchState {
+    pub(super) match_expr: ExprId,
     pub(super) env: EvalEnv,
 }
 
@@ -395,11 +400,10 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         search: SearchAssumptionState,
     },
-    MatchScrutinee {
+    Match {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        arms: Arc<[MatchArmPlan]>,
-        env: EvalEnv,
+        match_state: MatchState,
     },
     Prefix {
         node_id: EvalNodeId,

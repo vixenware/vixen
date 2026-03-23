@@ -761,7 +761,7 @@ pub(super) fn eval_expr_with_node_id(
             let ExprKind::Match(match_expr) = expr.kind() else {
                 unreachable!()
             };
-            eval_match(state, match_expr, env)
+            eval_match(state, state.expr_id(expr), match_expr, env)
         }
         _ if matches!(expr.kind(), ExprKind::Where(_)) => {
             let ExprKind::Where(where_expr) = expr.kind() else {
@@ -2544,6 +2544,7 @@ pub(super) fn eval_if(
 
 pub(super) fn eval_match(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    match_expr_id: ExprId,
     match_expr: &MatchExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
@@ -2553,7 +2554,6 @@ pub(super) fn eval_match(
         .copied()
         .expect("match expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let arms = Arc::clone(&match_expr.arms);
     let scrutinee = match eval_dependent_expr_id(
         state,
         node_id,
@@ -2566,26 +2566,43 @@ pub(super) fn eval_match(
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
                 suspension,
-                ContinuationFrame::MatchScrutinee {
+                ContinuationFrame::Match {
                     node_id,
                     parent_id,
-                    arms,
-                    env: env.clone(),
+                    match_state: MatchState {
+                        match_expr: match_expr_id,
+                        env: env.clone(),
+                    },
                 },
             ));
         }
     };
-    continue_match_arms(state, node_id, parent_id, scrutinee, arms, env.clone())
+    continue_match_arms(
+        state,
+        node_id,
+        parent_id,
+        match_expr_id,
+        scrutinee,
+        env.clone(),
+    )
 }
 
 pub(super) fn continue_match_arms(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
+    match_expr_id: ExprId,
     scrutinee: Value,
-    arms: Arc<[MatchArmPlan]>,
     env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    let match_expr = state.program.resolve_expr_id(match_expr_id)?;
+    let ExprKind::Match(match_expr) = match_expr.kind() else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "match continuation targeted non-match expression",
+        ));
+    };
+    let arms = &match_expr.arms;
     for arm in arms.iter() {
         let mut arm_env = env.clone();
         if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
