@@ -140,23 +140,24 @@ impl EvalPreparedIdAllocator {
     }
 }
 
-fn find_keyed_node_in_keyed_nodes(
-    keyed_nodes: &EvalNodeTable<KeyedNodeMemo>,
+fn find_keyed_node_in_base(
+    base: &EvalSchedulerBase,
     resolver: &FunctionRef,
     key: &Value,
     branch_context: &EvalBranchContext,
 ) -> Result<Option<EvalNodeId>, EvalError> {
-    keyed_nodes
-        .iter()
-        .find_map(|(node_id, memo)| {
-            if memo.resolver == *resolver && memo.branch_context == *branch_context {
-                Some(values_equal(&memo.key.rep, &key.rep).map(|equal| equal.then_some(node_id)))
-            } else {
-                None
-            }
-        })
-        .transpose()
-        .map(|found| found.flatten())
+    let Some(candidates) = base.keyed_lookup_candidates(resolver, key, branch_context) else {
+        return Ok(None);
+    };
+    for node_id in candidates.iter().copied() {
+        let Some(memo) = base.keyed_nodes.get(&node_id) else {
+            continue;
+        };
+        if memo.resolver == *resolver && memo.branch_context == *branch_context {
+            return Ok(Some(node_id));
+        }
+    }
+    Ok(None)
 }
 
 fn learned_no_good_in_iter<'a>(
@@ -429,20 +430,18 @@ impl<'a> EvalPreparedScheduler<'a> {
         let result = self
             .base
             .base
-            .keyed_nodes
-            .iter()
-            .filter(|(node_id, _)| !self.delta.keyed_nodes.contains_key(node_id))
-            .find_map(|(node_id, memo)| {
-                if memo.resolver == *resolver && memo.branch_context == *branch_context {
-                    Some(
-                        values_equal(&memo.key.rep, &key.rep).map(|equal| equal.then_some(node_id)),
-                    )
-                } else {
-                    None
-                }
-            })
-            .transpose()
-            .map(|found| found.flatten())?;
+            .keyed_lookup_candidates(resolver, key, branch_context)
+            .and_then(|candidates| {
+                candidates.iter().copied().find(|node_id| {
+                    if self.delta.keyed_nodes.contains_key(node_id) {
+                        return false;
+                    }
+                    let Some(memo) = self.base.base.keyed_nodes.get(node_id) else {
+                        return false;
+                    };
+                    memo.resolver == *resolver && memo.branch_context == *branch_context
+                })
+            });
         self.record_keyed_lookup(
             resolver.clone(),
             key.clone(),
@@ -1034,8 +1033,8 @@ fn completion_reads_stale_base(
         }
     }
     for lookup in &reads.keyed_lookups {
-        if find_keyed_node_in_keyed_nodes(
-            &current.keyed_nodes,
+        if find_keyed_node_in_base(
+            current,
             &lookup.resolver,
             &lookup.key,
             &lookup.branch_context,
@@ -1334,7 +1333,7 @@ impl EvalScheduler {
         key: &Value,
         branch_context: &EvalBranchContext,
     ) -> Result<Option<EvalNodeId>, EvalError> {
-        find_keyed_node_in_keyed_nodes(&self.base.keyed_nodes, resolver, key, branch_context)
+        find_keyed_node_in_base(&self.base, resolver, key, branch_context)
     }
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
@@ -1628,20 +1627,17 @@ impl EvalScheduler {
             },
             source: Some(source),
         });
-        self.base.keyed_nodes.insert(
+        self.base.insert_keyed_node(KeyedNodeMemo {
             node_id,
-            KeyedNodeMemo {
-                node_id,
-                resolver,
-                key,
-                joined,
-                branch_context,
-                revision: 1,
-                active_revision: None,
-                evaluated_revision: None,
-                last_update: EvalKeyedNodeUpdateReason::Created,
-            },
-        );
+            resolver,
+            key,
+            joined,
+            branch_context,
+            revision: 1,
+            active_revision: None,
+            evaluated_revision: None,
+            last_update: EvalKeyedNodeUpdateReason::Created,
+        });
         self.enqueue_keyed_work(node_id)?;
         Ok(node_id)
     }
@@ -2003,7 +1999,7 @@ impl EvalScheduler {
             match self.base.keyed_nodes.get_mut(&keyed.node_id) {
                 Some(existing) => merge_keyed_node(existing, keyed)?,
                 None => {
-                    self.base.keyed_nodes.insert(keyed.node_id, keyed);
+                    self.base.insert_keyed_node(keyed);
                 }
             }
         }

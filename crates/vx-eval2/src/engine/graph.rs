@@ -1,4 +1,6 @@
 use super::*;
+use crate::value::compare_value_reps;
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::mem;
 use std::time::Duration;
@@ -255,6 +257,155 @@ impl KeyedNodeMemo {
             last_update: self.last_update.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KeyedResolverIndexKey {
+    source_id: Arc<str>,
+    name: Arc<str>,
+    parameters: Arc<[CompiledParameter]>,
+    has_keyword_parameters: bool,
+    body: Option<ProgramNodeHandle>,
+    self_name: Option<Arc<str>>,
+}
+
+impl From<&FunctionRef> for KeyedResolverIndexKey {
+    fn from(value: &FunctionRef) -> Self {
+        Self {
+            source_id: value.source_id.clone(),
+            name: value.name.clone(),
+            parameters: value.parameters.clone(),
+            has_keyword_parameters: value.has_keyword_parameters,
+            body: value.body,
+            self_name: value.self_name.clone(),
+        }
+    }
+}
+
+impl PartialOrd for KeyedResolverIndexKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KeyedResolverIndexKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.source_id
+            .cmp(&other.source_id)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| {
+                self.has_keyword_parameters
+                    .cmp(&other.has_keyword_parameters)
+            })
+            .then_with(|| self.body.cmp(&other.body))
+            .then_with(|| self.self_name.cmp(&other.self_name))
+            .then_with(|| compare_compiled_parameter_slices(&self.parameters, &other.parameters))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KeyedBranchContextIndexKey {
+    key: Arc<str>,
+    assumptions: Arc<[(Arc<str>, ValueRep)]>,
+}
+
+impl From<&EvalBranchContext> for KeyedBranchContextIndexKey {
+    fn from(value: &EvalBranchContext) -> Self {
+        Self {
+            key: value.key.clone(),
+            assumptions: Arc::from(
+                value
+                    .assumptions
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.rep.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+}
+
+impl PartialOrd for KeyedBranchContextIndexKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KeyedBranchContextIndexKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key
+            .cmp(&other.key)
+            .then_with(|| compare_branch_assumption_slices(&self.assumptions, &other.assumptions))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KeyedLookupIndexKey {
+    resolver: KeyedResolverIndexKey,
+    key: ValueRep,
+    branch_context: KeyedBranchContextIndexKey,
+}
+
+impl KeyedLookupIndexKey {
+    pub(super) fn new(
+        resolver: &FunctionRef,
+        key: &Value,
+        branch_context: &EvalBranchContext,
+    ) -> Self {
+        Self {
+            resolver: resolver.into(),
+            key: key.rep.clone(),
+            branch_context: branch_context.into(),
+        }
+    }
+}
+
+impl PartialOrd for KeyedLookupIndexKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KeyedLookupIndexKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.resolver
+            .cmp(&other.resolver)
+            .then_with(|| self.branch_context.cmp(&other.branch_context))
+            .then_with(|| compare_value_reps(&self.key, &other.key))
+    }
+}
+
+fn compare_branch_assumption_slices(
+    lhs: &[(Arc<str>, ValueRep)],
+    rhs: &[(Arc<str>, ValueRep)],
+) -> Ordering {
+    for ((lhs_name, lhs_value), (rhs_name, rhs_value)) in lhs.iter().zip(rhs.iter()) {
+        let name_order = lhs_name.cmp(rhs_name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+        let value_order = compare_value_reps(lhs_value, rhs_value);
+        if value_order != Ordering::Equal {
+            return value_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_compiled_parameter_slices(
+    lhs: &[CompiledParameter],
+    rhs: &[CompiledParameter],
+) -> Ordering {
+    for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+        let label_order = lhs.label.cmp(&rhs.label);
+        if label_order != Ordering::Equal {
+            return label_order;
+        }
+        let name_order = lhs.name.cmp(&rhs.name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +743,7 @@ pub(super) struct EvalSchedulerBase {
     pub(super) node_states: EvalNodeTable<EvalNodeState>,
     pub(super) node_records: EvalNodeTable<EvalNodeRecord>,
     pub(super) keyed_nodes: EvalNodeTable<KeyedNodeMemo>,
+    pub(super) keyed_lookup_index: OrdMap<KeyedLookupIndexKey, Vector<EvalNodeId>>,
     pub(super) dependency_edges: Vector<EvalDependencyEdge>,
     pub(super) pending_resumes: EvalNodeTable<Vec<EvalSuspension>>,
     pub(super) pending_kinds: EvalNodeTable<PendingKind>,
@@ -609,6 +761,7 @@ impl Default for EvalSchedulerBase {
             node_states: EvalNodeTable::default(),
             node_records: EvalNodeTable::default(),
             keyed_nodes: EvalNodeTable::default(),
+            keyed_lookup_index: OrdMap::new(),
             dependency_edges: Vector::new(),
             pending_resumes: EvalNodeTable::default(),
             pending_kinds: EvalNodeTable::default(),
@@ -616,6 +769,33 @@ impl Default for EvalSchedulerBase {
             learned_no_goods: Vector::new(),
             learned_search_no_goods: Vector::new(),
         }
+    }
+}
+
+impl EvalSchedulerBase {
+    pub(super) fn keyed_lookup_candidates(
+        &self,
+        resolver: &FunctionRef,
+        key: &Value,
+        branch_context: &EvalBranchContext,
+    ) -> Option<&Vector<EvalNodeId>> {
+        let lookup_key = KeyedLookupIndexKey::new(resolver, key, branch_context);
+        self.keyed_lookup_index.get(&lookup_key)
+    }
+
+    pub(super) fn insert_keyed_node(&mut self, memo: KeyedNodeMemo) -> Option<KeyedNodeMemo> {
+        let lookup_key = KeyedLookupIndexKey::new(&memo.resolver, &memo.key, &memo.branch_context);
+        let previous = self.keyed_nodes.insert(memo.node_id, memo.clone());
+        if previous.is_none() {
+            if let Some(bucket) = self.keyed_lookup_index.get_mut(&lookup_key) {
+                bucket.push_back(memo.node_id);
+            } else {
+                let mut bucket = Vector::new();
+                bucket.push_back(memo.node_id);
+                self.keyed_lookup_index.insert(lookup_key, bucket);
+            }
+        }
+        previous
     }
 }
 

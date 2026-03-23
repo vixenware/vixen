@@ -11599,6 +11599,46 @@ fn build() {
 }
 
 #[test]
+fn keyed_nodes_distinguish_resolver_captures() {
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  let mk = ((prefix) => ((ctx) => prefix));
+  [
+    keyed("logger", [], mk("a")),
+    keyed("logger", [], mk("a")),
+    keyed("logger", [], mk("b")),
+  ]
+}
+"#,
+        "keyed-resolver-captures",
+        "build",
+        Vec::new(),
+        &UnsupportedRuntime,
+        "win",
+    );
+
+    let Resolution::Ready(value) = session.run().expect("evaluate keyed closure captures") else {
+        panic!("expected ready keyed closure-capture result");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result, got {:?}", value.rep);
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].rep, ValueRep::String("a".into()));
+    assert_eq!(items[1].rep, ValueRep::String("a".into()));
+    assert_eq!(items[2].rep, ValueRep::String("b".into()));
+
+    let snapshot = session.graph_snapshot();
+    let keyed_nodes = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.keyed.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_nodes.len(), 2);
+}
+
+#[test]
 fn run_parallel_can_drive_multiple_frontier_waves_to_completion() {
     let active_calls = Arc::new(AtomicUsize::new(0));
     let max_calls = Arc::new(AtomicUsize::new(0));
