@@ -2183,14 +2183,16 @@ pub(super) fn eval_tuple(
         state,
         node_id,
         parent_id,
-        Vec::new(),
-        items
-            .iter()
-            .copied()
-            .map(|item| state.expr_handle_for(item))
-            .collect::<Result<Vec<_>, _>>()?,
-        env.clone(),
-        state.span_for_node(tuple),
+        TupleState {
+            items: Vec::new(),
+            remaining_items: items
+                .iter()
+                .copied()
+                .map(|item| state.expr_handle_for(item))
+                .collect::<Result<Vec<_>, _>>()?,
+            env: env.clone(),
+            tuple_source: state.span_for_node(tuple),
+        },
     )
 }
 
@@ -3065,33 +3067,28 @@ pub(super) fn continue_tuple_items(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut items: Vec<Value>,
-    remaining_items: Vec<ExprHandle>,
-    mut env: EvalEnv,
-    tuple_source: SourceSpan,
+    mut tuple: TupleState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_items.into_iter();
+    let mut remaining = tuple.remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
-        match eval_dependent_expr_handle(state, node_id, item_handle, &mut env)? {
-            EvalStep::Ready(value) => items.push(value),
+        match eval_dependent_expr_handle(state, node_id, item_handle, &mut tuple.env)? {
+            EvalStep::Ready(value) => tuple.items.push(value),
             EvalStep::Suspended(suspension) => {
+                tuple.remaining_items = remaining.collect();
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::TupleAfterItem {
+                    ContinuationFrame::Tuple {
                         node_id,
                         parent_id,
-                        items,
-                        remaining_items: remaining.collect(),
-                        env,
-                        tuple_source,
+                        tuple,
                     },
                 ));
             }
         }
     }
-    let provenance = Provenance::literal(tuple_source);
-    let meta = aggregate_child_meta(provenance, items.iter());
-    Ok(EvalStep::Ready(Value::tuple(items).with_meta(meta)))
+    let provenance = Provenance::literal(tuple.tuple_source);
+    let meta = aggregate_child_meta(provenance, tuple.items.iter());
+    Ok(EvalStep::Ready(Value::tuple(tuple.items).with_meta(meta)))
 }
 
 pub(super) fn continue_range_end(

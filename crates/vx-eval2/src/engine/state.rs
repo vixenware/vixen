@@ -52,6 +52,14 @@ pub(super) struct ArrayState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TupleState {
+    pub(super) items: Vec<Value>,
+    pub(super) remaining_items: Vec<ExprHandle>,
+    pub(super) env: EvalEnv,
+    pub(super) tuple_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ArrayJoinItem {
     Expr(EvalNodeId),
     Spread(EvalNodeId),
@@ -228,13 +236,10 @@ pub(super) enum ContinuationFrame {
         items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
     },
-    TupleAfterItem {
+    Tuple {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        remaining_items: Vec<ExprHandle>,
-        env: EvalEnv,
-        tuple_source: SourceSpan,
+        tuple: TupleState,
     },
     TupleJoin {
         node_id: EvalNodeId,

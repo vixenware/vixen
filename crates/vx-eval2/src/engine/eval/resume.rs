@@ -433,26 +433,15 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::TupleAfterItem {
+        ContinuationFrame::Tuple {
             node_id,
             parent_id,
-            mut items,
-            remaining_items,
-            env,
-            tuple_source,
+            mut tuple,
         } => {
             let result = match input {
                 Ok(value) => {
-                    items.push(value);
-                    continue_tuple_items(
-                        state,
-                        node_id,
-                        parent_id,
-                        items,
-                        remaining_items,
-                        env,
-                        tuple_source,
-                    )
+                    tuple.items.push(value);
+                    continue_tuple_items(state, node_id, parent_id, tuple)
                 }
                 Err(error) => Err(error),
             };
