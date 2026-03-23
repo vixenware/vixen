@@ -119,6 +119,10 @@ pub(crate) struct EvalArgs {
     #[facet(args::named, default = "local")]
     pub(crate) place: String,
 
+    /// Number of eval workers to use (defaults to host parallelism)
+    #[facet(args::named, args::short = 'j')]
+    pub(crate) workers: Option<usize>,
+
     /// JSON argument passed to the entry function
     #[facet(args::named, default)]
     pub(crate) arg_json: Vec<String>,

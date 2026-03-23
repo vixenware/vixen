@@ -9,7 +9,7 @@ use crate::types::CliMode;
 pub(crate) struct EvalProgressReporter;
 
 pub(crate) struct EvalRuntimeCallProgress {
-    callee: &'static str,
+    label: &'static str,
     detail: Option<String>,
     source: SourceSpan,
     started: Instant,
@@ -27,18 +27,18 @@ impl EvalProgressReporter {
 
     pub(crate) fn begin_runtime_call(
         &self,
-        callee: &'static str,
+        label: &'static str,
         detail: Option<String>,
         source: &SourceSpan,
     ) -> EvalRuntimeCallProgress {
         eprintln!(
             "[eval] {}{} started{}",
-            callee,
+            label,
             format_detail(detail.as_deref()),
             format_source_suffix(source)
         );
         EvalRuntimeCallProgress {
-            callee,
+            label,
             detail,
             source: source.clone(),
             started: Instant::now(),
@@ -63,7 +63,7 @@ impl EvalRuntimeCallProgress {
         self.finished = true;
         eprintln!(
             "[eval] {}{} {} in {}{}",
-            self.callee,
+            self.label,
             format_detail(self.detail.as_deref()),
             outcome,
             format_elapsed(self.started.elapsed()),
@@ -127,6 +127,7 @@ mod tests {
             "sha2-0.10.9.crate"
         );
         assert_eq!(summarize_detail("/usr/bin/rustc"), "rustc");
+        assert_eq!(summarize_detail("sha2 (cache)"), "sha2 (cache)");
     }
 
     #[test]

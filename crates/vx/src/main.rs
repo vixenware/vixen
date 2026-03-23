@@ -383,6 +383,12 @@ fn parse_eval_args(arg_json: &[String]) -> Result<Vec<EvalValue>> {
     arg_json.iter().map(|arg| parse_eval_arg(arg)).collect()
 }
 
+fn default_eval_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+}
+
 fn parse_eval_arg(arg: &str) -> Result<EvalValue> {
     let value = facet_json::from_str::<FacetValue>(arg)
         .map_err(|error| eyre!("failed to parse --arg-json value {arg:?}: {error}"))?;
@@ -607,7 +613,16 @@ impl CliContext {
             session.set_call_profiling_enabled(true);
         }
 
-        let resolution = session.run().map_err(eval_error_report)?;
+        let workers = args.workers.unwrap_or_else(default_eval_workers);
+        if workers == 0 {
+            bail!("--workers must be at least 1");
+        }
+        let resolution = if workers > 1 {
+            session.run_parallel(workers)
+        } else {
+            session.run()
+        }
+        .map_err(eval_error_report)?;
         let cli_resolution = eval_cli_resolution(resolution.clone())?;
         print_eval_resolution(&self.mode, &cli_resolution)?;
         print_eval_reports(&args, &session);

@@ -451,11 +451,16 @@ impl CargoSketchRuntime {
                 "Http.get() argument must evaluate to String",
             ));
         };
-        let progress = self
-            .progress
-            .as_ref()
-            .map(|reporter| reporter.begin_runtime_call("Http.get", Some(url.to_string()), source));
-        let contents = local_sparse_index_http_response(url.as_ref()).or_else(|| {
+        let local = local_sparse_index_http_response(url.as_ref());
+        let (progress_label, progress_detail) = if local.is_some() {
+            ("index", format!("{} (cache)", summarize_url_label(url)))
+        } else {
+            ("fetch", summarize_url_label(url).to_string())
+        };
+        let progress = self.progress.as_ref().map(|reporter| {
+            reporter.begin_runtime_call(progress_label, Some(progress_detail), source)
+        });
+        let contents = local.or_else(|| {
             block_on_runtime(vx_http::get_text(url.as_ref()))
                 .map_err(|error| {
                     EvalError::new(
@@ -514,10 +519,13 @@ impl CargoSketchRuntime {
         };
         let digest = capture_string(callee, "digest")?;
         let extract = capture_optional_string(callee, "extract")?;
-        let progress = self
-            .progress
-            .as_ref()
-            .map(|reporter| reporter.begin_runtime_call("acquire", Some(url.to_string()), source));
+        let progress = self.progress.as_ref().map(|reporter| {
+            reporter.begin_runtime_call(
+                "download",
+                Some(summarize_url_label(url).to_string()),
+                source,
+            )
+        });
         let bytes = block_on_runtime(vx_http::get_bytes(url.as_ref()))
             .map_err(|error| {
                 EvalError::new(
@@ -1321,4 +1329,8 @@ fn local_sparse_index_http_response(url: &str) -> Option<String> {
     }
     let bytes = fs::read(root.join(".cache").join(rel)).ok()?;
     sparse_cache_entry_to_jsonl(&bytes)
+}
+
+fn summarize_url_label(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
 }
