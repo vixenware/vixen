@@ -1154,7 +1154,7 @@ pub(super) fn immediate_call_callee_value(
                 .with_provenance(Provenance::binding(source, full_name.to_string())),
             ))
         }
-        CallCallee::Field(field) => static_namespace_member_value(state, field, env),
+        CallCallee::Field(field) => static_namespace_member_value(state, field),
         CallCallee::Expr(_) => Ok(None),
     }
 }
@@ -1309,55 +1309,11 @@ pub(super) fn eval_call_callee(
 pub(super) fn static_namespace_member_value(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     field: &FieldExpr,
-    env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
     if let Some(static_member) = &field.static_member {
         return static_member_value(state, field.handle, static_member).map(Some);
     }
-    let Some(receiver) = field.receiver else {
-        return Ok(None);
-    };
-    let receiver = state.program.resolve_expr(receiver)?;
-    let ExprKind::NameRef(receiver) = receiver.kind() else {
-        return Ok(None);
-    };
-    let Some(receiver_token) = receiver.token.as_ref() else {
-        return Ok(None);
-    };
-    if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
-        return Ok(None);
-    }
-    if env.contains_key(receiver_token.text()) {
-        return Ok(None);
-    }
-    let Some(field_name) = field.field_name.as_ref() else {
-        return Ok(None);
-    };
-    if let Some(constructor) = state
-        .program
-        .resolve_variant_constructor(field_name.as_ref())
-    {
-        return Ok(Some(enum_constructor_or_value(
-            state,
-            constructor.name,
-            constructor.fields,
-            state.program.span_for_handle(field.handle),
-        )));
-    }
-    let full_name = format!("{}.{}", receiver_token.text(), field_name);
-    let function = FunctionRef::new(
-        state.program.source_id(state.current_source()),
-        Arc::from(full_name.as_str()),
-        Arc::from([]),
-        false,
-        None,
-        Arc::from([]),
-        None,
-    );
-    let source = state.program.span_for_handle(field.handle);
-    Ok(Some(
-        Value::function(function).with_provenance(Provenance::binding(source, full_name)),
-    ))
+    Ok(None)
 }
 
 fn static_member_value(
@@ -2836,7 +2792,7 @@ pub(super) fn eval_field(
     field: &FieldExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    if let Some(value) = static_namespace_member_value(state, field, env)? {
+    if let Some(value) = static_namespace_member_value(state, field)? {
         return Ok(EvalStep::Ready(value));
     }
     let node_id = state

@@ -535,8 +535,15 @@ pub(crate) enum StructLiteralPart {
 pub(crate) struct FieldExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) receiver: Option<ExprId>,
+    pub(crate) static_receiver: Option<FieldStaticReceiver>,
     pub(crate) field_name: Option<Arc<str>>,
     pub(crate) static_member: Option<StaticMemberPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldStaticReceiver {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) name: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1009,26 +1016,16 @@ impl CompiledProgram {
         &self,
         field: &FieldExpr,
     ) -> Result<Option<StaticMemberPlan>, EvalError> {
-        let Some(receiver) = field.receiver else {
+        let Some(receiver) = field.static_receiver.as_ref() else {
             return Ok(None);
         };
-        let receiver = self.resolve_expr_id(receiver)?;
-        let ExprKind::NameRef(receiver) = receiver.kind() else {
-            return Ok(None);
-        };
-        let Some(receiver_token) = receiver.token.as_ref() else {
-            return Ok(None);
-        };
-        if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
-            return Ok(None);
-        }
         if let Some(scope) = self
             .scopes
             .scope_at(receiver.handle.source(), receiver.handle.to_range().start())
         {
             if let Some(definition) = self.scopes.lookup_at(
                 receiver.handle.source(),
-                receiver_token.text(),
+                receiver.name.as_ref(),
                 scope,
                 receiver.handle.to_range().start(),
             ) {
@@ -1044,7 +1041,7 @@ impl CompiledProgram {
             return Ok(None);
         };
         Ok(Some(StaticMemberPlan {
-            full_name: Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name)),
+            full_name: Arc::<str>::from(format!("{}.{}", receiver.name, field_name)),
             variant_constructor: self.resolve_variant_constructor(field_name),
         }))
     }
@@ -2430,6 +2427,23 @@ fn compile_field_expr_ast(
     field: &vx_parser::FieldExpr,
     expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
 ) -> Result<FieldExpr, EvalError> {
+    let static_receiver = match field.receiver() {
+        Some(ParserExpr::NameRef(name_ref)) => {
+            let token = name_ref.token();
+            if token
+                .as_ref()
+                .is_some_and(|token| token.kind() == SyntaxKind::UPPER_IDENT)
+            {
+                Some(FieldStaticReceiver {
+                    handle: ProgramNodeHandle::for_node(source, &name_ref),
+                    name: Arc::from(name_ref_text_from_ast(&name_ref)),
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     Ok(FieldExpr {
         handle: ProgramNodeHandle::for_node(source, field),
         receiver: field
@@ -2443,6 +2457,7 @@ fn compile_field_expr_ast(
                 )
             })
             .transpose()?,
+        static_receiver,
         field_name: field.field_name().map(|token| Arc::from(token.text())),
         static_member: None,
     })

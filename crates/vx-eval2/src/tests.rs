@@ -1080,6 +1080,35 @@ fn compiled_program_lowers_static_member_field_expr_to_plan() {
 }
 
 #[test]
+fn compiled_program_does_not_lower_shadowed_upper_name_field_expr_to_plan() {
+    let program = CompiledProgram::new(
+        "lowered-shadowed-static-member-field-expr",
+        "fn String() { 1 }\nfn build() { String.len }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(field_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain field expression");
+    };
+    let expr = program
+        .resolve_expr_id(field_expr)
+        .expect("resolve field expr");
+    let ExprKind::Field(field) = expr.kind() else {
+        panic!("expected lowered step to be a field expr, got {expr:?}");
+    };
+    assert!(field.static_member.is_none());
+}
+
+#[test]
 fn compiled_program_lowers_where_expr_to_compiled_call_plan() {
     let program = CompiledProgram::new(
         "lowered-where-call-plan",
