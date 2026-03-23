@@ -2529,6 +2529,16 @@ pub(super) fn eval_if(
         .copied()
         .expect("if expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    let if_state =
+        IfState {
+            then_branch: state.expr_handle_for(if_expr.then_branch.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "if branch is missing")
+            })?)?,
+            else_branch: state.expr_handle_for(if_expr.else_branch.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "if branch is missing")
+            })?)?,
+            env: env.clone(),
+        };
     let condition = match eval_dependent_expr_handle(
         state,
         node_id,
@@ -2541,39 +2551,15 @@ pub(super) fn eval_if(
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
                 suspension,
-                ContinuationFrame::IfCondition {
+                ContinuationFrame::If {
                     node_id,
                     parent_id,
-                    then_branch: state.expr_handle_for(if_expr.then_branch.ok_or_else(
-                        || EvalError::new(EvalErrorKind::Internal, "if branch is missing"),
-                    )?)?,
-                    else_branch: state.expr_handle_for(if_expr.else_branch.ok_or_else(
-                        || EvalError::new(EvalErrorKind::Internal, "if branch is missing"),
-                    )?)?,
-                    env: env.clone(),
+                    if_state,
                 },
             ));
         }
     };
-    let ValueRep::Bool(value) = condition.rep else {
-        return Err(EvalError::new(
-            EvalErrorKind::TypeError,
-            "if condition must evaluate to Bool",
-        ));
-    };
-    let branch = if value {
-        if_expr.then_branch
-    } else {
-        if_expr.else_branch
-    }
-    .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
-    match eval_dependent_expr_handle(state, node_id, state.expr_handle_for(branch)?, env)? {
-        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::FinishNode { node_id, parent_id },
-        )),
-    }
+    continue_if(state, node_id, parent_id, if_state, condition)
 }
 
 pub(super) fn eval_match(
@@ -3793,6 +3779,37 @@ pub(super) fn continue_binary(
                 binary,
                 pending: BinaryResumeKind::Rhs,
             },
+        )),
+    }
+}
+
+pub(super) fn continue_if(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut if_state: IfState,
+    condition: Value,
+) -> Result<EvalStep, EvalError> {
+    let ValueRep::Bool(value) = condition.rep else {
+        return Err(EvalError::new(
+            EvalErrorKind::TypeError,
+            "if condition must evaluate to Bool",
+        ));
+    };
+    match eval_dependent_expr_handle(
+        state,
+        node_id,
+        if value {
+            if_state.then_branch
+        } else {
+            if_state.else_branch
+        },
+        &mut if_state.env,
+    )? {
+        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+            suspension,
+            ContinuationFrame::FinishNode { node_id, parent_id },
         )),
     }
 }

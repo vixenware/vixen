@@ -130,6 +130,13 @@ pub(super) struct BinaryState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IfState {
+    pub(super) then_branch: ExprHandle,
+    pub(super) else_branch: ExprHandle,
+    pub(super) env: EvalEnv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -296,13 +303,6 @@ pub(super) enum ContinuationFrame {
         search_start_index: usize,
         prior_branch_context: EvalBranchContext,
     },
-    IfCondition {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        then_branch: ExprHandle,
-        else_branch: ExprHandle,
-        env: EvalEnv,
-    },
     MatchScrutinee {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -381,6 +381,11 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         binary: BinaryState,
         pending: BinaryResumeKind,
+    },
+    If {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        if_state: IfState,
     },
 }
 

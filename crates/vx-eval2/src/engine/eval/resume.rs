@@ -853,34 +853,13 @@ pub(in crate::engine) fn resume_frame(
                 Err(error) => Ok(ResumeOutcome::Continue(Err(error))),
             }
         }
-        ContinuationFrame::IfCondition {
+        ContinuationFrame::If {
             node_id,
             parent_id,
-            then_branch,
-            else_branch,
-            mut env,
+            if_state,
         } => {
             let result = match input {
-                Ok(condition) => {
-                    let ValueRep::Bool(value) = condition.rep else {
-                        return Err(EvalError::new(
-                            EvalErrorKind::TypeError,
-                            "if condition must evaluate to Bool",
-                        ));
-                    };
-                    match eval_dependent_expr_handle(
-                        state,
-                        node_id,
-                        if value { then_branch } else { else_branch },
-                        &mut env,
-                    )? {
-                        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-                        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::FinishNode { node_id, parent_id },
-                        )),
-                    }
-                }
+                Ok(condition) => continue_if(state, node_id, parent_id, if_state, condition),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
