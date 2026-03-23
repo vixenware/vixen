@@ -1,7 +1,6 @@
 use super::*;
 use crate::value::compare_value_reps;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::mem;
 use std::time::Duration;
 
@@ -803,7 +802,7 @@ impl EvalSchedulerBase {
 pub(super) struct EvalPreparedSnapshot {
     pub(super) base: Arc<EvalSchedulerBase>,
     pub(super) lease_namespace: Option<u64>,
-    pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
+    pub(super) baseline_ready_tasks: Arc<[EvalWorkId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -848,10 +847,10 @@ pub(super) struct EvalSnapshotReadSet {
 
 pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) program: Arc<CompiledProgram>,
-    pub(super) entry: String,
-    pub(super) args: Vec<Value>,
+    pub(super) entry: Arc<str>,
+    pub(super) args: Arc<[Value]>,
     pub(super) runtime: &'runtime Runtime,
-    pub(super) place: String,
+    pub(super) place: Arc<str>,
     pub(super) branch_context: EvalBranchContext,
     pub(super) wave_id: EvalWaveId,
     pub(super) lease_sequence: u64,

@@ -416,7 +416,11 @@ impl<'a> EvalPreparedScheduler<'a> {
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
         self.queued.iter().any(|record| record.work.id == work_id)
-            || self.base.baseline_ready_tasks.contains(&work_id)
+            || self
+                .base
+                .baseline_ready_tasks
+                .binary_search(&work_id)
+                .is_ok()
     }
 
     fn find_keyed_node(
@@ -1073,7 +1077,7 @@ impl EvalScheduler {
         EvalPreparedSnapshot {
             base: Arc::clone(&self.base),
             lease_namespace: namespace,
-            baseline_ready_tasks: self.ready_tasks.keys().copied().collect(),
+            baseline_ready_tasks: Arc::from(self.ready_tasks.keys().copied().collect::<Vec<_>>()),
         }
     }
 

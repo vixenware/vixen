@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 
 pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     program: Arc<CompiledProgram>,
-    entry: String,
-    args: Vec<Value>,
+    entry: Arc<str>,
+    args: Arc<[Value]>,
     runtime: &'runtime Runtime,
-    place: String,
+    place: Arc<str>,
     branch_context: EvalBranchContext,
     scheduler: EvalScheduler,
     trace: EvalTrace,
@@ -75,10 +75,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     ) -> Self {
         Self {
             program,
-            entry: entry.into(),
-            args,
+            entry: Arc::from(entry.into()),
+            args: Arc::from(args),
             runtime,
-            place: place.into(),
+            place: Arc::from(place.into()),
             branch_context,
             scheduler,
             trace: EvalTrace::default(),
@@ -572,10 +572,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
         Ok(Some(EvalPreparedWork {
             program: Arc::clone(&self.program),
-            entry: self.entry.clone(),
-            args: self.args.clone(),
+            entry: Arc::clone(&self.entry),
+            args: Arc::clone(&self.args),
             runtime: self.runtime,
-            place: self.place.clone(),
+            place: Arc::clone(&self.place),
             branch_context: lease.record.branch_context.clone(),
             wave_id: lease.wave_id,
             lease_sequence: lease.lease_sequence,
