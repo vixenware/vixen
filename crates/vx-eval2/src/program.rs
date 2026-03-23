@@ -371,6 +371,24 @@ pub(crate) struct NameRefExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallCallee {
     NameRef(NameRefExpr),
+    ResolvedFunction {
+        resolved_name: Arc<str>,
+        function: CompiledFunction,
+    },
+    VariantConstructor {
+        handle: ProgramNodeHandle,
+        constructor: VariantConstructor,
+    },
+    NewtypeConstructor {
+        handle: ProgramNodeHandle,
+        display_name: Arc<str>,
+        newtype_name: Arc<str>,
+    },
+    StaticMember {
+        handle: ProgramNodeHandle,
+        full_name: Arc<str>,
+        variant_constructor: Option<VariantConstructor>,
+    },
     Field(FieldExpr),
     Expr(ExprId),
 }
@@ -642,6 +660,7 @@ impl CompiledProgram {
             types: collect_types_for_sources(&type_sources),
         }
         .with_resolved_type_args()
+        .with_resolved_call_callees()
     }
 
     pub(crate) fn entry_source(&self) -> SourceId {
@@ -804,6 +823,134 @@ impl CompiledProgram {
         }
         self
     }
+
+    fn with_resolved_call_callees(mut self) -> Self {
+        let source_ids = self.sources.keys().copied().collect::<Vec<_>>();
+        for source_key in source_ids {
+            let source_id = SourceId(source_key);
+            let rewrites = self
+                .collect_call_callee_rewrites(source_id)
+                .expect("compiled call callees should resolve");
+            let source = self
+                .sources
+                .get_mut(&source_key)
+                .expect("compiled source should exist for call callee rewrites");
+            source
+                .apply_call_callee_rewrites(rewrites)
+                .expect("compiled call callee rewrites should target call expressions");
+        }
+        self
+    }
+
+    fn collect_call_callee_rewrites(
+        &self,
+        source_id: SourceId,
+    ) -> Result<Vec<(ExprId, CallCallee)>, EvalError> {
+        let source = self.source(source_id)?;
+        source.ensure_parsed()?;
+        let mut rewrites = Vec::new();
+        for (index, expr) in source.exprs.iter().enumerate() {
+            let ExprKind::Call(call) = expr.kind() else {
+                continue;
+            };
+            let Some(callee) = call.callee.as_ref() else {
+                continue;
+            };
+            let resolved = self.resolve_call_callee(callee)?;
+            if resolved != *callee {
+                rewrites.push((
+                    ExprId {
+                        source: source_id.0,
+                        index: index as u32,
+                    },
+                    resolved,
+                ));
+            }
+        }
+        Ok(rewrites)
+    }
+
+    fn resolve_call_callee(&self, callee: &CallCallee) -> Result<CallCallee, EvalError> {
+        match callee {
+            CallCallee::NameRef(name_ref) => self.resolve_name_call_callee(name_ref),
+            CallCallee::Field(field) => self.resolve_field_call_callee(field),
+            other => Ok(other.clone()),
+        }
+    }
+
+    fn resolve_name_call_callee(&self, name_ref: &NameRefExpr) -> Result<CallCallee, EvalError> {
+        let Some(name_token) = name_ref.token.as_ref() else {
+            return Ok(CallCallee::NameRef(name_ref.clone()));
+        };
+        let reference = name_token.handle();
+        let name = name_ref.name.as_ref();
+        if let Some((resolved_name, function)) = self.resolve_function_reference(reference, name)? {
+            return Ok(CallCallee::ResolvedFunction {
+                resolved_name,
+                function,
+            });
+        }
+        let constructor_name = name.rsplit('.').next().unwrap_or(name);
+        if let Some(constructor) = self.resolve_variant_constructor(constructor_name) {
+            return Ok(CallCallee::VariantConstructor {
+                handle: name_ref.handle,
+                constructor,
+            });
+        }
+        if let Some(newtype_name) = self.resolve_newtype_constructor(constructor_name) {
+            return Ok(CallCallee::NewtypeConstructor {
+                handle: name_ref.handle,
+                display_name: name_ref.name.clone(),
+                newtype_name,
+            });
+        }
+        Ok(CallCallee::NameRef(name_ref.clone()))
+    }
+
+    fn resolve_field_call_callee(&self, field: &FieldExpr) -> Result<CallCallee, EvalError> {
+        let Some(receiver) = field.receiver else {
+            return Ok(CallCallee::Field(field.clone()));
+        };
+        let receiver = self.resolve_expr_id(receiver)?;
+        let ExprKind::NameRef(receiver) = receiver.kind() else {
+            return Ok(CallCallee::Field(field.clone()));
+        };
+        let Some(receiver_token) = receiver.token.as_ref() else {
+            return Ok(CallCallee::Field(field.clone()));
+        };
+        if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
+            return Ok(CallCallee::Field(field.clone()));
+        }
+        if let Some(scope) = self
+            .scopes
+            .scope_at(receiver.handle.source(), receiver.handle.to_range().start())
+        {
+            if let Some(definition) = self.scopes.lookup_at(
+                receiver.handle.source(),
+                receiver_token.text(),
+                scope,
+                receiver.handle.to_range().start(),
+            ) {
+                if matches!(
+                    definition.kind,
+                    DefKind::Binding | DefKind::Parameter | DefKind::Function
+                ) {
+                    return Ok(CallCallee::Field(field.clone()));
+                }
+            }
+        }
+        let Some(field_name) = field.field_name.as_ref() else {
+            return Ok(CallCallee::Field(field.clone()));
+        };
+        let variant_constructor = self.resolve_variant_constructor(field_name.text());
+        let full_name =
+            Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name.text()));
+        Ok(CallCallee::StaticMember {
+            handle: field.handle,
+            full_name,
+            variant_constructor,
+        })
+    }
 }
 
 impl CompiledProgramSource {
@@ -929,6 +1076,31 @@ impl CompiledProgramSource {
             call.type_args = resolved;
         }
         self.pending_call_type_args.clear();
+        Ok(())
+    }
+
+    fn apply_call_callee_rewrites(
+        &mut self,
+        rewrites: Vec<(ExprId, CallCallee)>,
+    ) -> Result<(), EvalError> {
+        for (expr_id, callee) in rewrites {
+            let expr = self.exprs.get_mut(expr_id.index as usize).ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("expression id {:?} was not found", expr_id),
+                )
+            })?;
+            let ExprKind::Call(call) = &mut expr.kind else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "call callee rewrite targeted non-call expression {:?}",
+                        expr_id
+                    ),
+                ));
+            };
+            call.callee = Some(callee);
+        }
         Ok(())
     }
 

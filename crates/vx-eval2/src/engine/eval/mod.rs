@@ -137,6 +137,10 @@ fn collect_adapter_parameters(
                     CallCallee::NameRef(name_ref) => {
                         collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
                     }
+                    CallCallee::ResolvedFunction { .. }
+                    | CallCallee::VariantConstructor { .. }
+                    | CallCallee::NewtypeConstructor { .. }
+                    | CallCallee::StaticMember { .. } => {}
                     CallCallee::Field(field) => {
                         collect_adapter_parameters_from_field(program, field, names_by_index)?;
                     }
@@ -1057,58 +1061,9 @@ pub(super) fn immediate_call_callee_value(
 ) -> Result<Option<Value>, EvalError> {
     match callee {
         CallCallee::NameRef(name_ref) => {
-            let name_token = name_ref.token.as_ref().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "callee name has no token")
-            })?;
             let name = name_ref_text(name_ref);
             if let Some(value) = env.get(name.as_ref()) {
                 return Ok(Some(value.clone()));
-            }
-            let reference = name_token.handle();
-            if let Some((resolved_name, function)) =
-                state.program.resolve_function_reference(reference, &name)?
-            {
-                return Ok(Some(Value::function(function_ref_from_compiled(
-                    state,
-                    resolved_name.clone(),
-                    function,
-                    Arc::from([]),
-                    Some(resolved_name),
-                ))));
-            }
-            if let Some(constructor) = state
-                .program
-                .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
-            {
-                return Ok(Some(enum_constructor_or_value(
-                    state,
-                    constructor.name,
-                    constructor.fields,
-                    state.span_for_token(&name_token),
-                )));
-            }
-            if let Some(newtype_name) = state
-                .program
-                .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
-            {
-                let source = state.span_for_token(&name_token);
-                let captures = Arc::from([(
-                    Arc::from("__newtype_ctor"),
-                    Value::bool(true)
-                        .with_provenance(Provenance::binding(source.clone(), name.to_string())),
-                )]);
-                return Ok(Some(
-                    Value::function(FunctionRef::new(
-                        state.program.source_id(state.current_source()),
-                        newtype_name,
-                        Arc::from([]),
-                        false,
-                        None,
-                        captures,
-                        Some(Arc::from(name.as_ref())),
-                    ))
-                    .with_provenance(Provenance::binding(source, name.to_string())),
-                ));
             }
             Ok(Some(Value::function(FunctionRef::new(
                 state.program.source_id(state.current_source()),
@@ -1119,6 +1074,78 @@ pub(super) fn immediate_call_callee_value(
                 Arc::from([]),
                 Some(Arc::from(name.as_ref())),
             ))))
+        }
+        CallCallee::ResolvedFunction {
+            resolved_name,
+            function,
+        } => Ok(Some(Value::function(function_ref_from_compiled(
+            state,
+            resolved_name.clone(),
+            function.clone(),
+            Arc::from([]),
+            Some(resolved_name.clone()),
+        )))),
+        CallCallee::VariantConstructor {
+            handle,
+            constructor,
+        } => Ok(Some(enum_constructor_or_value(
+            state,
+            constructor.name.clone(),
+            constructor.fields.clone(),
+            state.program.span_for_handle(*handle),
+        ))),
+        CallCallee::NewtypeConstructor {
+            handle,
+            display_name,
+            newtype_name,
+        } => {
+            let source = state.program.span_for_handle(*handle);
+            let captures = Arc::from([(
+                Arc::from("__newtype_ctor"),
+                Value::bool(true).with_provenance(Provenance::binding(
+                    source.clone(),
+                    display_name.to_string(),
+                )),
+            )]);
+            Ok(Some(
+                Value::function(FunctionRef::new(
+                    state.program.source_id(state.current_source()),
+                    newtype_name.clone(),
+                    Arc::from([]),
+                    false,
+                    None,
+                    captures,
+                    Some(display_name.clone()),
+                ))
+                .with_provenance(Provenance::binding(source, display_name.to_string())),
+            ))
+        }
+        CallCallee::StaticMember {
+            handle,
+            full_name,
+            variant_constructor,
+        } => {
+            if let Some(constructor) = variant_constructor {
+                return Ok(Some(enum_constructor_or_value(
+                    state,
+                    constructor.name.clone(),
+                    constructor.fields.clone(),
+                    state.program.span_for_handle(*handle),
+                )));
+            }
+            let source = state.program.span_for_handle(*handle);
+            Ok(Some(
+                Value::function(FunctionRef::new(
+                    state.program.source_id(state.current_source()),
+                    full_name.clone(),
+                    Arc::from([]),
+                    false,
+                    None,
+                    Arc::from([]),
+                    None,
+                ))
+                .with_provenance(Provenance::binding(source, full_name.to_string())),
+            ))
         }
         CallCallee::Field(field) => static_namespace_member_value(state, field, env),
         CallCallee::Expr(_) => Ok(None),
@@ -1206,9 +1233,13 @@ pub(super) fn eval_call_callee(
     match callee {
         CallCallee::Expr(callee) => eval_child_expr_handle(state, ExprHandle { key: *callee }, env),
         CallCallee::Field(field) => eval_field(state, field, env),
-        CallCallee::NameRef(_) => Err(EvalError::new(
+        CallCallee::NameRef(_)
+        | CallCallee::ResolvedFunction { .. }
+        | CallCallee::VariantConstructor { .. }
+        | CallCallee::NewtypeConstructor { .. }
+        | CallCallee::StaticMember { .. } => Err(EvalError::new(
             EvalErrorKind::Internal,
-            "direct name call callee should resolve immediately",
+            "direct call callee should resolve immediately",
         )),
     }
 }
