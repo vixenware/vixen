@@ -246,8 +246,8 @@ impl<'a> EvalPreparedScheduler<'a> {
         }
     }
 
-    fn finish(self) -> (EvalSchedulerDelta, bool, EvalSnapshotReadSet) {
-        let mut delta = self.delta.into_delta();
+    fn finish(self) -> (RecordedSchedulerDelta, bool, EvalSnapshotReadSet) {
+        let mut delta = self.delta;
         delta.next_id = self.allocator.owner_next_id(self.base);
         delta.next_work_id = self.allocator.owner_next_work_id(self.base);
         delta.queued = self.queued;
@@ -1975,28 +1975,25 @@ impl EvalScheduler {
         completion_reads_stale_base(&self.base, &completion.snapshot, &completion.delta.reads)
     }
 
-    pub(super) fn apply_delta(&mut self, delta: EvalSchedulerDelta) -> Result<(), EvalError> {
+    pub(super) fn apply_delta(&mut self, delta: RecordedSchedulerDelta) -> Result<(), EvalError> {
         self.base.next_id = self.base.next_id.max(delta.next_id);
         self.base.next_work_id = self.base.next_work_id.max(delta.next_work_id);
-        for record in delta.node_records {
-            match self.base.node_records.get(&record.node_id) {
+        for (node_id, record) in delta.node_records {
+            match self.base.node_records.get(&node_id) {
                 Some(existing) if existing != &record => {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
-                        format!(
-                            "node record {:?} diverged during completion merge",
-                            record.node_id
-                        ),
+                        format!("node record {:?} diverged during completion merge", node_id),
                     ));
                 }
                 Some(_) => {}
                 None => {
-                    self.base.node_records.insert(record.node_id, record);
+                    self.base.node_records.insert(node_id, record);
                 }
             }
         }
-        for keyed in delta.keyed_nodes {
-            match self.base.keyed_nodes.get_mut(&keyed.node_id) {
+        for (node_id, keyed) in delta.keyed_nodes {
+            match self.base.keyed_nodes.get_mut(&node_id) {
                 Some(existing) => merge_keyed_node(existing, keyed)?,
                 None => {
                     self.base.insert_keyed_node(keyed);
@@ -2021,15 +2018,17 @@ impl EvalScheduler {
                 }
             }
         }
-        for (pending_id, suspension) in delta.pending_resumes {
+        for (pending_id, added_suspensions) in delta.pending_resumes {
             if let Some(suspensions) = self.base.pending_resumes.get_mut(&pending_id) {
-                if !suspensions.contains(&suspension) {
-                    suspensions.push(suspension);
+                for suspension in added_suspensions {
+                    if !suspensions.contains(&suspension) {
+                        suspensions.push(suspension);
+                    }
                 }
             } else {
                 self.base
                     .pending_resumes
-                    .insert(pending_id, vec![suspension]);
+                    .insert(pending_id, added_suspensions);
             }
         }
         for (node_id, state) in delta.node_states {

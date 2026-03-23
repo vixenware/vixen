@@ -878,26 +878,10 @@ pub struct EvalWorkCompletion {
 
 #[derive(Debug, Clone)]
 pub(super) struct EvalSessionDelta {
-    pub(super) scheduler: EvalSchedulerDelta,
+    pub(super) scheduler: RecordedSchedulerDelta,
     pub(super) reads: EvalSnapshotReadSet,
     pub(super) trace_events: Vec<EvalEvent>,
     pub(super) completed_invalidated: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct EvalSchedulerDelta {
-    pub(super) next_id: u64,
-    pub(super) next_work_id: u64,
-    pub(super) node_records: Vec<EvalNodeRecord>,
-    pub(super) keyed_nodes: Vec<KeyedNodeMemo>,
-    pub(super) node_states: Vec<(EvalNodeId, EvalNodeState)>,
-    pub(super) dependency_edges: Vec<EvalDependencyEdge>,
-    pub(super) queued: Vec<ReadyTaskRecord>,
-    pub(super) pending_resumes: Vec<(EvalNodeId, EvalSuspension)>,
-    pub(super) pending_kinds: Vec<(EvalNodeId, PendingKind)>,
-    pub(super) retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
-    pub(super) learned_no_goods: Vec<LearnedNoGood>,
-    pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -914,32 +898,4 @@ pub(super) struct RecordedSchedulerDelta {
     pub(super) retained_exprs: BTreeMap<EvalNodeId, RetainedExprTask>,
     pub(super) learned_no_goods: Vec<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
-}
-
-impl RecordedSchedulerDelta {
-    pub(super) fn into_delta(self) -> EvalSchedulerDelta {
-        let pending_resumes = self
-            .pending_resumes
-            .into_iter()
-            .flat_map(|(pending_id, suspensions)| {
-                suspensions
-                    .into_iter()
-                    .map(move |suspension| (pending_id, suspension))
-            })
-            .collect();
-        EvalSchedulerDelta {
-            next_id: self.next_id,
-            next_work_id: self.next_work_id,
-            node_records: self.node_records.into_values().collect(),
-            keyed_nodes: self.keyed_nodes.into_values().collect(),
-            node_states: self.node_states.into_iter().collect(),
-            dependency_edges: self.dependency_edges,
-            queued: self.queued,
-            pending_resumes,
-            pending_kinds: self.pending_kinds.into_iter().collect(),
-            retained_exprs: self.retained_exprs.into_iter().collect(),
-            learned_no_goods: self.learned_no_goods,
-            learned_search_no_goods: self.learned_search_no_goods,
-        }
-    }
 }
