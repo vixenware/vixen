@@ -90,6 +90,23 @@ pub(super) enum BlockResumeKind {
     Expr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CallResumeKind {
+    Callee,
+    Arg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CallState {
+    pub(super) call_source: SourceSpan,
+    pub(super) type_args: Arc<[Ty]>,
+    pub(super) env: EvalEnv,
+    pub(super) callee: Option<Value>,
+    pub(super) args: Vec<Value>,
+    pub(super) remaining_args: Arc<[ExprId]>,
+    pub(super) next_arg_index: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
@@ -122,6 +139,12 @@ pub(super) enum ContinuationFrame {
         type_args: Arc<[Ty]>,
         child_nodes: Vec<EvalNodeId>,
     },
+    Call {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        call: CallState,
+        pending: CallResumeKind,
+    },
     BlockBody {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -130,27 +153,6 @@ pub(super) enum ContinuationFrame {
         body: BlockBodyId,
         next_step_index: usize,
         pending: BlockResumeKind,
-    },
-    CallAfterCallee {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        call_source: SourceSpan,
-        type_args: Arc<[Ty]>,
-        env: EvalEnv,
-        args: Vec<Value>,
-        remaining_args: Arc<[ExprId]>,
-        next_arg_index: usize,
-    },
-    CallAfterArg {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        callee: Value,
-        call_source: SourceSpan,
-        type_args: Arc<[Ty]>,
-        args: Vec<Value>,
-        remaining_args: Arc<[ExprId]>,
-        next_arg_index: usize,
-        env: EvalEnv,
     },
     ArrayAfterItem {
         node_id: EvalNodeId,

@@ -199,46 +199,39 @@ pub(in crate::engine) fn resume_frame(
                             }
                         }
                     }
-                    continue_call_from_args(
+                    continue_call(
                         state,
                         node_id,
                         parent_id,
-                        callee,
-                        call_source,
-                        type_args,
-                        args,
-                        Arc::from([]),
-                        0,
-                        empty_env(),
+                        CallState {
+                            call_source,
+                            type_args,
+                            env: empty_env(),
+                            callee: Some(callee),
+                            args,
+                            remaining_args: Arc::from([]),
+                            next_arg_index: 0,
+                        },
                     )
                 }
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::CallAfterCallee {
+        ContinuationFrame::Call {
             node_id,
             parent_id,
-            call_source,
-            type_args,
-            env,
-            args,
-            remaining_args,
-            next_arg_index,
+            mut call,
+            pending,
         } => {
             let result = match input {
-                Ok(callee) => continue_call_from_args(
-                    state,
-                    node_id,
-                    parent_id,
-                    callee,
-                    call_source,
-                    type_args,
-                    args,
-                    remaining_args,
-                    next_arg_index,
-                    env,
-                ),
+                Ok(value) => {
+                    match pending {
+                        CallResumeKind::Callee => call.callee = Some(value),
+                        CallResumeKind::Arg => call.args.push(value),
+                    }
+                    continue_call(state, node_id, parent_id, call)
+                }
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
@@ -263,37 +256,6 @@ pub(in crate::engine) fn resume_frame(
                 pending,
                 input,
             );
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::CallAfterArg {
-            node_id,
-            parent_id,
-            callee,
-            call_source,
-            type_args,
-            mut args,
-            remaining_args,
-            next_arg_index,
-            env,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    args.push(value);
-                    continue_call_from_args(
-                        state,
-                        node_id,
-                        parent_id,
-                        callee,
-                        call_source,
-                        type_args,
-                        args,
-                        remaining_args,
-                        next_arg_index,
-                        env,
-                    )
-                }
-                Err(error) => Err(error),
-            };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
         ContinuationFrame::ArrayAfterItem {

@@ -954,17 +954,19 @@ pub(super) fn eval_call(
                 }],
             ));
         }
-        return continue_call_from_args(
+        return continue_call(
             state,
             node_id,
             parent_id,
-            callee_value,
-            call_source,
-            Arc::clone(&type_args),
-            Vec::new(),
-            Arc::clone(&positional_args),
-            0,
-            env.clone(),
+            CallState {
+                call_source,
+                type_args: Arc::clone(&type_args),
+                env: env.clone(),
+                callee: Some(callee_value),
+                args: Vec::new(),
+                remaining_args: Arc::clone(&positional_args),
+                next_arg_index: 0,
+            },
         );
     }
     let callee_value = match eval_call_callee(state, &callee, env)? {
@@ -972,30 +974,36 @@ pub(super) fn eval_call(
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
                 suspension,
-                ContinuationFrame::CallAfterCallee {
+                ContinuationFrame::Call {
                     node_id,
                     parent_id,
-                    call_source,
-                    type_args: Arc::clone(&type_args),
-                    env: env.clone(),
-                    args: Vec::new(),
-                    remaining_args: Arc::clone(&positional_args),
-                    next_arg_index: 0,
+                    call: CallState {
+                        call_source,
+                        type_args: Arc::clone(&type_args),
+                        env: env.clone(),
+                        callee: None,
+                        args: Vec::new(),
+                        remaining_args: Arc::clone(&positional_args),
+                        next_arg_index: 0,
+                    },
+                    pending: CallResumeKind::Callee,
                 },
             ));
         }
     };
-    continue_call_from_args(
+    continue_call(
         state,
         node_id,
         parent_id,
-        callee_value,
-        call_source,
-        type_args,
-        Vec::new(),
-        positional_args,
-        0,
-        env.clone(),
+        CallState {
+            call_source,
+            type_args,
+            env: env.clone(),
+            callee: Some(callee_value),
+            args: Vec::new(),
+            remaining_args: positional_args,
+            next_arg_index: 0,
+        },
     )
 }
 
@@ -1442,63 +1450,54 @@ fn newtype_constructor_name(function: &FunctionRef) -> Option<Arc<str>> {
     (marker.1.rep == ValueRep::Bool(true)).then(|| function.name.clone())
 }
 
-pub(super) fn continue_call_from_args(
+pub(super) fn continue_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    callee: Value,
-    call_source: SourceSpan,
-    type_args: Arc<[Ty]>,
-    mut args: Vec<Value>,
-    remaining_args: Arc<[ExprId]>,
-    mut next_arg_index: usize,
-    mut env: EvalEnv,
+    mut call: CallState,
 ) -> Result<EvalStep, EvalError> {
     if state.current_parent() != Some(node_id) {
         return state.with_active_node(node_id, |state| {
-            continue_call_from_args(
-                state,
-                node_id,
-                parent_id,
-                callee,
-                call_source,
-                type_args,
-                args,
-                remaining_args,
-                next_arg_index,
-                env,
-            )
+            continue_call(state, node_id, parent_id, call)
         });
     }
-    while let Some(arg_handle) = remaining_args.get(next_arg_index).copied() {
+    while let Some(arg_handle) = call.remaining_args.get(call.next_arg_index).copied() {
         let arg_handle = ExprHandle { key: arg_handle };
-        next_arg_index += 1;
-        let arg_index = args.len();
-        let adapter = function_adapter_value_for_arg(state, &callee, arg_index, arg_handle, &env)?;
+        call.next_arg_index += 1;
+        let arg_index = call.args.len();
+        let callee = call
+            .callee
+            .as_ref()
+            .expect("call should have a callee before evaluating arguments");
+        let adapter =
+            function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
         let arg_step = match adapter {
             Some(value) => EvalStep::Ready(value),
-            None => eval_dependent_expr_handle(state, node_id, arg_handle, &mut env)?,
+            None => eval_dependent_expr_handle(state, node_id, arg_handle, &mut call.env)?,
         };
         match arg_step {
-            EvalStep::Ready(value) => args.push(value),
+            EvalStep::Ready(value) => call.args.push(value),
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::CallAfterArg {
+                    ContinuationFrame::Call {
                         node_id,
                         parent_id,
-                        callee: callee.clone(),
-                        call_source,
-                        type_args: Arc::clone(&type_args),
-                        args,
-                        remaining_args,
-                        next_arg_index,
-                        env,
+                        call,
+                        pending: CallResumeKind::Arg,
                     },
                 ));
             }
         }
     }
+    let CallState {
+        call_source,
+        type_args,
+        callee,
+        mut args,
+        ..
+    } = call;
+    let callee = callee.expect("call should have a callee before dispatch");
     let ValueRep::Function(function) = &callee.rep else {
         return Err(EvalError::new(
             EvalErrorKind::TypeError,
@@ -1507,17 +1506,19 @@ pub(super) fn continue_call_from_args(
     };
     if let Some(target) = fallible_target_function(function) {
         let fallible_source = call_source.clone();
-        return match continue_call_from_args(
+        return match continue_call(
             state,
             node_id,
             parent_id,
-            Value::function(target),
-            call_source,
-            type_args,
-            args,
-            Arc::from([]),
-            0,
-            empty_env(),
+            CallState {
+                call_source,
+                type_args,
+                env: empty_env(),
+                callee: Some(Value::function(target)),
+                args,
+                remaining_args: Arc::from([]),
+                next_arg_index: 0,
+            },
         ) {
             Ok(EvalStep::Ready(value)) => {
                 Ok(EvalStep::Ready(fallible_some(value, fallible_source)))
@@ -2580,17 +2581,19 @@ fn eval_call_with_keyword_bindings(
             }],
         ));
     }
-    continue_call_from_args(
+    continue_call(
         state,
         node_id,
         parent_id,
-        callee_value,
-        call_source,
-        type_args,
-        Vec::new(),
-        positional_args,
-        0,
-        env,
+        CallState {
+            call_source,
+            type_args,
+            env,
+            callee: Some(callee_value),
+            args: Vec::new(),
+            remaining_args: positional_args,
+            next_arg_index: 0,
+        },
     )
 }
 
