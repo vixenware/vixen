@@ -1438,6 +1438,7 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Option.unwrap_or"
             | "Array.filter"
             | "Array.map"
+            | "Array.flat_map"
             | "Array.filter_map"
             | "Array.any"
             | "Array.find"
@@ -1446,6 +1447,7 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Array.to_array"
             | "Stream.flatten"
             | "Stream.filter"
+            | "Stream.flat_map"
             | "Stream.map"
             | "Stream.merge"
             | "Stream.to_array"
@@ -2257,6 +2259,52 @@ fn continue_builtin_call_inner(
             )
             .map(Some)
         }
+        "Array.flat_map" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.flat_map() requires receiver and mapper",
+                ));
+            }
+            let ValueRep::Array(items) = &args[0].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.flat_map() receiver must evaluate to Array",
+                ));
+            };
+            let ValueRep::Function(mapper) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Array.flat_map() mapper must evaluate to a function value",
+                ));
+            };
+            let EvalStep::Ready(stream) = continue_array_map_builtin(
+                state,
+                items.iter().cloned().collect(),
+                mapper.clone(),
+                args[0].meta.provenance.clone(),
+            )?
+            else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    "Array.flat_map() mapping pipeline must not suspend",
+                ));
+            };
+            let calls = internal_stream_calls(&stream)?;
+            let calls = calls
+                .into_iter()
+                .map(|call| match call {
+                    InternalStreamCall::Pipeline { source, mut stages } => {
+                        stages.push(StreamStage::Flatten);
+                        internal_stream_call_value(source, stages)
+                    }
+                })
+                .collect();
+            Ok(ready_builtin_value(internal_stream_value(
+                calls,
+                args[0].meta.clone(),
+            )))
+        }
         "Array.filter_map" => {
             if args.len() != 2 {
                 return Err(EvalError::new(
@@ -2561,6 +2609,39 @@ fn continue_builtin_call_inner(
                 .into_iter()
                 .map(|call| match call {
                     InternalStreamCall::Pipeline { source, mut stages } => {
+                        stages.push(StreamStage::Flatten);
+                        internal_stream_call_value(source, stages)
+                    }
+                })
+                .collect();
+            Ok(ready_builtin_value(internal_stream_value(
+                calls,
+                args[0].meta.clone(),
+            )))
+        }
+        "Stream.flat_map" => {
+            if args.len() != 2 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.flat_map() requires receiver and mapper",
+                ));
+            }
+            let ValueRep::Function(mapper) = &args[1].rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.flat_map() mapper must evaluate to a function value",
+                ));
+            };
+            ensure_unary_bodyful_stream_function(
+                mapper,
+                "Stream.flat_map() mapper must be a bodyful Vixen function",
+            )?;
+            let calls = internal_stream_calls(&args[0])?;
+            let calls = calls
+                .into_iter()
+                .map(|call| match call {
+                    InternalStreamCall::Pipeline { source, mut stages } => {
+                        stages.push(StreamStage::Map(mapper.clone()));
                         stages.push(StreamStage::Flatten);
                         internal_stream_call_value(source, stages)
                     }

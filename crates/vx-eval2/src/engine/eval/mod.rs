@@ -111,8 +111,10 @@ fn compile_adapter_parameters(
 
 fn builtin_adapter_arg_index(function_name: &str, arg_index: usize) -> bool {
     match function_name {
-        "Array.any" | "Array.find" | "Array.filter" | "Array.map" | "Array.filter_map"
-        | "Map.map" | "Stream.filter" | "Stream.map" => arg_index == 0,
+        "Array.any" | "Array.find" | "Array.filter" | "Array.map" | "Array.flat_map"
+        | "Array.filter_map" | "Map.map" | "Stream.filter" | "Stream.map" | "Stream.flat_map" => {
+            arg_index == 0
+        }
         "array_find" => arg_index == 1,
         "array_fold" => arg_index == 2,
         _ => false,
@@ -868,6 +870,11 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         {
             Some("Stream.flatten")
         }
+        (ValueRep::Struct(StructValue { type_name, .. }), "flat_map")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.flat_map")
+        }
         (ValueRep::Struct(StructValue { type_name, .. }), "map")
             if type_name.as_ref() == "__Eval2Stream" =>
         {
@@ -913,6 +920,7 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         (ValueRep::String(_), "ends_with") => Some("String.ends_with"),
         (ValueRep::Array(_), "any") => Some("Array.any"),
         (ValueRep::Array(_), "find") => Some("Array.find"),
+        (ValueRep::Array(_), "flat_map") => Some("Array.flat_map"),
         (ValueRep::Array(_), "filter_map") => Some("Array.filter_map"),
         (ValueRep::Array(_), "flatten") => Some("Array.flatten"),
         (ValueRep::Array(_), "filter") => Some("Array.filter"),

@@ -98,6 +98,8 @@ namespace String {
 namespace Array[T] {
   /// Apply `f` to each element.
   fn map[U](self, f: Fn(T) -> U) -> Stream[U];
+  /// Map each element to a stream-like value and flatten one level.
+  fn flat_map[U](self, f: Fn(T) -> U) -> Stream[U];
   /// Keep the elements for which `pred` returns true.
   fn filter(self, pred: Fn(T) -> Bool) -> Stream[T];
   /// Map and skip empty results in one pass.
@@ -175,6 +177,8 @@ namespace Bytes {
 namespace Stream[T] {
   /// Apply `f` to each stream item.
   fn map[U](self, f: Fn(T) -> U) -> Stream[U];
+  /// Map each item to a stream-like value and flatten one level.
+  fn flat_map[U](self, f: Fn(T) -> U) -> Stream[U];
   /// Keep the items for which `pred` returns true.
   fn filter(self, pred: Fn(T) -> Bool) -> Stream[T];
   /// Flatten one level of nested arrays or streams into a single stream.

@@ -2578,6 +2578,84 @@ fn build(items: Array[String]) {
 }
 
 #[test]
+fn array_flat_map_flattens_array_and_stream_mapper_results_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  [
+    items.flat_map((item) => [item.to_lower(), item]).to_array(),
+    items.flat_map((item) => [item.to_lower()].map((lower) => lower)).to_array(),
+  ]
+}
+"#,
+        "array-flat-map-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+        ])],
+    )
+    .expect("evaluate Array.flat_map().to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Array.flat_map().to_array() result, got {resolution:?}");
+    };
+    let ValueRep::Array(groups) = &value.rep else {
+        panic!("expected array result from Array.flat_map(), got {value:?}");
+    };
+    assert_eq!(groups.len(), 2);
+
+    let ValueRep::Array(items) = &groups[0].rep else {
+        panic!("expected flattened array result, got {:?}", groups[0]);
+    };
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("FlAtE2".into()));
+    assert_eq!(items[2].rep, ValueRep::String("serde".into()));
+    assert_eq!(items[3].rep, ValueRep::String("SeRdE".into()));
+
+    let ValueRep::Array(stream_items) = &groups[1].rep else {
+        panic!("expected flattened stream result, got {:?}", groups[1]);
+    };
+    assert_eq!(stream_items.len(), 2);
+    assert_eq!(stream_items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(stream_items[1].rep, ValueRep::String("serde".into()));
+}
+
+#[test]
+fn stream_flat_map_flattens_nested_results_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items
+    .map((item) => item)
+    .flat_map((item) => [item, item.to_lower()])
+    .to_array()
+}
+"#,
+        "stream-flat-map-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+        ])],
+    )
+    .expect("evaluate Stream.flat_map().to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Stream.flat_map().to_array() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Stream.flat_map(), got {value:?}");
+    };
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].rep, ValueRep::String("FlAtE2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[2].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[3].rep, ValueRep::String("serde".into()));
+}
+
+#[test]
 fn map_map_stream_to_array_projects_entries_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

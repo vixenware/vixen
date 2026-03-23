@@ -1711,6 +1711,61 @@ fn main(paths: Array[Path]) {
 }
 
 #[test]
+fn flat_map_typechecks_for_array_and_stream_mappers() {
+    let src = r#"
+fn main(paths: Array[Path]) {
+    let via_array = paths.flat_map((path) => [Tree(path)]);
+    let via_stream = paths.flat_map((path) => [Tree(path)].map((tree) => tree));
+    let via_stream_receiver = paths.map((path) => Tree(path)).flat_map((tree) => [tree]);
+    [
+      via_array.to_array(),
+      via_stream.to_array(),
+      via_stream_receiver.to_array(),
+    ]
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let array_flat_map_ty =
+        find_expr_type(&result, src, r#"paths.flat_map((path) => [Tree(path)])"#);
+    assert_eq!(
+        array_flat_map_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree"))))
+    );
+
+    let stream_flat_map_ty = find_expr_type(
+        &result,
+        src,
+        r#"paths.flat_map((path) => [Tree(path)].map((tree) => tree))"#,
+    );
+    assert_eq!(
+        stream_flat_map_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree"))))
+    );
+
+    let collected_ty = find_expr_type(&result, src, r#"via_stream_receiver.to_array()"#);
+    assert_eq!(
+        collected_ty,
+        Some(Ty::Array(Box::new(nominal_ty(&types, "Tree"))))
+    );
+}
+
+#[test]
+fn flat_map_rejects_non_stream_like_mapper_results() {
+    let src = r#"
+fn main(items: Array[String]) {
+    items.flat_map((item) => item.to_lower())
+}
+"#;
+    let (result, _types) = type_check_with_types(src);
+    assert!(
+        !result.errors.is_empty(),
+        "expected flat_map type error, got no errors"
+    );
+}
+
+#[test]
 fn tree_constructor_from_stdlib_returns_tree() {
     let src = r#"
 fn main(ws: Path) {

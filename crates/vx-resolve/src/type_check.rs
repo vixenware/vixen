@@ -1258,7 +1258,18 @@ impl<'a> ExprTyper<'a> {
                 doc: param.doc.clone(),
             })
             .collect();
-        let ret = substitute_bound_type_params(&sig.ret, &substitutions);
+        let mut ret = substitute_bound_type_params(&sig.ret, &substitutions);
+        if def.name == "flat_map"
+            && params.len() == 1
+            && let Some(Ty::Function(function)) = arg_tys.first()
+        {
+            let flattened = match function.ret.as_ref() {
+                Ty::Array(item) => item.clone(),
+                Ty::Stream(item) => item.clone(),
+                _ => return None,
+            };
+            ret = Ty::Stream(flattened);
+        }
         if ret.is_poison() || bound_params.iter().any(|param| param.ty.is_poison()) {
             return None;
         }
@@ -1286,6 +1297,10 @@ impl<'a> ExprTyper<'a> {
                     .map(|expr| self.infer_arg_with_expected_type(&expr, &param.ty))
             })
             .collect();
+
+        if def.name == "flat_map" && !arg_tys.is_empty() {
+            return self.instantiate_method_sig(receiver_ty, def, &arg_tys);
+        }
 
         self.instantiate_method_sig(receiver_ty, def, &arg_tys)
             .or(Some(receiver_bound))
