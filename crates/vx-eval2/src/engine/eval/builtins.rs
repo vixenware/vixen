@@ -1017,7 +1017,7 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
 ) -> Result<EvalStep, EvalError> {
     match &mapper_result.rep {
         ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
-            mapped.push(project_struct_field(mapper_result, "value".to_string())?);
+            mapped.push(project_struct_field(mapper_result, Arc::from("value"))?);
         }
         ValueRep::Struct(option) if option.type_name.as_ref() == "None" => {}
         _ => {
@@ -1039,7 +1039,7 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
         match eval_dependent_prepared_entry(state, node_id, prepared)? {
             EvalStep::Ready(result) => match &result.rep {
                 ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
-                    mapped.push(project_struct_field(result, "value".to_string())?);
+                    mapped.push(project_struct_field(result, Arc::from("value"))?);
                 }
                 ValueRep::Struct(option) if option.type_name.as_ref() == "None" => {}
                 _ => {
@@ -2224,7 +2224,7 @@ fn continue_builtin_call_inner(
             };
             match option.type_name.as_ref() {
                 "Some" => {
-                    let value = project_struct_field(args[0].clone(), "value".to_string())?;
+                    let value = project_struct_field(args[0].clone(), Arc::from("value"))?;
                     Ok(ready_builtin_value(value))
                 }
                 "None" => Ok(ready_builtin_value(args[1].clone())),

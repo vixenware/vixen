@@ -534,7 +534,7 @@ pub(crate) enum StructLiteralPart {
 pub(crate) struct FieldExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) receiver: Option<ExprId>,
-    pub(crate) field_name: Option<Token>,
+    pub(crate) field_name: Option<Arc<str>>,
     pub(crate) static_member: Option<StaticMemberPlan>,
 }
 
@@ -1024,8 +1024,8 @@ impl CompiledProgram {
             return Ok(None);
         };
         Ok(Some(StaticMemberPlan {
-            full_name: Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name.text())),
-            variant_constructor: self.resolve_variant_constructor(field_name.text()),
+            full_name: Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name)),
+            variant_constructor: self.resolve_variant_constructor(field_name),
         }))
     }
 }
@@ -2396,9 +2396,7 @@ fn compile_field_expr_ast(
                 )
             })
             .transpose()?,
-        field_name: field
-            .field_name()
-            .map(|token| compile_token(source, &token)),
+        field_name: field.field_name().map(|token| Arc::from(token.text())),
         static_member: None,
     })
 }

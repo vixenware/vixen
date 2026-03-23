@@ -982,7 +982,10 @@ fn compiled_program_lowers_field_call_callee_to_call_callee_plan() {
     let ExprKind::Call(call) = expr.kind() else {
         panic!("expected lowered step to be a call expr, got {expr:?}");
     };
-    assert!(matches!(call.callee, Some(CallCallee::Field(_))));
+    let Some(CallCallee::Field(field)) = &call.callee else {
+        panic!("expected lowered call callee to be a field plan");
+    };
+    assert_eq!(field.field_name.as_deref(), Some("len"));
 }
 
 #[test]
@@ -1073,6 +1076,7 @@ fn compiled_program_lowers_static_member_field_expr_to_plan() {
         panic!("expected lowered step to be a field expr, got {expr:?}");
     };
     assert!(field.static_member.is_some());
+    assert_eq!(field.field_name.as_deref(), Some("len"));
 }
 
 #[test]

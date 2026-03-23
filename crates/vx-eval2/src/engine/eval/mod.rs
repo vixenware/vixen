@@ -1326,15 +1326,18 @@ pub(super) fn static_namespace_member_value(
     let Some(field_name) = field.field_name.as_ref() else {
         return Ok(None);
     };
-    if let Some(constructor) = state.program.resolve_variant_constructor(field_name.text()) {
+    if let Some(constructor) = state
+        .program
+        .resolve_variant_constructor(field_name.as_ref())
+    {
         return Ok(Some(enum_constructor_or_value(
             state,
             constructor.name,
             constructor.fields,
-            state.span_for_node(field),
+            state.program.span_for_handle(field.handle),
         )));
     }
-    let full_name = format!("{}.{}", receiver_token.text(), field_name.text());
+    let full_name = format!("{}.{}", receiver_token.text(), field_name);
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from(full_name.as_str()),
@@ -1344,7 +1347,7 @@ pub(super) fn static_namespace_member_value(
         Arc::from([]),
         None,
     );
-    let source = state.span_for_node(field);
+    let source = state.program.span_for_handle(field.handle);
     Ok(Some(
         Value::function(function).with_provenance(Provenance::binding(source, full_name)),
     ))
@@ -1377,6 +1380,19 @@ fn static_member_value(
         source,
         static_member.full_name.to_string(),
     )))
+}
+
+fn field_state(field: &FieldExpr, field_source: SourceSpan) -> Result<FieldState, EvalError> {
+    let Some(field_name) = field.field_name.as_ref() else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "field expression has no field name",
+        ));
+    };
+    Ok(FieldState {
+        field_name: Arc::clone(field_name),
+        field_source,
+    })
 }
 
 fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {
@@ -1508,10 +1524,9 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
 fn bound_method_value(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     receiver: Value,
-    field_name: &str,
+    method_name: &'static str,
     field_source: SourceSpan,
-) -> Option<Value> {
-    let method_name = bound_method_name(&receiver, field_name)?;
+) -> Value {
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from(method_name),
@@ -1521,20 +1536,23 @@ fn bound_method_value(
         Arc::from(vec![(Arc::from("self"), receiver)]),
         None,
     );
-    Some(
-        Value::function(function)
-            .with_provenance(Provenance::binding(field_source, method_name.to_string())),
-    )
+    Value::function(function)
+        .with_provenance(Provenance::binding(field_source, method_name.to_string()))
 }
 
 pub(super) fn project_field_or_method_value(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     receiver: Value,
-    field_name: String,
+    field_name: Arc<str>,
     field_source: SourceSpan,
 ) -> Result<Value, EvalError> {
-    if let Some(value) = bound_method_value(state, receiver.clone(), &field_name, field_source) {
-        return Ok(value);
+    if let Some(method_name) = bound_method_name(&receiver, field_name.as_ref()) {
+        return Ok(bound_method_value(
+            state,
+            receiver,
+            method_name,
+            field_source,
+        ));
     }
     project_struct_field(receiver, field_name)
 }
@@ -2815,53 +2833,26 @@ pub(super) fn eval_field(
         .copied()
         .expect("field expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let receiver = match eval_child_expr(
-        state,
-        state.program.resolve_expr(field.receiver.ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
-        })?)?,
-        env,
-    )? {
+    let receiver = field.receiver.ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
+    })?;
+    let field_source = state.program.span_for_handle(field.handle);
+    let field = field_state(field, field_source)?;
+    let receiver = match eval_child_expr(state, state.program.resolve_expr(receiver)?, env)? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
-            let field_name = field
-                .field_name
-                .as_ref()
-                .map(|name| name.text().to_string())
-                .ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "field expression has no field name",
-                    )
-                })?;
-            let field_source = state.span_for_node(field);
             return Ok(extend_suspension(
                 suspension,
-                ContinuationFrame::FieldReceiver {
+                ContinuationFrame::Field {
                     node_id,
                     parent_id,
-                    field_name,
-                    field_source,
+                    field,
                 },
             ));
         }
     };
-    project_field_or_method_value(
-        state,
-        receiver,
-        field
-            .field_name
-            .as_ref()
-            .map(|name| name.text().to_string())
-            .ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    "field expression has no field name",
-                )
-            })?,
-        state.span_for_node(field),
-    )
-    .map(EvalStep::Ready)
+    project_field_or_method_value(state, receiver, field.field_name, field.field_source)
+        .map(EvalStep::Ready)
 }
 
 pub(super) fn eval_binary(
@@ -3722,7 +3713,7 @@ fn apply_struct_literal_part(
 
 pub(super) fn project_struct_field(
     receiver: Value,
-    field_name: String,
+    field_name: Arc<str>,
 ) -> Result<Value, EvalError> {
     let ValueRep::Struct(StructValue { fields, .. }) = &receiver.rep else {
         return Err(EvalError::new(
@@ -3732,14 +3723,14 @@ pub(super) fn project_struct_field(
     };
     let value = fields
         .iter()
-        .find_map(|(name, value)| (name.as_ref() == field_name).then(|| value.clone()))
+        .find_map(|(name, value)| (name.as_ref() == field_name.as_ref()).then(|| value.clone()))
         .ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::TypeError,
                 format!("struct field {field_name} was not found"),
             )
         })?;
-    Ok(value.project(ProjectionStep::Field(field_name.into())))
+    Ok(value.project(ProjectionStep::Field(field_name.to_string())))
 }
 
 pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {

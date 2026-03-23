@@ -1152,14 +1152,13 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::FieldReceiver {
+        ContinuationFrame::Field {
             node_id,
             parent_id,
-            field_name,
-            field_source,
+            field,
         } => {
             let result = input.and_then(|receiver| {
-                project_field_or_method_value(state, receiver, field_name, field_source)
+                project_field_or_method_value(state, receiver, field.field_name, field.field_source)
             });
             Ok(match result {
                 Ok(value) => {

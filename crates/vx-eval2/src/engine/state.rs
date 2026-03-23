@@ -110,6 +110,12 @@ pub(super) struct CallState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FieldState {
+    pub(super) field_name: Arc<str>,
+    pub(super) field_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -364,11 +370,10 @@ pub(super) enum ContinuationFrame {
         predicate: FunctionRef,
         index: usize,
     },
-    FieldReceiver {
+    Field {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        field_name: String,
-        field_source: SourceSpan,
+        field: FieldState,
     },
 }
 
