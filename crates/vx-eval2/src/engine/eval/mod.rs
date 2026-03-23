@@ -97,12 +97,8 @@ fn collect_adapter_parameters(
             names_by_index[index] = Some(token.handle());
         }
         ExprKind::Block(block) => {
-            for statement in block.statements.iter().copied() {
-                collect_adapter_parameters_from_stmt(
-                    program,
-                    program.resolve_stmt(statement)?,
-                    names_by_index,
-                )?;
+            for step in program.resolve_block_body(block.body)?.steps.iter() {
+                collect_adapter_parameters_from_block_step(program, step, names_by_index)?;
             }
         }
         ExprKind::Paren(paren) => {
@@ -256,26 +252,20 @@ fn collect_adapter_parameters(
     Ok(())
 }
 
-fn collect_adapter_parameters_from_stmt(
+fn collect_adapter_parameters_from_block_step(
     program: &CompiledProgram,
-    stmt: &Stmt,
+    step: &BlockStep,
     names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
 ) -> Result<(), EvalError> {
-    match stmt {
-        Stmt::Let(let_stmt) => {
-            if let Some(expr) = let_stmt.expr {
-                collect_adapter_parameters(program, program.resolve_expr(expr)?, names_by_index)?;
-            }
+    match step {
+        BlockStep::Let { expr, .. } | BlockStep::Expr(expr) => {
+            collect_adapter_parameters(program, program.resolve_expr(*expr)?, names_by_index)?;
         }
-        Stmt::Expr(expr) => {
-            collect_adapter_parameters(program, program.resolve_expr(expr.expr)?, names_by_index)?;
-        }
-        Stmt::FnDecl(function) => {
+        BlockStep::FnDecl(function) => {
             if let Some(body) = function.compiled.body {
                 collect_adapter_parameters(program, program.resolve_expr(body)?, names_by_index)?;
             }
         }
-        Stmt::Unsupported { .. } => {}
     }
     Ok(())
 }
@@ -1745,18 +1735,14 @@ pub(super) fn eval_block(
         .copied()
         .expect("block should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    continue_block_statements(
+    continue_block_body(
         state,
         node_id,
         parent_id,
         env.clone(),
         Value::unit(),
-        block
-            .statements
-            .iter()
-            .copied()
-            .map(|stmt| state.stmt_handle_for(stmt))
-            .collect::<Result<Vec<_>, _>>()?,
+        block.body,
+        0,
     )
 }
 
@@ -2655,88 +2641,108 @@ pub(super) fn eval_prefix(
     }
 }
 
-pub(super) fn continue_block_statements(
+pub(super) fn continue_block_body(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     mut scope: EvalEnv,
     mut last: Value,
-    statements: Vec<StmtHandle>,
+    body: BlockBodyId,
+    next_step_index: usize,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = statements.into_iter();
-    while let Some(statement_handle) = remaining.next() {
-        let statement = state.program.resolve_stmt_id(statement_handle.key)?;
-        match statement {
-            Stmt::Let(let_stmt) => {
-                let pattern = let_stmt.pattern.clone().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "let statement has no pattern")
-                })?;
-                let expr = let_stmt.expr.ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "let statement has no value")
-                })?;
-                match state.with_source(statement_handle.key.source(), |state| {
+    let steps = Arc::clone(&state.program.resolve_block_body(body)?.steps);
+    let source = body.source();
+    for (index, step) in steps.iter().enumerate().skip(next_step_index) {
+        match step {
+            BlockStep::Let { pattern, expr } => {
+                match state.with_source(source, |state| {
                     eval_dependent_expr_handle(
                         state,
                         node_id,
-                        state.expr_handle_for(expr)?,
+                        ExprHandle { key: *expr },
                         &mut scope,
                     )
                 })? {
                     EvalStep::Ready(value) => {
-                        bind_let_pattern(&mut scope, &pattern, value)?;
+                        bind_let_pattern(&mut scope, pattern, value)?;
                     }
                     EvalStep::Suspended(suspension) => {
                         return Ok(extend_suspension(
                             suspension,
-                            ContinuationFrame::BlockAfterLet {
+                            ContinuationFrame::BlockBody {
                                 node_id,
                                 parent_id,
                                 scope,
                                 last,
-                                pattern,
-                                remaining_statements: remaining.collect(),
+                                body,
+                                next_step_index: index + 1,
+                                pending: BlockResumeKind::Let {
+                                    pattern: pattern.clone(),
+                                },
                             },
                         ));
                     }
                 }
             }
-            Stmt::FnDecl(function) => {
-                let (name, _name_source, value) = state
-                    .with_source(statement_handle.key.source(), |state| {
-                        bind_named_function_decl(state, &function, &scope)
-                    })?;
+            BlockStep::FnDecl(function) => {
+                let (name, _name_source, value) = state.with_source(source, |state| {
+                    bind_named_function_decl(state, function, &scope)
+                })?;
                 env_mut(&mut scope).insert(name, value);
             }
-            Stmt::Expr(expr) => match state.with_source(statement_handle.key.source(), |state| {
-                eval_dependent_expr_handle(
-                    state,
-                    node_id,
-                    state.expr_handle_for(expr.expr)?,
-                    &mut scope,
-                )
+            BlockStep::Expr(expr) => match state.with_source(source, |state| {
+                eval_dependent_expr_handle(state, node_id, ExprHandle { key: *expr }, &mut scope)
             })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
                     return Ok(extend_suspension(
                         suspension,
-                        ContinuationFrame::BlockAfterExpr {
+                        ContinuationFrame::BlockBody {
                             node_id,
                             parent_id,
                             scope,
-                            remaining_statements: remaining.collect(),
+                            last,
+                            body,
+                            next_step_index: index + 1,
+                            pending: BlockResumeKind::Expr,
                         },
                     ));
                 }
             },
-            other => {
-                return Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    format!("unsupported block statement: {other:?}"),
-                ));
-            }
         }
     }
     Ok(EvalStep::Ready(last))
+}
+
+pub(super) fn resume_block_body(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut scope: EvalEnv,
+    mut last: Value,
+    body: BlockBodyId,
+    next_step_index: usize,
+    pending: BlockResumeKind,
+    input: Result<Value, EvalError>,
+) -> Result<EvalStep, EvalError> {
+    match input {
+        Ok(value) => match pending {
+            BlockResumeKind::Let { pattern } => {
+                bind_let_pattern(&mut scope, &pattern, value)?;
+            }
+            BlockResumeKind::Expr => last = value,
+        },
+        Err(error) => return Err(error),
+    }
+    continue_block_body(
+        state,
+        node_id,
+        parent_id,
+        scope,
+        last,
+        body,
+        next_step_index,
+    )
 }
 
 pub(super) fn continue_array_items(

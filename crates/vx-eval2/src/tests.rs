@@ -24,7 +24,9 @@ use crate::{
     channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
-    eval_source_entry_with_args_with_source_id_with_sink, resolution_to_outcome, value_to_envelope,
+    eval_source_entry_with_args_with_source_id_with_sink,
+    program::{BlockStep, CompiledProgram, ExprKind},
+    resolution_to_outcome, value_to_envelope,
 };
 use tempfile::tempdir;
 use vx_eval2_proto::EvalOutcome;
@@ -871,6 +873,29 @@ fn block_local_named_function_can_be_called() {
         panic!("expected ready block-local helper result, got {resolution:?}");
     };
     assert_eq!(value.rep, ValueRep::U64(42));
+}
+
+#[test]
+fn compiled_program_lowers_block_expr_to_block_steps() {
+    let program = CompiledProgram::new(
+        "lowered-block",
+        "fn build() {\n  let captured = 41;\n  fn helper() { captured }\n  helper()\n}",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    assert_eq!(block_body.steps.len(), 3);
+    assert!(matches!(block_body.steps[0], BlockStep::Let { .. }));
+    assert!(matches!(block_body.steps[1], BlockStep::FnDecl(_)));
+    assert!(matches!(block_body.steps[2], BlockStep::Expr(_)));
 }
 
 #[test]

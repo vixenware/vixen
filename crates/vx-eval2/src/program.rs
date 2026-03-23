@@ -168,12 +168,12 @@ impl ExprId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct StmtId {
+pub(crate) struct BlockBodyId {
     source: u32,
     index: u32,
 }
 
-impl StmtId {
+impl BlockBodyId {
     pub(crate) fn source(self) -> SourceId {
         SourceId(self.source)
     }
@@ -320,7 +320,19 @@ pub(crate) enum ExprKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) statements: Arc<[StmtId]>,
+    pub(crate) body: BlockBodyId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlockBody {
+    pub(crate) steps: Arc<[BlockStep]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BlockStep {
+    Let { pattern: LetPattern, expr: ExprId },
+    FnDecl(FunctionStmt),
+    Expr(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,40 +498,6 @@ pub(crate) struct FieldExpr {
     pub(crate) field_name: Option<Token>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExprStmt {
-    pub(crate) handle: ProgramNodeHandle,
-    pub(crate) expr: ExprId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Stmt {
-    Let(LetStmt),
-    FnDecl(FunctionStmt),
-    Expr(ExprStmt),
-    Unsupported {
-        handle: ProgramNodeHandle,
-        kind: SyntaxKind,
-    },
-}
-
-impl Stmt {
-    pub(crate) fn handle(&self) -> ProgramNodeHandle {
-        match self {
-            Self::Let(stmt) => stmt.handle,
-            Self::FnDecl(stmt) => stmt.handle,
-            Self::Expr(stmt) => stmt.handle,
-            Self::Unsupported { handle, .. } => *handle,
-        }
-    }
-}
-
-impl HasHandle for Stmt {
-    fn handle(&self) -> ProgramNodeHandle {
-        self.handle()
-    }
-}
-
 macro_rules! impl_has_handle {
     ($($ty:ty),+ $(,)?) => {
         $(
@@ -554,17 +532,8 @@ impl_has_handle!(
     InterpolatedStringExpr,
     StructLiteralExpr,
     FieldExpr,
-    ExprStmt,
-    LetStmt,
     FunctionStmt,
 );
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LetStmt {
-    pub(crate) handle: ProgramNodeHandle,
-    pub(crate) pattern: Option<LetPattern>,
-    pub(crate) expr: Option<ExprId>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FunctionStmt {
@@ -586,8 +555,7 @@ struct CompiledProgramSource {
     functions_by_definition: BTreeMap<ProgramNodeHandle, (Arc<str>, CompiledFunction)>,
     exprs: Vec<Expr>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
-    stmts: Vec<Stmt>,
-    stmt_ids: BTreeMap<ProgramNodeHandle, StmtId>,
+    block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
     pending_call_type_args: Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
     parse_error: Option<EvalError>,
@@ -620,22 +588,6 @@ impl IntoExprLookupId for ProgramNodeHandle {
 
 impl IntoExprLookupId for ExprId {
     fn into_expr_id(self, _program: &CompiledProgram) -> Result<ExprId, EvalError> {
-        Ok(self)
-    }
-}
-
-pub(crate) trait IntoStmtLookupId {
-    fn into_stmt_id(self, program: &CompiledProgram) -> Result<StmtId, EvalError>;
-}
-
-impl IntoStmtLookupId for ProgramNodeHandle {
-    fn into_stmt_id(self, program: &CompiledProgram) -> Result<StmtId, EvalError> {
-        program.source(self.source())?.stmt_id(self)
-    }
-}
-
-impl IntoStmtLookupId for StmtId {
-    fn into_stmt_id(self, _program: &CompiledProgram) -> Result<StmtId, EvalError> {
         Ok(self)
     }
 }
@@ -734,10 +686,6 @@ impl CompiledProgram {
         key.into_expr_id(self)
     }
 
-    pub(crate) fn stmt_id(&self, key: impl IntoStmtLookupId) -> Result<StmtId, EvalError> {
-        key.into_stmt_id(self)
-    }
-
     pub(crate) fn resolve_expr_id(&self, id: ExprId) -> Result<&Expr, EvalError> {
         self.source(id.source())?.resolve_expr(id)
     }
@@ -747,13 +695,8 @@ impl CompiledProgram {
         self.resolve_expr_id(id)
     }
 
-    pub(crate) fn resolve_stmt_id(&self, id: StmtId) -> Result<&Stmt, EvalError> {
-        self.source(id.source())?.resolve_stmt(id)
-    }
-
-    pub(crate) fn resolve_stmt(&self, key: impl IntoStmtLookupId) -> Result<&Stmt, EvalError> {
-        let id = self.stmt_id(key)?;
-        self.resolve_stmt_id(id)
+    pub(crate) fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
+        self.source(id.source())?.resolve_block_body(id)
     }
 
     pub(crate) fn span_for_handle(&self, handle: ProgramNodeHandle) -> SourceSpan {
@@ -866,8 +809,7 @@ impl CompiledProgramSource {
         let mut functions_by_definition = BTreeMap::new();
         let mut exprs = Vec::new();
         let mut expr_ids = BTreeMap::new();
-        let mut stmts = Vec::new();
-        let mut stmt_ids = BTreeMap::new();
+        let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
         let mut pending_call_type_args = Vec::new();
         let parse_error = if parse.errors().is_empty() {
@@ -881,8 +823,7 @@ impl CompiledProgramSource {
                 &mut path,
                 &mut exprs,
                 &mut expr_ids,
-                &mut stmts,
-                &mut stmt_ids,
+                &mut block_bodies,
                 &mut type_nodes,
                 &mut pending_call_type_args,
             ) {
@@ -920,8 +861,7 @@ impl CompiledProgramSource {
             functions_by_definition,
             exprs,
             expr_ids,
-            stmts,
-            stmt_ids,
+            block_bodies,
             type_nodes,
             pending_call_type_args,
             parse_error,
@@ -1008,16 +948,6 @@ impl CompiledProgramSource {
         })
     }
 
-    fn stmt_id(&self, handle: ProgramNodeHandle) -> Result<StmtId, EvalError> {
-        self.ensure_parsed()?;
-        self.stmt_ids.get(&handle).copied().ok_or_else(|| {
-            EvalError::new(
-                EvalErrorKind::Internal,
-                format!("statement at range {:?} was not found", handle.to_range()),
-            )
-        })
-    }
-
     fn resolve_expr(&self, id: ExprId) -> Result<&Expr, EvalError> {
         self.ensure_parsed()?;
         self.exprs.get(id.index as usize).ok_or_else(|| {
@@ -1028,12 +958,12 @@ impl CompiledProgramSource {
         })
     }
 
-    fn resolve_stmt(&self, id: StmtId) -> Result<&Stmt, EvalError> {
+    fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
-        self.stmts.get(id.index as usize).ok_or_else(|| {
+        self.block_bodies.get(id.index as usize).ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::Internal,
-                format!("statement id {:?} was not found", id),
+                format!("block body id {:?} was not found", id),
             )
         })
     }
@@ -1193,22 +1123,6 @@ fn require_expr_id(
     })
 }
 
-fn require_stmt_id(
-    stmt_ids: &BTreeMap<ProgramNodeHandle, StmtId>,
-    handle: ProgramNodeHandle,
-    label: &str,
-) -> Result<StmtId, EvalError> {
-    stmt_ids.get(&handle).copied().ok_or_else(|| {
-        EvalError::new(
-            EvalErrorKind::Internal,
-            format!(
-                "{label} statement at range {:?} was not indexed",
-                handle.to_range()
-            ),
-        )
-    })
-}
-
 fn index_nodes(
     source: SourceId,
     source_id: &Arc<str>,
@@ -1217,8 +1131,7 @@ fn index_nodes(
     path: &mut Vec<u32>,
     exprs: &mut Vec<Expr>,
     expr_ids: &mut BTreeMap<ProgramNodeHandle, ExprId>,
-    stmts: &mut Vec<Stmt>,
-    stmt_ids: &mut BTreeMap<ProgramNodeHandle, StmtId>,
+    block_bodies: &mut Vec<BlockBody>,
     type_nodes: &mut BTreeMap<ProgramNodeHandle, IndexedNode>,
     pending_call_type_args: &mut Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
 ) -> Result<(), EvalError> {
@@ -1232,8 +1145,7 @@ fn index_nodes(
             path,
             exprs,
             expr_ids,
-            stmts,
-            stmt_ids,
+            block_bodies,
             type_nodes,
             pending_call_type_args,
         )?;
@@ -1250,21 +1162,12 @@ fn index_nodes(
             line_index,
             &expr,
             expr_ids,
-            stmt_ids,
             id,
+            block_bodies,
             pending_call_type_args,
         )?;
         expr_ids.insert(compiled.handle(), id);
         exprs.push(compiled);
-    }
-    if let Some(stmt) = ParserStmt::cast(node.clone()) {
-        let compiled = compile_stmt(source, source_id, line_index, &stmt, expr_ids)?;
-        let id = StmtId {
-            source: source.0,
-            index: stmts.len() as u32,
-        };
-        stmt_ids.insert(compiled.handle(), id);
-        stmts.push(compiled);
     }
     if let Some(ty) = Type::cast(node.clone()) {
         type_nodes.insert(
@@ -1283,27 +1186,29 @@ fn compile_expr(
     line_index: &ParserLineIndex,
     expr: &ParserExpr,
     expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
-    stmt_ids: &BTreeMap<ProgramNodeHandle, StmtId>,
     expr_id: ExprId,
+    block_bodies: &mut Vec<BlockBody>,
     pending_call_type_args: &mut Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
 ) -> Result<Expr, EvalError> {
     let handle = ProgramNodeHandle::for_node(source, expr);
     let kind = match expr {
-        ParserExpr::Block(block) => ExprKind::Block(BlockExpr {
-            handle,
-            statements: Arc::from(
-                block
-                    .statements()
-                    .map(|stmt| {
-                        require_stmt_id(
-                            stmt_ids,
-                            ProgramNodeHandle::for_node(source, &stmt),
-                            "block child",
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        }),
+        ParserExpr::Block(block) => {
+            let body = BlockBodyId {
+                source: source.0,
+                index: block_bodies.len() as u32,
+            };
+            block_bodies.push(BlockBody {
+                steps: Arc::from(
+                    block
+                        .statements()
+                        .map(|stmt| {
+                            compile_block_step(source, source_id, line_index, &stmt, expr_ids)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            });
+            ExprKind::Block(BlockExpr { handle, body })
+        }
         ParserExpr::Literal(literal) => ExprKind::Literal(LiteralExpr {
             handle,
             token: literal.token().map(|token| compile_token(source, &token)),
@@ -1732,21 +1637,22 @@ fn compile_expr(
     Ok(Expr { handle, kind })
 }
 
-fn compile_stmt(
+fn compile_block_step(
     source: SourceId,
     source_id: &Arc<str>,
     line_index: &ParserLineIndex,
     stmt: &ParserStmt,
     expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
-) -> Result<Stmt, EvalError> {
-    let handle = ProgramNodeHandle::for_node(source, stmt);
+) -> Result<BlockStep, EvalError> {
     Ok(match stmt {
-        ParserStmt::Let(let_stmt) => Stmt::Let(LetStmt {
-            handle,
+        ParserStmt::Let(let_stmt) => BlockStep::Let {
             pattern: let_stmt
                 .pattern()
                 .map(|pattern| compile_let_pattern(source, source_id, line_index, &pattern))
-                .transpose()?,
+                .transpose()?
+                .ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "let statement has no pattern")
+                })?,
             expr: let_stmt
                 .expr()
                 .as_ref()
@@ -1757,8 +1663,11 @@ fn compile_stmt(
                         "let value",
                     )
                 })
-                .transpose()?,
-        }),
+                .transpose()?
+                .ok_or_else(|| {
+                    EvalError::new(EvalErrorKind::Internal, "let statement has no value")
+                })?,
+        },
         ParserStmt::FnDecl(function) => {
             let Some((name, compiled)) = compile_function_decl(source, function, expr_ids) else {
                 return Err(EvalError::new(
@@ -1766,24 +1675,23 @@ fn compile_stmt(
                     "function declaration could not be compiled",
                 ));
             };
-            Stmt::FnDecl(FunctionStmt {
-                handle,
+            BlockStep::FnDecl(FunctionStmt {
+                handle: ProgramNodeHandle::for_node(source, stmt),
                 name: Arc::from(name),
                 compiled,
             })
         }
-        ParserStmt::Expr(expr) => Stmt::Expr(ExprStmt {
-            handle,
-            expr: require_expr_id(
-                expr_ids,
-                ProgramNodeHandle::for_node(source, expr),
-                "expression statement",
-            )?,
-        }),
-        other => Stmt::Unsupported {
-            handle,
-            kind: other.syntax().kind(),
-        },
+        ParserStmt::Expr(expr) => BlockStep::Expr(require_expr_id(
+            expr_ids,
+            ProgramNodeHandle::for_node(source, expr),
+            "expression statement",
+        )?),
+        other => {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("unsupported block statement: {other:?}"),
+            ));
+        }
     })
 }
 

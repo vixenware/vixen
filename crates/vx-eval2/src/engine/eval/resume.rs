@@ -243,47 +243,26 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::BlockAfterLet {
-            node_id,
-            parent_id,
-            mut scope,
-            last,
-            pattern,
-            remaining_statements,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    bind_let_pattern(&mut scope, &pattern, value)?;
-                    continue_block_statements(
-                        state,
-                        node_id,
-                        parent_id,
-                        scope,
-                        last,
-                        remaining_statements,
-                    )
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::BlockAfterExpr {
+        ContinuationFrame::BlockBody {
             node_id,
             parent_id,
             scope,
-            remaining_statements,
+            last,
+            body,
+            next_step_index,
+            pending,
         } => {
-            let result = match input {
-                Ok(value) => continue_block_statements(
-                    state,
-                    node_id,
-                    parent_id,
-                    scope,
-                    value,
-                    remaining_statements,
-                ),
-                Err(error) => Err(error),
-            };
+            let result = resume_block_body(
+                state,
+                node_id,
+                parent_id,
+                scope,
+                last,
+                body,
+                next_step_index,
+                pending,
+                input,
+            );
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
         ContinuationFrame::CallAfterArg {

@@ -30,11 +30,6 @@ pub(super) struct ExprHandle {
     pub(super) key: ExprId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StmtHandle {
-    pub(super) key: StmtId,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InterpolatedPart {
     Text(Arc<str>),
@@ -90,6 +85,12 @@ pub(super) type MatchFieldPattern = crate::program::MatchFieldPattern;
 pub(super) type MatchPattern = crate::program::MatchPattern;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BlockResumeKind {
+    Let { pattern: LetPattern },
+    Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -121,19 +122,14 @@ pub(super) enum ContinuationFrame {
         type_args: Arc<[Ty]>,
         child_nodes: Vec<EvalNodeId>,
     },
-    BlockAfterLet {
+    BlockBody {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         scope: EvalEnv,
         last: Value,
-        pattern: LetPattern,
-        remaining_statements: Vec<StmtHandle>,
-    },
-    BlockAfterExpr {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        scope: EvalEnv,
-        remaining_statements: Vec<StmtHandle>,
+        body: BlockBodyId,
+        next_step_index: usize,
+        pending: BlockResumeKind,
     },
     CallAfterCallee {
         node_id: EvalNodeId,
@@ -502,15 +498,6 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     ) -> Result<ExprHandle, EvalError> {
         Ok(ExprHandle {
             key: self.program.expr_id(handle)?,
-        })
-    }
-
-    pub(super) fn stmt_handle_for(
-        &self,
-        handle: impl crate::program::IntoStmtLookupId,
-    ) -> Result<StmtHandle, EvalError> {
-        Ok(StmtHandle {
-            key: self.program.stmt_id(handle)?,
         })
     }
 
