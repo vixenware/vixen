@@ -801,7 +801,7 @@ impl EvalSchedulerBase {
 
 #[derive(Debug, Clone)]
 pub(super) struct EvalPreparedSnapshot {
-    pub(super) base: EvalSchedulerBase,
+    pub(super) base: Arc<EvalSchedulerBase>,
     pub(super) lease_namespace: Option<u64>,
     pub(super) baseline_ready_tasks: BTreeSet<EvalWorkId>,
 }
@@ -835,11 +835,11 @@ pub(super) struct EvalLearnedSearchNoGoodValidation {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct EvalSnapshotReadSet {
-    pub(super) node_records: BTreeSet<EvalNodeId>,
-    pub(super) node_states: BTreeSet<EvalNodeId>,
-    pub(super) pending_kinds: BTreeSet<EvalNodeId>,
-    pub(super) keyed_nodes: BTreeSet<EvalNodeId>,
-    pub(super) retained_exprs: BTreeSet<EvalNodeId>,
+    pub(super) node_records: BTreeMap<EvalNodeId, Option<EvalNodeRecord>>,
+    pub(super) node_states: BTreeMap<EvalNodeId, Option<EvalNodeState>>,
+    pub(super) pending_kinds: BTreeMap<EvalNodeId, Option<PendingKind>>,
+    pub(super) keyed_nodes: BTreeMap<EvalNodeId, Option<KeyedNodeMemo>>,
+    pub(super) retained_exprs: BTreeMap<EvalNodeId, Option<RetainedExprTask>>,
     pub(super) dependency_reads: Vec<(EvalNodeId, Vec<EvalNodeId>)>,
     pub(super) keyed_lookups: Vec<EvalKeyedLookupValidation>,
     pub(super) learned_no_good_lookups: Vec<EvalLearnedNoGoodValidation>,
@@ -868,7 +868,6 @@ pub struct EvalWorkCompletion {
     pub(super) lease_sequence: u64,
     pub(super) base_generation: u64,
     pub(super) record: ReadyTaskRecord,
-    pub(super) snapshot: EvalPreparedSnapshot,
     pub(super) work: EvalQueuedWork,
     pub(super) outcome: EvalCompletedWorkOutcome,
     pub(super) delta: EvalSessionDelta,

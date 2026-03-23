@@ -7,7 +7,7 @@ pub(super) struct EvalScheduler {
     pub(super) next_lease_namespace: u64,
     pub(super) next_lease_sequence: u64,
     pub(super) active_wave: Option<EvalWaveId>,
-    pub(super) base: EvalSchedulerBase,
+    pub(super) base: Arc<EvalSchedulerBase>,
     pub(super) ready_queue: VecDeque<EvalWorkId>,
     pub(super) ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
     pub(super) in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
@@ -23,7 +23,7 @@ impl Default for EvalScheduler {
             next_lease_namespace: 1,
             next_lease_sequence: 1,
             active_wave: None,
-            base: EvalSchedulerBase::default(),
+            base: Arc::new(EvalSchedulerBase::default()),
             ready_queue: VecDeque::new(),
             ready_tasks: BTreeMap::new(),
             in_flight_tasks: BTreeMap::new(),
@@ -254,24 +254,39 @@ impl<'a> EvalPreparedScheduler<'a> {
         (delta, self.completed_invalidated, self.reads.into_inner())
     }
 
-    fn record_node_record_read(&self, node_id: EvalNodeId) {
-        self.reads.borrow_mut().node_records.insert(node_id);
+    fn record_node_record_read(&self, node_id: EvalNodeId, observed: Option<EvalNodeRecord>) {
+        self.reads
+            .borrow_mut()
+            .node_records
+            .insert(node_id, observed);
     }
 
-    fn record_node_state_read(&self, node_id: EvalNodeId) {
-        self.reads.borrow_mut().node_states.insert(node_id);
+    fn record_node_state_read(&self, node_id: EvalNodeId, observed: Option<EvalNodeState>) {
+        self.reads
+            .borrow_mut()
+            .node_states
+            .insert(node_id, observed);
     }
 
-    fn record_pending_kind_read(&self, pending_id: EvalNodeId) {
-        self.reads.borrow_mut().pending_kinds.insert(pending_id);
+    fn record_pending_kind_read(&self, pending_id: EvalNodeId, observed: Option<PendingKind>) {
+        self.reads
+            .borrow_mut()
+            .pending_kinds
+            .insert(pending_id, observed);
     }
 
-    fn record_keyed_node_read(&self, node_id: EvalNodeId) {
-        self.reads.borrow_mut().keyed_nodes.insert(node_id);
+    fn record_keyed_node_read(&self, node_id: EvalNodeId, observed: Option<KeyedNodeMemo>) {
+        self.reads
+            .borrow_mut()
+            .keyed_nodes
+            .insert(node_id, observed);
     }
 
-    fn record_retained_expr_read(&self, node_id: EvalNodeId) {
-        self.reads.borrow_mut().retained_exprs.insert(node_id);
+    fn record_retained_expr_read(&self, node_id: EvalNodeId, observed: Option<RetainedExprTask>) {
+        self.reads
+            .borrow_mut()
+            .retained_exprs
+            .insert(node_id, observed);
     }
 
     fn record_dependency_read(&self, dependency: EvalNodeId, parents: Vec<EvalNodeId>) {
@@ -345,9 +360,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             Some(record)
         } else {
             let record = self.base.node_record(node_id);
-            if record.is_some() {
-                self.record_node_record_read(node_id);
-            }
+            self.record_node_record_read(node_id, record.cloned());
             record
         }
     }
@@ -357,9 +370,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             Some(state)
         } else {
             let state = self.base.node_state(node_id);
-            if state.is_some() {
-                self.record_node_state_read(node_id);
-            }
+            self.record_node_state_read(node_id, state.cloned());
             state
         }
     }
@@ -369,9 +380,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             Some(kind)
         } else {
             let kind = self.base.base.pending_kinds.get(&pending_id).copied();
-            if kind.is_some() {
-                self.record_pending_kind_read(pending_id);
-            }
+            self.record_pending_kind_read(pending_id, kind);
             kind
         }
     }
@@ -381,9 +390,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             Some(memo)
         } else {
             let memo = self.base.base.keyed_nodes.get(&node_id);
-            if memo.is_some() {
-                self.record_keyed_node_read(node_id);
-            }
+            self.record_keyed_node_read(node_id, memo.cloned());
             memo
         }
     }
@@ -391,7 +398,7 @@ impl<'a> EvalPreparedScheduler<'a> {
     fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
         if !self.delta.keyed_nodes.contains_key(&node_id) {
             let base = self.base.base.keyed_nodes.get(&node_id)?;
-            self.record_keyed_node_read(node_id);
+            self.record_keyed_node_read(node_id, Some(base.clone()));
             self.delta.keyed_nodes.insert(node_id, base.clone());
         }
         self.delta.keyed_nodes.get_mut(&node_id)
@@ -402,9 +409,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             Some(retained)
         } else {
             let retained = self.base.base.retained_exprs.get(&node_id);
-            if retained.is_some() {
-                self.record_retained_expr_read(node_id);
-            }
+            self.record_retained_expr_read(node_id, retained.cloned());
             retained
         }
     }
@@ -984,46 +989,30 @@ fn snapshot_entry_changed<T: PartialEq>(current: Option<&T>, observed: Option<&T
 
 fn completion_reads_stale_base(
     current: &EvalSchedulerBase,
-    snapshot: &EvalPreparedSnapshot,
     reads: &EvalSnapshotReadSet,
 ) -> Result<bool, EvalError> {
-    for node_id in &reads.node_records {
-        if snapshot_entry_changed(
-            current.node_records.get(node_id),
-            snapshot.base.node_records.get(node_id),
-        ) {
+    for (node_id, observed) in &reads.node_records {
+        if snapshot_entry_changed(current.node_records.get(node_id), observed.as_ref()) {
             return Ok(true);
         }
     }
-    for node_id in &reads.node_states {
-        if snapshot_entry_changed(
-            current.node_states.get(node_id),
-            snapshot.base.node_states.get(node_id),
-        ) {
+    for (node_id, observed) in &reads.node_states {
+        if snapshot_entry_changed(current.node_states.get(node_id), observed.as_ref()) {
             return Ok(true);
         }
     }
-    for pending_id in &reads.pending_kinds {
-        if snapshot_entry_changed(
-            current.pending_kinds.get(pending_id),
-            snapshot.base.pending_kinds.get(pending_id),
-        ) {
+    for (pending_id, observed) in &reads.pending_kinds {
+        if snapshot_entry_changed(current.pending_kinds.get(pending_id), observed.as_ref()) {
             return Ok(true);
         }
     }
-    for node_id in &reads.keyed_nodes {
-        if snapshot_entry_changed(
-            current.keyed_nodes.get(node_id),
-            snapshot.base.keyed_nodes.get(node_id),
-        ) {
+    for (node_id, observed) in &reads.keyed_nodes {
+        if snapshot_entry_changed(current.keyed_nodes.get(node_id), observed.as_ref()) {
             return Ok(true);
         }
     }
-    for node_id in &reads.retained_exprs {
-        if snapshot_entry_changed(
-            current.retained_exprs.get(node_id),
-            snapshot.base.retained_exprs.get(node_id),
-        ) {
+    for (node_id, observed) in &reads.retained_exprs {
+        if snapshot_entry_changed(current.retained_exprs.get(node_id), observed.as_ref()) {
             return Ok(true);
         }
     }
@@ -1072,13 +1061,17 @@ fn completion_reads_stale_base(
 }
 
 impl EvalScheduler {
+    fn base_mut(&mut self) -> &mut EvalSchedulerBase {
+        Arc::make_mut(&mut self.base)
+    }
+
     pub(super) fn base_generation(&self) -> u64 {
         self.base.generation
     }
 
     pub(super) fn prepared_snapshot(&self, namespace: Option<u64>) -> EvalPreparedSnapshot {
         EvalPreparedSnapshot {
-            base: self.base.clone(),
+            base: Arc::clone(&self.base),
             lease_namespace: namespace,
             baseline_ready_tasks: self.ready_tasks.keys().copied().collect(),
         }
@@ -1117,13 +1110,14 @@ impl EvalScheduler {
 
     pub(super) fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
-        if self.base.node_records.get(&node_id).is_none() {
-            self.base.node_records.insert(node_id, record);
+        let base = self.base_mut();
+        if base.node_records.get(&node_id).is_none() {
+            base.node_records.insert(node_id, record);
         }
     }
 
     pub(super) fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
-        self.base
+        self.base_mut()
             .dependency_edges
             .push_back(EvalDependencyEdge { parent, child });
     }
@@ -1221,8 +1215,9 @@ impl EvalScheduler {
     }
 
     pub(super) fn alloc_node_id(&mut self) -> EvalNodeId {
-        let node_id = EvalNodeId(self.base.next_id);
-        self.base.next_id += 1;
+        let base = self.base_mut();
+        let node_id = EvalNodeId(base.next_id);
+        base.next_id += 1;
         node_id
     }
 
@@ -1230,7 +1225,7 @@ impl EvalScheduler {
         let pending_id = self.alloc_node_id();
         let description = description.into();
         let pending = PendingRef::new(pending_id.0, description.clone());
-        self.base
+        self.base_mut()
             .pending_kinds
             .insert(pending_id, PendingKind::External);
         self.record_node(EvalNodeRecord {
@@ -1244,7 +1239,7 @@ impl EvalScheduler {
 
     pub(super) fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
-        self.base
+        self.base_mut()
             .pending_kinds
             .insert(dependency, PendingKind::ChildDependency { dependency });
         pending
@@ -1324,7 +1319,7 @@ impl EvalScheduler {
     }
 
     fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
-        self.base.keyed_nodes.get_mut(&node_id)
+        self.base_mut().keyed_nodes.get_mut(&node_id)
     }
 
     fn find_keyed_node(
@@ -1347,7 +1342,7 @@ impl EvalScheduler {
         branch_context: EvalBranchContext,
     ) {
         if self.base.retained_exprs.get(&node_id).is_none() {
-            self.base.retained_exprs.insert(
+            self.base_mut().retained_exprs.insert(
                 node_id,
                 RetainedExprTask {
                     scheduled,
@@ -1409,7 +1404,7 @@ impl EvalScheduler {
         &mut self,
         learned: LearnedSearchNoGood,
     ) -> Result<(), EvalError> {
-        let learned_search_no_goods = &mut self.base.learned_search_no_goods;
+        let learned_search_no_goods = &mut self.base_mut().learned_search_no_goods;
         for existing in learned_search_no_goods.iter_mut() {
             if existing.branch_context == learned.branch_context
                 && existing.assumption == learned.assumption
@@ -1434,7 +1429,7 @@ impl EvalScheduler {
         if self.covers_learned_no_good(&learned)? {
             return Ok(());
         }
-        let learned_no_goods = &mut self.base.learned_no_goods;
+        let learned_no_goods = &mut self.base_mut().learned_no_goods;
         for existing in learned_no_goods.iter_mut() {
             if existing.branch_context == learned.branch_context
                 && existing.assumption == learned.assumption
@@ -1571,7 +1566,7 @@ impl EvalScheduler {
             },
         );
         let keyed = self
-            .base
+            .base_mut()
             .keyed_nodes
             .get_mut(&node_id)
             .expect("keyed node must still exist");
@@ -1627,7 +1622,7 @@ impl EvalScheduler {
             },
             source: Some(source),
         });
-        self.base.insert_keyed_node(KeyedNodeMemo {
+        self.base_mut().insert_keyed_node(KeyedNodeMemo {
             node_id,
             resolver,
             key,
@@ -1662,7 +1657,7 @@ impl EvalScheduler {
             return Ok(true);
         }
         let memo = self
-            .base
+            .base_mut()
             .keyed_nodes
             .get_mut(&node_id)
             .expect("keyed node must exist");
@@ -1722,7 +1717,7 @@ impl EvalScheduler {
     }
 
     pub(super) fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
-        self.base.node_states.insert(node_id, state);
+        self.base_mut().node_states.insert(node_id, state);
     }
 
     pub(super) fn resolve_pending(
@@ -1772,7 +1767,7 @@ impl EvalScheduler {
         pending_id: EvalNodeId,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
-        let Some(suspensions) = self.base.pending_resumes.remove(&pending_id) else {
+        let Some(suspensions) = self.base_mut().pending_resumes.remove(&pending_id) else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 format!("pending node {:?} is not registered", pending_id),
@@ -1790,7 +1785,7 @@ impl EvalScheduler {
                 ),
             ));
         };
-        self.base.pending_kinds.remove(&pending_id);
+        self.base_mut().pending_kinds.remove(&pending_id);
         let node_id = EvalNodeId(pending.node_id);
         match &result {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
@@ -1817,16 +1812,16 @@ impl EvalScheduler {
                 },
             );
         }
-        self.base.generation += 1;
+        self.base_mut().generation += 1;
         Ok(())
     }
 
     pub(super) fn register_suspension(&mut self, suspension: EvalSuspension) {
         let pending_id = EvalNodeId(suspension.pending.node_id);
-        if let Some(suspensions) = self.base.pending_resumes.get_mut(&pending_id) {
+        if let Some(suspensions) = self.base_mut().pending_resumes.get_mut(&pending_id) {
             suspensions.push(suspension);
         } else {
-            self.base
+            self.base_mut()
                 .pending_resumes
                 .insert(pending_id, vec![suspension]);
         }
@@ -1972,92 +1967,107 @@ impl EvalScheduler {
         &self,
         completion: &EvalWorkCompletion,
     ) -> Result<bool, EvalError> {
-        completion_reads_stale_base(&self.base, &completion.snapshot, &completion.delta.reads)
+        completion_reads_stale_base(self.base.as_ref(), &completion.delta.reads)
     }
 
     pub(super) fn apply_delta(&mut self, delta: RecordedSchedulerDelta) -> Result<(), EvalError> {
-        self.base.next_id = self.base.next_id.max(delta.next_id);
-        self.base.next_work_id = self.base.next_work_id.max(delta.next_work_id);
-        for (node_id, record) in delta.node_records {
-            match self.base.node_records.get(&node_id) {
-                Some(existing) if existing != &record => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("node record {:?} diverged during completion merge", node_id),
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    self.base.node_records.insert(node_id, record);
-                }
-            }
-        }
-        for (node_id, keyed) in delta.keyed_nodes {
-            match self.base.keyed_nodes.get_mut(&node_id) {
-                Some(existing) => merge_keyed_node(existing, keyed)?,
-                None => {
-                    self.base.insert_keyed_node(keyed);
-                }
-            }
-        }
-        self.base.dependency_edges.extend(delta.dependency_edges);
-        for (pending_id, kind) in delta.pending_kinds {
-            match self.base.pending_kinds.get(&pending_id) {
-                Some(existing) if existing != &kind => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!(
-                            "pending kind {:?} diverged during completion merge",
-                            pending_id
-                        ),
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    self.base.pending_kinds.insert(pending_id, kind);
-                }
-            }
-        }
-        for (pending_id, added_suspensions) in delta.pending_resumes {
-            if let Some(suspensions) = self.base.pending_resumes.get_mut(&pending_id) {
-                for suspension in added_suspensions {
-                    if !suspensions.contains(&suspension) {
-                        suspensions.push(suspension);
+        let RecordedSchedulerDelta {
+            next_id,
+            next_work_id,
+            node_records,
+            keyed_nodes,
+            node_states,
+            dependency_edges,
+            queued,
+            pending_resumes,
+            pending_kinds,
+            retained_exprs,
+            learned_no_goods,
+            learned_search_no_goods,
+        } = delta;
+        {
+            let base = self.base_mut();
+            base.next_id = base.next_id.max(next_id);
+            base.next_work_id = base.next_work_id.max(next_work_id);
+            for (node_id, record) in node_records {
+                match base.node_records.get(&node_id) {
+                    Some(existing) if existing != &record => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("node record {:?} diverged during completion merge", node_id),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        base.node_records.insert(node_id, record);
                     }
                 }
-            } else {
-                self.base
-                    .pending_resumes
-                    .insert(pending_id, added_suspensions);
             }
-        }
-        for (node_id, state) in delta.node_states {
-            self.base.node_states.insert(node_id, state);
-        }
-        for (node_id, retained) in delta.retained_exprs {
-            match self.base.retained_exprs.get(&node_id) {
-                Some(existing) if existing != &retained => {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!(
-                            "retained expression task {:?} diverged during completion merge",
-                            node_id
-                        ),
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    self.base.retained_exprs.insert(node_id, retained);
+            for (node_id, keyed) in keyed_nodes {
+                match base.keyed_nodes.get_mut(&node_id) {
+                    Some(existing) => merge_keyed_node(existing, keyed)?,
+                    None => {
+                        base.insert_keyed_node(keyed);
+                    }
                 }
             }
+            base.dependency_edges.extend(dependency_edges);
+            for (pending_id, kind) in pending_kinds {
+                match base.pending_kinds.get(&pending_id) {
+                    Some(existing) if existing != &kind => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!(
+                                "pending kind {:?} diverged during completion merge",
+                                pending_id
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        base.pending_kinds.insert(pending_id, kind);
+                    }
+                }
+            }
+            for (pending_id, added_suspensions) in pending_resumes {
+                if let Some(suspensions) = base.pending_resumes.get_mut(&pending_id) {
+                    for suspension in added_suspensions {
+                        if !suspensions.contains(&suspension) {
+                            suspensions.push(suspension);
+                        }
+                    }
+                } else {
+                    base.pending_resumes.insert(pending_id, added_suspensions);
+                }
+            }
+            for (node_id, state) in node_states {
+                base.node_states.insert(node_id, state);
+            }
+            for (node_id, retained) in retained_exprs {
+                match base.retained_exprs.get(&node_id) {
+                    Some(existing) if existing != &retained => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!(
+                                "retained expression task {:?} diverged during completion merge",
+                                node_id
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        base.retained_exprs.insert(node_id, retained);
+                    }
+                }
+            }
         }
-        for learned in delta.learned_no_goods {
+        for learned in learned_no_goods {
             self.record_learned_no_good(learned)?;
         }
-        for learned in delta.learned_search_no_goods {
+        for learned in learned_search_no_goods {
             self.record_learned_search_no_good(learned)?;
         }
-        for record in delta.queued {
+        for record in queued {
             if self.ready_tasks.contains_key(&record.work.id)
                 || self.in_flight_tasks.contains_key(&record.work.id)
             {
@@ -2072,7 +2082,7 @@ impl EvalScheduler {
             self.ready_queue.push_back(record.work.id);
             self.ready_tasks.insert(record.work.id, record);
         }
-        self.base.generation += 1;
+        self.base_mut().generation += 1;
         Ok(())
     }
 
@@ -2101,13 +2111,18 @@ impl EvalScheduler {
         pending: Option<PendingRef>,
         branch_context: EvalBranchContext,
     ) -> EvalQueuedWork {
+        let work_id = {
+            let base = self.base_mut();
+            let work_id = EvalWorkId(base.next_work_id);
+            base.next_work_id += 1;
+            work_id
+        };
         let work = EvalQueuedWork {
-            id: EvalWorkId(self.base.next_work_id),
+            id: work_id,
             kind,
             node_id,
             pending,
         };
-        self.base.next_work_id += 1;
         self.ready_queue.push_back(work.id);
         self.ready_tasks.insert(
             work.id,

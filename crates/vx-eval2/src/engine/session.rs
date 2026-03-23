@@ -832,7 +832,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             return Err(error);
         }
         let started = Instant::now();
-        let snapshot = scheduler.clone();
         let completion_record = record.clone();
         let (delta, outcome, invocation) = execute_ready_task(
             program,
@@ -850,7 +849,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             lease_sequence,
             base_generation,
             record: completion_record.clone(),
-            snapshot,
             work: completion_record.work.clone(),
             outcome,
             delta,
@@ -1405,7 +1403,7 @@ impl EvalWorkCompletion {
     }
 
     pub(crate) fn inject_node_state_read_for_validation(&mut self, node_id: EvalNodeId) {
-        self.delta.reads.node_states.insert(node_id);
+        self.delta.reads.node_states.insert(node_id, None);
     }
 }
 
