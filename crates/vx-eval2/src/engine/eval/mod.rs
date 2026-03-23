@@ -8,7 +8,6 @@ mod resume;
 pub(in crate::engine) use resume::*;
 
 pub(super) struct PreparedEntry {
-    pub(super) source: SourceId,
     pub(super) body_id: ExprId,
     pub(super) env: EvalEnv,
 }
@@ -395,11 +394,7 @@ pub(super) fn prepare_entry(
         )
     })?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
-    Ok(PreparedEntry {
-        source: body.source(),
-        body_id: body,
-        env,
-    })
+    Ok(PreparedEntry { body_id: body, env })
 }
 
 pub(super) fn prepare_function_call(
@@ -436,11 +431,7 @@ pub(super) fn prepare_function_call(
         env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
-    Ok(Some(PreparedEntry {
-        source: body.source(),
-        body_id: body,
-        env,
-    }))
+    Ok(Some(PreparedEntry { body_id: body, env }))
 }
 
 pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
@@ -1424,7 +1415,7 @@ pub(super) fn continue_call_from_args(
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
         let mut env = prepared.env;
         return if !state.track_calls {
-            state.with_source(prepared.source, |state| {
+            state.with_source(prepared.body_id.source(), |state| {
                 eval_dependent_expr_handle(
                     state,
                     node_id,
@@ -1451,7 +1442,7 @@ pub(super) fn continue_call_from_args(
                 args.len(),
             );
             state.with_authored_call(frame, |state| {
-                state.with_source(prepared.source, |state| {
+                state.with_source(prepared.body_id.source(), |state| {
                     eval_dependent_expr_handle(
                         state,
                         node_id,

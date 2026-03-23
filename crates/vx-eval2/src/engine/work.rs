@@ -2423,7 +2423,7 @@ pub(super) fn execute_ready_task(
             if !call_profiling {
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
                 let mut env = prepared.env;
-                match state.with_source(prepared.source, |state| {
+                match state.with_source(prepared.body_id.source(), |state| {
                     eval_dependent_expr_handle(
                         state,
                         node_id,
@@ -2489,7 +2489,7 @@ pub(super) fn execute_ready_task(
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
                 let mut env = prepared.env;
                 let step = state.with_authored_call(frame, |state| {
-                    state.with_source(prepared.source, |state| {
+                    state.with_source(prepared.body_id.source(), |state| {
                         eval_dependent_expr_handle(
                             state,
                             node_id,

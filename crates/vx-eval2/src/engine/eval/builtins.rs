@@ -810,7 +810,7 @@ pub(in crate::engine) fn continue_array_find_builtin(
             ));
         };
         let mut env = prepared.env;
-        let matched = match state.with_source(prepared.source, |state| {
+        let matched = match state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 node_id,
@@ -883,7 +883,7 @@ pub(in crate::engine) fn continue_array_fold_builtin(
             ));
         };
         let mut env = prepared.env;
-        accumulator = match state.with_source(prepared.source, |state| {
+        accumulator = match state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 node_id,
@@ -998,7 +998,7 @@ pub(in crate::engine) fn continue_array_any_builtin(
             ));
         };
         let mut env = prepared.env;
-        match state.with_source(prepared.source, |state| {
+        match state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 node_id,
@@ -1067,7 +1067,7 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
             ));
         };
         let mut env = prepared.env;
-        match state.with_source(prepared.source, |state| {
+        match state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 node_id,
@@ -1331,7 +1331,7 @@ pub(in crate::engine) fn continue_search_assumption_builtin(
         };
         let mut env = prepared.env;
         match state.with_branch_context(branch_context, |state| {
-            state.with_source(prepared.source, |state| {
+            state.with_source(prepared.body_id.source(), |state| {
                 eval_dependent_expr_handle(
                     state,
                     node_id,
@@ -2410,7 +2410,7 @@ fn continue_builtin_call_inner(
                 ));
             };
             let mut env = prepared.env;
-            match state.with_source(prepared.source, |state| {
+            match state.with_source(prepared.body_id.source(), |state| {
                 eval_dependent_expr_handle(
                     state,
                     node_id,
@@ -3345,7 +3345,7 @@ pub(in crate::engine) fn continue_slot_builtin(
                 ));
             };
             let mut env = prepared.env;
-            match state.with_source(prepared.source, |state| {
+            match state.with_source(prepared.body_id.source(), |state| {
                 eval_dependent_expr_handle(
                     state,
                     node_id,
@@ -3406,7 +3406,7 @@ pub(in crate::engine) fn continue_keyed_builtin(
     if !state.queue_child_work {
         let prepared = prepare_keyed_call(state, keyed_node_id)?;
         let mut env = prepared.env;
-        return match state.with_source(prepared.source, |state| {
+        return match state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 keyed_node_id,
@@ -3484,7 +3484,7 @@ pub(in crate::engine) fn continue_with_assumption_builtin(
     let mut env = prepared.env;
     let prior_branch_context = state.branch_context.clone();
     let result = state.with_branch_context(branch_context, |state| {
-        state.with_source(prepared.source, |state| {
+        state.with_source(prepared.body_id.source(), |state| {
             eval_dependent_expr_handle(
                 state,
                 node_id,
