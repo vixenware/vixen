@@ -48,6 +48,17 @@ impl EvalProgressReporter {
 }
 
 impl EvalRuntimeCallProgress {
+    pub(crate) fn report_phase(&self, phase: &'static str, elapsed: Duration) {
+        eprintln!(
+            "[eval] {}{} {} in {}{}",
+            self.label,
+            format_detail(self.detail.as_deref()),
+            phase,
+            format_elapsed(elapsed),
+            format_source_suffix(&self.source)
+        );
+    }
+
     pub(crate) fn finish_ready(mut self) {
         self.finish("finished");
     }

@@ -4,6 +4,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use eyre::{Result, bail, eyre};
 use sha2::{Digest, Sha256};
@@ -526,6 +527,7 @@ impl CargoSketchRuntime {
                 source,
             )
         });
+        let transfer_started = Instant::now();
         let bytes = block_on_runtime(vx_http::get_bytes(url.as_ref()))
             .map_err(|error| {
                 EvalError::new(
@@ -539,10 +541,21 @@ impl CargoSketchRuntime {
                     format!("acquire() failed for {url}: {error}"),
                 )
             })?;
+        if let Some(progress) = progress.as_ref() {
+            progress.report_phase("transfer", transfer_started.elapsed());
+        }
+        let verify_started = Instant::now();
         verify_sha256_digest(&bytes, &digest)?;
+        if let Some(progress) = progress.as_ref() {
+            progress.report_phase("verify", verify_started.elapsed());
+        }
         let outcome = match extract.as_deref() {
             Some("tar.gz") => {
+                let extract_started = Instant::now();
                 let extracted = self.extract_tar_gz(url.as_ref(), &digest, &bytes)?;
+                if let Some(progress) = progress.as_ref() {
+                    progress.report_phase("extract", extract_started.elapsed());
+                }
                 Ok(RuntimeCallOutcome::Ready(runtime_external(
                     "Tree",
                     extracted.to_string_lossy().into_owned(),
@@ -672,6 +685,7 @@ impl CargoSketchRuntime {
         }
 
         let sandbox_root = alloc_eval_tempdir("exec")?;
+        let setup_started = Instant::now();
         for (mount_path, mount_value) in &request.mounts {
             let rel = path_like_descriptor(mount_path, "exec().mounts key")?;
             let dest = sandbox_root.join(rel);
@@ -707,18 +721,29 @@ impl CargoSketchRuntime {
                 render_exec_value(value, &sandbox_root, "exec env value")?,
             );
         }
+        if let Some(progress) = progress.as_ref() {
+            progress.report_phase("setup", setup_started.elapsed());
+        }
 
+        let run_started = Instant::now();
         let output = command.output().map_err(|error| {
             EvalError::new(
                 EvalErrorKind::UserFail,
                 format!("failed to execute {program}: {error}"),
             )
         })?;
+        if let Some(progress) = progress.as_ref() {
+            progress.report_phase("run", run_started.elapsed());
+        }
 
+        let capture_started = Instant::now();
         let stdout_path = sandbox_root.join(".vx-stdout");
         fs::write(&stdout_path, &output.stdout).map_err(io_error)?;
         let stderr_path = sandbox_root.join(".vx-stderr");
         fs::write(&stderr_path, &output.stderr).map_err(io_error)?;
+        if let Some(progress) = progress.as_ref() {
+            progress.report_phase("capture", capture_started.elapsed());
+        }
 
         let exit_code = output
             .status
