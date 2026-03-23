@@ -84,49 +84,10 @@ pub(super) enum StructLiteralPart {
     Spread(ExprHandle),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MatchArmPlan {
-    pub(super) pattern: MatchPattern,
-    pub(super) body: ExprHandle,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum LetPattern {
-    Binding { name: String, source: SourceSpan },
-    Wildcard,
-    Tuple(Vec<LetPattern>),
-    Unit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MatchFieldPattern {
-    pub(super) name: String,
-    pub(super) source: SourceSpan,
-    pub(super) pattern: Option<Box<MatchPattern>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MatchPattern {
-    Binding {
-        name: String,
-        source: SourceSpan,
-    },
-    Wildcard,
-    Literal(Value),
-    Tuple(Vec<MatchPattern>),
-    Struct(Vec<MatchFieldPattern>),
-    Unit,
-    Variant {
-        name: Arc<str>,
-        fields: Option<Vec<MatchFieldPattern>>,
-    },
-    At {
-        binding_name: String,
-        binding_source: SourceSpan,
-        pattern: Box<MatchPattern>,
-    },
-    Or(Vec<MatchPattern>),
-}
+pub(super) type MatchArmPlan = crate::program::MatchArmPlan;
+pub(super) type LetPattern = crate::program::LetPattern;
+pub(super) type MatchFieldPattern = crate::program::MatchFieldPattern;
+pub(super) type MatchPattern = crate::program::MatchPattern;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
@@ -516,24 +477,16 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         result
     }
 
-    pub(super) fn span_for_node<T: AstNode>(&self, node: &T) -> SourceSpan {
-        self.program.span_for_node(self.current_source, node)
+    pub(super) fn span_for_node<T: crate::program::HasHandle>(&self, node: &T) -> SourceSpan {
+        self.program.span_for_handle(node.handle())
     }
 
-    pub(super) fn span_for_token(&self, token: &vx_parser::SyntaxToken) -> SourceSpan {
-        self.program.span_for_token(self.current_source, token)
+    pub(super) fn span_for_token(&self, token: &Token) -> SourceSpan {
+        self.program.span_for_token_ref(token)
     }
 
     pub(super) fn expr_handle(&self, expr: &Expr) -> ExprHandle {
-        ExprHandle {
-            key: ProgramNodeHandle::for_node(self.current_source, expr),
-        }
-    }
-
-    pub(super) fn stmt_handle(&self, stmt: &Stmt) -> StmtHandle {
-        StmtHandle {
-            key: ProgramNodeHandle::for_node(self.current_source, stmt),
-        }
+        ExprHandle { key: expr.handle() }
     }
 
     pub(super) fn emit(

@@ -1,6 +1,5 @@
 use super::*;
 use crate::value::compare_value_reps;
-use vx_parser::{FallibleExpr, MatchExpr, PathLiteralExpr};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -42,28 +41,6 @@ pub(super) fn captures_from_scope(scope: &EvalEnv) -> Arc<[(Arc<str>, Value)]> {
     )
 }
 
-pub(super) fn compile_closure_parameters(
-    source: SourceId,
-    closure: &ClosureExpr,
-) -> Result<Arc<[CompiledParameter]>, EvalError> {
-    closure
-        .parameters()
-        .map(|parameter| {
-            let name = parameter.name().ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    "closure parameter has no binding name",
-                )
-            })?;
-            Ok(CompiledParameter {
-                label: Arc::from(name.text()),
-                name: ProgramNodeHandle::for_token(source, &name),
-            })
-        })
-        .collect::<Result<Vec<_>, EvalError>>()
-        .map(Arc::from)
-}
-
 fn dollar_placeholder_index(text: &str) -> Option<usize> {
     if text == "$" {
         return Some(0);
@@ -72,26 +49,16 @@ fn dollar_placeholder_index(text: &str) -> Option<usize> {
 }
 
 fn compile_adapter_parameters(
-    source: SourceId,
+    program: &CompiledProgram,
     expr: &Expr,
     fallback: ProgramNodeHandle,
-) -> Option<Arc<[CompiledParameter]>> {
+) -> Result<Option<Arc<[CompiledParameter]>>, EvalError> {
     let mut names_by_index: Vec<Option<ProgramNodeHandle>> = Vec::new();
-    for name_ref in expr.syntax().descendants().filter_map(NameRefExpr::cast) {
-        let token = name_ref.token()?;
-        if token.kind() != SyntaxKind::DOLLAR_IDENT {
-            continue;
-        }
-        let index = dollar_placeholder_index(token.text())?;
-        if names_by_index.len() <= index {
-            names_by_index.resize(index + 1, None);
-        }
-        names_by_index[index] = Some(ProgramNodeHandle::for_token(source, &token));
-    }
+    collect_adapter_parameters(program, expr, &mut names_by_index)?;
     if names_by_index.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(Arc::from(
+    Ok(Some(Arc::from(
         names_by_index
             .into_iter()
             .enumerate()
@@ -107,7 +74,228 @@ fn compile_adapter_parameters(
                 }
             })
             .collect::<Vec<_>>(),
-    ))
+    )))
+}
+
+fn collect_adapter_parameters(
+    program: &CompiledProgram,
+    expr: &Expr,
+    names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
+) -> Result<(), EvalError> {
+    match expr.kind() {
+        ExprKind::NameRef(name_ref) => {
+            let Some(token) = &name_ref.token else {
+                return Ok(());
+            };
+            if token.kind() != SyntaxKind::DOLLAR_IDENT {
+                return Ok(());
+            }
+            let Some(index) = dollar_placeholder_index(token.text()) else {
+                return Ok(());
+            };
+            if names_by_index.len() <= index {
+                names_by_index.resize(index + 1, None);
+            }
+            names_by_index[index] = Some(token.handle());
+        }
+        ExprKind::Block(block) => {
+            for statement in block.statements.iter().copied() {
+                collect_adapter_parameters_from_stmt(
+                    program,
+                    &program.resolve_stmt(statement)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Paren(paren) => {
+            if let Some(inner) = paren.expr {
+                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+            }
+        }
+        ExprKind::Closure(closure) => {
+            if let Some(body) = closure.body {
+                collect_adapter_parameters(program, &program.resolve_expr(body)?, names_by_index)?;
+            }
+        }
+        ExprKind::Call(call) => {
+            if let Some(callee) = call.callee {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(callee)?,
+                    names_by_index,
+                )?;
+            }
+            for arg in call.positional_args.iter().copied() {
+                collect_adapter_parameters(program, &program.resolve_expr(arg)?, names_by_index)?;
+            }
+        }
+        ExprKind::Array(array) => {
+            for item in array.items.iter() {
+                let handle = match item {
+                    ArrayItem::Expr(expr) | ArrayItem::Spread(expr) => *expr,
+                };
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(handle)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Tuple(tuple) => {
+            for item in tuple.items.iter().copied() {
+                collect_adapter_parameters(program, &program.resolve_expr(item)?, names_by_index)?;
+            }
+        }
+        ExprKind::Range(range) => {
+            if let Some(start) = range.start {
+                collect_adapter_parameters(program, &program.resolve_expr(start)?, names_by_index)?;
+            }
+            if let Some(end) = range.end {
+                collect_adapter_parameters(program, &program.resolve_expr(end)?, names_by_index)?;
+            }
+        }
+        ExprKind::Map(map) => {
+            for (key, value) in map.entries.iter().copied() {
+                collect_adapter_parameters(program, &program.resolve_expr(key)?, names_by_index)?;
+                collect_adapter_parameters(program, &program.resolve_expr(value)?, names_by_index)?;
+            }
+        }
+        ExprKind::Fail(fail) => {
+            if let Some(message) = fail.message {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(message)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Fallible(fallible) => {
+            if let Some(inner) = fallible.expr {
+                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+            }
+        }
+        ExprKind::If(if_expr) => {
+            for handle in [if_expr.condition, if_expr.then_branch, if_expr.else_branch]
+                .into_iter()
+                .flatten()
+            {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(handle)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Match(match_expr) => {
+            if let Some(scrutinee) = match_expr.scrutinee {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(scrutinee)?,
+                    names_by_index,
+                )?;
+            }
+            for arm in match_expr.arms.iter() {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(arm.body)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Where(where_expr) => {
+            if let Some(call) = where_expr.call {
+                collect_adapter_parameters(program, &program.resolve_expr(call)?, names_by_index)?;
+            }
+            for binding in where_expr.keyword_bindings.iter() {
+                if let Some(expr) = binding.expr {
+                    collect_adapter_parameters(
+                        program,
+                        &program.resolve_expr(expr)?,
+                        names_by_index,
+                    )?;
+                }
+            }
+        }
+        ExprKind::Prefix(prefix) => {
+            if let Some(inner) = prefix.expr {
+                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+            }
+        }
+        ExprKind::Binary(binary) => {
+            for handle in [binary.lhs, binary.rhs].into_iter().flatten() {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(handle)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::InterpolatedString(interpolated) => {
+            for part in interpolated.parts.iter() {
+                let StringPart::Interpolation(expr) = part else {
+                    continue;
+                };
+                collect_adapter_parameters(program, &program.resolve_expr(*expr)?, names_by_index)?;
+            }
+        }
+        ExprKind::StructLiteral(struct_literal) => {
+            for part in struct_literal.parts.iter() {
+                match part {
+                    crate::program::StructLiteralPart::Field { expr, .. } => {
+                        if let Some(expr) = expr {
+                            collect_adapter_parameters(
+                                program,
+                                &program.resolve_expr(*expr)?,
+                                names_by_index,
+                            )?;
+                        }
+                    }
+                    crate::program::StructLiteralPart::Spread(expr) => {
+                        collect_adapter_parameters(
+                            program,
+                            &program.resolve_expr(*expr)?,
+                            names_by_index,
+                        )?;
+                    }
+                }
+            }
+        }
+        ExprKind::Field(field) => {
+            if let Some(receiver) = field.receiver {
+                collect_adapter_parameters(
+                    program,
+                    &program.resolve_expr(receiver)?,
+                    names_by_index,
+                )?;
+            }
+        }
+        ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Unsupported { .. } => {}
+    }
+    Ok(())
+}
+
+fn collect_adapter_parameters_from_stmt(
+    program: &CompiledProgram,
+    stmt: &Stmt,
+    names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
+) -> Result<(), EvalError> {
+    match stmt {
+        Stmt::Let(let_stmt) => {
+            if let Some(expr) = let_stmt.expr {
+                collect_adapter_parameters(program, &program.resolve_expr(expr)?, names_by_index)?;
+            }
+        }
+        Stmt::Expr(expr) => {
+            collect_adapter_parameters(program, &program.resolve_expr(*expr)?, names_by_index)?;
+        }
+        Stmt::FnDecl(function) => {
+            if let Some(body) = function.compiled.body {
+                collect_adapter_parameters(program, &program.resolve_expr(body)?, names_by_index)?;
+            }
+        }
+        Stmt::Unsupported { .. } => {}
+    }
+    Ok(())
 }
 
 fn builtin_adapter_arg_index(function_name: &str, arg_index: usize) -> bool {
@@ -136,9 +324,7 @@ fn function_adapter_value_for_arg(
         return Ok(None);
     }
     let expr = state.program.resolve_expr(arg_handle.key)?;
-    let Some(parameters) =
-        compile_adapter_parameters(arg_handle.key.source(), &expr, arg_handle.key)
-    else {
+    let Some(parameters) = compile_adapter_parameters(state.program, &expr, arg_handle.key)? else {
         return Ok(None);
     };
     let function = FunctionRef::new(
@@ -151,29 +337,19 @@ fn function_adapter_value_for_arg(
         None,
     );
     Ok(Some(Value::function(function).with_provenance(
-        Provenance::literal(state.program.span_for_node(arg_handle.key.source(), &expr)),
+        Provenance::literal(state.program.span_for_expr(&expr)),
     )))
 }
 
 pub(super) fn bind_named_function_decl(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    function: &vx_parser::FnDecl,
+    function: &crate::program::FunctionStmt,
     scope: &EvalEnv,
 ) -> Result<(String, SourceSpan, Value), EvalError> {
-    let name_token = function.name().ok_or_else(|| {
-        EvalError::new(EvalErrorKind::Internal, "function declaration has no name")
-    })?;
-    let name = name_token.text().to_string();
-    let name_source = state.span_for_token(&name_token);
-    let Some((compiled_name, compiled)) = state
-        .program
-        .compile_function_decl(state.current_source(), function)?
-    else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "function declaration could not be compiled",
-        ));
-    };
+    let name = function.name.to_string();
+    let name_source = state.program.span_for_handle(function.compiled.definition);
+    let compiled_name = function.name.clone();
+    let compiled = function.compiled.clone();
     let function = function_ref_from_compiled(
         state,
         compiled_name.clone(),
@@ -192,15 +368,15 @@ pub(super) fn eval_closure(
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
     let body = closure
-        .body()
+        .body
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "closure expression has no body"))?;
     let closure_source = state.span_for_node(closure);
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from("<closure>"),
-        compile_closure_parameters(state.current_source(), closure)?,
+        Arc::clone(&closure.parameters),
         false,
-        Some(ProgramNodeHandle::for_node(state.current_source(), &body)),
+        Some(body),
         captures_from_scope(env),
         None,
     );
@@ -442,43 +618,145 @@ pub(super) fn eval_expr_with_node_id(
     state.stack.push(node_id);
 
     let result = match expr {
-        Expr::Block(block) => eval_block(state, block, env),
-        Expr::Literal(literal) => eval_literal(state, literal).map(EvalStep::Ready),
-        Expr::PathLiteral(path_literal) => {
+        _ if matches!(expr.kind(), ExprKind::Block(_)) => {
+            let ExprKind::Block(block) = expr.kind() else {
+                unreachable!()
+            };
+            eval_block(state, block, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Literal(_)) => {
+            let ExprKind::Literal(literal) = expr.kind() else {
+                unreachable!()
+            };
+            eval_literal(state, literal).map(EvalStep::Ready)
+        }
+        _ if matches!(expr.kind(), ExprKind::PathLiteral(_)) => {
+            let ExprKind::PathLiteral(path_literal) = expr.kind() else {
+                unreachable!()
+            };
             eval_path_literal(state, path_literal).map(EvalStep::Ready)
         }
-        Expr::Paren(paren) => match paren.expr() {
-            Some(inner) => match eval_child_expr(state, &inner, env)? {
-                EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-                EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::FinishNode { node_id, parent_id },
-                )),
-            },
-            None => Ok(EvalStep::Ready(Value::unit())),
-        },
-        Expr::Closure(closure) => eval_closure(state, closure, env).map(EvalStep::Ready),
-        Expr::NameRef(name_ref) => eval_name_ref(state, name_ref, env).map(EvalStep::Ready),
-        Expr::Call(call) => eval_call(state, call, env),
-        Expr::Array(array) => eval_array(state, array, env),
-        Expr::Tuple(tuple) => eval_tuple(state, tuple, env),
-        Expr::Range(range) => eval_range(state, range, env),
-        Expr::Map(map) => eval_map(state, map, env),
-        Expr::Fail(fail) => eval_fail(state, fail, env),
-        Expr::Fallible(fallible) => eval_fallible(state, fallible, env),
-        Expr::If(if_expr) => eval_if(state, if_expr, env),
-        Expr::Match(match_expr) => eval_match(state, match_expr, env),
-        Expr::Where(where_expr) => eval_where(state, where_expr, env),
-        Expr::Prefix(prefix) => eval_prefix(state, prefix, env),
-        Expr::Binary(binary) => eval_binary(state, binary, env),
-        Expr::InterpolatedString(interpolated) => {
+        _ if matches!(expr.kind(), ExprKind::Paren(_)) => {
+            let ExprKind::Paren(paren) = expr.kind() else {
+                unreachable!()
+            };
+            match paren.expr {
+                Some(inner) => match eval_child_expr_handle(state, ExprHandle { key: inner }, env)?
+                {
+                    EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+                    EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                        suspension,
+                        ContinuationFrame::FinishNode { node_id, parent_id },
+                    )),
+                },
+                None => Ok(EvalStep::Ready(Value::unit())),
+            }
+        }
+        _ if matches!(expr.kind(), ExprKind::Closure(_)) => {
+            let ExprKind::Closure(closure) = expr.kind() else {
+                unreachable!()
+            };
+            eval_closure(state, closure, env).map(EvalStep::Ready)
+        }
+        _ if matches!(expr.kind(), ExprKind::NameRef(_)) => {
+            let ExprKind::NameRef(name_ref) = expr.kind() else {
+                unreachable!()
+            };
+            eval_name_ref(state, name_ref, env).map(EvalStep::Ready)
+        }
+        _ if matches!(expr.kind(), ExprKind::Call(_)) => {
+            let ExprKind::Call(call) = expr.kind() else {
+                unreachable!()
+            };
+            eval_call(state, call, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Array(_)) => {
+            let ExprKind::Array(array) = expr.kind() else {
+                unreachable!()
+            };
+            eval_array(state, array, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Tuple(_)) => {
+            let ExprKind::Tuple(tuple) = expr.kind() else {
+                unreachable!()
+            };
+            eval_tuple(state, tuple, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Range(_)) => {
+            let ExprKind::Range(range) = expr.kind() else {
+                unreachable!()
+            };
+            eval_range(state, range, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Map(_)) => {
+            let ExprKind::Map(map) = expr.kind() else {
+                unreachable!()
+            };
+            eval_map(state, map, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Fail(_)) => {
+            let ExprKind::Fail(fail) = expr.kind() else {
+                unreachable!()
+            };
+            eval_fail(state, fail, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Fallible(_)) => {
+            let ExprKind::Fallible(fallible) = expr.kind() else {
+                unreachable!()
+            };
+            eval_fallible(state, fallible, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::If(_)) => {
+            let ExprKind::If(if_expr) = expr.kind() else {
+                unreachable!()
+            };
+            eval_if(state, if_expr, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Match(_)) => {
+            let ExprKind::Match(match_expr) = expr.kind() else {
+                unreachable!()
+            };
+            eval_match(state, match_expr, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Where(_)) => {
+            let ExprKind::Where(where_expr) = expr.kind() else {
+                unreachable!()
+            };
+            eval_where(state, where_expr, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Prefix(_)) => {
+            let ExprKind::Prefix(prefix) = expr.kind() else {
+                unreachable!()
+            };
+            eval_prefix(state, prefix, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Binary(_)) => {
+            let ExprKind::Binary(binary) = expr.kind() else {
+                unreachable!()
+            };
+            eval_binary(state, binary, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::InterpolatedString(_)) => {
+            let ExprKind::InterpolatedString(interpolated) = expr.kind() else {
+                unreachable!()
+            };
             eval_interpolated_string(state, interpolated, env)
         }
-        Expr::StructLiteral(struct_literal) => eval_struct_literal(state, struct_literal, env),
-        Expr::Field(field) => eval_field(state, field, env),
-        other => Err(EvalError::new(
+        _ if matches!(expr.kind(), ExprKind::StructLiteral(_)) => {
+            let ExprKind::StructLiteral(struct_literal) = expr.kind() else {
+                unreachable!()
+            };
+            eval_struct_literal(state, struct_literal, env)
+        }
+        _ if matches!(expr.kind(), ExprKind::Field(_)) => {
+            let ExprKind::Field(field) = expr.kind() else {
+                unreachable!()
+            };
+            eval_field(state, field, env)
+        }
+        _ => Err(EvalError::new(
             EvalErrorKind::Internal,
-            format!("unsupported expression: {other:?}"),
+            format!("unsupported expression: {:?}", expr.kind()),
         )),
     };
 
@@ -521,13 +799,36 @@ pub(super) fn eval_child_expr(
     ))
 }
 
+pub(super) fn eval_child_expr_handle(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    expr: ExprHandle,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(child_id, Some(state.program.span_for_handle(expr.key)));
+        let expr = state.program.resolve_expr(expr.key)?;
+        return eval_expr_with_node_id(state, child_id, &expr, env);
+    }
+    let child_id = queue_child_expr_handle(state, expr, env);
+    let resume_node = state
+        .current_parent()
+        .expect("child expression should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
 pub(super) fn eval_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let callee = call
-        .callee()
+        .callee
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.span_for_node(call);
     let node_id = state
@@ -537,18 +838,24 @@ pub(super) fn eval_call(
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let type_args = Arc::<[Ty]>::from(
-        call.type_args()
-            .into_iter()
-            .flat_map(|args| args.types())
-            .map(|ty| state.program.resolve_type_annotation(&ty))
-            .collect::<Vec<_>>(),
+        call.type_args
+            .iter()
+            .copied()
+            .map(|ty| state.program.resolve_type_handle(ty))
+            .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
+    let positional_args = call
+        .positional_args
+        .iter()
+        .copied()
+        .map(|arg| ExprHandle { key: arg })
+        .collect::<Vec<_>>();
+    let callee = state.program.resolve_expr(callee)?;
     if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
             let child_nodes = positional_args
                 .iter()
-                .map(|arg| queue_child_expr(state, arg, env))
+                .map(|arg| queue_child_expr_handle(state, *arg, env))
                 .collect::<Vec<_>>();
             return Ok(wait_on_child_dependency(
                 state,
@@ -572,10 +879,7 @@ pub(super) fn eval_call(
             call_source,
             Arc::clone(&type_args),
             Vec::new(),
-            positional_args
-                .iter()
-                .map(|arg| state.expr_handle(arg))
-                .collect(),
+            positional_args.clone(),
             env.clone(),
         );
     }
@@ -591,10 +895,7 @@ pub(super) fn eval_call(
                     type_args: Arc::clone(&type_args),
                     env: env.clone(),
                     args: Vec::new(),
-                    remaining_args: positional_args
-                        .iter()
-                        .map(|arg| state.expr_handle(arg))
-                        .collect(),
+                    remaining_args: positional_args.clone(),
                 },
             ));
         }
@@ -607,10 +908,7 @@ pub(super) fn eval_call(
         call_source,
         type_args,
         Vec::new(),
-        positional_args
-            .iter()
-            .map(|arg| state.expr_handle(arg))
-            .collect(),
+        positional_args,
         env.clone(),
     )
 }
@@ -620,17 +918,18 @@ pub(super) fn immediate_call_callee_value(
     callee: &Expr,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
-    let Expr::NameRef(name_ref) = callee else {
+    let ExprKind::NameRef(name_ref) = callee.kind() else {
         return Ok(None);
     };
     let name_token = name_ref
-        .token()
+        .token
+        .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "callee name has no token"))?;
     let name = name_ref_text(name_ref);
-    if let Some(value) = env.get(&name) {
+    if let Some(value) = env.get(name.as_ref()) {
         return Ok(Some(value.clone()));
     }
-    let reference = ProgramNodeHandle::for_token(state.current_source(), &name_token);
+    let reference = name_token.handle();
     if let Some((resolved_name, function)) =
         state.program.resolve_function_reference(reference, &name)?
     {
@@ -660,7 +959,8 @@ pub(super) fn immediate_call_callee_value(
         let source = state.span_for_token(&name_token);
         let captures = Arc::from([(
             Arc::from("__newtype_ctor"),
-            Value::bool(true).with_provenance(Provenance::binding(source.clone(), name.clone())),
+            Value::bool(true)
+                .with_provenance(Provenance::binding(source.clone(), name.to_string())),
         )]);
         return Ok(Some(
             Value::function(FunctionRef::new(
@@ -670,19 +970,19 @@ pub(super) fn immediate_call_callee_value(
                 false,
                 None,
                 captures,
-                Some(Arc::from(name.as_str())),
+                Some(Arc::from(name.as_ref())),
             ))
-            .with_provenance(Provenance::binding(source, name)),
+            .with_provenance(Provenance::binding(source, name.to_string())),
         ));
     }
     Ok(Some(Value::function(FunctionRef::new(
         state.program.source_id(state.current_source()),
-        Arc::from(name.as_str()),
+        Arc::from(name.as_ref()),
         Arc::from([]),
         false,
         None,
         Arc::from([]),
-        Some(Arc::from(name.as_str())),
+        Some(Arc::from(name.as_ref())),
     ))))
 }
 
@@ -692,13 +992,14 @@ pub(super) fn eval_name_ref(
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
     let name_token = name_ref
-        .token()
+        .token
+        .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "name reference has no token"))?;
     let name = name_ref_text(name_ref);
-    if let Some(value) = env.get(&name) {
+    if let Some(value) = env.get(name.as_ref()) {
         return Ok(value.clone());
     }
-    let reference = ProgramNodeHandle::for_token(state.current_source(), &name_token);
+    let reference = name_token.handle();
     if let Some((resolved_name, function)) =
         state.program.resolve_function_reference(reference, &name)?
     {
@@ -710,9 +1011,8 @@ pub(super) fn eval_name_ref(
             Arc::from([]),
             Some(resolved_name),
         );
-        return Ok(
-            Value::function(function).with_provenance(Provenance::binding(name_source, name))
-        );
+        return Ok(Value::function(function)
+            .with_provenance(Provenance::binding(name_source, name.to_string())));
     }
     if let Some(constructor) = state
         .program
@@ -732,7 +1032,8 @@ pub(super) fn eval_name_ref(
         let source = state.span_for_token(&name_token);
         let captures = Arc::from([(
             Arc::from("__newtype_ctor"),
-            Value::bool(true).with_provenance(Provenance::binding(source.clone(), name.clone())),
+            Value::bool(true)
+                .with_provenance(Provenance::binding(source.clone(), name.to_string())),
         )]);
         return Ok(Value::function(FunctionRef::new(
             state.program.source_id(state.current_source()),
@@ -741,9 +1042,9 @@ pub(super) fn eval_name_ref(
             false,
             None,
             captures,
-            Some(Arc::from(name.as_str())),
+            Some(Arc::from(name.as_ref())),
         ))
-        .with_provenance(Provenance::binding(source, name)));
+        .with_provenance(Provenance::binding(source, name.to_string())));
     }
     Err(EvalError::new(
         EvalErrorKind::Internal,
@@ -751,23 +1052,8 @@ pub(super) fn eval_name_ref(
     ))
 }
 
-fn name_ref_text(name_ref: &NameRefExpr) -> String {
-    name_ref
-        .syntax()
-        .children_with_tokens()
-        .filter_map(|child| child.into_token())
-        .filter(|token| {
-            matches!(
-                token.kind(),
-                SyntaxKind::LOWER_IDENT
-                    | SyntaxKind::UPPER_IDENT
-                    | SyntaxKind::DOLLAR_IDENT
-                    | SyntaxKind::UNDERSCORE
-                    | SyntaxKind::DOT
-            )
-        })
-        .map(|token| token.text().to_string())
-        .collect()
+fn name_ref_text(name_ref: &NameRefExpr) -> Arc<str> {
+    name_ref.name.clone()
 }
 
 pub(super) fn eval_call_callee(
@@ -786,10 +1072,14 @@ pub(super) fn static_namespace_member_value(
     field: &FieldExpr,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
-    let Some(Expr::NameRef(receiver)) = field.receiver() else {
+    let Some(receiver) = field.receiver else {
         return Ok(None);
     };
-    let Some(receiver_token) = receiver.token() else {
+    let receiver = state.program.resolve_expr(receiver)?;
+    let ExprKind::NameRef(receiver) = receiver.kind() else {
+        return Ok(None);
+    };
+    let Some(receiver_token) = receiver.token.as_ref() else {
         return Ok(None);
     };
     if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
@@ -798,7 +1088,7 @@ pub(super) fn static_namespace_member_value(
     if env.contains_key(receiver_token.text()) {
         return Ok(None);
     }
-    let Some(field_name) = field.field_name() else {
+    let Some(field_name) = field.field_name.as_ref() else {
         return Ok(None);
     };
     if let Some(constructor) = state.program.resolve_variant_constructor(field_name.text()) {
@@ -1380,35 +1670,28 @@ pub(super) fn eval_struct_literal(
     let struct_source = state.span_for_node(struct_literal);
     let mut immediate_fields = Vec::new();
     let mut remaining_parts = Vec::new();
-    for field in struct_literal.fields() {
-        match field.expr() {
-            Some(expr) => {
-                if let Some(name_token) = field.name() {
-                    let name = Arc::<str>::from(name_token.text().to_string());
-                    remaining_parts.push(StructLiteralPart::Field {
-                        name,
-                        expr: state.expr_handle(&expr),
-                    });
-                } else {
-                    remaining_parts.push(StructLiteralPart::Spread(state.expr_handle(&expr)));
-                }
+    for field in struct_literal.parts.iter() {
+        match field {
+            crate::program::StructLiteralPart::Field {
+                name,
+                expr: Some(expr),
+            } => {
+                remaining_parts.push(StructLiteralPart::Field {
+                    name: name.clone(),
+                    expr: ExprHandle { key: *expr },
+                });
             }
-            None => {
-                let name_token = field.name().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "struct field has no name")
-                })?;
-                let field_name = name_token.text();
-                let Some(value) = env.get(field_name) else {
+            crate::program::StructLiteralPart::Spread(expr) => {
+                remaining_parts.push(StructLiteralPart::Spread(ExprHandle { key: *expr }));
+            }
+            crate::program::StructLiteralPart::Field { name, expr: None } => {
+                let Some(value) = env.get(name.as_ref()) else {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
-                        format!("struct field {field_name} has no value"),
+                        format!("struct field {name} has no value"),
                     ));
                 };
-                set_struct_field(
-                    &mut immediate_fields,
-                    Arc::<str>::from(name_token.text().to_string()),
-                    value.clone(),
-                );
+                set_struct_field(&mut immediate_fields, name.clone(), value.clone());
             }
         }
     }
@@ -1459,28 +1742,13 @@ pub(super) fn eval_struct_literal(
 }
 
 fn struct_literal_type_name(
-    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    _state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     struct_literal: &StructLiteralExpr,
 ) -> Result<Arc<str>, EvalError> {
-    let raw_name = struct_literal
-        .syntax()
-        .children_with_tokens()
-        .take_while(|child| child.kind() != SyntaxKind::STRUCT_LITERAL_BODY)
-        .filter_map(|child| child.into_token())
-        .filter(|token| matches!(token.kind(), SyntaxKind::UPPER_IDENT | SyntaxKind::DOT))
-        .map(|token| token.text().to_string())
-        .collect::<String>();
-    if raw_name.is_empty() {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "struct literal has no type name",
-        ));
-    }
-    let short_name = raw_name.rsplit('.').next().unwrap_or(&raw_name);
-    if let Some(constructor) = state.program.resolve_variant_constructor(short_name) {
-        return Ok(constructor.name);
-    }
-    Ok(Arc::from(short_name))
+    struct_literal
+        .type_name
+        .clone()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct literal has no type name"))
 }
 
 pub(super) fn eval_block(
@@ -1501,8 +1769,10 @@ pub(super) fn eval_block(
         env.clone(),
         Value::unit(),
         block
-            .statements()
-            .map(|stmt| state.stmt_handle(&stmt))
+            .statements
+            .iter()
+            .copied()
+            .map(|stmt| StmtHandle { key: stmt })
             .collect(),
     )
 }
@@ -1520,23 +1790,18 @@ pub(super) fn eval_array(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     if state.queue_child_work {
         let mut child_nodes = Vec::new();
-        for item in array.items() {
+        for item in array.items.iter() {
             match item {
                 ArrayItem::Expr(expr) => {
-                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr(state, &expr, env)));
-                }
-                ArrayItem::Spread(spread) => {
-                    child_nodes.push(ArrayJoinItem::Spread(queue_child_expr(
+                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_handle(
                         state,
-                        &spread.expr().ok_or_else(|| {
-                            EvalError::new(
-                                EvalErrorKind::Internal,
-                                "array spread expression has no operand",
-                            )
-                        })?,
+                        ExprHandle { key: *expr },
                         env,
-                    )))
+                    )));
                 }
+                ArrayItem::Spread(expr) => child_nodes.push(ArrayJoinItem::Spread(
+                    queue_child_expr_handle(state, ExprHandle { key: *expr }, env),
+                )),
             }
         }
         if child_nodes.is_empty() {
@@ -1566,17 +1831,11 @@ pub(super) fn eval_array(
         parent_id,
         Vec::new(),
         array
-            .items()
+            .items
+            .iter()
             .map(|item| match item {
-                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle(&expr))),
-                ArrayItem::Spread(spread) => Ok(ArrayEvalItem::Spread(state.expr_handle(
-                    &spread.expr().ok_or_else(|| {
-                        EvalError::new(
-                            EvalErrorKind::Internal,
-                            "array spread expression has no operand",
-                        )
-                    })?,
-                ))),
+                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(ExprHandle { key: *expr })),
+                ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(ExprHandle { key: *expr })),
             })
             .collect::<Result<Vec<_>, EvalError>>()?,
         env.clone(),
@@ -1610,11 +1869,11 @@ pub(super) fn eval_tuple(
         .copied()
         .expect("tuple should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let items = tuple.items().collect::<Vec<_>>();
+    let items = tuple.items.iter().copied().collect::<Vec<_>>();
     if state.queue_child_work {
         let child_nodes = items
             .iter()
-            .map(|item| queue_child_expr(state, item, env))
+            .map(|item| queue_child_expr_handle(state, ExprHandle { key: *item }, env))
             .collect::<Vec<_>>();
         if child_nodes.is_empty() {
             let provenance = Provenance::literal(state.span_for_node(tuple));
@@ -1639,7 +1898,11 @@ pub(super) fn eval_tuple(
         node_id,
         parent_id,
         Vec::new(),
-        items.iter().map(|item| state.expr_handle(item)).collect(),
+        items
+            .iter()
+            .copied()
+            .map(|item| ExprHandle { key: item })
+            .collect(),
         env.clone(),
         state.span_for_node(tuple),
     )
@@ -1658,17 +1921,12 @@ pub(super) fn eval_interpolated_string(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let string_source = state.span_for_node(interpolated);
     let parts = interpolated
-        .parts()
+        .parts
+        .iter()
         .map(|part| match part {
-            StringPart::Text(token) => Ok(InterpolatedPart::Text(Arc::from(token.text()))),
-            StringPart::Interpolation(interpolation) => {
-                let expr = interpolation.expr().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "string interpolation has no embedded expression",
-                    )
-                })?;
-                Ok(InterpolatedPart::Expr(state.expr_handle(&expr)))
+            StringPart::Text(text) => Ok(InterpolatedPart::Text(text.clone())),
+            StringPart::Interpolation(expr) => {
+                Ok(InterpolatedPart::Expr(ExprHandle { key: *expr }))
             }
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
@@ -1724,15 +1982,15 @@ pub(super) fn eval_range(
         .expect("range should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let range_source = state.span_for_node(range);
-    let start = range.start();
-    let end = range.end();
-    let inclusive_end = range.is_inclusive();
+    let start = range.start;
+    let end = range.end;
+    let inclusive_end = range.inclusive_end;
 
     if state.queue_child_work {
-        let start_child = start
-            .as_ref()
-            .map(|expr| queue_child_expr(state, expr, env));
-        let end_child = end.as_ref().map(|expr| queue_child_expr(state, expr, env));
+        let start_child =
+            start.map(|expr| queue_child_expr_handle(state, ExprHandle { key: expr }, env));
+        let end_child =
+            end.map(|expr| queue_child_expr_handle(state, ExprHandle { key: expr }, env));
         if let Some(child_id) = start_child.or(end_child) {
             return Ok(wait_on_child_dependency(
                 state,
@@ -1756,8 +2014,8 @@ pub(super) fn eval_range(
         )));
     }
 
-    let start_handle = start.as_ref().map(|expr| state.expr_handle(expr));
-    let end_handle = end.as_ref().map(|expr| state.expr_handle(expr));
+    let start_handle = start.map(|expr| ExprHandle { key: expr });
+    let end_handle = end.map(|expr| ExprHandle { key: expr });
     if let Some(start_handle) = start_handle {
         match eval_dependent_expr_handle(state, node_id, start_handle, env)? {
             EvalStep::Ready(start) => continue_range_end(
@@ -1808,16 +2066,10 @@ pub(super) fn eval_map(
         .expect("map should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let entries = map
-        .entries()
-        .map(|entry| {
-            let key_expr = entry.key().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "map entry has no explicit key")
-            })?;
-            let value_expr = entry
-                .value()
-                .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "map entry has no value"))?;
-            Ok((state.expr_handle(&key_expr), state.expr_handle(&value_expr)))
-        })
+        .entries
+        .iter()
+        .copied()
+        .map(|(key, value)| Ok((ExprHandle { key }, ExprHandle { key: value })))
         .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
         state,
@@ -1841,11 +2093,14 @@ pub(super) fn eval_fail(
         .copied()
         .expect("fail expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let failure = match eval_child_expr(
+    let failure = match eval_dependent_expr_handle(
         state,
-        &fail.message().ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
-        })?,
+        node_id,
+        ExprHandle {
+            key: fail.message.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
+            })?,
+        },
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -1925,13 +2180,13 @@ pub(super) fn eval_fallible(
         .expect("fallible expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let source = state.span_for_node(fallible);
-    let Some(expr) = fallible.expr() else {
+    let Some(expr) = fallible.expr else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "fallible expression has no operand",
         ));
     };
-    match eval_child_expr(state, &expr, env) {
+    match eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, env) {
         Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
         Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
             suspension,
@@ -1981,11 +2236,14 @@ pub(super) fn eval_if(
         .copied()
         .expect("if expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let condition = match eval_child_expr(
+    let condition = match eval_dependent_expr_handle(
         state,
-        &if_expr.condition().ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
-        })?,
+        node_id,
+        ExprHandle {
+            key: if_expr.condition.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
+            })?,
+        },
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -1995,18 +2253,16 @@ pub(super) fn eval_if(
                 ContinuationFrame::IfCondition {
                     node_id,
                     parent_id,
-                    then_branch: if_expr
-                        .then_branch()
-                        .ok_or_else(|| {
+                    then_branch: ExprHandle {
+                        key: if_expr.then_branch.ok_or_else(|| {
                             EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                        })
-                        .map(|expr| state.expr_handle(&expr))?,
-                    else_branch: if_expr
-                        .else_branch()
-                        .ok_or_else(|| {
+                        })?,
+                    },
+                    else_branch: ExprHandle {
+                        key: if_expr.else_branch.ok_or_else(|| {
                             EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                        })
-                        .map(|expr| state.expr_handle(&expr))?,
+                        })?,
+                    },
                     env: env.clone(),
                 },
             ));
@@ -2019,12 +2275,12 @@ pub(super) fn eval_if(
         ));
     };
     let branch = if value {
-        if_expr.then_branch()
+        if_expr.then_branch
     } else {
-        if_expr.else_branch()
+        if_expr.else_branch
     }
     .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
-    match eval_child_expr(state, &branch, env)? {
+    match eval_dependent_expr_handle(state, node_id, ExprHandle { key: branch }, env)? {
         EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
@@ -2044,31 +2300,17 @@ pub(super) fn eval_match(
         .copied()
         .expect("match expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let scrutinee = match_expr
-        .syntax()
-        .children()
-        .find_map(Expr::cast)
-        .ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
-        })?;
-    let arms = Arc::<[MatchArmPlan]>::from(
-        match_expr
-            .arms()
-            .map(|arm| {
-                let pattern = arm.pattern().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "match arm has no pattern")
-                })?;
-                let body = arm.expr().ok_or_else(|| {
-                    EvalError::new(EvalErrorKind::Internal, "match arm has no body")
-                })?;
-                Ok(MatchArmPlan {
-                    pattern: match_pattern_from_ast(state, &pattern)?,
-                    body: state.expr_handle(&body),
-                })
-            })
-            .collect::<Result<Vec<_>, EvalError>>()?,
-    );
-    let scrutinee = match eval_child_expr(state, &scrutinee, env)? {
+    let arms = Arc::clone(&match_expr.arms);
+    let scrutinee = match eval_dependent_expr_handle(
+        state,
+        node_id,
+        ExprHandle {
+            key: match_expr.scrutinee.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
+            })?,
+        },
+        env,
+    )? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
@@ -2096,7 +2338,12 @@ pub(super) fn continue_match_arms(
     for arm in arms.iter() {
         let mut arm_env = env.clone();
         if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
-            return match eval_dependent_expr_handle(state, node_id, arm.body, &mut arm_env)? {
+            return match eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle { key: arm.body },
+                &mut arm_env,
+            )? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
                 EvalStep::Suspended(suspension) => Ok(extend_suspension(
                     suspension,
@@ -2113,7 +2360,7 @@ pub(super) fn continue_match_arms(
 
 pub(super) fn eval_where(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    where_expr: &vx_parser::WhereExpr,
+    where_expr: &WhereExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2123,46 +2370,26 @@ pub(super) fn eval_where(
         .expect("where expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let call = where_expr
-        .callee()
+        .call
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "where expression has no callee"))?;
-    let Expr::Call(call_expr) = call else {
+    let call_expr = state.program.resolve_expr(call)?;
+    let ExprKind::Call(_) = call_expr.kind() else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "where expression currently requires a call callee",
         ));
     };
-    let keywords = where_expr.keywords().ok_or_else(|| {
-        EvalError::new(
-            EvalErrorKind::Internal,
-            "where expression has no keyword record",
-        )
-    })?;
-    let Expr::Record(record) = keywords else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "where expression currently requires a record keyword payload",
-        ));
-    };
     let mut keyword_bindings = Vec::new();
     let mut remaining_keyword_bindings = Vec::new();
-    for field in record.fields() {
-        let name_token = field.name().ok_or_else(|| {
-            EvalError::new(
-                EvalErrorKind::Internal,
-                "where keyword field is missing a name",
-            )
-        })?;
-        let name = Arc::<str>::from(name_token.text().to_string());
-        match field.value() {
-            Some(expr) => remaining_keyword_bindings.push((name, state.expr_handle(&expr))),
+    for binding in where_expr.keyword_bindings.iter() {
+        let name = binding.name.clone();
+        match binding.expr {
+            Some(expr) => remaining_keyword_bindings.push((name, ExprHandle { key: expr })),
             None => {
-                let Some(value) = env.get(name_token.text()) else {
+                let Some(value) = env.get(name.as_ref()) else {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
-                        format!(
-                            "where binding {} is not available in scope",
-                            name_token.text()
-                        ),
+                        format!("where binding {name} is not available in scope"),
                     ));
                 };
                 keyword_bindings.push((name, value.clone()));
@@ -2173,7 +2400,7 @@ pub(super) fn eval_where(
         state,
         node_id,
         parent_id,
-        &call_expr,
+        ExprHandle { key: call },
         keyword_bindings,
         remaining_keyword_bindings,
         env.clone(),
@@ -2184,7 +2411,7 @@ pub(super) fn continue_where_keyword_bindings(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    call_expr: &CallExpr,
+    call_expr: ExprHandle,
     mut keyword_bindings: Vec<(Arc<str>, Value)>,
     remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
     mut env: EvalEnv,
@@ -2199,9 +2426,7 @@ pub(super) fn continue_where_keyword_bindings(
                     ContinuationFrame::WhereAfterKeyword {
                         node_id,
                         parent_id,
-                        call: ExprHandle {
-                            key: ProgramNodeHandle::for_node(state.current_source(), call_expr),
-                        },
+                        call: call_expr,
                         pending_keyword_name: name,
                         keyword_bindings,
                         remaining_keyword_bindings: remaining.collect(),
@@ -2218,22 +2443,35 @@ fn eval_call_with_keyword_bindings(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    call: &CallExpr,
+    call: ExprHandle,
     env: EvalEnv,
     keyword_bindings: Vec<(Arc<str>, Value)>,
 ) -> Result<EvalStep, EvalError> {
+    let call = state.program.resolve_expr(call.key)?;
+    let ExprKind::Call(call) = call.kind() else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where continuation expected a call expression",
+        ));
+    };
     let callee = call
-        .callee()
+        .callee
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.span_for_node(call);
     let type_args = Arc::<[Ty]>::from(
-        call.type_args()
-            .into_iter()
-            .flat_map(|args| args.types())
-            .map(|ty| state.program.resolve_type_annotation(&ty))
-            .collect::<Vec<_>>(),
+        call.type_args
+            .iter()
+            .copied()
+            .map(|ty| state.program.resolve_type_handle(ty))
+            .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = call.positional_args().into_iter().collect::<Vec<_>>();
+    let positional_args = call
+        .positional_args
+        .iter()
+        .copied()
+        .map(|arg| ExprHandle { key: arg })
+        .collect::<Vec<_>>();
+    let callee = state.program.resolve_expr(callee)?;
     let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
@@ -2244,7 +2482,7 @@ fn eval_call_with_keyword_bindings(
     if state.queue_child_work && !positional_args.is_empty() {
         let child_nodes = positional_args
             .iter()
-            .map(|arg| queue_child_expr(state, arg, &env))
+            .map(|arg| queue_child_expr_handle(state, *arg, &env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -2268,10 +2506,7 @@ fn eval_call_with_keyword_bindings(
         call_source,
         type_args,
         Vec::new(),
-        positional_args
-            .iter()
-            .map(|arg| state.expr_handle(arg))
-            .collect(),
+        positional_args,
         env,
     )
 }
@@ -2315,15 +2550,16 @@ pub(super) fn eval_field(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let receiver = match eval_child_expr(
         state,
-        &field.receiver().ok_or_else(|| {
+        &state.program.resolve_expr(field.receiver.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
-        })?,
+        })?)?,
         env,
     )? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
             let field_name = field
-                .field_name()
+                .field_name
+                .as_ref()
                 .map(|name| name.text().to_string())
                 .ok_or_else(|| {
                     EvalError::new(
@@ -2347,7 +2583,8 @@ pub(super) fn eval_field(
         state,
         receiver,
         field
-            .field_name()
+            .field_name
+            .as_ref()
             .map(|name| name.text().to_string())
             .ok_or_else(|| {
                 EvalError::new(
@@ -2372,12 +2609,13 @@ pub(super) fn eval_binary(
         .expect("binary expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let lhs = binary
-        .lhs()
+        .lhs
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no lhs"))?;
     let rhs = binary
-        .rhs()
+        .rhs
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
     let operator = binary_operator(binary)?;
+    let lhs = state.program.resolve_expr(lhs)?;
     match eval_child_expr(state, &lhs, env)? {
         EvalStep::Ready(lhs) => continue_binary_rhs(
             state,
@@ -2385,7 +2623,7 @@ pub(super) fn eval_binary(
             parent_id,
             lhs,
             operator,
-            state.expr_handle(&rhs),
+            ExprHandle { key: rhs },
             env.clone(),
         ),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
@@ -2394,7 +2632,7 @@ pub(super) fn eval_binary(
                 node_id,
                 parent_id,
                 operator,
-                rhs: state.expr_handle(&rhs),
+                rhs: ExprHandle { key: rhs },
                 env: env.clone(),
             },
         )),
@@ -2412,15 +2650,13 @@ pub(super) fn eval_prefix(
         .copied()
         .expect("prefix expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let operand = prefix.expr().ok_or_else(|| {
+    let operand = prefix.expr.ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "prefix expression has no operand")
     })?;
-    let operator = prefix
-        .operator_token()
-        .map(|token| token.kind())
-        .ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
-        })?;
+    let operator = prefix.operator.ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
+    })?;
+    let operand = state.program.resolve_expr(operand)?;
     match eval_child_expr(state, &operand, env)? {
         EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
@@ -2447,20 +2683,17 @@ pub(super) fn continue_block_statements(
         let statement = state.program.resolve_stmt(statement_handle.key)?;
         match statement {
             Stmt::Let(let_stmt) => {
-                let pattern = let_stmt.pattern().ok_or_else(|| {
+                let pattern = let_stmt.pattern.clone().ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "let statement has no pattern")
                 })?;
-                let let_pattern = state.with_source(statement_handle.key.source(), |state| {
-                    let_pattern_from_ast(state, &pattern)
-                })?;
-                let expr = let_stmt.expr().ok_or_else(|| {
+                let expr = let_stmt.expr.ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "let statement has no value")
                 })?;
                 match state.with_source(statement_handle.key.source(), |state| {
-                    eval_dependent_expr(state, node_id, &expr, &mut scope)
+                    eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, &mut scope)
                 })? {
                     EvalStep::Ready(value) => {
-                        bind_let_pattern(&mut scope, &let_pattern, value)?;
+                        bind_let_pattern(&mut scope, &pattern, value)?;
                     }
                     EvalStep::Suspended(suspension) => {
                         return Ok(extend_suspension(
@@ -2470,7 +2703,7 @@ pub(super) fn continue_block_statements(
                                 parent_id,
                                 scope,
                                 last,
-                                pattern: let_pattern,
+                                pattern,
                                 remaining_statements: remaining.collect(),
                             },
                         ));
@@ -2485,7 +2718,7 @@ pub(super) fn continue_block_statements(
                 env_mut(&mut scope).insert(name, value);
             }
             Stmt::Expr(expr) => match state.with_source(statement_handle.key.source(), |state| {
-                eval_dependent_expr(state, node_id, &expr, &mut scope)
+                eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, &mut scope)
             })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
@@ -2755,45 +2988,6 @@ fn decode_string_literal(text: &str) -> Result<String, EvalError> {
     Ok(decoded)
 }
 
-pub(super) fn let_pattern_from_ast(
-    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    pattern: &Pattern,
-) -> Result<LetPattern, EvalError> {
-    match pattern {
-        Pattern::Binding(binding) => {
-            let name_token = binding.name().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "binding pattern has no name")
-            })?;
-            let name = name_token.text().to_string();
-            Ok(LetPattern::Binding {
-                name,
-                source: state.span_for_token(&name_token),
-            })
-        }
-        Pattern::Wildcard(_) => Ok(LetPattern::Wildcard),
-        Pattern::Paren(paren) => {
-            let inner = paren.inner().ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    "paren pattern has no inner pattern",
-                )
-            })?;
-            let_pattern_from_ast(state, &inner)
-        }
-        Pattern::Unit(_) => Ok(LetPattern::Unit),
-        Pattern::Tuple(tuple) => Ok(LetPattern::Tuple(
-            tuple
-                .items()
-                .map(|item| let_pattern_from_ast(state, &item))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        other => Err(EvalError::new(
-            EvalErrorKind::Internal,
-            format!("unsupported let pattern: {other:?}"),
-        )),
-    }
-}
-
 pub(super) fn bind_let_pattern(
     scope: &mut EvalEnv,
     pattern: &LetPattern,
@@ -2959,140 +3153,6 @@ fn match_struct_pattern_fields(
         }
     }
     Ok(true)
-}
-
-fn match_pattern_from_ast(
-    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    pattern: &Pattern,
-) -> Result<MatchPattern, EvalError> {
-    match pattern {
-        Pattern::Binding(binding) => {
-            let name_token = binding.name().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "binding pattern has no name")
-            })?;
-            Ok(MatchPattern::Binding {
-                name: name_token.text().to_string(),
-                source: state.span_for_token(&name_token),
-            })
-        }
-        Pattern::Wildcard(_) => Ok(MatchPattern::Wildcard),
-        Pattern::Literal(literal) => {
-            literal_pattern_value(state, literal).map(MatchPattern::Literal)
-        }
-        Pattern::Tuple(tuple) => Ok(MatchPattern::Tuple(
-            tuple
-                .items()
-                .map(|item| match_pattern_from_ast(state, &item))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        Pattern::Struct(struct_pattern) => Ok(MatchPattern::Struct(
-            struct_pattern
-                .fields()
-                .map(|field| match_field_pattern_from_ast(state, &field))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        Pattern::Paren(paren) => {
-            let inner = paren.inner().ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    "paren pattern has no inner pattern",
-                )
-            })?;
-            match_pattern_from_ast(state, &inner)
-        }
-        Pattern::Unit(_) => Ok(MatchPattern::Unit),
-        Pattern::Variant(variant) => Ok(MatchPattern::Variant {
-            name: Arc::from(
-                variant
-                    .segments()
-                    .last()
-                    .ok_or_else(|| {
-                        EvalError::new(EvalErrorKind::Internal, "variant pattern has no name")
-                    })?
-                    .text(),
-            ),
-            fields: variant
-                .fields()
-                .map(|fields| {
-                    fields
-                        .fields()
-                        .map(|field| match_field_pattern_from_ast(state, &field))
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?,
-        }),
-        Pattern::At(at) => {
-            let binding_name = at.binding_name().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "at pattern has no binding name")
-            })?;
-            let pattern = at.pattern().ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "at pattern has no nested pattern")
-            })?;
-            Ok(MatchPattern::At {
-                binding_name: binding_name.text().to_string(),
-                binding_source: state.span_for_token(&binding_name),
-                pattern: Box::new(match_pattern_from_ast(state, &pattern)?),
-            })
-        }
-        Pattern::Or(or) => Ok(MatchPattern::Or(
-            or.patterns()
-                .map(|pattern| match_pattern_from_ast(state, &pattern))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        other => Err(EvalError::new(
-            EvalErrorKind::Internal,
-            format!("unsupported match pattern: {other:?}"),
-        )),
-    }
-}
-
-fn match_field_pattern_from_ast(
-    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    field: &vx_parser::StructPatternField,
-) -> Result<MatchFieldPattern, EvalError> {
-    let name_token = field.name().ok_or_else(|| {
-        EvalError::new(EvalErrorKind::Internal, "struct pattern field has no name")
-    })?;
-    Ok(MatchFieldPattern {
-        name: name_token.text().to_string(),
-        source: state.span_for_token(&name_token),
-        pattern: field
-            .pattern()
-            .map(|pattern| match_pattern_from_ast(state, &pattern).map(Box::new))
-            .transpose()?,
-    })
-}
-
-fn literal_pattern_value(
-    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    literal: &vx_parser::LiteralPattern,
-) -> Result<Value, EvalError> {
-    let token = literal
-        .token()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "literal pattern has no token"))?;
-    let source = state.span_for_token(&token);
-    match token.kind() {
-        SyntaxKind::INT => {
-            let value = token.text().parse::<u64>().map_err(|source| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    format!("invalid integer literal {}: {source}", token.text()),
-                )
-            })?;
-            Ok(Value::u64(value).with_provenance(Provenance::literal(source)))
-        }
-        SyntaxKind::TRUE_KW => Ok(Value::bool(true).with_provenance(Provenance::literal(source))),
-        SyntaxKind::FALSE_KW => Ok(Value::bool(false).with_provenance(Provenance::literal(source))),
-        SyntaxKind::STRING => {
-            let text = token.text();
-            Ok(Value::string(decode_string_literal(text)?)
-                .with_provenance(Provenance::literal(source)))
-        }
-        other => Err(EvalError::new(
-            EvalErrorKind::Internal,
-            format!("unsupported literal pattern token: {other:?}"),
-        )),
-    }
 }
 
 pub(super) fn queue_child_expr(
@@ -3378,55 +3438,34 @@ pub(super) fn project_struct_field(
 }
 
 pub(super) fn expr_kind(expr: &Expr) -> EvalExprKind {
-    match expr {
-        Expr::Block(_) => EvalExprKind::Block,
-        Expr::Literal(_) => EvalExprKind::Literal,
-        Expr::PathLiteral(_) => EvalExprKind::Literal,
-        Expr::Paren(_) => EvalExprKind::Paren,
-        Expr::Closure(_) => EvalExprKind::Closure,
-        Expr::NameRef(_) => EvalExprKind::NameRef,
-        Expr::Call(_) => EvalExprKind::Call,
-        Expr::Array(_) => EvalExprKind::Array,
-        Expr::Tuple(_) => EvalExprKind::Tuple,
-        Expr::Range(_) => EvalExprKind::Range,
-        Expr::Map(_) => EvalExprKind::Map,
-        Expr::Fail(_) => EvalExprKind::Fail,
-        Expr::If(_) => EvalExprKind::If,
-        Expr::Match(_) => EvalExprKind::Match,
-        Expr::Where(_) => EvalExprKind::Where,
-        Expr::Prefix(_) => EvalExprKind::Prefix,
-        Expr::Binary(_) => EvalExprKind::Binary,
-        Expr::InterpolatedString(_) => EvalExprKind::InterpolatedString,
-        Expr::StructLiteral(_) => EvalExprKind::StructLiteral,
-        Expr::Field(_) => EvalExprKind::Field,
+    match expr.kind() {
+        ExprKind::Block(_) => EvalExprKind::Block,
+        ExprKind::Literal(_) => EvalExprKind::Literal,
+        ExprKind::PathLiteral(_) => EvalExprKind::Literal,
+        ExprKind::Paren(_) => EvalExprKind::Paren,
+        ExprKind::Closure(_) => EvalExprKind::Closure,
+        ExprKind::NameRef(_) => EvalExprKind::NameRef,
+        ExprKind::Call(_) => EvalExprKind::Call,
+        ExprKind::Array(_) => EvalExprKind::Array,
+        ExprKind::Tuple(_) => EvalExprKind::Tuple,
+        ExprKind::Range(_) => EvalExprKind::Range,
+        ExprKind::Map(_) => EvalExprKind::Map,
+        ExprKind::Fail(_) => EvalExprKind::Fail,
+        ExprKind::If(_) => EvalExprKind::If,
+        ExprKind::Match(_) => EvalExprKind::Match,
+        ExprKind::Where(_) => EvalExprKind::Where,
+        ExprKind::Prefix(_) => EvalExprKind::Prefix,
+        ExprKind::Binary(_) => EvalExprKind::Binary,
+        ExprKind::InterpolatedString(_) => EvalExprKind::InterpolatedString,
+        ExprKind::StructLiteral(_) => EvalExprKind::StructLiteral,
+        ExprKind::Field(_) => EvalExprKind::Field,
         _ => EvalExprKind::Unsupported,
     }
 }
 
 pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalError> {
     binary
-        .syntax()
-        .children_with_tokens()
-        .filter_map(|child| child.into_token())
-        .map(|token| token.kind())
-        .find(|kind| {
-            matches!(
-                kind,
-                SyntaxKind::AMP2
-                    | SyntaxKind::PIPE2
-                    | SyntaxKind::EQ2
-                    | SyntaxKind::BANG_EQ
-                    | SyntaxKind::PLUS
-                    | SyntaxKind::MINUS
-                    | SyntaxKind::STAR
-                    | SyntaxKind::SLASH
-                    | SyntaxKind::PERCENT
-                    | SyntaxKind::LT
-                    | SyntaxKind::LT_EQ
-                    | SyntaxKind::GT
-                    | SyntaxKind::GT_EQ
-            )
-        })
+        .operator
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
 }
 
@@ -3866,7 +3905,8 @@ pub(super) fn eval_literal(
     literal: &LiteralExpr,
 ) -> Result<Value, EvalError> {
     let token = literal
-        .token()
+        .token
+        .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "literal has no token"))?;
     let literal_source = state.span_for_node(literal);
     match token.kind() {
@@ -3902,7 +3942,7 @@ pub(super) fn eval_path_literal(
     path_literal: &PathLiteralExpr,
 ) -> Result<Value, EvalError> {
     let path_source = state.span_for_node(path_literal);
-    if path_literal.interpolated().is_some() {
+    if path_literal.interpolated {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "interpolated path literals are not supported yet",
@@ -3910,23 +3950,10 @@ pub(super) fn eval_path_literal(
     }
 
     let descriptor = path_literal
-        .syntax()
-        .children_with_tokens()
-        .filter_map(|child| child.into_token())
-        .filter(|token| {
-            !matches!(
-                token.kind(),
-                vx_parser::SyntaxKind::AT
-                    | vx_parser::SyntaxKind::L_PAREN
-                    | vx_parser::SyntaxKind::R_PAREN
-                    | vx_parser::SyntaxKind::WHITESPACE
-                    | vx_parser::SyntaxKind::LINE_COMMENT
-                    | vx_parser::SyntaxKind::BLOCK_COMMENT
-                    | vx_parser::SyntaxKind::DOC_COMMENT
-            )
-        })
-        .map(|token| token.text().to_string())
-        .collect::<String>();
+        .descriptor
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     if descriptor.is_empty() {
         return Err(EvalError::new(
             EvalErrorKind::Internal,

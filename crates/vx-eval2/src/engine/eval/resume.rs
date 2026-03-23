@@ -991,7 +991,7 @@ pub(in crate::engine) fn resume_frame(
             let result = match input {
                 Ok(value) => {
                     let expr = state.program.resolve_expr(call.key)?;
-                    let Expr::Call(call_expr) = expr else {
+                    let ExprKind::Call(_) = expr.kind() else {
                         return Err(EvalError::new(
                             EvalErrorKind::Internal,
                             "where continuation expected a call expression",
@@ -1002,7 +1002,7 @@ pub(in crate::engine) fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        &call_expr,
+                        call,
                         keyword_bindings,
                         remaining_keyword_bindings,
                         env,

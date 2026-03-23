@@ -2289,9 +2289,7 @@ pub(super) fn execute_ready_task(
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
             let body_kind = expr_kind(&prepared.body);
-            let body_source = state
-                .program
-                .span_for_handle(ProgramNodeHandle::for_node(prepared.source, &prepared.body));
+            let body_source = state.program.span_for_handle(prepared.body_handle);
             state
                 .scheduler
                 .record_dependency(ENTRY_WORK_NODE_ID, node_id);
@@ -2323,7 +2321,7 @@ pub(super) fn execute_ready_task(
             };
             let scheduled = ScheduledExpr {
                 expr: ExprHandle {
-                    key: ProgramNodeHandle::for_node(prepared.source, &prepared.body),
+                    key: prepared.body_handle,
                 },
                 env: prepared.env,
                 call_stack,

@@ -7,11 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use im::{OrdMap, Vector};
-use vx_parser::{
-    ArrayExpr, ArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FailExpr,
-    FieldExpr, IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr, NameRefExpr, Pattern,
-    PrefixExpr, RangeExpr, Stmt, StringPart, StructLiteralExpr, SyntaxKind, TupleExpr,
-};
+use vx_parser::SyntaxKind;
 use vx_resolve::SourceId;
 use vx_types::Ty;
 
@@ -21,7 +17,13 @@ use crate::{
     ProjectionStep, Provenance, RangeValue, Resolution, ReuseClass, RuntimeInputKind, SlotAction,
     SourceSpan, StructValue, Value, ValueMeta, ValueRep,
     decode::{StructuredFormat, parse_blob_as_value},
-    program::{CompiledParameter, CompiledProgram, EvalProgram, ProgramNodeHandle},
+    program::{
+        ArrayExpr, ArrayItem, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, CompiledParameter,
+        CompiledProgram, EvalProgram, Expr, ExprKind, FailExpr, FallibleExpr, FieldExpr, IfExpr,
+        InterpolatedStringExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, PathLiteralExpr,
+        PrefixExpr, ProgramNodeHandle, RangeExpr, Stmt, StringPart, StructLiteralExpr, Token,
+        TupleExpr, WhereExpr,
+    },
 };
 
 mod graph;
