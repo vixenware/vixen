@@ -10607,6 +10607,91 @@ fn run_parallel_executes_sibling_frontier_on_worker_threads() {
 }
 
 #[test]
+fn run_parallel_array_fold_runtime_steps_remain_sequential_today() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  array_fold(
+    [1, 2, 3, 4],
+    0,
+    ((acc, item) => {
+      let _os = host_os();
+      acc + item
+    }),
+  )
+}
+"#,
+        "parallel-array-fold-sequential",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    assert_eq!(value.rep, ValueRep::U64(10));
+    assert_eq!(
+        max_calls.load(Ordering::SeqCst),
+        1,
+        "array_fold currently drives runtime-heavy steps one at a time",
+    );
+}
+
+#[test]
+fn run_parallel_array_map_runtime_steps_remain_sequential_today() {
+    let active_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = ParallelObserveRuntime {
+        active_calls,
+        max_calls: max_calls.clone(),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn build() {
+  [1, 2, 3, 4].map((_item) => host_os())
+}
+"#,
+        "parallel-array-map-sequential",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(4)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = value.rep else {
+        panic!("expected array value");
+    };
+    assert_eq!(items.len(), 4);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.rep == ValueRep::String("windows".into()))
+    );
+    assert_eq!(
+        max_calls.load(Ordering::SeqCst),
+        1,
+        "Array.map currently drives runtime-heavy bodies one at a time",
+    );
+}
+
+#[test]
 fn run_parallel_commits_out_of_order_worker_results_in_lease_order() {
     let mut session = EvalSession::new(
         "fn build() { [slow_value(), fast_value()] }",
