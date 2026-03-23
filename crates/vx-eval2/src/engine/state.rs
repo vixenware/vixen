@@ -75,6 +75,7 @@ pub(super) enum StreamPendingKind {
 pub(super) enum StreamStage {
     Map(FunctionRef),
     Filter(FunctionRef),
+    Flatten,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -83,7 +83,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "/c",
             @(src/{file}),
             `/Foout\\obj\\${file}.obj`,
-            ..includes.map((include) => ["/I", include]).flatten(),
+            ..includes.map((include) => ["/I", include]).flatten().to_array(),
             ..defines.map((define) => `/D${define}`),
             "/O2",
           ] where {
@@ -98,7 +98,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             @(src/{file}),
             "-o",
             @(out/obj/{file}.o),
-            ..includes.map((include) => ["-I", include]).flatten(),
+            ..includes.map((include) => ["-I", include]).flatten().to_array(),
             ..defines.map((define) => `-D${define}`),
             "-O2",
             "-fPIC",

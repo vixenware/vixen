@@ -2545,6 +2545,39 @@ fn build(items: Array[String]) {
 }
 
 #[test]
+fn stream_flatten_flattens_mapped_arrays_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build(items: Array[String]) {
+  items
+    .map((item) => [item.to_lower(), item])
+    .flatten()
+    .to_array()
+}
+"#,
+        "stream-flatten-runtime",
+        "build",
+        &[Value::array(vec![
+            Value::string("FlAtE2"),
+            Value::string("SeRdE"),
+        ])],
+    )
+    .expect("evaluate Stream.flatten().to_array()");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Stream.flatten().to_array() result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Stream.flatten().to_array(), got {value:?}");
+    };
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("FlAtE2".into()));
+    assert_eq!(items[2].rep, ValueRep::String("serde".into()));
+    assert_eq!(items[3].rep, ValueRep::String("SeRdE".into()));
+}
+
+#[test]
 fn map_map_stream_to_array_projects_entries_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"

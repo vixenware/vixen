@@ -1680,6 +1680,37 @@ fn main(lines: Array[String], requests: Array[Request]) {
 }
 
 #[test]
+fn stream_flatten_typechecks_for_streams_of_arrays() {
+    let src = r#"
+fn main(paths: Array[Path]) {
+    paths.map((path) => [Tree(path)]).flatten().to_array()
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let flattened_ty = find_expr_type(
+        &result,
+        src,
+        r#"paths.map((path) => [Tree(path)]).flatten()"#,
+    );
+    assert_eq!(
+        flattened_ty,
+        Some(Ty::Stream(Box::new(nominal_ty(&types, "Tree"))))
+    );
+
+    let collected_ty = find_expr_type(
+        &result,
+        src,
+        r#"paths.map((path) => [Tree(path)]).flatten().to_array()"#,
+    );
+    assert_eq!(
+        collected_ty,
+        Some(Ty::Array(Box::new(nominal_ty(&types, "Tree"))))
+    );
+}
+
+#[test]
 fn tree_constructor_from_stdlib_returns_tree() {
     let src = r#"
 fn main(ws: Path) {

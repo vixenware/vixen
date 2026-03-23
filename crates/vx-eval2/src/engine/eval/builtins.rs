@@ -196,6 +196,7 @@ const INTERNAL_STREAM_STAGE_KIND_FIELD: &str = "kind";
 const INTERNAL_STREAM_STAGE_FUNCTION_FIELD: &str = "function";
 const INTERNAL_STREAM_STAGE_KIND_MAP: &str = "map";
 const INTERNAL_STREAM_STAGE_KIND_FILTER: &str = "filter";
+const INTERNAL_STREAM_STAGE_KIND_FLATTEN: &str = "flatten";
 const INTERNAL_MERGED_TREE_TYPE_NAME: &str = "__Eval2MergedTree";
 const INTERNAL_MERGED_TREE_TREES_FIELD: &str = "trees";
 
@@ -225,24 +226,21 @@ enum InternalStreamCall {
 }
 
 fn internal_stream_stage_value(stage: StreamStage) -> Value {
-    Value::structure(
-        INTERNAL_STREAM_STAGE_TYPE_NAME,
-        [
-            (
-                Arc::from(INTERNAL_STREAM_STAGE_KIND_FIELD),
-                Value::string(match stage {
-                    StreamStage::Map(_) => INTERNAL_STREAM_STAGE_KIND_MAP,
-                    StreamStage::Filter(_) => INTERNAL_STREAM_STAGE_KIND_FILTER,
-                }),
-            ),
-            (
-                Arc::from(INTERNAL_STREAM_STAGE_FUNCTION_FIELD),
-                Value::function(match stage {
-                    StreamStage::Map(function) | StreamStage::Filter(function) => function,
-                }),
-            ),
-        ],
-    )
+    let mut fields = vec![(
+        Arc::from(INTERNAL_STREAM_STAGE_KIND_FIELD),
+        Value::string(match &stage {
+            StreamStage::Map(_) => INTERNAL_STREAM_STAGE_KIND_MAP,
+            StreamStage::Filter(_) => INTERNAL_STREAM_STAGE_KIND_FILTER,
+            StreamStage::Flatten => INTERNAL_STREAM_STAGE_KIND_FLATTEN,
+        }),
+    )];
+    if let StreamStage::Map(function) | StreamStage::Filter(function) = stage {
+        fields.push((
+            Arc::from(INTERNAL_STREAM_STAGE_FUNCTION_FIELD),
+            Value::function(function),
+        ));
+    }
+    Value::structure(INTERNAL_STREAM_STAGE_TYPE_NAME, fields)
 }
 
 fn internal_stream_call_value(source: InternalStreamSource, stages: Vec<StreamStage>) -> Value {
@@ -406,29 +404,38 @@ fn internal_stream_calls(value: &Value) -> Result<Vec<InternalStreamCall>, EvalE
                             "internal stream stage kind must evaluate to String",
                         ));
                     };
-                    let function = stage
-                        .fields
-                        .iter()
-                        .find_map(|(name, value)| {
-                            (name.as_ref() == INTERNAL_STREAM_STAGE_FUNCTION_FIELD).then_some(value)
-                        })
-                        .ok_or_else(|| {
-                            EvalError::new(
-                                EvalErrorKind::Internal,
-                                "internal stream stage is missing a function",
-                            )
-                        })?;
-                    let ValueRep::Function(function) = &function.rep else {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            "internal stream stage function must evaluate to Function",
-                        ));
-                    };
                     match kind.as_ref() {
-                        INTERNAL_STREAM_STAGE_KIND_MAP => Ok(StreamStage::Map(function.clone())),
-                        INTERNAL_STREAM_STAGE_KIND_FILTER => {
-                            Ok(StreamStage::Filter(function.clone()))
+                        INTERNAL_STREAM_STAGE_KIND_MAP | INTERNAL_STREAM_STAGE_KIND_FILTER => {
+                            let function = stage
+                                .fields
+                                .iter()
+                                .find_map(|(name, value)| {
+                                    (name.as_ref() == INTERNAL_STREAM_STAGE_FUNCTION_FIELD)
+                                        .then_some(value)
+                                })
+                                .ok_or_else(|| {
+                                    EvalError::new(
+                                        EvalErrorKind::Internal,
+                                        "internal stream stage is missing a function",
+                                    )
+                                })?;
+                            let ValueRep::Function(function) = &function.rep else {
+                                return Err(EvalError::new(
+                                    EvalErrorKind::Internal,
+                                    "internal stream stage function must evaluate to Function",
+                                ));
+                            };
+                            match kind.as_ref() {
+                                INTERNAL_STREAM_STAGE_KIND_MAP => {
+                                    Ok(StreamStage::Map(function.clone()))
+                                }
+                                INTERNAL_STREAM_STAGE_KIND_FILTER => {
+                                    Ok(StreamStage::Filter(function.clone()))
+                                }
+                                _ => unreachable!(),
+                            }
                         }
+                        INTERNAL_STREAM_STAGE_KIND_FLATTEN => Ok(StreamStage::Flatten),
                         _ => Err(EvalError::new(
                             EvalErrorKind::Internal,
                             "internal stream stage has an unknown kind",
@@ -562,94 +569,153 @@ fn stream_stage_error_message(stage: &StreamStage) -> &'static str {
     match stage {
         StreamStage::Map(_) => "Stream.map() mapper must be a bodyful Vixen function",
         StreamStage::Filter(_) => "Stream.filter() predicate must be a bodyful Vixen function",
+        StreamStage::Flatten => "Stream.flatten() inputs must evaluate to Stream or Array",
     }
 }
 
-fn advance_stream_join_item_from_value(
+fn advance_stream_join_items_from_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    call: InternalStreamCall,
+    trailing_stages: Vec<StreamStage>,
+    source_error_message: &'static str,
+) -> Result<Vec<StreamJoinItem>, EvalError> {
+    match call {
+        InternalStreamCall::Pipeline { source, mut stages } => {
+            stages.extend(trailing_stages);
+            match source {
+                InternalStreamSource::Value(value) => {
+                    expand_stream_join_items_from_value(state, value, stages, source_error_message)
+                }
+                InternalStreamSource::Call { function, args } => {
+                    Ok(vec![StreamJoinItem::Pending {
+                        child_node: queue_stream_prepared_call(
+                            state,
+                            &function,
+                            &args,
+                            source_error_message,
+                        )?,
+                        waiting_on: StreamPendingKind::SourceCall,
+                        remaining_stages: stages,
+                    }])
+                }
+            }
+        }
+    }
+}
+
+fn expand_stream_join_items_from_value(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     value: Value,
     remaining_stages: Vec<StreamStage>,
-) -> Result<StreamJoinItem, EvalError> {
+    source_error_message: &'static str,
+) -> Result<Vec<StreamJoinItem>, EvalError> {
     let Some((stage, rest)) = remaining_stages.split_first() else {
-        return Ok(StreamJoinItem::Ready(value));
+        return Ok(vec![StreamJoinItem::Ready(value)]);
     };
-    let child_node = match stage {
-        StreamStage::Map(function) | StreamStage::Filter(function) => queue_stream_prepared_call(
-            state,
-            function,
-            std::slice::from_ref(&value),
-            stream_stage_error_message(stage),
-        )?,
-    };
-    Ok(StreamJoinItem::Pending {
-        child_node,
-        waiting_on: match stage {
-            StreamStage::Map(_) => StreamPendingKind::Map,
-            StreamStage::Filter(_) => StreamPendingKind::Filter { input: value },
+    match stage {
+        StreamStage::Map(function) | StreamStage::Filter(function) => {
+            let child_node = queue_stream_prepared_call(
+                state,
+                function,
+                std::slice::from_ref(&value),
+                stream_stage_error_message(stage),
+            )?;
+            Ok(vec![StreamJoinItem::Pending {
+                child_node,
+                waiting_on: match stage {
+                    StreamStage::Map(_) => StreamPendingKind::Map,
+                    StreamStage::Filter(_) => StreamPendingKind::Filter { input: value },
+                    StreamStage::Flatten => unreachable!(),
+                },
+                remaining_stages: rest.to_vec(),
+            }])
+        }
+        StreamStage::Flatten => match &value.rep {
+            ValueRep::Array(items) => {
+                let mut expanded = Vec::new();
+                for item in items.iter().cloned() {
+                    expanded.extend(expand_stream_join_items_from_value(
+                        state,
+                        item,
+                        rest.to_vec(),
+                        source_error_message,
+                    )?);
+                }
+                Ok(expanded)
+            }
+            ValueRep::Struct(struct_value)
+                if struct_value.type_name.as_ref() == INTERNAL_STREAM_TYPE_NAME =>
+            {
+                let nested_calls = internal_stream_calls(&value)?;
+                let mut expanded = Vec::new();
+                for call in nested_calls {
+                    expanded.extend(advance_stream_join_items_from_call(
+                        state,
+                        call,
+                        rest.to_vec(),
+                        source_error_message,
+                    )?);
+                }
+                Ok(expanded)
+            }
+            _ => Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "Stream.flatten() inputs must evaluate to Stream or Array",
+            )),
         },
-        remaining_stages: rest.to_vec(),
-    })
+    }
 }
 
-fn initial_stream_join_item(
+fn initial_stream_join_items(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     call: InternalStreamCall,
     source_error_message: &'static str,
-) -> Result<StreamJoinItem, EvalError> {
-    match call {
-        InternalStreamCall::Pipeline { source, stages } => match source {
-            InternalStreamSource::Value(value) => {
-                advance_stream_join_item_from_value(state, value, stages)
-            }
-            InternalStreamSource::Call { function, args } => Ok(StreamJoinItem::Pending {
-                child_node: queue_stream_prepared_call(
-                    state,
-                    &function,
-                    &args,
-                    source_error_message,
-                )?,
-                waiting_on: StreamPendingKind::SourceCall,
-                remaining_stages: stages,
-            }),
-        },
-    }
+) -> Result<Vec<StreamJoinItem>, EvalError> {
+    advance_stream_join_items_from_call(state, call, Vec::new(), source_error_message)
 }
 
 pub(in crate::engine) fn collect_stream_join_items(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    items: &mut [StreamJoinItem],
+    items: &mut Vec<StreamJoinItem>,
 ) -> Result<StreamJoinState, EvalError> {
     loop {
         let mut made_progress = false;
         let mut first_waiting = None;
+        let mut index = 0;
 
-        for item in items.iter_mut() {
-            let StreamJoinItem::Pending {
-                child_node,
-                waiting_on,
-                remaining_stages,
-            } = item
-            else {
+        while index < items.len() {
+            let pending = match items.get(index) {
+                Some(StreamJoinItem::Pending {
+                    child_node,
+                    waiting_on,
+                    remaining_stages,
+                }) => Some((*child_node, waiting_on.clone(), remaining_stages.clone())),
+                _ => None,
+            };
+            let Some((child_node, waiting_on, remaining_stages)) = pending else {
+                index += 1;
                 continue;
             };
 
-            match state.scheduler.node_state(*child_node) {
+            match state.scheduler.node_state(child_node) {
                 Some(EvalNodeState::Ready(value)) => {
-                    let next = match waiting_on {
+                    let replacement = match waiting_on {
                         StreamPendingKind::SourceCall | StreamPendingKind::Map => {
-                            advance_stream_join_item_from_value(
+                            expand_stream_join_items_from_value(
                                 state,
                                 value.clone(),
-                                remaining_stages.clone(),
+                                remaining_stages,
+                                "Stream stages can only resume bodyful mapped streams",
                             )?
                         }
                         StreamPendingKind::Filter { input } => match &value.rep {
-                            ValueRep::Bool(true) => advance_stream_join_item_from_value(
+                            ValueRep::Bool(true) => expand_stream_join_items_from_value(
                                 state,
-                                input.clone(),
-                                remaining_stages.clone(),
+                                input,
+                                remaining_stages,
+                                "Stream stages can only resume bodyful mapped streams",
                             )?,
-                            ValueRep::Bool(false) => StreamJoinItem::Skipped,
+                            ValueRep::Bool(false) => vec![StreamJoinItem::Skipped],
                             _ => {
                                 return Err(EvalError::new(
                                     EvalErrorKind::TypeError,
@@ -658,12 +724,14 @@ pub(in crate::engine) fn collect_stream_join_items(
                             }
                         },
                     };
-                    *item = next;
+                    items.splice(index..=index, replacement);
                     made_progress = true;
+                    break;
                 }
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
-                    first_waiting.get_or_insert(*child_node);
+                    first_waiting.get_or_insert(child_node);
+                    index += 1;
                 }
             }
         }
@@ -1376,6 +1444,7 @@ fn is_profiled_builtin_call_name(callee_name: &str) -> bool {
             | "Array.flatten"
             | "Array.merge"
             | "Array.to_array"
+            | "Stream.flatten"
             | "Stream.filter"
             | "Stream.map"
             | "Stream.merge"
@@ -2375,7 +2444,7 @@ fn continue_builtin_call_inner(
             let calls = internal_stream_calls(&args[0])?;
             let mut items = Vec::with_capacity(calls.len());
             for call in calls {
-                items.push(initial_stream_join_item(
+                items.extend(initial_stream_join_items(
                     state,
                     call,
                     "Stream.to_array() can only collect bodyful mapped streams",
@@ -2419,7 +2488,7 @@ fn continue_builtin_call_inner(
             let calls = internal_stream_calls(&args[0])?;
             let mut items = Vec::with_capacity(calls.len());
             for call in calls {
-                items.push(initial_stream_join_item(
+                items.extend(initial_stream_join_items(
                     state,
                     call,
                     "Stream.merge() can only merge bodyful mapped streams",
@@ -2471,6 +2540,28 @@ fn continue_builtin_call_inner(
                 .map(|call| match call {
                     InternalStreamCall::Pipeline { source, mut stages } => {
                         stages.push(StreamStage::Filter(predicate.clone()));
+                        internal_stream_call_value(source, stages)
+                    }
+                })
+                .collect();
+            Ok(ready_builtin_value(internal_stream_value(
+                calls,
+                args[0].meta.clone(),
+            )))
+        }
+        "Stream.flatten" => {
+            if args.len() != 1 {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "Stream.flatten() requires receiver",
+                ));
+            }
+            let calls = internal_stream_calls(&args[0])?;
+            let calls = calls
+                .into_iter()
+                .map(|call| match call {
+                    InternalStreamCall::Pipeline { source, mut stages } => {
+                        stages.push(StreamStage::Flatten);
                         internal_stream_call_value(source, stages)
                     }
                 })

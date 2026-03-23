@@ -1221,6 +1221,21 @@ impl<'a> ExprTyper<'a> {
         if self_param.name != "self" || sig.ret.is_poison() {
             return None;
         }
+        if def.name == "flatten"
+            && params.is_empty()
+            && let Ty::Stream(inner) = receiver_ty
+        {
+            let ret = match inner.as_ref() {
+                Ty::Array(item) => Ty::Stream(item.clone()),
+                Ty::Stream(item) => Ty::Stream(item.clone()),
+                _ => return None,
+            };
+            return Some(BoundMethodSig {
+                params: Vec::new(),
+                ret,
+                capabilities: sig.capabilities,
+            });
+        }
         let mut substitutions = vec![None; sig.type_params.len()];
         bind_type_params(&self_param.ty, receiver_ty, &mut substitutions);
 

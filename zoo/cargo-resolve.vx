@@ -432,8 +432,8 @@ fn manifest_requests_at_with_workspace(
       .map((selector, table) => (
         target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies) where { target }
       ))
-      .to_array()
-      .flatten(),
+      .flatten()
+      .to_array(),
   ]
 )
 
@@ -460,8 +460,8 @@ fn root_requests_at_with_workspace(
         root_target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies)
           where { target }
       ))
-      .to_array()
-      .flatten(),
+      .flatten()
+      .to_array(),
   ]
 )
 
@@ -485,8 +485,8 @@ fn package_dependency_requests_at_with_workspace(
       .map((selector, table) => (
         package_target_requests_at_with_workspace(selector, table, manifest_root, workspace_dependencies)
       ))
-      .to_array()
-      .flatten(),
+      .flatten()
+      .to_array(),
   ]
 )
 

@@ -177,6 +177,8 @@ namespace Stream[T] {
   fn map[U](self, f: Fn(T) -> U) -> Stream[U];
   /// Keep the items for which `pred` returns true.
   fn filter(self, pred: Fn(T) -> Bool) -> Stream[T];
+  /// Flatten one level of nested arrays or streams into a single stream.
+  fn flatten(self) -> T;
   /// Merge a stream of tree fragments into one tree.
   fn merge(self) -> Tree;
   /// Collect the stream into a deterministic array value.

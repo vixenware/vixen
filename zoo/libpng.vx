@@ -166,7 +166,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           @(src/{file}),
           "-o",
           @(out/{file}.o),
-          ..includes.map((include) => ["-I", include]).flatten(),
+          ..includes.map((include) => ["-I", include]).flatten().to_array(),
           ..defines.map((define) => `-D${define}`),
           ..common_cflags,
           ..flags,

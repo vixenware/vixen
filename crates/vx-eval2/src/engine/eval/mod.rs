@@ -863,6 +863,11 @@ fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str>
         {
             Some("Stream.filter")
         }
+        (ValueRep::Struct(StructValue { type_name, .. }), "flatten")
+            if type_name.as_ref() == "__Eval2Stream" =>
+        {
+            Some("Stream.flatten")
+        }
         (ValueRep::Struct(StructValue { type_name, .. }), "map")
             if type_name.as_ref() == "__Eval2Stream" =>
         {
