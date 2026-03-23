@@ -132,30 +132,7 @@ fn collect_adapter_parameters(
             }
         }
         ExprKind::Call(call) => {
-            if let Some(callee) = &call.callee {
-                match callee {
-                    CallCallee::NameRef(name_ref) => {
-                        collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
-                    }
-                    CallCallee::ResolvedFunction { .. }
-                    | CallCallee::VariantConstructor { .. }
-                    | CallCallee::NewtypeConstructor { .. }
-                    | CallCallee::StaticMember { .. } => {}
-                    CallCallee::Field(field) => {
-                        collect_adapter_parameters_from_field(program, field, names_by_index)?;
-                    }
-                    CallCallee::Expr(callee) => {
-                        collect_adapter_parameters(
-                            program,
-                            program.resolve_expr(*callee)?,
-                            names_by_index,
-                        )?;
-                    }
-                }
-            }
-            for arg in call.positional_args.iter().copied() {
-                collect_adapter_parameters(program, program.resolve_expr(arg)?, names_by_index)?;
-            }
+            collect_adapter_parameters_from_call(program, call, names_by_index)?;
         }
         ExprKind::Array(array) => {
             for item in array.items.iter() {
@@ -223,8 +200,8 @@ fn collect_adapter_parameters(
             }
         }
         ExprKind::Where(where_expr) => {
-            if let Some(call) = where_expr.call {
-                collect_adapter_parameters(program, program.resolve_expr(call)?, names_by_index)?;
+            if let Some(call) = where_expr.call.as_ref() {
+                collect_adapter_parameters_from_call(program, call, names_by_index)?;
             }
             for binding in where_expr.keyword_bindings.iter() {
                 if let Some(expr) = binding.expr {
@@ -286,6 +263,38 @@ fn collect_adapter_parameters(
             }
         }
         ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Unsupported { .. } => {}
+    }
+    Ok(())
+}
+
+fn collect_adapter_parameters_from_call(
+    program: &CompiledProgram,
+    call: &CallExpr,
+    names_by_index: &mut Vec<Option<ProgramNodeHandle>>,
+) -> Result<(), EvalError> {
+    if let Some(callee) = &call.callee {
+        match callee {
+            CallCallee::NameRef(name_ref) => {
+                collect_adapter_parameters_from_name_ref(name_ref, names_by_index)?;
+            }
+            CallCallee::ResolvedFunction { .. }
+            | CallCallee::VariantConstructor { .. }
+            | CallCallee::NewtypeConstructor { .. }
+            | CallCallee::StaticMember { .. } => {}
+            CallCallee::Field(field) => {
+                collect_adapter_parameters_from_field(program, field, names_by_index)?;
+            }
+            CallCallee::Expr(callee) => {
+                collect_adapter_parameters(
+                    program,
+                    program.resolve_expr(*callee)?,
+                    names_by_index,
+                )?;
+            }
+        }
+    }
+    for arg in call.positional_args.iter().copied() {
+        collect_adapter_parameters(program, program.resolve_expr(arg)?, names_by_index)?;
     }
     Ok(())
 }
@@ -2655,19 +2664,12 @@ pub(super) fn eval_where(
         .copied()
         .expect("where expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let call = where_expr
-        .call
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "where expression has no callee"))?;
-    let call_expr = state.program.resolve_expr(call)?;
-    let ExprKind::Call(_) = call_expr.kind() else {
-        return Err(EvalError::new(
+    let call_expr = where_expr.call.as_ref().ok_or_else(|| {
+        EvalError::new(
             EvalErrorKind::Internal,
-            "where expression currently requires a call callee",
-        ));
-    };
-    let ExprKind::Call(call_expr) = call_expr.kind() else {
-        unreachable!();
-    };
+            "where expression currently requires a compiled call plan",
+        )
+    })?;
     let callee = call_expr
         .callee
         .as_ref()

@@ -1080,6 +1080,42 @@ fn compiled_program_lowers_static_member_field_expr_to_plan() {
 }
 
 #[test]
+fn compiled_program_lowers_where_expr_to_compiled_call_plan() {
+    let program = CompiledProgram::new(
+        "lowered-where-call-plan",
+        "fn helper() { 1 }\nfn build() { helper() where { value: \"serde\", needle: \"ser\" } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(where_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain where expression");
+    };
+    let expr = program
+        .resolve_expr_id(where_expr)
+        .expect("resolve where expr");
+    let ExprKind::Where(where_expr) = expr.kind() else {
+        panic!("expected lowered step to be a where expr, got {expr:?}");
+    };
+    let Some(call) = where_expr.call.as_ref() else {
+        panic!("expected where expr to contain compiled call plan");
+    };
+    assert!(matches!(
+        call.callee,
+        Some(CallCallee::ResolvedFunction { .. })
+    ));
+    assert_eq!(call.positional_args.len(), 0);
+}
+
+#[test]
 fn block_local_named_function_captures_outer_binding() {
     let resolution = eval_source_entry_with_args_with_source_id(
         "fn build() {\n  let captured = 41;\n  fn helper() { captured }\n  helper()\n}",

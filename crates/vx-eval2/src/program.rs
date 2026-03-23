@@ -477,7 +477,8 @@ pub(crate) struct MatchExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WhereExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) call: Option<ExprId>,
+    pub(crate) call_expr: Option<ExprId>,
+    pub(crate) call: Option<CallExpr>,
     pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
 }
 
@@ -862,6 +863,9 @@ impl CompiledProgram {
             source
                 .apply_expr_ref_rewrites(rewrites.expr_refs)
                 .expect("compiled expression ref rewrites should target name or field expressions");
+            source
+                .apply_where_call_rewrites(rewrites.where_calls)
+                .expect("compiled where call rewrites should target where expressions");
         }
         self
     }
@@ -874,6 +878,7 @@ impl CompiledProgram {
         source.ensure_parsed()?;
         let mut call_callees = Vec::new();
         let mut expr_refs = Vec::new();
+        let mut where_calls = Vec::new();
         for (index, expr) in source.exprs.iter().enumerate() {
             let expr_id = ExprId {
                 source: source_id.0,
@@ -902,12 +907,27 @@ impl CompiledProgram {
                         });
                     }
                 }
+                ExprKind::Where(where_expr) => {
+                    let Some(call_expr_id) = where_expr.call_expr else {
+                        continue;
+                    };
+                    let call_expr = self.resolve_expr_id(call_expr_id)?;
+                    let ExprKind::Call(call) = call_expr.kind() else {
+                        continue;
+                    };
+                    let mut call = call.clone();
+                    if let Some(callee) = call.callee.as_ref() {
+                        call.callee = Some(self.resolve_call_callee(callee)?);
+                    }
+                    where_calls.push((expr_id, call));
+                }
                 _ => {}
             }
         }
         Ok(ExecutionRefRewrites {
             call_callees,
             expr_refs,
+            where_calls,
         })
     }
 
@@ -1046,6 +1066,7 @@ enum ExprRefRewrite {
 struct ExecutionRefRewrites {
     call_callees: Vec<(ExprId, CallCallee)>,
     expr_refs: Vec<ExprRefRewrite>,
+    where_calls: Vec<(ExprId, CallExpr)>,
 }
 
 impl CompiledProgramSource {
@@ -1242,6 +1263,31 @@ impl CompiledProgramSource {
                     field.static_member = Some(static_member);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn apply_where_call_rewrites(
+        &mut self,
+        rewrites: Vec<(ExprId, CallExpr)>,
+    ) -> Result<(), EvalError> {
+        for (expr_id, call) in rewrites {
+            let expr = self.exprs.get_mut(expr_id.index as usize).ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("expression id {:?} was not found", expr_id),
+                )
+            })?;
+            let ExprKind::Where(where_expr) = &mut expr.kind else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "where call rewrite targeted non-where expression {:?}",
+                        expr_id
+                    ),
+                ));
+            };
+            where_expr.call = Some(call);
         }
         Ok(())
     }
@@ -1826,7 +1872,7 @@ fn compile_expr(
         }),
         ParserExpr::Where(where_expr) => ExprKind::Where(WhereExpr {
             handle,
-            call: where_expr
+            call_expr: where_expr
                 .callee()
                 .as_ref()
                 .map(|expr| {
@@ -1837,6 +1883,7 @@ fn compile_expr(
                     )
                 })
                 .transpose()?,
+            call: None,
             keyword_bindings: Arc::from(compile_where_keyword_bindings(
                 source, where_expr, expr_ids,
             )?),
