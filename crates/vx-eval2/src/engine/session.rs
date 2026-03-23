@@ -699,7 +699,28 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         completion: EvalWorkCompletion,
         record_history: bool,
     ) -> Result<EvalSessionStep, EvalError> {
-        self.apply_completion_batch_impl(vec![completion], record_history)
+        let snapshot = record_history.then(|| self.checkpoint());
+        let step = match apply_completion_to_state(
+            &mut self.scheduler,
+            &mut self.trace,
+            &mut self.completed_work,
+            &mut self.completed,
+            completion,
+        ) {
+            Ok(step) => step,
+            Err(error) => {
+                if let Some(snapshot) = snapshot {
+                    self.restore(snapshot);
+                }
+                return Err(error);
+            }
+        };
+        self.scheduler.clear_active_wave_if_idle();
+
+        if let Some(snapshot) = snapshot {
+            self.history.push(snapshot);
+        }
+        Ok(step)
     }
 
     pub fn work_records(&self) -> Vec<EvalWorkRecord> {
