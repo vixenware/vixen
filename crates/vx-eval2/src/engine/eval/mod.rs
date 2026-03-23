@@ -7,9 +7,41 @@ pub(in crate::engine) use builtins::*;
 mod resume;
 pub(in crate::engine) use resume::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparedBodyRef {
+    Expr(ExprId),
+    Block {
+        root_expr_id: ExprId,
+        body: BlockBodyId,
+    },
+}
+
 pub(super) struct PreparedEntry {
-    pub(super) body_id: ExprId,
+    pub(super) body: PreparedBodyRef,
     pub(super) env: EvalEnv,
+}
+
+impl PreparedBodyRef {
+    pub(super) fn from_expr_id(
+        program: &CompiledProgram,
+        expr_id: ExprId,
+    ) -> Result<Self, EvalError> {
+        let expr = program.resolve_expr_id(expr_id)?;
+        match expr.kind() {
+            ExprKind::Block(block) => Ok(Self::Block {
+                root_expr_id: expr_id,
+                body: block.body,
+            }),
+            _ => Ok(Self::Expr(expr_id)),
+        }
+    }
+
+    pub(super) fn root_expr_id(self) -> ExprId {
+        match self {
+            Self::Expr(expr_id) => expr_id,
+            Self::Block { root_expr_id, .. } => root_expr_id,
+        }
+    }
 }
 
 pub(super) fn function_ref_from_compiled(
@@ -384,7 +416,10 @@ pub(super) fn prepare_entry(
         )
     })?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
-    Ok(PreparedEntry { body_id: body, env })
+    Ok(PreparedEntry {
+        body: PreparedBodyRef::from_expr_id(state.program, body)?,
+        env,
+    })
 }
 
 pub(super) fn prepare_function_call(
@@ -421,7 +456,10 @@ pub(super) fn prepare_function_call(
         env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
-    Ok(Some(PreparedEntry { body_id: body, env }))
+    Ok(Some(PreparedEntry {
+        body: PreparedBodyRef::from_expr_id(state.program, body)?,
+        env,
+    }))
 }
 
 pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
@@ -738,6 +776,99 @@ pub(super) fn eval_expr_with_node_id(
     }
 
     result
+}
+
+pub(super) fn eval_prepared_body_with_node_id(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    mut prepared: PreparedEntry,
+) -> Result<EvalStep, EvalError> {
+    match prepared.body {
+        PreparedBodyRef::Expr(expr_id) => {
+            let expr = state.program.resolve_expr_id(expr_id)?;
+            state.with_source(expr_id.source(), |state| {
+                eval_expr_with_node_id(state, node_id, expr, &mut prepared.env)
+            })
+        }
+        PreparedBodyRef::Block { root_expr_id, body } => {
+            let parent_id = state.current_parent();
+            let source = state.program.span_for_expr_id(root_expr_id)?;
+            state.scheduler.record_node(EvalNodeRecord {
+                node_id,
+                parent_id,
+                kind: EvalNodeKind::Expr {
+                    kind: crate::EvalExprKind::Block,
+                },
+                source: Some(source.clone()),
+            });
+            state.emit(
+                node_id,
+                parent_id,
+                Some(source),
+                EvalEventKind::EnterExpr {
+                    kind: crate::EvalExprKind::Block,
+                },
+            );
+            state.stack.push(node_id);
+            let result = state.with_source(root_expr_id.source(), |state| {
+                continue_block_body(
+                    state,
+                    node_id,
+                    parent_id,
+                    prepared.env,
+                    Value::unit(),
+                    body,
+                    0,
+                )
+            });
+            let popped = state.stack.pop();
+            debug_assert_eq!(popped, Some(node_id));
+            match &result {
+                Ok(EvalStep::Ready(value)) => record_ready_step(state, node_id, parent_id, value),
+                Ok(EvalStep::Suspended(suspension)) => {
+                    record_pending_step(state, node_id, parent_id, &suspension.pending);
+                }
+                Err(error) => record_poison_step(state, node_id, parent_id, error),
+            }
+            result
+        }
+    }
+}
+
+pub(super) fn eval_child_prepared_entry(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prepared: PreparedEntry,
+) -> Result<EvalStep, EvalError> {
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        let source = state
+            .program
+            .span_for_expr_id(prepared.body.root_expr_id())?;
+        state.emit_current_dependency(child_id, Some(source));
+        return eval_prepared_body_with_node_id(state, child_id, prepared);
+    }
+    let child_id = queue_child_prepared_entry(state, prepared);
+    let resume_node = state
+        .current_parent()
+        .expect("prepared child entry should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
+pub(super) fn eval_dependent_prepared_entry(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    prepared: PreparedEntry,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() == Some(node_id) {
+        eval_child_prepared_entry(state, prepared)
+    } else {
+        state.with_active_node(node_id, |state| eval_child_prepared_entry(state, prepared))
+    }
 }
 
 pub(super) fn eval_child_expr(
@@ -1403,18 +1534,8 @@ pub(super) fn continue_call_from_args(
         };
     }
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
-        let mut env = prepared.env;
         return if !state.track_calls {
-            state.with_source(prepared.body_id.source(), |state| {
-                eval_dependent_expr_handle(
-                    state,
-                    node_id,
-                    ExprHandle {
-                        key: prepared.body_id,
-                    },
-                    &mut env,
-                )
-            })
+            eval_dependent_prepared_entry(state, node_id, prepared)
         } else {
             let frame = authored_call_frame(
                 state,
@@ -1432,16 +1553,7 @@ pub(super) fn continue_call_from_args(
                 args.len(),
             );
             state.with_authored_call(frame, |state| {
-                state.with_source(prepared.body_id.source(), |state| {
-                    eval_dependent_expr_handle(
-                        state,
-                        node_id,
-                        ExprHandle {
-                            key: prepared.body_id,
-                        },
-                        &mut env,
-                    )
-                })
+                eval_dependent_prepared_entry(state, node_id, prepared)
             })
         };
     }
@@ -3188,7 +3300,7 @@ pub(super) fn queue_child_expr_handle(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        expr,
+        target: ScheduledExprTarget::Expr(expr),
         env: env.clone(),
         call_stack: if state.track_calls {
             state.call_stack.clone()
@@ -3223,12 +3335,12 @@ pub(super) fn queue_child_prepared_entry(
     let child_id = state.alloc_node_id();
     let resolved_source = state
         .program
-        .span_for_expr_id(prepared.body_id)
-        .expect("prepared entry body id should resolve to a source span");
+        .span_for_expr_id(prepared.body.root_expr_id())
+        .expect("prepared entry body should resolve to a source span");
     let body = state
         .program
-        .resolve_expr_id(prepared.body_id)
-        .expect("prepared entry body id should resolve");
+        .resolve_expr_id(prepared.body.root_expr_id())
+        .expect("prepared entry root expr should resolve");
     state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
         node_id: child_id,
@@ -3239,9 +3351,7 @@ pub(super) fn queue_child_prepared_entry(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        expr: ExprHandle {
-            key: prepared.body_id,
-        },
+        target: ScheduledExprTarget::Prepared(prepared.body),
         env: prepared.env,
         call_stack: if state.track_calls {
             state.call_stack.clone()

@@ -958,9 +958,15 @@ pub(super) struct ScheduledResume {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScheduledExpr {
-    pub(super) expr: ExprHandle,
+    pub(super) target: ScheduledExprTarget,
     pub(super) env: EvalEnv,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScheduledExprTarget {
+    Expr(ExprHandle),
+    Prepared(PreparedBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2306,9 +2312,13 @@ pub(super) fn execute_ready_task(
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
-            let body = state.program.resolve_expr_id(prepared.body_id)?;
+            let body = state
+                .program
+                .resolve_expr_id(prepared.body.root_expr_id())?;
             let body_kind = expr_kind(body);
-            let body_source = state.program.span_for_expr_id(prepared.body_id)?;
+            let body_source = state
+                .program
+                .span_for_expr_id(prepared.body.root_expr_id())?;
             state
                 .scheduler
                 .record_dependency(ENTRY_WORK_NODE_ID, node_id);
@@ -2339,9 +2349,7 @@ pub(super) fn execute_ready_task(
                 Vec::new()
             };
             let scheduled = ScheduledExpr {
-                expr: ExprHandle {
-                    key: prepared.body_id,
-                },
+                target: ScheduledExprTarget::Prepared(prepared.body),
                 env: prepared.env,
                 call_stack,
             };
@@ -2374,17 +2382,41 @@ pub(super) fn execute_ready_task(
             EvalCompletedWorkOutcome::Progressed
         }
         ReadyTask::EvaluateExpr(scheduled) => {
-            let mut env = scheduled.env;
-            let expr = state.program.resolve_expr_id(scheduled.expr.key)?;
             let step = if scheduled.call_stack.is_empty() {
-                state.with_source(scheduled.expr.key.source(), |state| {
-                    eval_expr_with_node_id(state, record.work.node_id, expr, &mut env)
-                })
+                match scheduled.target {
+                    ScheduledExprTarget::Expr(expr) => {
+                        let mut env = scheduled.env;
+                        let resolved = state.program.resolve_expr_id(expr.key)?;
+                        state.with_source(expr.key.source(), |state| {
+                            eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
+                        })
+                    }
+                    ScheduledExprTarget::Prepared(body) => eval_prepared_body_with_node_id(
+                        &mut state,
+                        record.work.node_id,
+                        PreparedEntry {
+                            body,
+                            env: scheduled.env,
+                        },
+                    ),
+                }
             } else {
-                state.with_call_stack(scheduled.call_stack, |state| {
-                    state.with_source(scheduled.expr.key.source(), |state| {
-                        eval_expr_with_node_id(state, record.work.node_id, expr, &mut env)
-                    })
+                state.with_call_stack(scheduled.call_stack, |state| match scheduled.target {
+                    ScheduledExprTarget::Expr(expr) => {
+                        let mut env = scheduled.env;
+                        let resolved = state.program.resolve_expr_id(expr.key)?;
+                        state.with_source(expr.key.source(), |state| {
+                            eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
+                        })
+                    }
+                    ScheduledExprTarget::Prepared(body) => eval_prepared_body_with_node_id(
+                        state,
+                        record.work.node_id,
+                        PreparedEntry {
+                            body,
+                            env: scheduled.env,
+                        },
+                    ),
                 })
             };
             invocation = state.work_invocation.clone();
@@ -2422,17 +2454,7 @@ pub(super) fn execute_ready_task(
         ReadyTask::EvaluateKeyed(node_id) => {
             if !call_profiling {
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
-                let mut env = prepared.env;
-                match state.with_source(prepared.body_id.source(), |state| {
-                    eval_dependent_expr_handle(
-                        state,
-                        node_id,
-                        ExprHandle {
-                            key: prepared.body_id,
-                        },
-                        &mut env,
-                    )
-                })? {
+                match eval_dependent_prepared_entry(&mut state, node_id, prepared)? {
                     EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
                     EvalStep::Suspended(suspension) => {
                         let pending = suspension.pending.clone();
@@ -2487,18 +2509,8 @@ pub(super) fn execute_ready_task(
                     authored_call_frame(&state, node_id, resolver_name, &[joined], source.clone());
                 emit_authored_call_started(&mut state, node_id, None, source, &frame, 1);
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
-                let mut env = prepared.env;
                 let step = state.with_authored_call(frame, |state| {
-                    state.with_source(prepared.body_id.source(), |state| {
-                        eval_dependent_expr_handle(
-                            state,
-                            node_id,
-                            ExprHandle {
-                                key: prepared.body_id,
-                            },
-                            &mut env,
-                        )
-                    })
+                    eval_dependent_prepared_entry(state, node_id, prepared)
                 });
                 invocation = state.work_invocation.clone();
                 match step? {

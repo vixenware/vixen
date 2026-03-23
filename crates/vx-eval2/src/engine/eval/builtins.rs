@@ -809,17 +809,7 @@ pub(in crate::engine) fn continue_array_find_builtin(
                 "array_find() predicate must be a bodyful Vixen function",
             ));
         };
-        let mut env = prepared.env;
-        let matched = match state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        })? {
+        let matched = match eval_dependent_prepared_entry(state, node_id, prepared)? {
             EvalStep::Ready(result) => result,
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -882,17 +872,7 @@ pub(in crate::engine) fn continue_array_fold_builtin(
                 "array_fold() step must be a bodyful Vixen function",
             ));
         };
-        let mut env = prepared.env;
-        accumulator = match state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        })? {
+        accumulator = match eval_dependent_prepared_entry(state, node_id, prepared)? {
             EvalStep::Ready(result) => result,
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -997,17 +977,7 @@ pub(in crate::engine) fn continue_array_any_builtin(
                 "Array.any() predicate must be a bodyful Vixen function",
             ));
         };
-        let mut env = prepared.env;
-        match state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        })? {
+        match eval_dependent_prepared_entry(state, node_id, prepared)? {
             EvalStep::Ready(result) => match result.rep {
                 ValueRep::Bool(true) => return Ok(EvalStep::Ready(Value::bool(true))),
                 ValueRep::Bool(false) => {}
@@ -1066,17 +1036,7 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
                 "Array.filter_map() mapper must be a bodyful Vixen function",
             ));
         };
-        let mut env = prepared.env;
-        match state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        })? {
+        match eval_dependent_prepared_entry(state, node_id, prepared)? {
             EvalStep::Ready(result) => match &result.rep {
                 ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
                     mapped.push(project_struct_field(result, "value".to_string())?);
@@ -1329,18 +1289,8 @@ pub(in crate::engine) fn continue_search_assumption_builtin(
                 "search_assumption() resolver must be a bodyful Vixen function",
             ));
         };
-        let mut env = prepared.env;
         match state.with_branch_context(branch_context, |state| {
-            state.with_source(prepared.body_id.source(), |state| {
-                eval_dependent_expr_handle(
-                    state,
-                    node_id,
-                    ExprHandle {
-                        key: prepared.body_id,
-                    },
-                    &mut env,
-                )
-            })
+            eval_dependent_prepared_entry(state, node_id, prepared)
         }) {
             Ok(EvalStep::Ready(value)) => return Ok(EvalStep::Ready(value)),
             Ok(EvalStep::Suspended(suspension)) => {
@@ -2409,17 +2359,7 @@ fn continue_builtin_call_inner(
                     "Array.filter_map() mapper must be a bodyful Vixen function",
                 ));
             };
-            let mut env = prepared.env;
-            match state.with_source(prepared.body_id.source(), |state| {
-                eval_dependent_expr_handle(
-                    state,
-                    node_id,
-                    ExprHandle {
-                        key: prepared.body_id,
-                    },
-                    &mut env,
-                )
-            })? {
+            match eval_dependent_prepared_entry(state, node_id, prepared)? {
                 EvalStep::Ready(result) => continue_array_filter_map_builtin(
                     state,
                     node_id,
@@ -3344,17 +3284,7 @@ pub(in crate::engine) fn continue_slot_builtin(
                     "slot resolver must be a bodyful Vixen function",
                 ));
             };
-            let mut env = prepared.env;
-            match state.with_source(prepared.body_id.source(), |state| {
-                eval_dependent_expr_handle(
-                    state,
-                    node_id,
-                    ExprHandle {
-                        key: prepared.body_id,
-                    },
-                    &mut env,
-                )
-            })? {
+            match eval_dependent_prepared_entry(state, node_id, prepared)? {
                 EvalStep::Ready(value) => commit_slot_result(
                     state,
                     node_id,
@@ -3405,17 +3335,7 @@ pub(in crate::engine) fn continue_keyed_builtin(
 
     if !state.queue_child_work {
         let prepared = prepare_keyed_call(state, keyed_node_id)?;
-        let mut env = prepared.env;
-        return match state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                keyed_node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        }) {
+        return match eval_dependent_prepared_entry(state, keyed_node_id, prepared) {
             Ok(EvalStep::Ready(value)) => {
                 state
                     .scheduler
@@ -3481,19 +3401,9 @@ pub(in crate::engine) fn continue_with_assumption_builtin(
             "with_assumption() resolver must be a bodyful Vixen function",
         ));
     };
-    let mut env = prepared.env;
     let prior_branch_context = state.branch_context.clone();
     let result = state.with_branch_context(branch_context, |state| {
-        state.with_source(prepared.body_id.source(), |state| {
-            eval_dependent_expr_handle(
-                state,
-                node_id,
-                ExprHandle {
-                    key: prepared.body_id,
-                },
-                &mut env,
-            )
-        })
+        eval_dependent_prepared_entry(state, node_id, prepared)
     })?;
     match result {
         EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
