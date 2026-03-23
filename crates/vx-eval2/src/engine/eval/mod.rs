@@ -10,7 +10,7 @@ pub(in crate::engine) use resume::*;
 pub(super) struct PreparedEntry {
     pub(super) source: SourceId,
     pub(super) body_handle: ProgramNodeHandle,
-    pub(super) body: Expr,
+    pub(super) body_id: ExprId,
     pub(super) env: EvalEnv,
 }
 
@@ -102,31 +102,27 @@ fn collect_adapter_parameters(
             for statement in block.statements.iter().copied() {
                 collect_adapter_parameters_from_stmt(
                     program,
-                    &program.resolve_stmt(statement)?,
+                    program.resolve_stmt(statement)?,
                     names_by_index,
                 )?;
             }
         }
         ExprKind::Paren(paren) => {
             if let Some(inner) = paren.expr {
-                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(inner)?, names_by_index)?;
             }
         }
         ExprKind::Closure(closure) => {
             if let Some(body) = closure.body {
-                collect_adapter_parameters(program, &program.resolve_expr(body)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(body)?, names_by_index)?;
             }
         }
         ExprKind::Call(call) => {
             if let Some(callee) = call.callee {
-                collect_adapter_parameters(
-                    program,
-                    &program.resolve_expr(callee)?,
-                    names_by_index,
-                )?;
+                collect_adapter_parameters(program, program.resolve_expr(callee)?, names_by_index)?;
             }
             for arg in call.positional_args.iter().copied() {
-                collect_adapter_parameters(program, &program.resolve_expr(arg)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(arg)?, names_by_index)?;
             }
         }
         ExprKind::Array(array) => {
@@ -134,44 +130,40 @@ fn collect_adapter_parameters(
                 let handle = match item {
                     ArrayItem::Expr(expr) | ArrayItem::Spread(expr) => *expr,
                 };
-                collect_adapter_parameters(
-                    program,
-                    &program.resolve_expr(handle)?,
-                    names_by_index,
-                )?;
+                collect_adapter_parameters(program, program.resolve_expr(handle)?, names_by_index)?;
             }
         }
         ExprKind::Tuple(tuple) => {
             for item in tuple.items.iter().copied() {
-                collect_adapter_parameters(program, &program.resolve_expr(item)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(item)?, names_by_index)?;
             }
         }
         ExprKind::Range(range) => {
             if let Some(start) = range.start {
-                collect_adapter_parameters(program, &program.resolve_expr(start)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(start)?, names_by_index)?;
             }
             if let Some(end) = range.end {
-                collect_adapter_parameters(program, &program.resolve_expr(end)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(end)?, names_by_index)?;
             }
         }
         ExprKind::Map(map) => {
             for (key, value) in map.entries.iter().copied() {
-                collect_adapter_parameters(program, &program.resolve_expr(key)?, names_by_index)?;
-                collect_adapter_parameters(program, &program.resolve_expr(value)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(key)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(value)?, names_by_index)?;
             }
         }
         ExprKind::Fail(fail) => {
             if let Some(message) = fail.message {
                 collect_adapter_parameters(
                     program,
-                    &program.resolve_expr(message)?,
+                    program.resolve_expr(message)?,
                     names_by_index,
                 )?;
             }
         }
         ExprKind::Fallible(fallible) => {
             if let Some(inner) = fallible.expr {
-                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(inner)?, names_by_index)?;
             }
         }
         ExprKind::If(if_expr) => {
@@ -179,38 +171,34 @@ fn collect_adapter_parameters(
                 .into_iter()
                 .flatten()
             {
-                collect_adapter_parameters(
-                    program,
-                    &program.resolve_expr(handle)?,
-                    names_by_index,
-                )?;
+                collect_adapter_parameters(program, program.resolve_expr(handle)?, names_by_index)?;
             }
         }
         ExprKind::Match(match_expr) => {
             if let Some(scrutinee) = match_expr.scrutinee {
                 collect_adapter_parameters(
                     program,
-                    &program.resolve_expr(scrutinee)?,
+                    program.resolve_expr(scrutinee)?,
                     names_by_index,
                 )?;
             }
             for arm in match_expr.arms.iter() {
                 collect_adapter_parameters(
                     program,
-                    &program.resolve_expr(arm.body)?,
+                    program.resolve_expr(arm.body)?,
                     names_by_index,
                 )?;
             }
         }
         ExprKind::Where(where_expr) => {
             if let Some(call) = where_expr.call {
-                collect_adapter_parameters(program, &program.resolve_expr(call)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(call)?, names_by_index)?;
             }
             for binding in where_expr.keyword_bindings.iter() {
                 if let Some(expr) = binding.expr {
                     collect_adapter_parameters(
                         program,
-                        &program.resolve_expr(expr)?,
+                        program.resolve_expr(expr)?,
                         names_by_index,
                     )?;
                 }
@@ -218,16 +206,12 @@ fn collect_adapter_parameters(
         }
         ExprKind::Prefix(prefix) => {
             if let Some(inner) = prefix.expr {
-                collect_adapter_parameters(program, &program.resolve_expr(inner)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(inner)?, names_by_index)?;
             }
         }
         ExprKind::Binary(binary) => {
             for handle in [binary.lhs, binary.rhs].into_iter().flatten() {
-                collect_adapter_parameters(
-                    program,
-                    &program.resolve_expr(handle)?,
-                    names_by_index,
-                )?;
+                collect_adapter_parameters(program, program.resolve_expr(handle)?, names_by_index)?;
             }
         }
         ExprKind::InterpolatedString(interpolated) => {
@@ -235,7 +219,7 @@ fn collect_adapter_parameters(
                 let StringPart::Interpolation(expr) = part else {
                     continue;
                 };
-                collect_adapter_parameters(program, &program.resolve_expr(*expr)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(*expr)?, names_by_index)?;
             }
         }
         ExprKind::StructLiteral(struct_literal) => {
@@ -245,7 +229,7 @@ fn collect_adapter_parameters(
                         if let Some(expr) = expr {
                             collect_adapter_parameters(
                                 program,
-                                &program.resolve_expr(*expr)?,
+                                program.resolve_expr(*expr)?,
                                 names_by_index,
                             )?;
                         }
@@ -253,7 +237,7 @@ fn collect_adapter_parameters(
                     crate::program::StructLiteralPart::Spread(expr) => {
                         collect_adapter_parameters(
                             program,
-                            &program.resolve_expr(*expr)?,
+                            program.resolve_expr(*expr)?,
                             names_by_index,
                         )?;
                     }
@@ -264,7 +248,7 @@ fn collect_adapter_parameters(
             if let Some(receiver) = field.receiver {
                 collect_adapter_parameters(
                     program,
-                    &program.resolve_expr(receiver)?,
+                    program.resolve_expr(receiver)?,
                     names_by_index,
                 )?;
             }
@@ -282,15 +266,15 @@ fn collect_adapter_parameters_from_stmt(
     match stmt {
         Stmt::Let(let_stmt) => {
             if let Some(expr) = let_stmt.expr {
-                collect_adapter_parameters(program, &program.resolve_expr(expr)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(expr)?, names_by_index)?;
             }
         }
         Stmt::Expr(expr) => {
-            collect_adapter_parameters(program, &program.resolve_expr(*expr)?, names_by_index)?;
+            collect_adapter_parameters(program, program.resolve_expr(*expr)?, names_by_index)?;
         }
         Stmt::FnDecl(function) => {
             if let Some(body) = function.compiled.body {
-                collect_adapter_parameters(program, &program.resolve_expr(body)?, names_by_index)?;
+                collect_adapter_parameters(program, program.resolve_expr(body)?, names_by_index)?;
             }
         }
         Stmt::Unsupported { .. } => {}
@@ -323,8 +307,8 @@ fn function_adapter_value_for_arg(
     if !builtin_adapter_arg_index(function.name.as_ref(), arg_index) {
         return Ok(None);
     }
-    let expr = state.program.resolve_expr(arg_handle.key)?;
-    let Some(parameters) = compile_adapter_parameters(state.program, &expr, arg_handle.key)? else {
+    let expr = state.program.resolve_expr_id(arg_handle.key)?;
+    let Some(parameters) = compile_adapter_parameters(state.program, expr, expr.handle())? else {
         return Ok(None);
     };
     let function = FunctionRef::new(
@@ -332,12 +316,12 @@ fn function_adapter_value_for_arg(
         Arc::from("<adapter>"),
         parameters,
         false,
-        Some(arg_handle.key),
+        Some(expr.handle()),
         captures_from_scope(env),
         None,
     );
     Ok(Some(Value::function(function).with_provenance(
-        Provenance::literal(state.program.span_for_expr(&expr)),
+        Provenance::literal(state.program.span_for_expr(expr)),
     )))
 }
 
@@ -411,11 +395,12 @@ pub(super) fn prepare_entry(
             format!("function {entry} has no body expression"),
         )
     })?;
+    let body_id = state.program.expr_id(body)?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
         source: body.source(),
         body_handle: body,
-        body: state.program.resolve_expr(body)?,
+        body_id,
         env,
     })
 }
@@ -454,10 +439,11 @@ pub(super) fn prepare_function_call(
         env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
+    let body_id = state.program.expr_id(body)?;
     Ok(Some(PreparedEntry {
         source: body.source(),
         body_handle: body,
-        body: state.program.resolve_expr(body)?,
+        body_id,
         env,
     }))
 }
@@ -641,14 +627,15 @@ pub(super) fn eval_expr_with_node_id(
                 unreachable!()
             };
             match paren.expr {
-                Some(inner) => match eval_child_expr_handle(state, ExprHandle { key: inner }, env)?
-                {
-                    EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-                    EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                        suspension,
-                        ContinuationFrame::FinishNode { node_id, parent_id },
-                    )),
-                },
+                Some(inner) => {
+                    match eval_child_expr_handle(state, state.expr_handle_for(inner)?, env)? {
+                        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+                        EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::FinishNode { node_id, parent_id },
+                        )),
+                    }
+                }
                 None => Ok(EvalStep::Ready(Value::unit())),
             }
         }
@@ -806,9 +793,9 @@ pub(super) fn eval_child_expr_handle(
 ) -> Result<EvalStep, EvalError> {
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
-        state.emit_current_dependency(child_id, Some(state.program.span_for_handle(expr.key)));
-        let expr = state.program.resolve_expr(expr.key)?;
-        return eval_expr_with_node_id(state, child_id, &expr, env);
+        state.emit_current_dependency(child_id, Some(state.program.span_for_expr_id(expr.key)?));
+        let expr = state.program.resolve_expr_id(expr.key)?;
+        return eval_expr_with_node_id(state, child_id, expr, env);
     }
     let child_id = queue_child_expr_handle(state, expr, env);
     let resume_node = state
@@ -844,7 +831,13 @@ pub(super) fn eval_call(
             .map(|ty| state.program.resolve_type_handle(ty))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = Arc::clone(&call.positional_args);
+    let positional_args = Arc::<[ExprId]>::from(
+        call.positional_args
+            .iter()
+            .copied()
+            .map(|arg| state.program.expr_id(arg))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let callee = state.program.resolve_expr(callee)?;
     if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
@@ -1362,7 +1355,7 @@ pub(super) fn continue_call_from_args(
     call_source: SourceSpan,
     type_args: Arc<[Ty]>,
     mut args: Vec<Value>,
-    remaining_args: Arc<[ProgramNodeHandle]>,
+    remaining_args: Arc<[ExprId]>,
     mut next_arg_index: usize,
     mut env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
@@ -1449,7 +1442,14 @@ pub(super) fn continue_call_from_args(
         let mut env = prepared.env;
         return if !state.track_calls {
             state.with_source(prepared.source, |state| {
-                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                eval_dependent_expr_handle(
+                    state,
+                    node_id,
+                    ExprHandle {
+                        key: prepared.body_id,
+                    },
+                    &mut env,
+                )
             })
         } else {
             let frame = authored_call_frame(
@@ -1469,7 +1469,14 @@ pub(super) fn continue_call_from_args(
             );
             state.with_authored_call(frame, |state| {
                 state.with_source(prepared.source, |state| {
-                    eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                    eval_dependent_expr_handle(
+                        state,
+                        node_id,
+                        ExprHandle {
+                            key: prepared.body_id,
+                        },
+                        &mut env,
+                    )
                 })
             })
         };
@@ -1680,11 +1687,11 @@ pub(super) fn eval_struct_literal(
             } => {
                 remaining_parts.push(StructLiteralPart::Field {
                     name: name.clone(),
-                    expr: ExprHandle { key: *expr },
+                    expr: state.expr_handle_for(*expr)?,
                 });
             }
             crate::program::StructLiteralPart::Spread(expr) => {
-                remaining_parts.push(StructLiteralPart::Spread(ExprHandle { key: *expr }));
+                remaining_parts.push(StructLiteralPart::Spread(state.expr_handle_for(*expr)?));
             }
             crate::program::StructLiteralPart::Field { name, expr: None } => {
                 let Some(value) = env.get(name.as_ref()) else {
@@ -1774,8 +1781,8 @@ pub(super) fn eval_block(
             .statements
             .iter()
             .copied()
-            .map(|stmt| StmtHandle { key: stmt })
-            .collect(),
+            .map(|stmt| state.stmt_handle_for(stmt))
+            .collect::<Result<Vec<_>, _>>()?,
     )
 }
 
@@ -1797,12 +1804,12 @@ pub(super) fn eval_array(
                 ArrayItem::Expr(expr) => {
                     child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_handle(
                         state,
-                        ExprHandle { key: *expr },
+                        state.expr_handle_for(*expr)?,
                         env,
                     )));
                 }
                 ArrayItem::Spread(expr) => child_nodes.push(ArrayJoinItem::Spread(
-                    queue_child_expr_handle(state, ExprHandle { key: *expr }, env),
+                    queue_child_expr_handle(state, state.expr_handle_for(*expr)?, env),
                 )),
             }
         }
@@ -1836,8 +1843,8 @@ pub(super) fn eval_array(
             .items
             .iter()
             .map(|item| match item {
-                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(ExprHandle { key: *expr })),
-                ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(ExprHandle { key: *expr })),
+                ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle_for(*expr)?)),
+                ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(state.expr_handle_for(*expr)?)),
             })
             .collect::<Result<Vec<_>, EvalError>>()?,
         env.clone(),
@@ -1875,7 +1882,15 @@ pub(super) fn eval_tuple(
     if state.queue_child_work {
         let child_nodes = items
             .iter()
-            .map(|item| queue_child_expr_handle(state, ExprHandle { key: *item }, env))
+            .map(|item| {
+                queue_child_expr_handle(
+                    state,
+                    state
+                        .expr_handle_for(*item)
+                        .expect("tuple item should resolve to an expression id"),
+                    env,
+                )
+            })
             .collect::<Vec<_>>();
         if child_nodes.is_empty() {
             let provenance = Provenance::literal(state.span_for_node(tuple));
@@ -1903,8 +1918,8 @@ pub(super) fn eval_tuple(
         items
             .iter()
             .copied()
-            .map(|item| ExprHandle { key: item })
-            .collect(),
+            .map(|item| state.expr_handle_for(item))
+            .collect::<Result<Vec<_>, _>>()?,
         env.clone(),
         state.span_for_node(tuple),
     )
@@ -1928,7 +1943,7 @@ pub(super) fn eval_interpolated_string(
         .map(|part| match part {
             StringPart::Text(text) => Ok(InterpolatedPart::Text(text.clone())),
             StringPart::Interpolation(expr) => {
-                Ok(InterpolatedPart::Expr(ExprHandle { key: *expr }))
+                Ok(InterpolatedPart::Expr(state.expr_handle_for(*expr)?))
             }
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
@@ -1989,10 +2004,24 @@ pub(super) fn eval_range(
     let inclusive_end = range.inclusive_end;
 
     if state.queue_child_work {
-        let start_child =
-            start.map(|expr| queue_child_expr_handle(state, ExprHandle { key: expr }, env));
-        let end_child =
-            end.map(|expr| queue_child_expr_handle(state, ExprHandle { key: expr }, env));
+        let start_child = start.map(|expr| {
+            queue_child_expr_handle(
+                state,
+                state
+                    .expr_handle_for(expr)
+                    .expect("range start should resolve to an expression id"),
+                env,
+            )
+        });
+        let end_child = end.map(|expr| {
+            queue_child_expr_handle(
+                state,
+                state
+                    .expr_handle_for(expr)
+                    .expect("range end should resolve to an expression id"),
+                env,
+            )
+        });
         if let Some(child_id) = start_child.or(end_child) {
             return Ok(wait_on_child_dependency(
                 state,
@@ -2016,8 +2045,8 @@ pub(super) fn eval_range(
         )));
     }
 
-    let start_handle = start.map(|expr| ExprHandle { key: expr });
-    let end_handle = end.map(|expr| ExprHandle { key: expr });
+    let start_handle = start.map(|expr| state.expr_handle_for(expr)).transpose()?;
+    let end_handle = end.map(|expr| state.expr_handle_for(expr)).transpose()?;
     if let Some(start_handle) = start_handle {
         match eval_dependent_expr_handle(state, node_id, start_handle, env)? {
             EvalStep::Ready(start) => continue_range_end(
@@ -2071,7 +2100,7 @@ pub(super) fn eval_map(
         .entries
         .iter()
         .copied()
-        .map(|(key, value)| Ok((ExprHandle { key }, ExprHandle { key: value })))
+        .map(|(key, value)| Ok((state.expr_handle_for(key)?, state.expr_handle_for(value)?)))
         .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
         state,
@@ -2098,11 +2127,9 @@ pub(super) fn eval_fail(
     let failure = match eval_dependent_expr_handle(
         state,
         node_id,
-        ExprHandle {
-            key: fail.message.ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
-            })?,
-        },
+        state.expr_handle_for(fail.message.ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
+        })?)?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2188,7 +2215,7 @@ pub(super) fn eval_fallible(
             "fallible expression has no operand",
         ));
     };
-    match eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, env) {
+    match eval_dependent_expr_handle(state, node_id, state.expr_handle_for(expr)?, env) {
         Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
         Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
             suspension,
@@ -2241,11 +2268,9 @@ pub(super) fn eval_if(
     let condition = match eval_dependent_expr_handle(
         state,
         node_id,
-        ExprHandle {
-            key: if_expr.condition.ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
-            })?,
-        },
+        state.expr_handle_for(if_expr.condition.ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
+        })?)?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2255,16 +2280,12 @@ pub(super) fn eval_if(
                 ContinuationFrame::IfCondition {
                     node_id,
                     parent_id,
-                    then_branch: ExprHandle {
-                        key: if_expr.then_branch.ok_or_else(|| {
-                            EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                        })?,
-                    },
-                    else_branch: ExprHandle {
-                        key: if_expr.else_branch.ok_or_else(|| {
-                            EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-                        })?,
-                    },
+                    then_branch: state.expr_handle_for(if_expr.then_branch.ok_or_else(
+                        || EvalError::new(EvalErrorKind::Internal, "if branch is missing"),
+                    )?)?,
+                    else_branch: state.expr_handle_for(if_expr.else_branch.ok_or_else(
+                        || EvalError::new(EvalErrorKind::Internal, "if branch is missing"),
+                    )?)?,
                     env: env.clone(),
                 },
             ));
@@ -2282,7 +2303,7 @@ pub(super) fn eval_if(
         if_expr.else_branch
     }
     .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?;
-    match eval_dependent_expr_handle(state, node_id, ExprHandle { key: branch }, env)? {
+    match eval_dependent_expr_handle(state, node_id, state.expr_handle_for(branch)?, env)? {
         EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
@@ -2306,11 +2327,9 @@ pub(super) fn eval_match(
     let scrutinee = match eval_dependent_expr_handle(
         state,
         node_id,
-        ExprHandle {
-            key: match_expr.scrutinee.ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
-            })?,
-        },
+        state.expr_handle_for(match_expr.scrutinee.ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
+        })?)?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2343,7 +2362,7 @@ pub(super) fn continue_match_arms(
             return match eval_dependent_expr_handle(
                 state,
                 node_id,
-                ExprHandle { key: arm.body },
+                state.expr_handle_for(arm.body)?,
                 &mut arm_env,
             )? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
@@ -2386,7 +2405,7 @@ pub(super) fn eval_where(
     for binding in where_expr.keyword_bindings.iter() {
         let name = binding.name.clone();
         match binding.expr {
-            Some(expr) => remaining_keyword_bindings.push((name, ExprHandle { key: expr })),
+            Some(expr) => remaining_keyword_bindings.push((name, state.expr_handle_for(expr)?)),
             None => {
                 let Some(value) = env.get(name.as_ref()) else {
                     return Err(EvalError::new(
@@ -2402,7 +2421,7 @@ pub(super) fn eval_where(
         state,
         node_id,
         parent_id,
-        ExprHandle { key: call },
+        state.expr_handle_for(call)?,
         keyword_bindings,
         remaining_keyword_bindings,
         env.clone(),
@@ -2449,7 +2468,7 @@ fn eval_call_with_keyword_bindings(
     env: EvalEnv,
     keyword_bindings: Vec<(Arc<str>, Value)>,
 ) -> Result<EvalStep, EvalError> {
-    let call = state.program.resolve_expr(call.key)?;
+    let call = state.program.resolve_expr_id(call.key)?;
     let ExprKind::Call(call) = call.kind() else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
@@ -2467,7 +2486,13 @@ fn eval_call_with_keyword_bindings(
             .map(|ty| state.program.resolve_type_handle(ty))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = Arc::clone(&call.positional_args);
+    let positional_args = Arc::<[ExprId]>::from(
+        call.positional_args
+            .iter()
+            .copied()
+            .map(|arg| state.program.expr_id(arg))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let callee = state.program.resolve_expr(callee)?;
     let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
         return Err(EvalError::new(
@@ -2548,7 +2573,7 @@ pub(super) fn eval_field(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let receiver = match eval_child_expr(
         state,
-        &state.program.resolve_expr(field.receiver.ok_or_else(|| {
+        state.program.resolve_expr(field.receiver.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
         })?)?,
         env,
@@ -2621,7 +2646,7 @@ pub(super) fn eval_binary(
             parent_id,
             lhs,
             operator,
-            ExprHandle { key: rhs },
+            state.expr_handle_for(rhs)?,
             env.clone(),
         ),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
@@ -2630,7 +2655,7 @@ pub(super) fn eval_binary(
                 node_id,
                 parent_id,
                 operator,
-                rhs: ExprHandle { key: rhs },
+                rhs: state.expr_handle_for(rhs)?,
                 env: env.clone(),
             },
         )),
@@ -2678,7 +2703,7 @@ pub(super) fn continue_block_statements(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = statements.into_iter();
     while let Some(statement_handle) = remaining.next() {
-        let statement = state.program.resolve_stmt(statement_handle.key)?;
+        let statement = state.program.resolve_stmt_id(statement_handle.key)?;
         match statement {
             Stmt::Let(let_stmt) => {
                 let pattern = let_stmt.pattern.clone().ok_or_else(|| {
@@ -2688,7 +2713,12 @@ pub(super) fn continue_block_statements(
                     EvalError::new(EvalErrorKind::Internal, "let statement has no value")
                 })?;
                 match state.with_source(statement_handle.key.source(), |state| {
-                    eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, &mut scope)
+                    eval_dependent_expr_handle(
+                        state,
+                        node_id,
+                        state.expr_handle_for(expr)?,
+                        &mut scope,
+                    )
                 })? {
                     EvalStep::Ready(value) => {
                         bind_let_pattern(&mut scope, &pattern, value)?;
@@ -2716,7 +2746,12 @@ pub(super) fn continue_block_statements(
                 env_mut(&mut scope).insert(name, value);
             }
             Stmt::Expr(expr) => match state.with_source(statement_handle.key.source(), |state| {
-                eval_dependent_expr_handle(state, node_id, ExprHandle { key: expr }, &mut scope)
+                eval_dependent_expr_handle(
+                    state,
+                    node_id,
+                    state.expr_handle_for(*expr)?,
+                    &mut scope,
+                )
             })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
@@ -3169,9 +3204,12 @@ pub(super) fn queue_child_expr_handle(
     let child_id = state.alloc_node_id();
     let resolved = state
         .program
-        .resolve_expr(expr.key)
+        .resolve_expr_id(expr.key)
         .expect("queued child expression handle should resolve");
-    let resolved_source = state.program.span_for_handle(expr.key);
+    let resolved_source = state
+        .program
+        .span_for_expr_id(expr.key)
+        .expect("queued child expression handle should have a source span");
     state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
         node_id: child_id,
@@ -3216,18 +3254,22 @@ pub(super) fn queue_child_prepared_entry(
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let resolved_source = state.program.span_for_handle(prepared.body_handle);
+    let body = state
+        .program
+        .resolve_expr_id(prepared.body_id)
+        .expect("prepared entry body id should resolve");
     state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
         node_id: child_id,
         parent_id: state.current_parent(),
         kind: EvalNodeKind::Expr {
-            kind: expr_kind(&prepared.body),
+            kind: expr_kind(body),
         },
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
         expr: ExprHandle {
-            key: prepared.body_handle,
+            key: prepared.body_id,
         },
         env: prepared.env,
         call_stack: if state.track_calls {

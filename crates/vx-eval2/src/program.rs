@@ -155,6 +155,30 @@ impl ProgramNodeHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ExprId {
+    source: u32,
+    index: u32,
+}
+
+impl ExprId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct StmtId {
+    source: u32,
+    index: u32,
+}
+
+impl StmtId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledParameter {
     pub(crate) label: Arc<str>,
@@ -553,8 +577,10 @@ struct CompiledProgramSource {
     parse: Parse,
     functions_by_name: BTreeMap<String, CompiledFunction>,
     functions_by_definition: BTreeMap<ProgramNodeHandle, (Arc<str>, CompiledFunction)>,
-    exprs: BTreeMap<ProgramNodeHandle, Expr>,
-    stmts: BTreeMap<ProgramNodeHandle, Stmt>,
+    exprs: Vec<Expr>,
+    expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
+    stmts: Vec<Stmt>,
+    stmt_ids: BTreeMap<ProgramNodeHandle, StmtId>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
     parse_error: Option<EvalError>,
     #[cfg(test)]
@@ -663,12 +689,30 @@ impl CompiledProgram {
             ))
     }
 
-    pub(crate) fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<Expr, EvalError> {
-        self.source(handle.source())?.resolve_expr(handle)
+    pub(crate) fn expr_id(&self, handle: ProgramNodeHandle) -> Result<ExprId, EvalError> {
+        self.source(handle.source())?.expr_id(handle)
     }
 
-    pub(crate) fn resolve_stmt(&self, handle: ProgramNodeHandle) -> Result<Stmt, EvalError> {
-        self.source(handle.source())?.resolve_stmt(handle)
+    pub(crate) fn stmt_id(&self, handle: ProgramNodeHandle) -> Result<StmtId, EvalError> {
+        self.source(handle.source())?.stmt_id(handle)
+    }
+
+    pub(crate) fn resolve_expr_id(&self, id: ExprId) -> Result<&Expr, EvalError> {
+        self.source(id.source())?.resolve_expr(id)
+    }
+
+    pub(crate) fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<&Expr, EvalError> {
+        let id = self.expr_id(handle)?;
+        self.resolve_expr_id(id)
+    }
+
+    pub(crate) fn resolve_stmt_id(&self, id: StmtId) -> Result<&Stmt, EvalError> {
+        self.source(id.source())?.resolve_stmt(id)
+    }
+
+    pub(crate) fn resolve_stmt(&self, handle: ProgramNodeHandle) -> Result<&Stmt, EvalError> {
+        let id = self.stmt_id(handle)?;
+        self.resolve_stmt_id(id)
     }
 
     pub(crate) fn span_for_handle(&self, handle: ProgramNodeHandle) -> SourceSpan {
@@ -685,6 +729,10 @@ impl CompiledProgram {
 
     pub(crate) fn span_for_expr(&self, expr: &Expr) -> SourceSpan {
         self.span_for_handle(expr.handle())
+    }
+
+    pub(crate) fn span_for_expr_id(&self, id: ExprId) -> Result<SourceSpan, EvalError> {
+        Ok(self.span_for_expr(self.resolve_expr_id(id)?))
     }
 
     pub(crate) fn span_for_token_ref(&self, token: &Token) -> SourceSpan {
@@ -787,8 +835,10 @@ impl CompiledProgramSource {
 
         let mut functions_by_name = BTreeMap::new();
         let mut functions_by_definition = BTreeMap::new();
-        let mut exprs = BTreeMap::new();
-        let mut stmts = BTreeMap::new();
+        let mut exprs = Vec::new();
+        let mut expr_ids = BTreeMap::new();
+        let mut stmts = Vec::new();
+        let mut stmt_ids = BTreeMap::new();
         let mut type_nodes = BTreeMap::new();
         let parse_error = if parse.errors().is_empty() {
             let root = SourceFile::cast_root(parse.syntax());
@@ -812,7 +862,9 @@ impl CompiledProgramSource {
                 root.syntax(),
                 &mut path,
                 &mut exprs,
+                &mut expr_ids,
                 &mut stmts,
+                &mut stmt_ids,
                 &mut type_nodes,
             ) {
                 Ok(()) => None,
@@ -832,7 +884,9 @@ impl CompiledProgramSource {
             functions_by_name,
             functions_by_definition,
             exprs,
+            expr_ids,
             stmts,
+            stmt_ids,
             type_nodes,
             parse_error,
             #[cfg(test)]
@@ -853,9 +907,9 @@ impl CompiledProgramSource {
         Ok(self.functions_by_definition.get(&handle).cloned())
     }
 
-    fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<Expr, EvalError> {
+    fn expr_id(&self, handle: ProgramNodeHandle) -> Result<ExprId, EvalError> {
         self.ensure_parsed()?;
-        self.exprs.get(&handle).cloned().ok_or_else(|| {
+        self.expr_ids.get(&handle).copied().ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::Internal,
                 format!("expression at range {:?} was not found", handle.to_range()),
@@ -863,12 +917,32 @@ impl CompiledProgramSource {
         })
     }
 
-    fn resolve_stmt(&self, handle: ProgramNodeHandle) -> Result<Stmt, EvalError> {
+    fn stmt_id(&self, handle: ProgramNodeHandle) -> Result<StmtId, EvalError> {
         self.ensure_parsed()?;
-        self.stmts.get(&handle).cloned().ok_or_else(|| {
+        self.stmt_ids.get(&handle).copied().ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::Internal,
                 format!("statement at range {:?} was not found", handle.to_range()),
+            )
+        })
+    }
+
+    fn resolve_expr(&self, id: ExprId) -> Result<&Expr, EvalError> {
+        self.ensure_parsed()?;
+        self.exprs.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("expression id {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_stmt(&self, id: StmtId) -> Result<&Stmt, EvalError> {
+        self.ensure_parsed()?;
+        self.stmts.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("statement id {:?} was not found", id),
             )
         })
     }
@@ -1016,17 +1090,29 @@ fn index_nodes(
     line_index: &ParserLineIndex,
     node: &SyntaxNode,
     path: &mut Vec<u32>,
-    exprs: &mut BTreeMap<ProgramNodeHandle, Expr>,
-    stmts: &mut BTreeMap<ProgramNodeHandle, Stmt>,
+    exprs: &mut Vec<Expr>,
+    expr_ids: &mut BTreeMap<ProgramNodeHandle, ExprId>,
+    stmts: &mut Vec<Stmt>,
+    stmt_ids: &mut BTreeMap<ProgramNodeHandle, StmtId>,
     type_nodes: &mut BTreeMap<ProgramNodeHandle, IndexedNode>,
 ) -> Result<(), EvalError> {
     if let Some(expr) = ParserExpr::cast(node.clone()) {
         let compiled = compile_expr(source, source_id, line_index, &expr)?;
-        exprs.insert(compiled.handle(), compiled);
+        let id = ExprId {
+            source: source.0,
+            index: exprs.len() as u32,
+        };
+        expr_ids.insert(compiled.handle(), id);
+        exprs.push(compiled);
     }
     if let Some(stmt) = ParserStmt::cast(node.clone()) {
         let compiled = compile_stmt(source, source_id, line_index, &stmt)?;
-        stmts.insert(compiled.handle(), compiled);
+        let id = StmtId {
+            source: source.0,
+            index: stmts.len() as u32,
+        };
+        stmt_ids.insert(compiled.handle(), id);
+        stmts.push(compiled);
     }
     if let Some(ty) = Type::cast(node.clone()) {
         type_nodes.insert(
@@ -1039,7 +1125,8 @@ fn index_nodes(
     for (index, child) in node.children().enumerate() {
         path.push(index as u32);
         index_nodes(
-            source, source_id, line_index, &child, path, exprs, stmts, type_nodes,
+            source, source_id, line_index, &child, path, exprs, expr_ids, stmts, stmt_ids,
+            type_nodes,
         )?;
         path.pop();
     }

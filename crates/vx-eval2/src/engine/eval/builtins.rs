@@ -811,7 +811,14 @@ pub(in crate::engine) fn continue_array_find_builtin(
         };
         let mut env = prepared.env;
         let matched = match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         })? {
             EvalStep::Ready(result) => result,
             EvalStep::Suspended(suspension) => {
@@ -877,7 +884,14 @@ pub(in crate::engine) fn continue_array_fold_builtin(
         };
         let mut env = prepared.env;
         accumulator = match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         })? {
             EvalStep::Ready(result) => result,
             EvalStep::Suspended(suspension) => {
@@ -985,7 +999,14 @@ pub(in crate::engine) fn continue_array_any_builtin(
         };
         let mut env = prepared.env;
         match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         })? {
             EvalStep::Ready(result) => match result.rep {
                 ValueRep::Bool(true) => return Ok(EvalStep::Ready(Value::bool(true))),
@@ -1047,7 +1068,14 @@ pub(in crate::engine) fn continue_array_filter_map_builtin(
         };
         let mut env = prepared.env;
         match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         })? {
             EvalStep::Ready(result) => match &result.rep {
                 ValueRep::Struct(option) if option.type_name.as_ref() == "Some" => {
@@ -1304,7 +1332,14 @@ pub(in crate::engine) fn continue_search_assumption_builtin(
         let mut env = prepared.env;
         match state.with_branch_context(branch_context, |state| {
             state.with_source(prepared.source, |state| {
-                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                eval_dependent_expr_handle(
+                    state,
+                    node_id,
+                    ExprHandle {
+                        key: prepared.body_id,
+                    },
+                    &mut env,
+                )
             })
         }) {
             Ok(EvalStep::Ready(value)) => return Ok(EvalStep::Ready(value)),
@@ -2376,7 +2411,14 @@ fn continue_builtin_call_inner(
             };
             let mut env = prepared.env;
             match state.with_source(prepared.source, |state| {
-                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                eval_dependent_expr_handle(
+                    state,
+                    node_id,
+                    ExprHandle {
+                        key: prepared.body_id,
+                    },
+                    &mut env,
+                )
             })? {
                 EvalStep::Ready(result) => continue_array_filter_map_builtin(
                     state,
@@ -3304,7 +3346,14 @@ pub(in crate::engine) fn continue_slot_builtin(
             };
             let mut env = prepared.env;
             match state.with_source(prepared.source, |state| {
-                eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                eval_dependent_expr_handle(
+                    state,
+                    node_id,
+                    ExprHandle {
+                        key: prepared.body_id,
+                    },
+                    &mut env,
+                )
             })? {
                 EvalStep::Ready(value) => commit_slot_result(
                     state,
@@ -3358,7 +3407,14 @@ pub(in crate::engine) fn continue_keyed_builtin(
         let prepared = prepare_keyed_call(state, keyed_node_id)?;
         let mut env = prepared.env;
         return match state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, keyed_node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                keyed_node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         }) {
             Ok(EvalStep::Ready(value)) => {
                 state
@@ -3429,7 +3485,14 @@ pub(in crate::engine) fn continue_with_assumption_builtin(
     let prior_branch_context = state.branch_context.clone();
     let result = state.with_branch_context(branch_context, |state| {
         state.with_source(prepared.source, |state| {
-            eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+            eval_dependent_expr_handle(
+                state,
+                node_id,
+                ExprHandle {
+                    key: prepared.body_id,
+                },
+                &mut env,
+            )
         })
     })?;
     match result {

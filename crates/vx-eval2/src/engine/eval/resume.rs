@@ -995,7 +995,7 @@ pub(in crate::engine) fn resume_frame(
         } => {
             let result = match input {
                 Ok(value) => {
-                    let expr = state.program.resolve_expr(call.key)?;
+                    let expr = state.program.resolve_expr_id(call.key)?;
                     let ExprKind::Call(_) = expr.kind() else {
                         return Err(EvalError::new(
                             EvalErrorKind::Internal,

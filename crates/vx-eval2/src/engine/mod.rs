@@ -19,10 +19,10 @@ use crate::{
     decode::{StructuredFormat, parse_blob_as_value},
     program::{
         ArrayExpr, ArrayItem, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, CompiledParameter,
-        CompiledProgram, EvalProgram, Expr, ExprKind, FailExpr, FallibleExpr, FieldExpr, IfExpr,
-        InterpolatedStringExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, PathLiteralExpr,
-        PrefixExpr, ProgramNodeHandle, RangeExpr, Stmt, StringPart, StructLiteralExpr, Token,
-        TupleExpr, WhereExpr,
+        CompiledProgram, EvalProgram, Expr, ExprId, ExprKind, FailExpr, FallibleExpr, FieldExpr,
+        IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr,
+        PathLiteralExpr, PrefixExpr, ProgramNodeHandle, RangeExpr, Stmt, StmtId, StringPart,
+        StructLiteralExpr, Token, TupleExpr, WhereExpr,
     },
 };
 

@@ -27,12 +27,12 @@ pub(super) struct EvalSuspension {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ExprHandle {
-    pub(super) key: ProgramNodeHandle,
+    pub(super) key: ExprId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StmtHandle {
-    pub(super) key: ProgramNodeHandle,
+    pub(super) key: StmtId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,7 @@ pub(super) enum ContinuationFrame {
         type_args: Arc<[Ty]>,
         env: EvalEnv,
         args: Vec<Value>,
-        remaining_args: Arc<[ProgramNodeHandle]>,
+        remaining_args: Arc<[ExprId]>,
         next_arg_index: usize,
     },
     CallAfterArg {
@@ -152,7 +152,7 @@ pub(super) enum ContinuationFrame {
         call_source: SourceSpan,
         type_args: Arc<[Ty]>,
         args: Vec<Value>,
-        remaining_args: Arc<[ProgramNodeHandle]>,
+        remaining_args: Arc<[ExprId]>,
         next_arg_index: usize,
         env: EvalEnv,
     },
@@ -488,7 +488,30 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
     }
 
     pub(super) fn expr_handle(&self, expr: &Expr) -> ExprHandle {
-        ExprHandle { key: expr.handle() }
+        ExprHandle {
+            key: self
+                .program
+                .expr_id(expr.handle())
+                .expect("expression handle should resolve to an expression id"),
+        }
+    }
+
+    pub(super) fn expr_handle_for(
+        &self,
+        handle: ProgramNodeHandle,
+    ) -> Result<ExprHandle, EvalError> {
+        Ok(ExprHandle {
+            key: self.program.expr_id(handle)?,
+        })
+    }
+
+    pub(super) fn stmt_handle_for(
+        &self,
+        handle: ProgramNodeHandle,
+    ) -> Result<StmtHandle, EvalError> {
+        Ok(StmtHandle {
+            key: self.program.stmt_id(handle)?,
+        })
     }
 
     pub(super) fn emit(
@@ -697,7 +720,7 @@ pub(super) fn eval_dependent_expr_handle(
     handle: ExprHandle,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let expr = state.program.resolve_expr(handle.key)?;
+    let expr = state.program.resolve_expr_id(handle.key)?;
     state.with_source(handle.key.source(), |state| {
         eval_dependent_expr(state, node_id, &expr, env)
     })

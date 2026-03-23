@@ -2306,7 +2306,8 @@ pub(super) fn execute_ready_task(
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
-            let body_kind = expr_kind(&prepared.body);
+            let body = state.program.resolve_expr_id(prepared.body_id)?;
+            let body_kind = expr_kind(body);
             let body_source = state.program.span_for_handle(prepared.body_handle);
             state
                 .scheduler
@@ -2339,7 +2340,7 @@ pub(super) fn execute_ready_task(
             };
             let scheduled = ScheduledExpr {
                 expr: ExprHandle {
-                    key: prepared.body_handle,
+                    key: prepared.body_id,
                 },
                 env: prepared.env,
                 call_stack,
@@ -2374,15 +2375,15 @@ pub(super) fn execute_ready_task(
         }
         ReadyTask::EvaluateExpr(scheduled) => {
             let mut env = scheduled.env;
-            let expr = state.program.resolve_expr(scheduled.expr.key)?;
+            let expr = state.program.resolve_expr_id(scheduled.expr.key)?;
             let step = if scheduled.call_stack.is_empty() {
                 state.with_source(scheduled.expr.key.source(), |state| {
-                    eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
+                    eval_expr_with_node_id(state, record.work.node_id, expr, &mut env)
                 })
             } else {
                 state.with_call_stack(scheduled.call_stack, |state| {
                     state.with_source(scheduled.expr.key.source(), |state| {
-                        eval_expr_with_node_id(state, record.work.node_id, &expr, &mut env)
+                        eval_expr_with_node_id(state, record.work.node_id, expr, &mut env)
                     })
                 })
             };
@@ -2423,7 +2424,14 @@ pub(super) fn execute_ready_task(
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
                 let mut env = prepared.env;
                 match state.with_source(prepared.source, |state| {
-                    eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                    eval_dependent_expr_handle(
+                        state,
+                        node_id,
+                        ExprHandle {
+                            key: prepared.body_id,
+                        },
+                        &mut env,
+                    )
                 })? {
                     EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
                     EvalStep::Suspended(suspension) => {
@@ -2482,7 +2490,14 @@ pub(super) fn execute_ready_task(
                 let mut env = prepared.env;
                 let step = state.with_authored_call(frame, |state| {
                     state.with_source(prepared.source, |state| {
-                        eval_dependent_expr(state, node_id, &prepared.body, &mut env)
+                        eval_dependent_expr_handle(
+                            state,
+                            node_id,
+                            ExprHandle {
+                                key: prepared.body_id,
+                            },
+                            &mut env,
+                        )
                     })
                 });
                 invocation = state.work_invocation.clone();
