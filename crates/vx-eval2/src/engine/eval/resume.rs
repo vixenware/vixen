@@ -878,34 +878,24 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::WhereAfterKeyword {
+        ContinuationFrame::Where {
             node_id,
             parent_id,
-            call,
-            pending_keyword_name,
-            mut keyword_bindings,
-            remaining_keyword_bindings,
-            env,
+            mut where_state,
         } => {
             let result = match input {
                 Ok(value) => {
-                    let expr = state.program.resolve_expr_id(call.key)?;
-                    let ExprKind::Call(_) = expr.kind() else {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            "where continuation expected a call expression",
-                        ));
-                    };
-                    keyword_bindings.push((pending_keyword_name, value));
-                    continue_where_keyword_bindings(
-                        state,
-                        node_id,
-                        parent_id,
-                        call,
-                        keyword_bindings,
-                        remaining_keyword_bindings,
-                        env,
-                    )
+                    let pending_keyword_name =
+                        where_state.pending_keyword_name.take().ok_or_else(|| {
+                            EvalError::new(
+                                EvalErrorKind::Internal,
+                                "where continuation is missing its pending keyword binding name",
+                            )
+                        })?;
+                    where_state
+                        .keyword_bindings
+                        .push((pending_keyword_name, value));
+                    continue_where(state, node_id, parent_id, where_state)
                 }
                 Err(error) => Err(error),
             };

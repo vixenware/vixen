@@ -137,6 +137,15 @@ pub(super) struct IfState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WhereState {
+    pub(super) call: ExprHandle,
+    pub(super) pending_keyword_name: Option<Arc<str>>,
+    pub(super) keyword_bindings: Vec<(Arc<str>, Value)>,
+    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
+    pub(super) env: EvalEnv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -309,15 +318,6 @@ pub(super) enum ContinuationFrame {
         arms: Arc<[MatchArmPlan]>,
         env: EvalEnv,
     },
-    WhereAfterKeyword {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        call: ExprHandle,
-        pending_keyword_name: Arc<str>,
-        keyword_bindings: Vec<(Arc<str>, Value)>,
-        remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
-        env: EvalEnv,
-    },
     PrefixOperand {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -386,6 +386,11 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         if_state: IfState,
+    },
+    Where {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        where_state: WhereState,
     },
 }
 

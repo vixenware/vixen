@@ -2667,47 +2667,52 @@ pub(super) fn eval_where(
             }
         }
     }
-    continue_where_keyword_bindings(
+    continue_where(
         state,
         node_id,
         parent_id,
-        state.expr_handle_for(call)?,
-        keyword_bindings,
-        remaining_keyword_bindings,
-        env.clone(),
+        WhereState {
+            call: state.expr_handle_for(call)?,
+            pending_keyword_name: None,
+            keyword_bindings,
+            remaining_keyword_bindings,
+            env: env.clone(),
+        },
     )
 }
 
-pub(super) fn continue_where_keyword_bindings(
+pub(super) fn continue_where(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    call_expr: ExprHandle,
-    mut keyword_bindings: Vec<(Arc<str>, Value)>,
-    remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
-    mut env: EvalEnv,
+    mut where_state: WhereState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_keyword_bindings.into_iter();
+    let mut remaining = where_state.remaining_keyword_bindings.into_iter();
     while let Some((name, expr_handle)) = remaining.next() {
-        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut env)? {
-            EvalStep::Ready(value) => keyword_bindings.push((name, value)),
+        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut where_state.env)? {
+            EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
             EvalStep::Suspended(suspension) => {
+                where_state.pending_keyword_name = Some(name);
+                where_state.remaining_keyword_bindings = remaining.collect();
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::WhereAfterKeyword {
+                    ContinuationFrame::Where {
                         node_id,
                         parent_id,
-                        call: call_expr,
-                        pending_keyword_name: name,
-                        keyword_bindings,
-                        remaining_keyword_bindings: remaining.collect(),
-                        env,
+                        where_state,
                     },
                 ));
             }
         }
     }
-    eval_call_with_keyword_bindings(state, node_id, parent_id, call_expr, env, keyword_bindings)
+    eval_call_with_keyword_bindings(
+        state,
+        node_id,
+        parent_id,
+        where_state.call,
+        where_state.env,
+        where_state.keyword_bindings,
+    )
 }
 
 fn eval_call_with_keyword_bindings(
