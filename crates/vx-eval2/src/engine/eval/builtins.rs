@@ -3,6 +3,7 @@ use std::path::{Component, MAIN_SEPARATOR, Path as FsPath, PathBuf};
 use facet_value::{VArray, VObject, Value as FacetValue};
 
 use super::*;
+use crate::value::compare_values;
 
 pub(in crate::engine) fn slot_builtin_action(
     callee_name: &str,
@@ -2509,7 +2510,8 @@ fn continue_builtin_call_inner(
                 ));
             }
             match collect_stream_join_items(state, &mut items)? {
-                StreamJoinState::Ready(values) => {
+                StreamJoinState::Ready(mut values) => {
+                    values.sort_by(compare_values);
                     let meta = aggregate_child_meta(args[0].meta.provenance.clone(), values.iter());
                     Ok(ready_builtin_value(Value::array(values).with_meta(meta)))
                 }

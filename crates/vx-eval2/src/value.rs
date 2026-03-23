@@ -1,6 +1,6 @@
 //! Runtime value payloads.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use im::OrdMap;
 
@@ -119,6 +119,120 @@ impl Value {
             _ => None,
         }
     }
+}
+
+pub(crate) fn compare_values(lhs: &Value, rhs: &Value) -> Ordering {
+    compare_value_reps(&lhs.rep, &rhs.rep)
+}
+
+pub(crate) fn compare_value_reps(lhs: &ValueRep, rhs: &ValueRep) -> Ordering {
+    let tag_order = value_rep_tag(lhs).cmp(&value_rep_tag(rhs));
+    if tag_order != Ordering::Equal {
+        return tag_order;
+    }
+
+    match (lhs, rhs) {
+        (ValueRep::Unit, ValueRep::Unit) => Ordering::Equal,
+        (ValueRep::Bool(lhs), ValueRep::Bool(rhs)) => lhs.cmp(rhs),
+        (ValueRep::U64(lhs), ValueRep::U64(rhs)) => lhs.cmp(rhs),
+        (ValueRep::String(lhs), ValueRep::String(rhs)) => lhs.cmp(rhs),
+        (ValueRep::Array(lhs), ValueRep::Array(rhs))
+        | (ValueRep::Tuple(lhs), ValueRep::Tuple(rhs)) => compare_value_slices(lhs, rhs),
+        (ValueRep::Range(lhs), ValueRep::Range(rhs)) => lhs
+            .start
+            .cmp(&rhs.start)
+            .then_with(|| lhs.end.cmp(&rhs.end))
+            .then_with(|| lhs.inclusive_end.cmp(&rhs.inclusive_end)),
+        (ValueRep::Map(lhs), ValueRep::Map(rhs)) => {
+            compare_value_pair_slices(&lhs.entries, &rhs.entries)
+        }
+        (ValueRep::Struct(lhs), ValueRep::Struct(rhs)) => lhs
+            .type_name
+            .cmp(&rhs.type_name)
+            .then_with(|| compare_named_value_slices(&lhs.fields, &rhs.fields)),
+        (ValueRep::External(lhs), ValueRep::External(rhs)) => lhs
+            .kind
+            .cmp(&rhs.kind)
+            .then_with(|| lhs.descriptor.cmp(&rhs.descriptor)),
+        (ValueRep::Function(lhs), ValueRep::Function(rhs)) => lhs
+            .source_id
+            .cmp(&rhs.source_id)
+            .then_with(|| lhs.name.cmp(&rhs.name))
+            .then_with(|| lhs.has_keyword_parameters.cmp(&rhs.has_keyword_parameters))
+            .then_with(|| lhs.body.cmp(&rhs.body))
+            .then_with(|| lhs.self_name.cmp(&rhs.self_name))
+            .then_with(|| compare_compiled_parameters(&lhs.parameters, &rhs.parameters))
+            .then_with(|| compare_named_value_slices(&lhs.captures, &rhs.captures)),
+        _ => Ordering::Equal,
+    }
+}
+
+fn value_rep_tag(value: &ValueRep) -> u8 {
+    match value {
+        ValueRep::Unit => 0,
+        ValueRep::Bool(_) => 1,
+        ValueRep::U64(_) => 2,
+        ValueRep::String(_) => 3,
+        ValueRep::Array(_) => 4,
+        ValueRep::Tuple(_) => 5,
+        ValueRep::Range(_) => 6,
+        ValueRep::Map(_) => 7,
+        ValueRep::Struct(_) => 8,
+        ValueRep::External(_) => 9,
+        ValueRep::Function(_) => 10,
+    }
+}
+
+fn compare_value_slices(lhs: &[Value], rhs: &[Value]) -> Ordering {
+    for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+        let item_order = compare_values(lhs, rhs);
+        if item_order != Ordering::Equal {
+            return item_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_value_pair_slices(lhs: &[(Value, Value)], rhs: &[(Value, Value)]) -> Ordering {
+    for ((lhs_key, lhs_value), (rhs_key, rhs_value)) in lhs.iter().zip(rhs.iter()) {
+        let key_order = compare_values(lhs_key, rhs_key);
+        if key_order != Ordering::Equal {
+            return key_order;
+        }
+        let value_order = compare_values(lhs_value, rhs_value);
+        if value_order != Ordering::Equal {
+            return value_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_named_value_slices(lhs: &[(Arc<str>, Value)], rhs: &[(Arc<str>, Value)]) -> Ordering {
+    for ((lhs_name, lhs_value), (rhs_name, rhs_value)) in lhs.iter().zip(rhs.iter()) {
+        let name_order = lhs_name.cmp(rhs_name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+        let value_order = compare_values(lhs_value, rhs_value);
+        if value_order != Ordering::Equal {
+            return value_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_compiled_parameters(lhs: &[CompiledParameter], rhs: &[CompiledParameter]) -> Ordering {
+    for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+        let label_order = lhs.label.cmp(&rhs.label);
+        if label_order != Ordering::Equal {
+            return label_order;
+        }
+        let name_order = lhs.name.cmp(&rhs.name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
 }
 
 /// The payload of a successful runtime value.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::value::compare_value_reps;
 use vx_parser::{FallibleExpr, MatchExpr, PathLiteralExpr};
 
 mod builtins;
@@ -3620,14 +3621,7 @@ fn apply_u64_arithmetic_operator(
 }
 
 fn values_order(lhs: &ValueRep, rhs: &ValueRep) -> Result<std::cmp::Ordering, EvalError> {
-    match (lhs, rhs) {
-        (ValueRep::U64(lhs), ValueRep::U64(rhs)) => Ok(lhs.cmp(rhs)),
-        (ValueRep::String(lhs), ValueRep::String(rhs)) => Ok(lhs.cmp(rhs)),
-        _ => Err(EvalError::new(
-            EvalErrorKind::TypeError,
-            format!("cannot compare {lhs:?} and {rhs:?} with ordering operators"),
-        )),
-    }
+    Ok(compare_value_reps(lhs, rhs))
 }
 
 fn short_circuit_binary(lhs: &Value, operator: SyntaxKind) -> Result<Option<Value>, EvalError> {

@@ -394,7 +394,8 @@ pub(in crate::engine) fn resume_frame(
         } => {
             let result = match input {
                 Ok(_) => match collect_stream_join_items(state, &mut items) {
-                    Ok(StreamJoinState::Ready(values)) => {
+                    Ok(StreamJoinState::Ready(mut values)) => {
+                        values.sort_by(crate::value::compare_values);
                         let meta = aggregate_child_meta(stream_provenance, values.iter());
                         Ok(EvalStep::Ready(Value::array(values).with_meta(meta)))
                     }

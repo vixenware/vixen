@@ -2545,6 +2545,32 @@ fn build(items: Array[String]) {
 }
 
 #[test]
+fn stream_to_array_sorts_results_by_universal_total_order_at_runtime() {
+    let resolution = eval_source_entry_with_args_with_source_id(
+        r#"
+fn build() {
+  [3, 1, 2].map((item) => item).to_array()
+}
+"#,
+        "stream-to-array-ordering-runtime",
+        "build",
+        &[],
+    )
+    .expect("evaluate Stream.to_array() sorting");
+
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready Stream.to_array() sorting result, got {resolution:?}");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected array result from Stream.to_array(), got {value:?}");
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].rep, ValueRep::U64(1));
+    assert_eq!(items[1].rep, ValueRep::U64(2));
+    assert_eq!(items[2].rep, ValueRep::U64(3));
+}
+
+#[test]
 fn stream_flatten_flattens_mapped_arrays_at_runtime() {
     let resolution = eval_source_entry_with_args_with_source_id(
         r#"
@@ -2571,10 +2597,10 @@ fn build(items: Array[String]) {
         panic!("expected array result from Stream.flatten().to_array(), got {value:?}");
     };
     assert_eq!(items.len(), 4);
-    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
-    assert_eq!(items[1].rep, ValueRep::String("FlAtE2".into()));
-    assert_eq!(items[2].rep, ValueRep::String("serde".into()));
-    assert_eq!(items[3].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[0].rep, ValueRep::String("FlAtE2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[2].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[3].rep, ValueRep::String("serde".into()));
 }
 
 #[test]
@@ -2609,10 +2635,10 @@ fn build(items: Array[String]) {
         panic!("expected flattened array result, got {:?}", groups[0]);
     };
     assert_eq!(items.len(), 4);
-    assert_eq!(items[0].rep, ValueRep::String("flate2".into()));
-    assert_eq!(items[1].rep, ValueRep::String("FlAtE2".into()));
-    assert_eq!(items[2].rep, ValueRep::String("serde".into()));
-    assert_eq!(items[3].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[0].rep, ValueRep::String("FlAtE2".into()));
+    assert_eq!(items[1].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[2].rep, ValueRep::String("flate2".into()));
+    assert_eq!(items[3].rep, ValueRep::String("serde".into()));
 
     let ValueRep::Array(stream_items) = &groups[1].rep else {
         panic!("expected flattened stream result, got {:?}", groups[1]);
@@ -2650,8 +2676,8 @@ fn build(items: Array[String]) {
     };
     assert_eq!(items.len(), 4);
     assert_eq!(items[0].rep, ValueRep::String("FlAtE2".into()));
-    assert_eq!(items[1].rep, ValueRep::String("flate2".into()));
-    assert_eq!(items[2].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[1].rep, ValueRep::String("SeRdE".into()));
+    assert_eq!(items[2].rep, ValueRep::String("flate2".into()));
     assert_eq!(items[3].rep, ValueRep::String("serde".into()));
 }
 
@@ -4913,6 +4939,7 @@ struct Summary {
   u64_lt: Bool,
   u64_ge: Bool,
   string_lt: Bool,
+  array_lt: Bool,
 }
 
 fn build() {
@@ -4920,6 +4947,7 @@ fn build() {
     u64_lt: 1 < 2,
     u64_ge: 3 >= 3,
     string_lt: "apple" < "banana",
+    array_lt: [1, 2] < [1, 3],
   }
 }
 "#,
@@ -4935,6 +4963,7 @@ fn build() {
     assert_eq!(struct_field(&value, "u64_lt").rep, ValueRep::Bool(true));
     assert_eq!(struct_field(&value, "u64_ge").rep, ValueRep::Bool(true));
     assert_eq!(struct_field(&value, "string_lt").rep, ValueRep::Bool(true));
+    assert_eq!(struct_field(&value, "array_lt").rep, ValueRep::Bool(true));
 }
 
 #[test]
