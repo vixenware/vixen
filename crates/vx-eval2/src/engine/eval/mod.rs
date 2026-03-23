@@ -2873,25 +2873,25 @@ pub(super) fn eval_binary(
         .rhs
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
     let operator = binary_operator(binary)?;
+    let mut binary = BinaryState {
+        operator,
+        rhs: state.expr_handle_for(rhs)?,
+        env: env.clone(),
+        lhs: None,
+    };
     let lhs = state.program.resolve_expr(lhs)?;
     match eval_child_expr(state, &lhs, env)? {
-        EvalStep::Ready(lhs) => continue_binary_rhs(
-            state,
-            node_id,
-            parent_id,
-            lhs,
-            operator,
-            state.expr_handle_for(rhs)?,
-            env.clone(),
-        ),
+        EvalStep::Ready(lhs) => {
+            binary.lhs = Some(lhs);
+            continue_binary(state, node_id, parent_id, binary)
+        }
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
-            ContinuationFrame::BinaryLhs {
+            ContinuationFrame::Binary {
                 node_id,
                 parent_id,
-                operator,
-                rhs: state.expr_handle_for(rhs)?,
-                env: env.clone(),
+                binary,
+                pending: BinaryResumeKind::Lhs,
             },
         )),
     }
@@ -3765,28 +3765,33 @@ pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalErr
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
 }
 
-pub(super) fn continue_binary_rhs(
+pub(super) fn continue_binary(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    lhs: Value,
-    operator: SyntaxKind,
-    rhs: ExprHandle,
-    mut env: EvalEnv,
+    mut binary: BinaryState,
 ) -> Result<EvalStep, EvalError> {
-    if let Some(short_circuit) = short_circuit_binary(&lhs, operator)? {
+    let lhs = binary.lhs.clone().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "binary state is missing its left-hand side value",
+        )
+    })?;
+    if let Some(short_circuit) = short_circuit_binary(&lhs, binary.operator)? {
         return Ok(EvalStep::Ready(short_circuit));
     }
 
-    match eval_dependent_expr_handle(state, node_id, rhs, &mut env)? {
-        EvalStep::Ready(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
+    match eval_dependent_expr_handle(state, node_id, binary.rhs, &mut binary.env)? {
+        EvalStep::Ready(rhs) => {
+            apply_binary_operator(lhs, binary.operator, rhs).map(EvalStep::Ready)
+        }
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
-            ContinuationFrame::BinaryRhs {
+            ContinuationFrame::Binary {
                 node_id,
                 parent_id,
-                lhs,
-                operator,
+                binary,
+                pending: BinaryResumeKind::Rhs,
             },
         )),
     }

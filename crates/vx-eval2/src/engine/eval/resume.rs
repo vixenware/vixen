@@ -943,27 +943,34 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::BinaryLhs {
+        ContinuationFrame::Binary {
             node_id,
             parent_id,
-            operator,
-            rhs,
-            env,
+            mut binary,
+            pending,
         } => {
             let result = match input {
-                Ok(lhs) => continue_binary_rhs(state, node_id, parent_id, lhs, operator, rhs, env),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::BinaryRhs {
-            node_id,
-            parent_id,
-            lhs,
-            operator,
-        } => {
-            let result = match input {
-                Ok(rhs) => apply_binary_operator(lhs, operator, rhs).map(EvalStep::Ready),
+                Ok(value) => {
+                    match pending {
+                        BinaryResumeKind::Lhs => binary.lhs = Some(value),
+                        BinaryResumeKind::Rhs => {
+                            let lhs = binary.lhs.take().ok_or_else(|| {
+                                EvalError::new(
+                                    EvalErrorKind::Internal,
+                                    "binary continuation is missing its left-hand side value",
+                                )
+                            })?;
+                            return Ok(conclude_resumed_node(
+                                state,
+                                node_id,
+                                parent_id,
+                                apply_binary_operator(lhs, binary.operator, value)
+                                    .map(EvalStep::Ready),
+                            ));
+                        }
+                    }
+                    continue_binary(state, node_id, parent_id, binary)
+                }
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

@@ -115,6 +115,20 @@ pub(super) struct FieldState {
     pub(super) field_source: SourceSpan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BinaryResumeKind {
+    Lhs,
+    Rhs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BinaryState {
+    pub(super) operator: SyntaxKind,
+    pub(super) rhs: ExprHandle,
+    pub(super) env: EvalEnv,
+    pub(super) lhs: Option<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
@@ -309,19 +323,6 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         operator: SyntaxKind,
     },
-    BinaryLhs {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        operator: SyntaxKind,
-        rhs: ExprHandle,
-        env: EvalEnv,
-    },
-    BinaryRhs {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        lhs: Value,
-        operator: SyntaxKind,
-    },
     StructAfterPart {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -374,6 +375,12 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         field: FieldState,
+    },
+    Binary {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        binary: BinaryState,
+        pending: BinaryResumeKind,
     },
 }
 
