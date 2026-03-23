@@ -1286,17 +1286,19 @@ pub(in crate::engine) fn continue_search_assumption_builtin(
             Ok(EvalStep::Suspended(suspension)) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::SearchAssumptionAfterBranch {
+                    ContinuationFrame::SearchAssumption {
                         node_id,
                         parent_id,
-                        name,
-                        candidates,
-                        resolver,
-                        index,
-                        attempts,
-                        root_search_start,
-                        search_start_index,
-                        prior_branch_context,
+                        search: SearchAssumptionState {
+                            name,
+                            candidates,
+                            resolver,
+                            index,
+                            attempts,
+                            root_search_start,
+                            search_start_index,
+                            prior_branch_context,
+                        },
                     },
                 ));
             }

@@ -715,32 +715,35 @@ pub(in crate::engine) fn resume_frame(
             state.branch_context = branch_context;
             Ok(ResumeOutcome::Continue(input))
         }
-        ContinuationFrame::SearchAssumptionAfterBranch {
+        ContinuationFrame::SearchAssumption {
             node_id,
             parent_id,
-            name,
-            candidates,
-            resolver,
-            index,
-            mut attempts,
-            root_search_start,
-            search_start_index,
-            prior_branch_context,
+            mut search,
         } => {
+            let SearchAssumptionState {
+                name,
+                candidates,
+                resolver,
+                index,
+                attempts,
+                root_search_start,
+                search_start_index,
+                prior_branch_context,
+            } = &mut search;
             state.branch_context = prior_branch_context.clone();
             match input {
                 Ok(value) => Ok(ResumeOutcome::Continue(Ok(value))),
                 Err(error) if error.kind == EvalErrorKind::UserFail => {
                     learn_point_no_good(
                         state,
-                        &prior_branch_context,
-                        &name,
-                        &candidates,
-                        index,
-                        &resolver,
+                        prior_branch_context,
+                        name,
+                        candidates,
+                        *index,
+                        resolver,
                         &error,
                     )?;
-                    attempts.push(branch_attempt_value(candidates[index].clone(), error));
+                    attempts.push(branch_attempt_value(candidates[*index].clone(), error));
                     let result = continue_search_assumption_builtin(
                         state,
                         node_id,
@@ -748,25 +751,25 @@ pub(in crate::engine) fn resume_frame(
                         name.clone(),
                         candidates.clone(),
                         resolver.clone(),
-                        index + 1,
-                        attempts,
-                        root_search_start,
-                        index + 1,
+                        *index + 1,
+                        std::mem::take(attempts),
+                        *root_search_start,
+                        *index + 1,
                     );
                     if let Err(error) = &result
-                        && search_start_index < candidates.len()
+                        && *search_start_index < candidates.len()
                     {
                         let local_attempt_offset =
-                            search_start_index.saturating_sub(root_search_start);
+                            search_start_index.saturating_sub(*root_search_start);
                         let local_error =
                             local_branch_conflict_error(name.clone(), error, local_attempt_offset)
                                 .unwrap_or_else(|| error.clone());
                         learn_search_no_good(
                             state,
-                            &prior_branch_context,
-                            &name,
-                            &candidates[search_start_index..],
-                            &resolver,
+                            prior_branch_context,
+                            name,
+                            &candidates[*search_start_index..],
+                            resolver,
                             &local_error,
                         )?;
                     }

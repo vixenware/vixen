@@ -154,6 +154,18 @@ pub(super) struct IfState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SearchAssumptionState {
+    pub(super) name: Arc<str>,
+    pub(super) candidates: Vec<Value>,
+    pub(super) resolver: FunctionRef,
+    pub(super) index: usize,
+    pub(super) attempts: Vec<Value>,
+    pub(super) root_search_start: usize,
+    pub(super) search_start_index: usize,
+    pub(super) prior_branch_context: EvalBranchContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WhereState {
     pub(super) call: ExprHandle,
     pub(super) pending_keyword_name: Option<Arc<str>>,
@@ -344,17 +356,10 @@ pub(super) enum ContinuationFrame {
     RestoreBranchContext {
         branch_context: EvalBranchContext,
     },
-    SearchAssumptionAfterBranch {
+    SearchAssumption {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        name: Arc<str>,
-        candidates: Vec<Value>,
-        resolver: FunctionRef,
-        index: usize,
-        attempts: Vec<Value>,
-        root_search_start: usize,
-        search_start_index: usize,
-        prior_branch_context: EvalBranchContext,
+        search: SearchAssumptionState,
     },
     MatchScrutinee {
         node_id: EvalNodeId,
