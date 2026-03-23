@@ -186,11 +186,19 @@ pub(super) struct SearchAssumptionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WhereCallPlan {
+    pub(super) call_source: SourceSpan,
+    pub(super) callee: Value,
+    pub(super) type_args: Arc<[Ty]>,
+    pub(super) positional_args: Arc<[ExprId]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WhereState {
-    pub(super) call: ExprHandle,
+    pub(super) call: WhereCallPlan,
     pub(super) pending_keyword_name: Option<Arc<str>>,
     pub(super) keyword_bindings: Vec<(Arc<str>, Value)>,
-    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprHandle)>,
+    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprId)>,
     pub(super) env: EvalEnv,
 }
 

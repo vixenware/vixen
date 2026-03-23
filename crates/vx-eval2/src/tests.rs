@@ -7693,6 +7693,81 @@ fn build() {
 }
 
 #[test]
+fn where_resumes_pending_keyword_bindings_before_runtime_call() {
+    struct PendingKeywordRuntime;
+
+    impl RuntimeHooks for PendingKeywordRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &FunctionRef,
+            args: &[Value],
+            _source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee.name(), args) {
+                ("win", "host_wait", []) => Ok(RuntimeCallOutcome::Pending {
+                    description: "waiting for where keyword binding".into(),
+                }),
+                ("win", "acquire", [url]) => {
+                    let ValueRep::String(url) = &url.rep else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::TypeError,
+                            "acquire() url should evaluate to String",
+                        ));
+                    };
+                    let digest = callee
+                        .captures()
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == "digest")
+                        .map(|(_, value)| value)
+                        .expect("digest capture");
+                    Ok(RuntimeCallOutcome::Ready(Value::string(format!(
+                        "{url}|{:?}",
+                        digest.rep
+                    ))))
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait();
+fn acquire(url: String);
+
+fn build() {
+  acquire("https://example.test/src.tar.gz") where {
+    digest: host_wait(),
+  }
+}
+"#,
+        "runtime-where-pending-keyword",
+        "build",
+        Vec::new(),
+        &PendingKeywordRuntime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start pending where keyword binding")
+    else {
+        panic!("expected pending where keyword binding");
+    };
+    session
+        .resolve_pending(&pending, Value::string("sha256:44556677"))
+        .expect("resolve where keyword binding");
+
+    let Resolution::Ready(value) = session.run().expect("resume where keyword binding result")
+    else {
+        panic!("expected ready result after pending where keyword binding");
+    };
+    assert_eq!(
+        value.rep,
+        ValueRep::String("https://example.test/src.tar.gz|String(\"sha256:44556677\")".into())
+    );
+}
+
+#[test]
 fn fallible_operator_wraps_ready_runtime_values_in_some() {
     let resolution = eval_source_entry_at_place_with_args_with_source_id(
         r#"

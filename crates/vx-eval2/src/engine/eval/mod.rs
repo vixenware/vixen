@@ -2670,12 +2670,25 @@ pub(super) fn eval_where(
             "where expression currently requires a call callee",
         ));
     };
+    let ExprKind::Call(call_expr) = call_expr.kind() else {
+        unreachable!();
+    };
+    let callee = call_expr
+        .callee
+        .as_ref()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
+    let Some(callee_value) = immediate_call_callee_value(state, callee, env)? else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where call callee must resolve immediately for now",
+        ));
+    };
     let mut keyword_bindings = Vec::new();
     let mut remaining_keyword_bindings = Vec::new();
     for binding in where_expr.keyword_bindings.iter() {
         let name = binding.name.clone();
         match binding.expr {
-            Some(expr) => remaining_keyword_bindings.push((name, state.expr_handle_for(expr)?)),
+            Some(expr) => remaining_keyword_bindings.push((name, expr)),
             None => {
                 let Some(value) = env.get(name.as_ref()) else {
                     return Err(EvalError::new(
@@ -2692,7 +2705,12 @@ pub(super) fn eval_where(
         node_id,
         parent_id,
         WhereState {
-            call: state.expr_handle_for(call)?,
+            call: WhereCallPlan {
+                call_source: state.span_for_node(call_expr),
+                callee: callee_value,
+                type_args: Arc::clone(&call_expr.type_args),
+                positional_args: Arc::clone(&call_expr.positional_args),
+            },
             pending_keyword_name: None,
             keyword_bindings,
             remaining_keyword_bindings,
@@ -2708,8 +2726,13 @@ pub(super) fn continue_where(
     mut where_state: WhereState,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = where_state.remaining_keyword_bindings.into_iter();
-    while let Some((name, expr_handle)) = remaining.next() {
-        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut where_state.env)? {
+    while let Some((name, expr_id)) = remaining.next() {
+        match eval_dependent_expr_handle(
+            state,
+            node_id,
+            ExprHandle { key: expr_id },
+            &mut where_state.env,
+        )? {
             EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
             EvalStep::Suspended(suspension) => {
                 where_state.pending_keyword_name = Some(name);
@@ -2739,31 +2762,17 @@ fn eval_call_with_keyword_bindings(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    call: ExprHandle,
+    call: WhereCallPlan,
     env: EvalEnv,
     keyword_bindings: Vec<(Arc<str>, Value)>,
 ) -> Result<EvalStep, EvalError> {
-    let call = state.program.resolve_expr_id(call.key)?;
-    let ExprKind::Call(call) = call.kind() else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "where continuation expected a call expression",
-        ));
-    };
-    let callee = call
-        .callee
-        .as_ref()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let call_source = state.span_for_node(call);
-    let type_args = Arc::clone(&call.type_args);
-    let positional_args = Arc::clone(&call.positional_args);
-    let Some(callee_value) = immediate_call_callee_value(state, callee, &env)? else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "where call callee must resolve immediately for now",
-        ));
-    };
-    let callee_value = apply_where_keyword_bindings(callee_value, keyword_bindings);
+    let WhereCallPlan {
+        call_source,
+        callee,
+        type_args,
+        positional_args,
+    } = call;
+    let callee_value = apply_where_keyword_bindings(callee, keyword_bindings);
     if state.queue_child_work && !positional_args.is_empty() {
         let child_nodes = positional_args
             .iter()
