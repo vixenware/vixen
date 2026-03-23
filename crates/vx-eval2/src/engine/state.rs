@@ -197,6 +197,21 @@ pub(super) struct InterpolatedStringState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayFindState {
+    pub(super) items: Vec<Value>,
+    pub(super) predicate: FunctionRef,
+    pub(super) index: usize,
+    pub(super) wrap_in_option: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayAnyState {
+    pub(super) items: Vec<Value>,
+    pub(super) predicate: FunctionRef,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -365,13 +380,10 @@ pub(super) enum ContinuationFrame {
         child_nodes: Vec<EvalNodeId>,
         struct_source: SourceSpan,
     },
-    ArrayFindAfterPredicate {
+    ArrayFind {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        predicate: FunctionRef,
-        index: usize,
-        wrap_in_option: bool,
+        find: ArrayFindState,
     },
     ArrayFoldAfterStep {
         node_id: EvalNodeId,
@@ -388,12 +400,10 @@ pub(super) enum ContinuationFrame {
         mapped: Vec<Value>,
         index: usize,
     },
-    ArrayAnyAfterPredicate {
+    ArrayAny {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        items: Vec<Value>,
-        predicate: FunctionRef,
-        index: usize,
+        any: ArrayAnyState,
     },
     Field {
         node_id: EvalNodeId,

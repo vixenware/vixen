@@ -941,21 +941,18 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::ArrayFindAfterPredicate {
+        ContinuationFrame::ArrayFind {
             node_id,
             parent_id,
-            items,
-            predicate,
-            index,
-            wrap_in_option,
+            find,
         } => {
             let result = match input {
                 Ok(result) => match result.rep {
                     ValueRep::Bool(true) => {
-                        let item = items[index]
+                        let item = find.items[find.index]
                             .clone()
-                            .project(ProjectionStep::Index(index as u64));
-                        Ok(EvalStep::Ready(if wrap_in_option {
+                            .project(ProjectionStep::Index(find.index as u64));
+                        Ok(EvalStep::Ready(if find.wrap_in_option {
                             Value::structure("Some", vec![(Arc::from("value"), item)])
                         } else {
                             item
@@ -965,10 +962,10 @@ pub(in crate::engine) fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        items,
-                        predicate,
-                        index + 1,
-                        wrap_in_option,
+                        ArrayFindState {
+                            index: find.index + 1,
+                            ..find
+                        },
                     ),
                     _ => Err(EvalError::new(
                         EvalErrorKind::TypeError,
@@ -1016,12 +1013,10 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::ArrayAnyAfterPredicate {
+        ContinuationFrame::ArrayAny {
             node_id,
             parent_id,
-            items,
-            predicate,
-            index,
+            any,
         } => {
             let result = match input {
                 Ok(result) => match result.rep {
@@ -1030,9 +1025,10 @@ pub(in crate::engine) fn resume_frame(
                         state,
                         node_id,
                         parent_id,
-                        items,
-                        predicate,
-                        index + 1,
+                        ArrayAnyState {
+                            index: any.index + 1,
+                            ..any
+                        },
                     ),
                     _ => Err(EvalError::new(
                         EvalErrorKind::TypeError,

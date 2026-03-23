@@ -794,15 +794,12 @@ pub(in crate::engine) fn continue_array_find_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    items: Vec<Value>,
-    predicate: FunctionRef,
-    start_index: usize,
-    wrap_in_option: bool,
+    find: ArrayFindState,
 ) -> Result<EvalStep, EvalError> {
-    for index in start_index..items.len() {
-        let item = items[index].clone();
+    for index in find.index..find.items.len() {
+        let item = find.items[index].clone();
         let Some(prepared) =
-            prepare_function_call(state, &predicate, &[item.clone()], Some(node_id))?
+            prepare_function_call(state, &find.predicate, &[item.clone()], Some(node_id))?
         else {
             return Err(EvalError::new(
                 EvalErrorKind::TypeError,
@@ -814,13 +811,10 @@ pub(in crate::engine) fn continue_array_find_builtin(
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayFindAfterPredicate {
+                    ContinuationFrame::ArrayFind {
                         node_id,
                         parent_id,
-                        items,
-                        predicate,
-                        index,
-                        wrap_in_option,
+                        find: ArrayFindState { index, ..find },
                     },
                 ));
             }
@@ -828,7 +822,7 @@ pub(in crate::engine) fn continue_array_find_builtin(
         match matched.rep {
             ValueRep::Bool(true) => {
                 let item = item.project(ProjectionStep::Index(index as u64));
-                return Ok(EvalStep::Ready(if wrap_in_option {
+                return Ok(EvalStep::Ready(if find.wrap_in_option {
                     option_some(item)
                 } else {
                     item
@@ -843,7 +837,7 @@ pub(in crate::engine) fn continue_array_find_builtin(
             }
         }
     }
-    if wrap_in_option {
+    if find.wrap_in_option {
         Ok(EvalStep::Ready(option_none()))
     } else {
         Err(EvalError::new(
@@ -964,13 +958,11 @@ pub(in crate::engine) fn continue_array_any_builtin(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    items: Vec<Value>,
-    predicate: FunctionRef,
-    start_index: usize,
+    any: ArrayAnyState,
 ) -> Result<EvalStep, EvalError> {
-    for index in start_index..items.len() {
-        let item = items[index].clone();
-        let Some(prepared) = prepare_function_call(state, &predicate, &[item], Some(node_id))?
+    for index in any.index..any.items.len() {
+        let item = any.items[index].clone();
+        let Some(prepared) = prepare_function_call(state, &any.predicate, &[item], Some(node_id))?
         else {
             return Err(EvalError::new(
                 EvalErrorKind::TypeError,
@@ -991,12 +983,10 @@ pub(in crate::engine) fn continue_array_any_builtin(
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::ArrayAnyAfterPredicate {
+                    ContinuationFrame::ArrayAny {
                         node_id,
                         parent_id,
-                        items,
-                        predicate,
-                        index,
+                        any: ArrayAnyState { index, ..any },
                     },
                 ));
             }
@@ -2413,9 +2403,11 @@ fn continue_builtin_call_inner(
                 state,
                 node_id,
                 parent_id,
-                items.iter().cloned().collect(),
-                predicate.clone(),
-                0,
+                ArrayAnyState {
+                    items: items.iter().cloned().collect(),
+                    predicate: predicate.clone(),
+                    index: 0,
+                },
             )
             .map(Some)
         }
@@ -2442,10 +2434,12 @@ fn continue_builtin_call_inner(
                 state,
                 node_id,
                 parent_id,
-                items.iter().cloned().collect(),
-                predicate.clone(),
-                0,
-                true,
+                ArrayFindState {
+                    items: items.iter().cloned().collect(),
+                    predicate: predicate.clone(),
+                    index: 0,
+                    wrap_in_option: true,
+                },
             )
             .map(Some)
         }
@@ -3002,10 +2996,12 @@ fn continue_builtin_call_inner(
                 state,
                 node_id,
                 parent_id,
-                items.iter().cloned().collect(),
-                predicate.clone(),
-                0,
-                false,
+                ArrayFindState {
+                    items: items.iter().cloned().collect(),
+                    predicate: predicate.clone(),
+                    index: 0,
+                    wrap_in_option: false,
+                },
             )
             .map(Some)
         }
