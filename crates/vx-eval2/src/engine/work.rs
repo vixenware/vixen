@@ -958,15 +958,9 @@ pub(super) struct ScheduledResume {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScheduledExpr {
-    pub(super) target: ScheduledExprTarget,
+    pub(super) body: PreparedBodyRef,
     pub(super) env: EvalEnv,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ScheduledExprTarget {
-    Expr(ExprId),
-    Prepared(PreparedBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2349,7 +2343,7 @@ pub(super) fn execute_ready_task(
                 Vec::new()
             };
             let scheduled = ScheduledExpr {
-                target: ScheduledExprTarget::Prepared(prepared.body),
+                body: prepared.body,
                 env: prepared.env,
                 call_stack,
             };
@@ -2383,40 +2377,24 @@ pub(super) fn execute_ready_task(
         }
         ReadyTask::EvaluateExpr(scheduled) => {
             let step = if scheduled.call_stack.is_empty() {
-                match scheduled.target {
-                    ScheduledExprTarget::Expr(expr) => {
-                        let mut env = scheduled.env;
-                        let resolved = state.program.resolve_expr_id(expr)?;
-                        state.with_source(expr.source(), |state| {
-                            eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
-                        })
-                    }
-                    ScheduledExprTarget::Prepared(body) => eval_prepared_body_with_node_id(
-                        &mut state,
-                        record.work.node_id,
-                        PreparedEntry {
-                            body,
-                            env: scheduled.env,
-                        },
-                    ),
-                }
+                eval_prepared_body_with_node_id(
+                    &mut state,
+                    record.work.node_id,
+                    PreparedEntry {
+                        body: scheduled.body,
+                        env: scheduled.env,
+                    },
+                )
             } else {
-                state.with_call_stack(scheduled.call_stack, |state| match scheduled.target {
-                    ScheduledExprTarget::Expr(expr) => {
-                        let mut env = scheduled.env;
-                        let resolved = state.program.resolve_expr_id(expr)?;
-                        state.with_source(expr.source(), |state| {
-                            eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
-                        })
-                    }
-                    ScheduledExprTarget::Prepared(body) => eval_prepared_body_with_node_id(
+                state.with_call_stack(scheduled.call_stack, |state| {
+                    eval_prepared_body_with_node_id(
                         state,
                         record.work.node_id,
                         PreparedEntry {
-                            body,
+                            body: scheduled.body,
                             env: scheduled.env,
                         },
-                    ),
+                    )
                 })
             };
             invocation = state.work_invocation.clone();

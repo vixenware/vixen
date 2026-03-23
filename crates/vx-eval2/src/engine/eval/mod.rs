@@ -942,13 +942,20 @@ pub(super) fn eval_child_expr_id(
     expr: ExprId,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    let body = PreparedBodyRef::from_expr_id(state.program, expr)?;
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
         state.emit_current_dependency(child_id, Some(state.program.span_for_expr_id(expr)?));
-        let expr = state.program.resolve_expr_id(expr)?;
-        return eval_expr_with_node_id(state, child_id, expr, env);
+        return eval_prepared_body_with_node_id(
+            state,
+            child_id,
+            PreparedEntry {
+                body,
+                env: env.clone(),
+            },
+        );
     }
-    let child_id = queue_child_expr_id(state, expr, env);
+    let child_id = queue_child_expr_body(state, body, env);
     let resume_node = state
         .current_parent()
         .expect("child expression should have an active parent node");
@@ -3442,14 +3449,24 @@ pub(super) fn queue_child_expr_id(
     expr: ExprId,
     env: &EvalEnv,
 ) -> EvalNodeId {
+    let body = PreparedBodyRef::from_expr_id(state.program, expr)
+        .expect("queued child expression handle should resolve to an execution body");
+    queue_child_expr_body(state, body, env)
+}
+
+fn queue_child_expr_body(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: PreparedBodyRef,
+    env: &EvalEnv,
+) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let resolved = state
         .program
-        .resolve_expr_id(expr)
+        .resolve_expr_id(body.root_expr_id())
         .expect("queued child expression handle should resolve");
     let resolved_source = state
         .program
-        .span_for_expr_id(expr)
+        .span_for_expr_id(body.root_expr_id())
         .expect("queued child expression handle should have a source span");
     state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
@@ -3461,7 +3478,7 @@ pub(super) fn queue_child_expr_id(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        target: ScheduledExprTarget::Expr(expr),
+        body,
         env: env.clone(),
         call_stack: if state.track_calls {
             state.call_stack.clone()
@@ -3512,7 +3529,7 @@ pub(super) fn queue_child_prepared_entry(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        target: ScheduledExprTarget::Prepared(prepared.body),
+        body: prepared.body,
         env: prepared.env,
         call_stack: if state.track_calls {
             state.call_stack.clone()
