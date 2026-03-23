@@ -154,6 +154,11 @@ pub(super) struct IfState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PrefixState {
+    pub(super) operator: SyntaxKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SearchAssumptionState {
     pub(super) name: Arc<str>,
     pub(super) candidates: Vec<Value>,
@@ -209,6 +214,14 @@ pub(super) struct InterpolatedStringState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SlotState {
+    pub(super) call_source: SourceSpan,
+    pub(super) slot_id: Arc<str>,
+    pub(super) witness: Value,
+    pub(super) action: SlotAction<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ArrayFindState {
     pub(super) items: Vec<Value>,
     pub(super) predicate: FunctionRef,
@@ -239,13 +252,10 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         call_source: SourceSpan,
     },
-    SlotAfterResolver {
+    Slot {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        call_source: SourceSpan,
-        slot_id: Arc<str>,
-        witness: Value,
-        action: SlotAction<Value>,
+        slot: SlotState,
     },
     Call {
         node_id: EvalNodeId,
@@ -367,10 +377,10 @@ pub(super) enum ContinuationFrame {
         arms: Arc<[MatchArmPlan]>,
         env: EvalEnv,
     },
-    PrefixOperand {
+    Prefix {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        operator: SyntaxKind,
+        prefix: PrefixState,
     },
     Struct {
         node_id: EvalNodeId,

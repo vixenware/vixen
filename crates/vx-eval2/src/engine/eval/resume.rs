@@ -139,23 +139,20 @@ pub(in crate::engine) fn resume_frame(
                 ResumeOutcome::Continue(Err(error))
             }
         }),
-        ContinuationFrame::SlotAfterResolver {
+        ContinuationFrame::Slot {
             node_id,
             parent_id,
-            call_source,
-            slot_id,
-            witness,
-            action,
+            slot,
         } => {
             let result = match input {
                 Ok(value) => commit_slot_result(
                     state,
                     node_id,
                     parent_id,
-                    &call_source,
-                    &slot_id,
-                    &witness,
-                    &action,
+                    &slot.call_source,
+                    &slot.slot_id,
+                    &slot.witness,
+                    &slot.action,
                     &value,
                 ),
                 Err(error) => Err(error),
@@ -826,13 +823,13 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::PrefixOperand {
+        ContinuationFrame::Prefix {
             node_id,
             parent_id,
-            operator,
+            prefix,
         } => {
             let result = match input {
-                Ok(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
+                Ok(value) => apply_prefix_operator(prefix.operator, value).map(EvalStep::Ready),
                 Err(error) => Err(error),
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))

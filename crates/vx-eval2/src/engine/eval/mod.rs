@@ -2926,10 +2926,10 @@ pub(super) fn eval_prefix(
         EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
-            ContinuationFrame::PrefixOperand {
+            ContinuationFrame::Prefix {
                 node_id,
                 parent_id,
-                operator,
+                prefix: PrefixState { operator },
             },
         )),
     }

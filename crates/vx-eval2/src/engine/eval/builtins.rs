@@ -3301,13 +3301,15 @@ pub(in crate::engine) fn continue_slot_builtin(
                 ),
                 EvalStep::Suspended(suspension) => Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::SlotAfterResolver {
+                    ContinuationFrame::Slot {
                         node_id,
                         parent_id,
-                        call_source,
-                        slot_id,
-                        witness,
-                        action,
+                        slot: SlotState {
+                            call_source,
+                            slot_id,
+                            witness,
+                            action,
+                        },
                     },
                 )),
             }
