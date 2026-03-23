@@ -179,6 +179,16 @@ pub(super) struct MapState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StructState {
+    pub(super) type_name: Arc<str>,
+    pub(super) fields: Vec<(Arc<str>, Value)>,
+    pub(super) pending_part: Option<StructLiteralPart>,
+    pub(super) remaining_parts: Vec<StructLiteralPart>,
+    pub(super) env: EvalEnv,
+    pub(super) struct_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
     FinishNode {
         node_id: EvalNodeId,
@@ -337,15 +347,10 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         operator: SyntaxKind,
     },
-    StructAfterPart {
+    Struct {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        type_name: Arc<str>,
-        fields: Vec<(Arc<str>, Value)>,
-        part: StructLiteralPart,
-        remaining_parts: Vec<StructLiteralPart>,
-        env: EvalEnv,
-        struct_source: SourceSpan,
+        struct_state: StructState,
     },
     StructJoin {
         node_id: EvalNodeId,

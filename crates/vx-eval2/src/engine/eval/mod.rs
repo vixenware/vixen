@@ -2010,11 +2010,14 @@ pub(super) fn eval_struct_literal(
         state,
         node_id,
         parent_id,
-        type_name,
-        immediate_fields,
-        remaining_parts,
-        env.clone(),
-        struct_source,
+        StructState {
+            type_name,
+            fields: immediate_fields,
+            pending_part: None,
+            remaining_parts,
+            env: env.clone(),
+            struct_source,
+        },
     )
 }
 
@@ -3627,42 +3630,48 @@ pub(super) fn continue_struct_fields(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    type_name: Arc<str>,
-    mut fields: Vec<(Arc<str>, Value)>,
-    remaining_parts: Vec<StructLiteralPart>,
-    mut env: EvalEnv,
-    struct_source: SourceSpan,
+    mut struct_state: StructState,
 ) -> Result<EvalStep, EvalError> {
-    let mut remaining = remaining_parts.into_iter();
-    while let Some(part) = remaining.next() {
+    let mut remaining = struct_state.remaining_parts.into_iter();
+    loop {
+        let Some(part) = struct_state
+            .pending_part
+            .take()
+            .or_else(|| remaining.next())
+        else {
+            break;
+        };
         let expr_handle = match &part {
             StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
         };
-        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut env)? {
-            EvalStep::Ready(value) => {
-                apply_struct_literal_part(&type_name, &mut fields, part, value)?
-            }
+        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut struct_state.env)? {
+            EvalStep::Ready(value) => apply_struct_literal_part(
+                &struct_state.type_name,
+                &mut struct_state.fields,
+                part,
+                value,
+            )?,
             EvalStep::Suspended(suspension) => {
+                struct_state.pending_part = Some(part);
+                struct_state.remaining_parts = remaining.collect();
                 return Ok(extend_suspension(
                     suspension,
-                    ContinuationFrame::StructAfterPart {
+                    ContinuationFrame::Struct {
                         node_id,
                         parent_id,
-                        type_name,
-                        fields,
-                        part,
-                        remaining_parts: remaining.collect(),
-                        env,
-                        struct_source,
+                        struct_state,
                     },
                 ));
             }
         }
     }
-    let provenance = Provenance::literal(struct_source);
-    let meta = aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
+    let provenance = Provenance::literal(struct_state.struct_source);
+    let meta = aggregate_child_meta(
+        provenance,
+        struct_state.fields.iter().map(|(_, value)| value),
+    );
     Ok(EvalStep::Ready(
-        Value::structure(type_name, fields).with_meta(meta),
+        Value::structure(struct_state.type_name, struct_state.fields).with_meta(meta),
     ))
 }
 
