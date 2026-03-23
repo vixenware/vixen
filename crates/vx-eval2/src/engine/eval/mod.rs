@@ -355,7 +355,7 @@ fn function_adapter_value_for_arg(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     callee: &Value,
     arg_index: usize,
-    arg_handle: ExprHandle,
+    arg_id: ExprId,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
     let ValueRep::Function(function) = &callee.rep else {
@@ -364,16 +364,16 @@ fn function_adapter_value_for_arg(
     if !builtin_adapter_arg_index(function.name.as_ref(), arg_index) {
         return Ok(None);
     }
-    let expr = state.program.resolve_expr_id(arg_handle.key)?;
+    let expr = state.program.resolve_expr_id(arg_id)?;
     let Some(parameters) = compile_adapter_parameters(state.program, expr, expr.handle())? else {
         return Ok(None);
     };
     let function = FunctionRef::new(
-        state.program.source_id(arg_handle.key.source()),
+        state.program.source_id(arg_id.source()),
         Arc::from("<adapter>"),
         parameters,
         false,
-        Some(arg_handle.key),
+        Some(arg_id),
         captures_from_scope(env),
         None,
     );
@@ -678,15 +678,13 @@ pub(super) fn eval_expr_with_node_id(
                 unreachable!()
             };
             match paren.expr {
-                Some(inner) => {
-                    match eval_child_expr_handle(state, state.expr_handle_for(inner)?, env)? {
-                        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-                        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::FinishNode { node_id, parent_id },
-                        )),
-                    }
-                }
+                Some(inner) => match eval_child_expr_id(state, state.expr_id_for(inner)?, env)? {
+                    EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+                    EvalStep::Suspended(suspension) => Ok(extend_suspension(
+                        suspension,
+                        ContinuationFrame::FinishNode { node_id, parent_id },
+                    )),
+                },
                 None => Ok(EvalStep::Ready(Value::unit())),
             }
         }
@@ -930,18 +928,18 @@ pub(super) fn eval_child_expr(
     ))
 }
 
-pub(super) fn eval_child_expr_handle(
+pub(super) fn eval_child_expr_id(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: ExprHandle,
+    expr: ExprId,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
-        state.emit_current_dependency(child_id, Some(state.program.span_for_expr_id(expr.key)?));
-        let expr = state.program.resolve_expr_id(expr.key)?;
+        state.emit_current_dependency(child_id, Some(state.program.span_for_expr_id(expr)?));
+        let expr = state.program.resolve_expr_id(expr)?;
         return eval_expr_with_node_id(state, child_id, expr, env);
     }
-    let child_id = queue_child_expr_handle(state, expr, env);
+    let child_id = queue_child_expr_id(state, expr, env);
     let resume_node = state
         .current_parent()
         .expect("child expression should have an active parent node");
@@ -975,7 +973,7 @@ pub(super) fn eval_call(
         if state.queue_child_work && !positional_args.is_empty() {
             let child_nodes = positional_args
                 .iter()
-                .map(|arg| queue_child_expr_handle(state, ExprHandle { key: *arg }, env))
+                .map(|arg| queue_child_expr_id(state, *arg, env))
                 .collect::<Vec<_>>();
             return Ok(wait_on_child_dependency(
                 state,
@@ -1286,7 +1284,7 @@ pub(super) fn eval_call_callee(
         return Ok(EvalStep::Ready(value));
     }
     match callee {
-        CallCallee::Expr(callee) => eval_child_expr_handle(state, ExprHandle { key: *callee }, env),
+        CallCallee::Expr(callee) => eval_child_expr_id(state, *callee, env),
         CallCallee::Field(field) => eval_field(state, field, env),
         CallCallee::NameRef(_)
         | CallCallee::ResolvedFunction { .. }
@@ -1650,7 +1648,6 @@ pub(super) fn continue_call(
         });
     }
     while let Some(arg_handle) = call.remaining_args.get(call.next_arg_index).copied() {
-        let arg_handle = ExprHandle { key: arg_handle };
         call.next_arg_index += 1;
         let arg_index = call.args.len();
         let callee = call
@@ -1661,7 +1658,7 @@ pub(super) fn continue_call(
             function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
         let arg_step = match adapter {
             Some(value) => EvalStep::Ready(value),
-            None => eval_dependent_expr_handle(state, node_id, arg_handle, &mut call.env)?,
+            None => eval_dependent_expr_id(state, node_id, arg_handle, &mut call.env)?,
         };
         match arg_step {
             EvalStep::Ready(value) => call.args.push(value),
@@ -1955,11 +1952,11 @@ pub(super) fn eval_struct_literal(
             } => {
                 remaining_parts.push(StructLiteralPart::Field {
                     name: name.clone(),
-                    expr: state.expr_handle_for(*expr)?,
+                    expr: state.expr_id_for(*expr)?,
                 });
             }
             crate::program::StructLiteralPart::Spread(expr) => {
-                remaining_parts.push(StructLiteralPart::Spread(state.expr_handle_for(*expr)?));
+                remaining_parts.push(StructLiteralPart::Spread(state.expr_id_for(*expr)?));
             }
             crate::program::StructLiteralPart::Field { name, expr: None } => {
                 let Some(value) = env.get(name.as_ref()) else {
@@ -1990,7 +1987,7 @@ pub(super) fn eval_struct_literal(
             .collect::<Vec<_>>();
         let child_nodes = joinable_fields
             .iter()
-            .map(|(_, expr)| queue_child_expr_handle(state, *expr, env))
+            .map(|(_, expr)| queue_child_expr_id(state, *expr, env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -2069,14 +2066,14 @@ pub(super) fn eval_array(
         for item in array.items.iter() {
             match item {
                 ArrayItem::Expr(expr) => {
-                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_handle(
+                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_id(
                         state,
-                        state.expr_handle_for(*expr)?,
+                        state.expr_id_for(*expr)?,
                         env,
                     )));
                 }
                 ArrayItem::Spread(expr) => child_nodes.push(ArrayJoinItem::Spread(
-                    queue_child_expr_handle(state, state.expr_handle_for(*expr)?, env),
+                    queue_child_expr_id(state, state.expr_id_for(*expr)?, env),
                 )),
             }
         }
@@ -2112,10 +2109,8 @@ pub(super) fn eval_array(
                 .items
                 .iter()
                 .map(|item| match item {
-                    ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_handle_for(*expr)?)),
-                    ArrayItem::Spread(expr) => {
-                        Ok(ArrayEvalItem::Spread(state.expr_handle_for(*expr)?))
-                    }
+                    ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_id_for(*expr)?)),
+                    ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(state.expr_id_for(*expr)?)),
                 })
                 .collect::<Result<Vec<_>, EvalError>>()?,
             env: env.clone(),
@@ -2155,10 +2150,10 @@ pub(super) fn eval_tuple(
         let child_nodes = items
             .iter()
             .map(|item| {
-                queue_child_expr_handle(
+                queue_child_expr_id(
                     state,
                     state
-                        .expr_handle_for(*item)
+                        .expr_id_for(*item)
                         .expect("tuple item should resolve to an expression id"),
                     env,
                 )
@@ -2191,7 +2186,7 @@ pub(super) fn eval_tuple(
             remaining_items: items
                 .iter()
                 .copied()
-                .map(|item| state.expr_handle_for(item))
+                .map(|item| state.expr_id_for(item))
                 .collect::<Result<Vec<_>, _>>()?,
             env: env.clone(),
             tuple_source: state.span_for_node(tuple),
@@ -2217,7 +2212,7 @@ pub(super) fn eval_interpolated_string(
         .map(|part| match part {
             StringPart::Text(text) => Ok(InterpolatedPart::Text(text.clone())),
             StringPart::Interpolation(expr) => {
-                Ok(InterpolatedPart::Expr(state.expr_handle_for(*expr)?))
+                Ok(InterpolatedPart::Expr(state.expr_id_for(*expr)?))
             }
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
@@ -2227,7 +2222,7 @@ pub(super) fn eval_interpolated_string(
             .iter()
             .filter_map(|part| match part {
                 InterpolatedPart::Text(_) => None,
-                InterpolatedPart::Expr(expr) => Some(queue_child_expr_handle(state, *expr, env)),
+                InterpolatedPart::Expr(expr) => Some(queue_child_expr_id(state, *expr, env)),
             })
             .collect::<Vec<_>>();
         if let Some(child_id) = expr_nodes.first().copied() {
@@ -2281,19 +2276,19 @@ pub(super) fn eval_range(
 
     if state.queue_child_work {
         let start_child = start.map(|expr| {
-            queue_child_expr_handle(
+            queue_child_expr_id(
                 state,
                 state
-                    .expr_handle_for(expr)
+                    .expr_id_for(expr)
                     .expect("range start should resolve to an expression id"),
                 env,
             )
         });
         let end_child = end.map(|expr| {
-            queue_child_expr_handle(
+            queue_child_expr_id(
                 state,
                 state
-                    .expr_handle_for(expr)
+                    .expr_id_for(expr)
                     .expect("range end should resolve to an expression id"),
                 env,
             )
@@ -2321,10 +2316,10 @@ pub(super) fn eval_range(
         )));
     }
 
-    let start_handle = start.map(|expr| state.expr_handle_for(expr)).transpose()?;
-    let end_handle = end.map(|expr| state.expr_handle_for(expr)).transpose()?;
+    let start_handle = start.map(|expr| state.expr_id_for(expr)).transpose()?;
+    let end_handle = end.map(|expr| state.expr_id_for(expr)).transpose()?;
     if let Some(start_handle) = start_handle {
-        match eval_dependent_expr_handle(state, node_id, start_handle, env)? {
+        match eval_dependent_expr_id(state, node_id, start_handle, env)? {
             EvalStep::Ready(start) => continue_range_end(
                 state,
                 node_id,
@@ -2380,7 +2375,7 @@ pub(super) fn eval_map(
         .entries
         .iter()
         .copied()
-        .map(|(key, value)| Ok((state.expr_handle_for(key)?, state.expr_handle_for(value)?)))
+        .map(|(key, value)| Ok((state.expr_id_for(key)?, state.expr_id_for(value)?)))
         .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
         state,
@@ -2408,10 +2403,10 @@ pub(super) fn eval_fail(
         .copied()
         .expect("fail expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let failure = match eval_dependent_expr_handle(
+    let failure = match eval_dependent_expr_id(
         state,
         node_id,
-        state.expr_handle_for(fail.message.ok_or_else(|| {
+        state.expr_id_for(fail.message.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
         })?)?,
         env,
@@ -2499,7 +2494,7 @@ pub(super) fn eval_fallible(
             "fallible expression has no operand",
         ));
     };
-    match eval_dependent_expr_handle(state, node_id, state.expr_handle_for(expr)?, env) {
+    match eval_dependent_expr_id(state, node_id, state.expr_id_for(expr)?, env) {
         Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
         Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
             suspension,
@@ -2551,18 +2546,18 @@ pub(super) fn eval_if(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let if_state =
         IfState {
-            then_branch: state.expr_handle_for(if_expr.then_branch.ok_or_else(|| {
+            then_branch: state.expr_id_for(if_expr.then_branch.ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "if branch is missing")
             })?)?,
-            else_branch: state.expr_handle_for(if_expr.else_branch.ok_or_else(|| {
+            else_branch: state.expr_id_for(if_expr.else_branch.ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "if branch is missing")
             })?)?,
             env: env.clone(),
         };
-    let condition = match eval_dependent_expr_handle(
+    let condition = match eval_dependent_expr_id(
         state,
         node_id,
-        state.expr_handle_for(if_expr.condition.ok_or_else(|| {
+        state.expr_id_for(if_expr.condition.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
         })?)?,
         env,
@@ -2594,10 +2589,10 @@ pub(super) fn eval_match(
         .expect("match expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let arms = Arc::clone(&match_expr.arms);
-    let scrutinee = match eval_dependent_expr_handle(
+    let scrutinee = match eval_dependent_expr_id(
         state,
         node_id,
-        state.expr_handle_for(match_expr.scrutinee.ok_or_else(|| {
+        state.expr_id_for(match_expr.scrutinee.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
         })?)?,
         env,
@@ -2629,10 +2624,10 @@ pub(super) fn continue_match_arms(
     for arm in arms.iter() {
         let mut arm_env = env.clone();
         if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
-            return match eval_dependent_expr_handle(
+            return match eval_dependent_expr_id(
                 state,
                 node_id,
-                state.expr_handle_for(arm.body)?,
+                state.expr_id_for(arm.body)?,
                 &mut arm_env,
             )? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
@@ -2727,12 +2722,7 @@ pub(super) fn continue_where(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = where_state.remaining_keyword_bindings.into_iter();
     while let Some((name, expr_id)) = remaining.next() {
-        match eval_dependent_expr_handle(
-            state,
-            node_id,
-            ExprHandle { key: expr_id },
-            &mut where_state.env,
-        )? {
+        match eval_dependent_expr_id(state, node_id, expr_id, &mut where_state.env)? {
             EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
             EvalStep::Suspended(suspension) => {
                 where_state.pending_keyword_name = Some(name);
@@ -2776,7 +2766,7 @@ fn eval_call_with_keyword_bindings(
     if state.queue_child_work && !positional_args.is_empty() {
         let child_nodes = positional_args
             .iter()
-            .map(|arg| queue_child_expr_handle(state, ExprHandle { key: *arg }, &env))
+            .map(|arg| queue_child_expr_id(state, *arg, &env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -2858,7 +2848,7 @@ pub(super) fn eval_field(
     })?;
     let field_source = state.program.span_for_handle(field.handle);
     let field = field_state(field, field_source)?;
-    let receiver = match eval_child_expr(state, state.program.resolve_expr(receiver)?, env)? {
+    let receiver = match eval_child_expr_id(state, receiver, env)? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
@@ -2895,12 +2885,11 @@ pub(super) fn eval_binary(
     let operator = binary_operator(binary)?;
     let mut binary = BinaryState {
         operator,
-        rhs: state.expr_handle_for(rhs)?,
+        rhs: state.expr_id_for(rhs)?,
         env: env.clone(),
         lhs: None,
     };
-    let lhs = state.program.resolve_expr(lhs)?;
-    match eval_child_expr(state, &lhs, env)? {
+    match eval_child_expr_id(state, lhs, env)? {
         EvalStep::Ready(lhs) => {
             binary.lhs = Some(lhs);
             continue_binary(state, node_id, parent_id, binary)
@@ -2934,8 +2923,7 @@ pub(super) fn eval_prefix(
     let operator = prefix.operator.ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
     })?;
-    let operand = state.program.resolve_expr(operand)?;
-    match eval_child_expr(state, &operand, env)? {
+    match eval_child_expr_id(state, operand, env)? {
         EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
@@ -2963,12 +2951,7 @@ pub(super) fn continue_block_body(
         match step {
             BlockStep::Let { pattern, expr } => {
                 match state.with_source(source, |state| {
-                    eval_dependent_expr_handle(
-                        state,
-                        node_id,
-                        ExprHandle { key: *expr },
-                        &mut scope,
-                    )
+                    eval_dependent_expr_id(state, node_id, *expr, &mut scope)
                 })? {
                     EvalStep::Ready(value) => {
                         bind_let_pattern(&mut scope, pattern, value)?;
@@ -2998,7 +2981,7 @@ pub(super) fn continue_block_body(
                 env_mut(&mut scope).insert(name, value);
             }
             BlockStep::Expr(expr) => match state.with_source(source, |state| {
-                eval_dependent_expr_handle(state, node_id, ExprHandle { key: *expr }, &mut scope)
+                eval_dependent_expr_id(state, node_id, *expr, &mut scope)
             })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
@@ -3064,7 +3047,7 @@ pub(super) fn continue_array_items(
             ArrayEvalItem::Expr(handle) => (handle, false),
             ArrayEvalItem::Spread(handle) => (handle, true),
         };
-        match eval_dependent_expr_handle(state, node_id, item_handle, &mut array.env)? {
+        match eval_dependent_expr_id(state, node_id, item_handle, &mut array.env)? {
             EvalStep::Ready(value) => append_array_item(&mut array.items, value, spread)?,
             EvalStep::Suspended(suspension) => {
                 array.spread = spread;
@@ -3093,7 +3076,7 @@ pub(super) fn continue_tuple_items(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = tuple.remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
-        match eval_dependent_expr_handle(state, node_id, item_handle, &mut tuple.env)? {
+        match eval_dependent_expr_id(state, node_id, item_handle, &mut tuple.env)? {
             EvalStep::Ready(value) => tuple.items.push(value),
             EvalStep::Suspended(suspension) => {
                 tuple.remaining_items = remaining.collect();
@@ -3118,14 +3101,13 @@ pub(super) fn continue_range_end(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     start: Option<Value>,
-    end: Option<ExprHandle>,
+    end: Option<ExprId>,
     mut env: EvalEnv,
     range_source: SourceSpan,
     inclusive_end: bool,
 ) -> Result<EvalStep, EvalError> {
     let end = match end {
-        Some(end_handle) => match eval_dependent_expr_handle(state, node_id, end_handle, &mut env)?
-        {
+        Some(end_handle) => match eval_dependent_expr_id(state, node_id, end_handle, &mut env)? {
             EvalStep::Ready(end) => Some(end),
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3166,7 +3148,7 @@ pub(super) fn continue_interpolated_string_parts(
         match part {
             InterpolatedPart::Text(text) => string.segments.push(text.to_string()),
             InterpolatedPart::Expr(expr) => {
-                match eval_dependent_expr_handle(state, node_id, expr, &mut string.env)? {
+                match eval_dependent_expr_id(state, node_id, expr, &mut string.env)? {
                     EvalStep::Ready(value) => {
                         string.segments.push(interpolation_segment_text(&value)?)
                     }
@@ -3460,22 +3442,22 @@ pub(super) fn queue_child_expr(
     expr: &Expr,
     env: &EvalEnv,
 ) -> EvalNodeId {
-    queue_child_expr_handle(state, state.expr_handle(expr), env)
+    queue_child_expr_id(state, state.expr_id(expr), env)
 }
 
-pub(super) fn queue_child_expr_handle(
+pub(super) fn queue_child_expr_id(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: ExprHandle,
+    expr: ExprId,
     env: &EvalEnv,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let resolved = state
         .program
-        .resolve_expr_id(expr.key)
+        .resolve_expr_id(expr)
         .expect("queued child expression handle should resolve");
     let resolved_source = state
         .program
-        .span_for_expr_id(expr.key)
+        .span_for_expr_id(expr)
         .expect("queued child expression handle should have a source span");
     state.emit_current_dependency(child_id, Some(resolved_source.clone()));
     state.scheduler.record_node(EvalNodeRecord {
@@ -3595,7 +3577,7 @@ pub(super) fn continue_map_entries(
                 break;
             };
             map.value_expr = Some(value_handle);
-            match eval_dependent_expr_handle(state, node_id, key_handle, &mut map.env)? {
+            match eval_dependent_expr_id(state, node_id, key_handle, &mut map.env)? {
                 EvalStep::Ready(key) => map.key = Some(key),
                 EvalStep::Suspended(suspension) => {
                     map.remaining_entries = remaining.collect();
@@ -3619,7 +3601,7 @@ pub(super) fn continue_map_entries(
             .value_expr
             .take()
             .expect("map value evaluation should retain the current value expr");
-        let value = match eval_dependent_expr_handle(state, node_id, value_handle, &mut map.env)? {
+        let value = match eval_dependent_expr_id(state, node_id, value_handle, &mut map.env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
                 map.key = Some(key);
@@ -3661,7 +3643,7 @@ pub(super) fn continue_struct_fields(
         let expr_handle = match &part {
             StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
         };
-        match eval_dependent_expr_handle(state, node_id, expr_handle, &mut struct_state.env)? {
+        match eval_dependent_expr_id(state, node_id, expr_handle, &mut struct_state.env)? {
             EvalStep::Ready(value) => apply_struct_literal_part(
                 &struct_state.type_name,
                 &mut struct_state.fields,
@@ -3808,7 +3790,7 @@ pub(super) fn continue_binary(
         return Ok(EvalStep::Ready(short_circuit));
     }
 
-    match eval_dependent_expr_handle(state, node_id, binary.rhs, &mut binary.env)? {
+    match eval_dependent_expr_id(state, node_id, binary.rhs, &mut binary.env)? {
         EvalStep::Ready(rhs) => {
             apply_binary_operator(lhs, binary.operator, rhs).map(EvalStep::Ready)
         }
@@ -3837,7 +3819,7 @@ pub(super) fn continue_if(
             "if condition must evaluate to Bool",
         ));
     };
-    match eval_dependent_expr_handle(
+    match eval_dependent_expr_id(
         state,
         node_id,
         if value {

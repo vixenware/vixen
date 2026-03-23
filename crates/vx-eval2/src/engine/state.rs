@@ -25,21 +25,16 @@ pub(super) struct EvalSuspension {
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ExprHandle {
-    pub(super) key: ExprId,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InterpolatedPart {
     Text(Arc<str>),
-    Expr(ExprHandle),
+    Expr(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ArrayEvalItem {
-    Expr(ExprHandle),
-    Spread(ExprHandle),
+    Expr(ExprId),
+    Spread(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +49,7 @@ pub(super) struct ArrayState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TupleState {
     pub(super) items: Vec<Value>,
-    pub(super) remaining_items: Vec<ExprHandle>,
+    pub(super) remaining_items: Vec<ExprId>,
     pub(super) env: EvalEnv,
     pub(super) tuple_source: SourceSpan,
 }
@@ -92,8 +87,8 @@ pub(super) enum StreamStage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StructLiteralPart {
-    Field { name: Arc<str>, expr: ExprHandle },
-    Spread(ExprHandle),
+    Field { name: Arc<str>, expr: ExprId },
+    Spread(ExprId),
 }
 
 pub(super) type MatchArmPlan = crate::program::MatchArmPlan;
@@ -141,7 +136,7 @@ pub(super) enum BinaryResumeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BinaryState {
     pub(super) operator: SyntaxKind,
-    pub(super) rhs: ExprHandle,
+    pub(super) rhs: ExprId,
     pub(super) env: EvalEnv,
     pub(super) lhs: Option<Value>,
 }
@@ -155,7 +150,7 @@ pub(super) enum RangeResumeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RangeState {
     pub(super) start: Option<Value>,
-    pub(super) end: Option<ExprHandle>,
+    pub(super) end: Option<ExprId>,
     pub(super) env: EvalEnv,
     pub(super) range_source: SourceSpan,
     pub(super) inclusive_end: bool,
@@ -163,8 +158,8 @@ pub(super) struct RangeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IfState {
-    pub(super) then_branch: ExprHandle,
-    pub(super) else_branch: ExprHandle,
+    pub(super) then_branch: ExprId,
+    pub(super) else_branch: ExprId,
     pub(super) env: EvalEnv,
 }
 
@@ -212,8 +207,8 @@ pub(super) enum MapResumeKind {
 pub(super) struct MapState {
     pub(super) entries: Vec<(Value, Value)>,
     pub(super) key: Option<Value>,
-    pub(super) value_expr: Option<ExprHandle>,
-    pub(super) remaining_entries: Vec<(ExprHandle, ExprHandle)>,
+    pub(super) value_expr: Option<ExprId>,
+    pub(super) remaining_entries: Vec<(ExprId, ExprId)>,
     pub(super) env: EvalEnv,
     pub(super) map_source: SourceSpan,
 }
@@ -574,22 +569,17 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         self.program.span_for_token_ref(token)
     }
 
-    pub(super) fn expr_handle(&self, expr: &Expr) -> ExprHandle {
-        ExprHandle {
-            key: self
-                .program
-                .expr_id(expr.handle())
-                .expect("expression handle should resolve to an expression id"),
-        }
+    pub(super) fn expr_id(&self, expr: &Expr) -> ExprId {
+        self.program
+            .expr_id(expr.handle())
+            .expect("expression handle should resolve to an expression id")
     }
 
-    pub(super) fn expr_handle_for(
+    pub(super) fn expr_id_for(
         &self,
         handle: impl crate::program::IntoExprLookupId,
-    ) -> Result<ExprHandle, EvalError> {
-        Ok(ExprHandle {
-            key: self.program.expr_id(handle)?,
-        })
+    ) -> Result<ExprId, EvalError> {
+        self.program.expr_id(handle)
     }
 
     pub(super) fn emit(
@@ -792,14 +782,14 @@ pub(super) fn eval_dependent_expr(
     }
 }
 
-pub(super) fn eval_dependent_expr_handle(
+pub(super) fn eval_dependent_expr_id(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
-    handle: ExprHandle,
+    expr_id: ExprId,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let expr = state.program.resolve_expr_id(handle.key)?;
-    state.with_source(handle.key.source(), |state| {
+    let expr = state.program.resolve_expr_id(expr_id)?;
+    state.with_source(expr_id.source(), |state| {
         eval_dependent_expr(state, node_id, &expr, env)
     })
 }

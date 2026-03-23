@@ -965,7 +965,7 @@ pub(super) struct ScheduledExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ScheduledExprTarget {
-    Expr(ExprHandle),
+    Expr(ExprId),
     Prepared(PreparedBodyRef),
 }
 
@@ -2386,8 +2386,8 @@ pub(super) fn execute_ready_task(
                 match scheduled.target {
                     ScheduledExprTarget::Expr(expr) => {
                         let mut env = scheduled.env;
-                        let resolved = state.program.resolve_expr_id(expr.key)?;
-                        state.with_source(expr.key.source(), |state| {
+                        let resolved = state.program.resolve_expr_id(expr)?;
+                        state.with_source(expr.source(), |state| {
                             eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
                         })
                     }
@@ -2404,8 +2404,8 @@ pub(super) fn execute_ready_task(
                 state.with_call_stack(scheduled.call_stack, |state| match scheduled.target {
                     ScheduledExprTarget::Expr(expr) => {
                         let mut env = scheduled.env;
-                        let resolved = state.program.resolve_expr_id(expr.key)?;
-                        state.with_source(expr.key.source(), |state| {
+                        let resolved = state.program.resolve_expr_id(expr)?;
+                        state.with_source(expr.source(), |state| {
                             eval_expr_with_node_id(state, record.work.node_id, resolved, &mut env)
                         })
                     }
