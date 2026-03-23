@@ -498,7 +498,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 
     pub(super) fn expr_handle_for(
         &self,
-        handle: ProgramNodeHandle,
+        handle: impl crate::program::IntoExprLookupId,
     ) -> Result<ExprHandle, EvalError> {
         Ok(ExprHandle {
             key: self.program.expr_id(handle)?,
@@ -507,7 +507,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
 
     pub(super) fn stmt_handle_for(
         &self,
-        handle: ProgramNodeHandle,
+        handle: impl crate::program::IntoStmtLookupId,
     ) -> Result<StmtHandle, EvalError> {
         Ok(StmtHandle {
             key: self.program.stmt_id(handle)?,

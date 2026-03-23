@@ -264,7 +264,7 @@ pub(super) struct KeyedResolverIndexKey {
     name: Arc<str>,
     parameters: Arc<[CompiledParameter]>,
     has_keyword_parameters: bool,
-    body: Option<ProgramNodeHandle>,
+    body: Option<ExprId>,
     self_name: Option<Arc<str>>,
 }
 

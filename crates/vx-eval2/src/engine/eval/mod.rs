@@ -9,7 +9,6 @@ pub(in crate::engine) use resume::*;
 
 pub(super) struct PreparedEntry {
     pub(super) source: SourceId,
-    pub(super) body_handle: ProgramNodeHandle,
     pub(super) body_id: ExprId,
     pub(super) env: EvalEnv,
 }
@@ -270,7 +269,7 @@ fn collect_adapter_parameters_from_stmt(
             }
         }
         Stmt::Expr(expr) => {
-            collect_adapter_parameters(program, program.resolve_expr(*expr)?, names_by_index)?;
+            collect_adapter_parameters(program, program.resolve_expr(expr.expr)?, names_by_index)?;
         }
         Stmt::FnDecl(function) => {
             if let Some(body) = function.compiled.body {
@@ -316,7 +315,7 @@ fn function_adapter_value_for_arg(
         Arc::from("<adapter>"),
         parameters,
         false,
-        Some(expr.handle()),
+        Some(arg_handle.key),
         captures_from_scope(env),
         None,
     );
@@ -395,12 +394,10 @@ pub(super) fn prepare_entry(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let body_id = state.program.expr_id(body)?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
         source: body.source(),
-        body_handle: body,
-        body_id,
+        body_id: body,
         env,
     })
 }
@@ -439,11 +436,9 @@ pub(super) fn prepare_function_call(
         env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
-    let body_id = state.program.expr_id(body)?;
     Ok(Some(PreparedEntry {
         source: body.source(),
-        body_handle: body,
-        body_id,
+        body_id: body,
         env,
     }))
 }
@@ -824,20 +819,8 @@ pub(super) fn eval_call(
         .copied()
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let type_args = Arc::<[Ty]>::from(
-        call.type_args
-            .iter()
-            .copied()
-            .map(|ty| state.program.resolve_type_handle(ty))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    let positional_args = Arc::<[ExprId]>::from(
-        call.positional_args
-            .iter()
-            .copied()
-            .map(|arg| state.program.expr_id(arg))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let type_args = Arc::clone(&call.type_args);
+    let positional_args = Arc::clone(&call.positional_args);
     let callee = state.program.resolve_expr(callee)?;
     if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
@@ -2479,20 +2462,8 @@ fn eval_call_with_keyword_bindings(
         .callee
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.span_for_node(call);
-    let type_args = Arc::<[Ty]>::from(
-        call.type_args
-            .iter()
-            .copied()
-            .map(|ty| state.program.resolve_type_handle(ty))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    let positional_args = Arc::<[ExprId]>::from(
-        call.positional_args
-            .iter()
-            .copied()
-            .map(|arg| state.program.expr_id(arg))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    let type_args = Arc::clone(&call.type_args);
+    let positional_args = Arc::clone(&call.positional_args);
     let callee = state.program.resolve_expr(callee)?;
     let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
         return Err(EvalError::new(
@@ -2749,7 +2720,7 @@ pub(super) fn continue_block_statements(
                 eval_dependent_expr_handle(
                     state,
                     node_id,
-                    state.expr_handle_for(*expr)?,
+                    state.expr_handle_for(expr.expr)?,
                     &mut scope,
                 )
             })? {
@@ -3253,7 +3224,10 @@ pub(super) fn queue_child_prepared_entry(
     prepared: PreparedEntry,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
-    let resolved_source = state.program.span_for_handle(prepared.body_handle);
+    let resolved_source = state
+        .program
+        .span_for_expr_id(prepared.body_id)
+        .expect("prepared entry body id should resolve to a source span");
     let body = state
         .program
         .resolve_expr_id(prepared.body_id)

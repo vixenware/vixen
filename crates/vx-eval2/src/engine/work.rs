@@ -2308,7 +2308,7 @@ pub(super) fn execute_ready_task(
             let node_id = state.alloc_node_id();
             let body = state.program.resolve_expr_id(prepared.body_id)?;
             let body_kind = expr_kind(body);
-            let body_source = state.program.span_for_handle(prepared.body_handle);
+            let body_source = state.program.span_for_expr_id(prepared.body_id)?;
             state
                 .scheduler
                 .record_dependency(ENTRY_WORK_NODE_ID, node_id);

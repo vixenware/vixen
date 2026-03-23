@@ -191,7 +191,7 @@ pub(crate) struct CompiledFunction {
     pub(crate) definition: ProgramNodeHandle,
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
-    pub(crate) body: Option<ProgramNodeHandle>,
+    pub(crate) body: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,7 +228,7 @@ impl Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatchArmPlan {
     pub(crate) pattern: MatchPattern,
-    pub(crate) body: ProgramNodeHandle,
+    pub(crate) body: ExprId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,7 +320,7 @@ pub(crate) enum ExprKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) statements: Arc<[ProgramNodeHandle]>,
+    pub(crate) statements: Arc<[StmtId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,14 +339,14 @@ pub(crate) struct PathLiteralExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParenExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) expr: Option<ProgramNodeHandle>,
+    pub(crate) expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClosureExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) parameters: Arc<[CompiledParameter]>,
-    pub(crate) body: Option<ProgramNodeHandle>,
+    pub(crate) body: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,9 +359,9 @@ pub(crate) struct NameRefExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) callee: Option<ProgramNodeHandle>,
-    pub(crate) type_args: Arc<[ProgramNodeHandle]>,
-    pub(crate) positional_args: Arc<[ProgramNodeHandle]>,
+    pub(crate) callee: Option<ExprId>,
+    pub(crate) type_args: Arc<[Ty]>,
+    pub(crate) positional_args: Arc<[ExprId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,82 +372,82 @@ pub(crate) struct ArrayExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArrayItem {
-    Expr(ProgramNodeHandle),
-    Spread(ProgramNodeHandle),
+    Expr(ExprId),
+    Spread(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TupleExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) items: Arc<[ProgramNodeHandle]>,
+    pub(crate) items: Arc<[ExprId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RangeExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) start: Option<ProgramNodeHandle>,
-    pub(crate) end: Option<ProgramNodeHandle>,
+    pub(crate) start: Option<ExprId>,
+    pub(crate) end: Option<ExprId>,
     pub(crate) inclusive_end: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MapExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) entries: Arc<[(ProgramNodeHandle, ProgramNodeHandle)]>,
+    pub(crate) entries: Arc<[(ExprId, ExprId)]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) message: Option<ProgramNodeHandle>,
+    pub(crate) message: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FallibleExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) expr: Option<ProgramNodeHandle>,
+    pub(crate) expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IfExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) condition: Option<ProgramNodeHandle>,
-    pub(crate) then_branch: Option<ProgramNodeHandle>,
-    pub(crate) else_branch: Option<ProgramNodeHandle>,
+    pub(crate) condition: Option<ExprId>,
+    pub(crate) then_branch: Option<ExprId>,
+    pub(crate) else_branch: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatchExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) scrutinee: Option<ProgramNodeHandle>,
+    pub(crate) scrutinee: Option<ExprId>,
     pub(crate) arms: Arc<[MatchArmPlan]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WhereExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) call: Option<ProgramNodeHandle>,
+    pub(crate) call: Option<ExprId>,
     pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeywordBinding {
     pub(crate) name: Arc<str>,
-    pub(crate) expr: Option<ProgramNodeHandle>,
+    pub(crate) expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrefixExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) operator: Option<SyntaxKind>,
-    pub(crate) expr: Option<ProgramNodeHandle>,
+    pub(crate) expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BinaryExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) lhs: Option<ProgramNodeHandle>,
-    pub(crate) rhs: Option<ProgramNodeHandle>,
+    pub(crate) lhs: Option<ExprId>,
+    pub(crate) rhs: Option<ExprId>,
     pub(crate) operator: Option<SyntaxKind>,
 }
 
@@ -460,7 +460,7 @@ pub(crate) struct InterpolatedStringExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StringPart {
     Text(Arc<str>),
-    Interpolation(ProgramNodeHandle),
+    Interpolation(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,23 +474,29 @@ pub(crate) struct StructLiteralExpr {
 pub(crate) enum StructLiteralPart {
     Field {
         name: Arc<str>,
-        expr: Option<ProgramNodeHandle>,
+        expr: Option<ExprId>,
     },
-    Spread(ProgramNodeHandle),
+    Spread(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FieldExpr {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) receiver: Option<ProgramNodeHandle>,
+    pub(crate) receiver: Option<ExprId>,
     pub(crate) field_name: Option<Token>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExprStmt {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) expr: ExprId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Stmt {
     Let(LetStmt),
     FnDecl(FunctionStmt),
-    Expr(ProgramNodeHandle),
+    Expr(ExprStmt),
     Unsupported {
         handle: ProgramNodeHandle,
         kind: SyntaxKind,
@@ -502,7 +508,7 @@ impl Stmt {
         match self {
             Self::Let(stmt) => stmt.handle,
             Self::FnDecl(stmt) => stmt.handle,
-            Self::Expr(handle) => *handle,
+            Self::Expr(stmt) => stmt.handle,
             Self::Unsupported { handle, .. } => *handle,
         }
     }
@@ -548,6 +554,7 @@ impl_has_handle!(
     InterpolatedStringExpr,
     StructLiteralExpr,
     FieldExpr,
+    ExprStmt,
     LetStmt,
     FunctionStmt,
 );
@@ -556,7 +563,7 @@ impl_has_handle!(
 pub(crate) struct LetStmt {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) pattern: Option<LetPattern>,
-    pub(crate) expr: Option<ProgramNodeHandle>,
+    pub(crate) expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,6 +589,7 @@ struct CompiledProgramSource {
     stmts: Vec<Stmt>,
     stmt_ids: BTreeMap<ProgramNodeHandle, StmtId>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
+    pending_call_type_args: Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
     parse_error: Option<EvalError>,
     #[cfg(test)]
     parse_count: usize,
@@ -598,6 +606,38 @@ pub(crate) struct CompiledProgram {
 pub(crate) struct VariantConstructor {
     pub(crate) name: Arc<str>,
     pub(crate) fields: Arc<[Arc<str>]>,
+}
+
+pub(crate) trait IntoExprLookupId {
+    fn into_expr_id(self, program: &CompiledProgram) -> Result<ExprId, EvalError>;
+}
+
+impl IntoExprLookupId for ProgramNodeHandle {
+    fn into_expr_id(self, program: &CompiledProgram) -> Result<ExprId, EvalError> {
+        program.source(self.source())?.expr_id(self)
+    }
+}
+
+impl IntoExprLookupId for ExprId {
+    fn into_expr_id(self, _program: &CompiledProgram) -> Result<ExprId, EvalError> {
+        Ok(self)
+    }
+}
+
+pub(crate) trait IntoStmtLookupId {
+    fn into_stmt_id(self, program: &CompiledProgram) -> Result<StmtId, EvalError>;
+}
+
+impl IntoStmtLookupId for ProgramNodeHandle {
+    fn into_stmt_id(self, program: &CompiledProgram) -> Result<StmtId, EvalError> {
+        program.source(self.source())?.stmt_id(self)
+    }
+}
+
+impl IntoStmtLookupId for StmtId {
+    fn into_stmt_id(self, _program: &CompiledProgram) -> Result<StmtId, EvalError> {
+        Ok(self)
+    }
 }
 
 impl CompiledProgram {
@@ -642,6 +682,7 @@ impl CompiledProgram {
             scopes: ProgramScopes::build(&scope_sources, imports),
             types: collect_types_for_sources(&type_sources),
         }
+        .with_resolved_type_args()
     }
 
     pub(crate) fn entry_source(&self) -> SourceId {
@@ -689,20 +730,20 @@ impl CompiledProgram {
             ))
     }
 
-    pub(crate) fn expr_id(&self, handle: ProgramNodeHandle) -> Result<ExprId, EvalError> {
-        self.source(handle.source())?.expr_id(handle)
+    pub(crate) fn expr_id(&self, key: impl IntoExprLookupId) -> Result<ExprId, EvalError> {
+        key.into_expr_id(self)
     }
 
-    pub(crate) fn stmt_id(&self, handle: ProgramNodeHandle) -> Result<StmtId, EvalError> {
-        self.source(handle.source())?.stmt_id(handle)
+    pub(crate) fn stmt_id(&self, key: impl IntoStmtLookupId) -> Result<StmtId, EvalError> {
+        key.into_stmt_id(self)
     }
 
     pub(crate) fn resolve_expr_id(&self, id: ExprId) -> Result<&Expr, EvalError> {
         self.source(id.source())?.resolve_expr(id)
     }
 
-    pub(crate) fn resolve_expr(&self, handle: ProgramNodeHandle) -> Result<&Expr, EvalError> {
-        let id = self.expr_id(handle)?;
+    pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
+        let id = self.expr_id(key)?;
         self.resolve_expr_id(id)
     }
 
@@ -710,8 +751,8 @@ impl CompiledProgram {
         self.source(id.source())?.resolve_stmt(id)
     }
 
-    pub(crate) fn resolve_stmt(&self, handle: ProgramNodeHandle) -> Result<&Stmt, EvalError> {
-        let id = self.stmt_id(handle)?;
+    pub(crate) fn resolve_stmt(&self, key: impl IntoStmtLookupId) -> Result<&Stmt, EvalError> {
+        let id = self.stmt_id(key)?;
         self.resolve_stmt_id(id)
     }
 
@@ -737,27 +778,6 @@ impl CompiledProgram {
 
     pub(crate) fn span_for_token_ref(&self, token: &Token) -> SourceSpan {
         self.span_for_handle(token.handle())
-    }
-
-    pub(crate) fn resolve_type_handle(&self, handle: ProgramNodeHandle) -> Result<Ty, EvalError> {
-        let source = self.source(handle.source())?;
-        source.ensure_parsed()?;
-        let indexed = source.type_nodes.get(&handle).ok_or_else(|| {
-            EvalError::new(
-                EvalErrorKind::Internal,
-                format!("type at range {:?} was not found", handle.to_range()),
-            )
-        })?;
-        let ty = Type::cast(source.resolve_node(indexed)?).ok_or_else(|| {
-            EvalError::new(
-                EvalErrorKind::Internal,
-                format!(
-                    "type at range {:?} resolved to a non-type node",
-                    handle.to_range()
-                ),
-            )
-        })?;
-        Ok(self.types.resolve_type_annotation(&ty))
     }
 
     pub(crate) fn types(&self) -> &TypeCollection {
@@ -825,6 +845,15 @@ impl CompiledProgram {
             )
         })
     }
+
+    fn with_resolved_type_args(mut self) -> Self {
+        for source in self.sources.values_mut() {
+            source
+                .resolve_pending_call_type_args(&self.types)
+                .expect("compiled call type arguments should resolve");
+        }
+        self
+    }
 }
 
 impl CompiledProgramSource {
@@ -840,20 +869,9 @@ impl CompiledProgramSource {
         let mut stmts = Vec::new();
         let mut stmt_ids = BTreeMap::new();
         let mut type_nodes = BTreeMap::new();
+        let mut pending_call_type_args = Vec::new();
         let parse_error = if parse.errors().is_empty() {
             let root = SourceFile::cast_root(parse.syntax());
-            for item in root.items() {
-                if let Item::FnDecl(function) = item {
-                    let Some((name, compiled)) = compile_function_decl(source, &function) else {
-                        continue;
-                    };
-                    functions_by_definition.insert(
-                        compiled.definition,
-                        (Arc::from(name.as_str()), compiled.clone()),
-                    );
-                    functions_by_name.insert(name, compiled);
-                }
-            }
             let mut path = Vec::new();
             match index_nodes(
                 source,
@@ -866,8 +884,25 @@ impl CompiledProgramSource {
                 &mut stmts,
                 &mut stmt_ids,
                 &mut type_nodes,
+                &mut pending_call_type_args,
             ) {
-                Ok(()) => None,
+                Ok(()) => {
+                    for item in root.items() {
+                        if let Item::FnDecl(function) = item {
+                            let Some((name, compiled)) =
+                                compile_function_decl(source, &function, &expr_ids)
+                            else {
+                                continue;
+                            };
+                            functions_by_definition.insert(
+                                compiled.definition,
+                                (Arc::from(name.as_str()), compiled.clone()),
+                            );
+                            functions_by_name.insert(name, compiled);
+                        }
+                    }
+                    None
+                }
                 Err(error) => Some(error),
             }
         } else {
@@ -888,10 +923,66 @@ impl CompiledProgramSource {
             stmts,
             stmt_ids,
             type_nodes,
+            pending_call_type_args,
             parse_error,
             #[cfg(test)]
             parse_count: 1,
         }
+    }
+
+    fn resolve_type_handle_with(
+        &self,
+        handle: ProgramNodeHandle,
+        types: &TypeCollection,
+    ) -> Result<Ty, EvalError> {
+        self.ensure_parsed()?;
+        let indexed = self.type_nodes.get(&handle).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("type at range {:?} was not found", handle.to_range()),
+            )
+        })?;
+        let ty = Type::cast(self.resolve_node(indexed)?).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "type at range {:?} resolved to a non-type node",
+                    handle.to_range()
+                ),
+            )
+        })?;
+        Ok(types.resolve_type_annotation(&ty))
+    }
+
+    fn resolve_pending_call_type_args(&mut self, types: &TypeCollection) -> Result<(), EvalError> {
+        self.ensure_parsed()?;
+        for (expr_id, handles) in &self.pending_call_type_args {
+            let resolved = Arc::<[Ty]>::from(
+                handles
+                    .iter()
+                    .copied()
+                    .map(|handle| self.resolve_type_handle_with(handle, types))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let expr = self.exprs.get_mut(expr_id.index as usize).ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("expression id {:?} was not found", expr_id),
+                )
+            })?;
+            let ExprKind::Call(call) = &mut expr.kind else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "pending call type args targeted non-call expression {:?}",
+                        expr_id
+                    ),
+                ));
+            };
+            call.type_args = resolved;
+        }
+        self.pending_call_type_args.clear();
+        Ok(())
     }
 
     fn lookup_function_by_name(&self, name: &str) -> Result<Option<CompiledFunction>, EvalError> {
@@ -1057,6 +1148,7 @@ fn normalize_call_trivia(source_text: &str) -> String {
 fn compile_function_decl(
     source: SourceId,
     function: &ParserFnDecl,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
 ) -> Option<(String, CompiledFunction)> {
     let name = function.name()?;
     let parameters = function
@@ -1076,12 +1168,45 @@ fn compile_function_decl(
             definition: ProgramNodeHandle::for_token(source, &name),
             parameters: Arc::from(parameters),
             has_keyword_parameters: function.keyword_parameters().next().is_some(),
-            body: function
-                .body_expr()
-                .as_ref()
-                .map(|body| ProgramNodeHandle::for_node(source, body)),
+            body: function.body_expr().as_ref().and_then(|body| {
+                expr_ids
+                    .get(&ProgramNodeHandle::for_node(source, body))
+                    .copied()
+            }),
         },
     ))
+}
+
+fn require_expr_id(
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
+    handle: ProgramNodeHandle,
+    label: &str,
+) -> Result<ExprId, EvalError> {
+    expr_ids.get(&handle).copied().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "{label} expression at range {:?} was not indexed",
+                handle.to_range()
+            ),
+        )
+    })
+}
+
+fn require_stmt_id(
+    stmt_ids: &BTreeMap<ProgramNodeHandle, StmtId>,
+    handle: ProgramNodeHandle,
+    label: &str,
+) -> Result<StmtId, EvalError> {
+    stmt_ids.get(&handle).copied().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "{label} statement at range {:?} was not indexed",
+                handle.to_range()
+            ),
+        )
+    })
 }
 
 fn index_nodes(
@@ -1095,18 +1220,45 @@ fn index_nodes(
     stmts: &mut Vec<Stmt>,
     stmt_ids: &mut BTreeMap<ProgramNodeHandle, StmtId>,
     type_nodes: &mut BTreeMap<ProgramNodeHandle, IndexedNode>,
+    pending_call_type_args: &mut Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
 ) -> Result<(), EvalError> {
+    for (index, child) in node.children().enumerate() {
+        path.push(index as u32);
+        index_nodes(
+            source,
+            source_id,
+            line_index,
+            &child,
+            path,
+            exprs,
+            expr_ids,
+            stmts,
+            stmt_ids,
+            type_nodes,
+            pending_call_type_args,
+        )?;
+        path.pop();
+    }
     if let Some(expr) = ParserExpr::cast(node.clone()) {
-        let compiled = compile_expr(source, source_id, line_index, &expr)?;
         let id = ExprId {
             source: source.0,
             index: exprs.len() as u32,
         };
+        let compiled = compile_expr(
+            source,
+            source_id,
+            line_index,
+            &expr,
+            expr_ids,
+            stmt_ids,
+            id,
+            pending_call_type_args,
+        )?;
         expr_ids.insert(compiled.handle(), id);
         exprs.push(compiled);
     }
     if let Some(stmt) = ParserStmt::cast(node.clone()) {
-        let compiled = compile_stmt(source, source_id, line_index, &stmt)?;
+        let compiled = compile_stmt(source, source_id, line_index, &stmt, expr_ids)?;
         let id = StmtId {
             source: source.0,
             index: stmts.len() as u32,
@@ -1122,14 +1274,6 @@ fn index_nodes(
             },
         );
     }
-    for (index, child) in node.children().enumerate() {
-        path.push(index as u32);
-        index_nodes(
-            source, source_id, line_index, &child, path, exprs, expr_ids, stmts, stmt_ids,
-            type_nodes,
-        )?;
-        path.pop();
-    }
     Ok(())
 }
 
@@ -1138,6 +1282,10 @@ fn compile_expr(
     source_id: &Arc<str>,
     line_index: &ParserLineIndex,
     expr: &ParserExpr,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
+    stmt_ids: &BTreeMap<ProgramNodeHandle, StmtId>,
+    expr_id: ExprId,
+    pending_call_type_args: &mut Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
 ) -> Result<Expr, EvalError> {
     let handle = ProgramNodeHandle::for_node(source, expr);
     let kind = match expr {
@@ -1146,8 +1294,14 @@ fn compile_expr(
             statements: Arc::from(
                 block
                     .statements()
-                    .map(|stmt| ProgramNodeHandle::for_node(source, &stmt))
-                    .collect::<Vec<_>>(),
+                    .map(|stmt| {
+                        require_stmt_id(
+                            stmt_ids,
+                            ProgramNodeHandle::for_node(source, &stmt),
+                            "block child",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
         }),
         ParserExpr::Literal(literal) => ExprKind::Literal(LiteralExpr {
@@ -1164,7 +1318,14 @@ fn compile_expr(
             expr: paren
                 .expr()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "paren inner",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::Closure(closure) => ExprKind::Closure(ClosureExpr {
             handle,
@@ -1172,54 +1333,86 @@ fn compile_expr(
             body: closure
                 .body()
                 .as_ref()
-                .map(|body| ProgramNodeHandle::for_node(source, body)),
+                .map(|body| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, body),
+                        "closure body",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::NameRef(name_ref) => ExprKind::NameRef(NameRefExpr {
             handle,
             token: name_ref.token().map(|token| compile_token(source, &token)),
             name: Arc::from(name_ref_text_from_ast(name_ref)),
         }),
-        ParserExpr::Call(call) => ExprKind::Call(CallExpr {
-            handle,
-            callee: call
-                .callee()
-                .as_ref()
-                .map(|callee| ProgramNodeHandle::for_node(source, callee)),
-            type_args: Arc::from(
+        ParserExpr::Call(call) => {
+            let raw_type_args: Arc<[ProgramNodeHandle]> = Arc::from(
                 call.type_args()
                     .into_iter()
                     .flat_map(|args| args.types())
                     .map(|ty| ProgramNodeHandle::for_node(source, &ty))
                     .collect::<Vec<_>>(),
-            ),
-            positional_args: Arc::from(
-                call.positional_args()
-                    .into_iter()
-                    .map(|arg| ProgramNodeHandle::for_node(source, &arg))
-                    .collect::<Vec<_>>(),
-            ),
-        }),
+            );
+            if !raw_type_args.is_empty() {
+                pending_call_type_args.push((expr_id, Arc::clone(&raw_type_args)));
+            }
+            ExprKind::Call(CallExpr {
+                handle,
+                callee: call
+                    .callee()
+                    .as_ref()
+                    .map(|callee| {
+                        require_expr_id(
+                            expr_ids,
+                            ProgramNodeHandle::for_node(source, callee),
+                            "call callee",
+                        )
+                    })
+                    .transpose()?,
+                type_args: Arc::from([]),
+                positional_args: Arc::from(
+                    call.positional_args()
+                        .into_iter()
+                        .map(|arg| {
+                            require_expr_id(
+                                expr_ids,
+                                ProgramNodeHandle::for_node(source, &arg),
+                                "call argument",
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            })
+        }
         ParserExpr::Array(array) => ExprKind::Array(ArrayExpr {
             handle,
             items: Arc::from(
                 array
                     .items()
                     .map(|item| match item {
-                        vx_parser::ArrayItem::Expr(expr) => {
-                            Ok(ArrayItem::Expr(ProgramNodeHandle::for_node(source, &expr)))
+                        vx_parser::ArrayItem::Expr(expr) => Ok(ArrayItem::Expr(require_expr_id(
+                            expr_ids,
+                            ProgramNodeHandle::for_node(source, &expr),
+                            "array item",
+                        )?)),
+                        vx_parser::ArrayItem::Spread(spread) => {
+                            Ok(ArrayItem::Spread(require_expr_id(
+                                expr_ids,
+                                spread
+                                    .expr()
+                                    .as_ref()
+                                    .map(|expr| ProgramNodeHandle::for_node(source, expr))
+                                    .ok_or_else(|| {
+                                        EvalError::new(
+                                            EvalErrorKind::Internal,
+                                            "array spread expression has no operand",
+                                        )
+                                    })?,
+                                "array spread",
+                            )?))
                         }
-                        vx_parser::ArrayItem::Spread(spread) => Ok(ArrayItem::Spread(
-                            spread
-                                .expr()
-                                .as_ref()
-                                .map(|expr| ProgramNodeHandle::for_node(source, expr))
-                                .ok_or_else(|| {
-                                    EvalError::new(
-                                        EvalErrorKind::Internal,
-                                        "array spread expression has no operand",
-                                    )
-                                })?,
-                        )),
                     })
                     .collect::<Result<Vec<_>, EvalError>>()?,
             ),
@@ -1229,8 +1422,14 @@ fn compile_expr(
             items: Arc::from(
                 tuple
                     .items()
-                    .map(|item| ProgramNodeHandle::for_node(source, &item))
-                    .collect::<Vec<_>>(),
+                    .map(|item| {
+                        require_expr_id(
+                            expr_ids,
+                            ProgramNodeHandle::for_node(source, &item),
+                            "tuple item",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
         }),
         ParserExpr::Range(range) => ExprKind::Range(RangeExpr {
@@ -1238,11 +1437,25 @@ fn compile_expr(
             start: range
                 .start()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "range start",
+                    )
+                })
+                .transpose()?,
             end: range
                 .end()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "range end",
+                    )
+                })
+                .transpose()?,
             inclusive_end: range.is_inclusive(),
         }),
         ParserExpr::Map(map) => ExprKind::Map(MapExpr {
@@ -1257,8 +1470,16 @@ fn compile_expr(
                             EvalError::new(EvalErrorKind::Internal, "map entry has no value")
                         })?;
                         Ok((
-                            ProgramNodeHandle::for_node(source, &key),
-                            ProgramNodeHandle::for_node(source, &value),
+                            require_expr_id(
+                                expr_ids,
+                                ProgramNodeHandle::for_node(source, &key),
+                                "map key",
+                            )?,
+                            require_expr_id(
+                                expr_ids,
+                                ProgramNodeHandle::for_node(source, &value),
+                                "map value",
+                            )?,
                         ))
                     })
                     .collect::<Result<Vec<_>, EvalError>>()?,
@@ -1269,29 +1490,64 @@ fn compile_expr(
             message: fail
                 .message()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "fail message",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::Fallible(fallible) => ExprKind::Fallible(FallibleExpr {
             handle,
             expr: fallible
                 .expr()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "fallible operand",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::If(if_expr) => ExprKind::If(IfExpr {
             handle,
             condition: if_expr
                 .condition()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "if condition",
+                    )
+                })
+                .transpose()?,
             then_branch: if_expr
                 .then_branch()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "if then branch",
+                    )
+                })
+                .transpose()?,
             else_branch: if_expr
                 .else_branch()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "if else branch",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::Match(match_expr) => ExprKind::Match(MatchExpr {
             handle,
@@ -1300,7 +1556,14 @@ fn compile_expr(
                 .children()
                 .find_map(ParserExpr::cast)
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "match scrutinee",
+                    )
+                })
+                .transpose()?,
             arms: Arc::from(
                 match_expr
                     .arms()
@@ -1315,7 +1578,11 @@ fn compile_expr(
                             pattern: compile_match_pattern(
                                 source, source_id, line_index, &pattern,
                             )?,
-                            body: ProgramNodeHandle::for_node(source, &body),
+                            body: require_expr_id(
+                                expr_ids,
+                                ProgramNodeHandle::for_node(source, &body),
+                                "match arm body",
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, EvalError>>()?,
@@ -1326,8 +1593,17 @@ fn compile_expr(
             call: where_expr
                 .callee()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
-            keyword_bindings: Arc::from(compile_where_keyword_bindings(source, where_expr)?),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "where callee",
+                    )
+                })
+                .transpose()?,
+            keyword_bindings: Arc::from(compile_where_keyword_bindings(
+                source, where_expr, expr_ids,
+            )?),
         }),
         ParserExpr::Prefix(prefix) => ExprKind::Prefix(PrefixExpr {
             handle,
@@ -1335,18 +1611,39 @@ fn compile_expr(
             expr: prefix
                 .expr()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "prefix operand",
+                    )
+                })
+                .transpose()?,
         }),
         ParserExpr::Binary(binary) => ExprKind::Binary(BinaryExpr {
             handle,
             lhs: binary
                 .lhs()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "binary lhs",
+                    )
+                })
+                .transpose()?,
             rhs: binary
                 .rhs()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "binary rhs",
+                    )
+                })
+                .transpose()?,
             operator: binary
                 .syntax()
                 .children_with_tokens()
@@ -1382,7 +1679,8 @@ fn compile_expr(
                                 Ok(StringPart::Text(Arc::from(token.text())))
                             }
                             ParserStringPart::Interpolation(interpolation) => {
-                                Ok(StringPart::Interpolation(
+                                Ok(StringPart::Interpolation(require_expr_id(
+                                    expr_ids,
                                     interpolation
                                         .expr()
                                         .as_ref()
@@ -1393,7 +1691,8 @@ fn compile_expr(
                                                 "string interpolation has no embedded expression",
                                             )
                                         })?,
-                                ))
+                                    "string interpolation",
+                                )?))
                             }
                         })
                         .collect::<Result<Vec<_>, EvalError>>()?,
@@ -1403,14 +1702,25 @@ fn compile_expr(
         ParserExpr::StructLiteral(struct_literal) => ExprKind::StructLiteral(StructLiteralExpr {
             handle,
             type_name: compile_struct_literal_type_name(struct_literal),
-            parts: Arc::from(compile_struct_literal_parts(source, struct_literal)?),
+            parts: Arc::from(compile_struct_literal_parts(
+                source,
+                struct_literal,
+                expr_ids,
+            )?),
         }),
         ParserExpr::Field(field) => ExprKind::Field(FieldExpr {
             handle,
             receiver: field
                 .receiver()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "field receiver",
+                    )
+                })
+                .transpose()?,
             field_name: field
                 .field_name()
                 .map(|token| compile_token(source, &token)),
@@ -1427,6 +1737,7 @@ fn compile_stmt(
     source_id: &Arc<str>,
     line_index: &ParserLineIndex,
     stmt: &ParserStmt,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
 ) -> Result<Stmt, EvalError> {
     let handle = ProgramNodeHandle::for_node(source, stmt);
     Ok(match stmt {
@@ -1439,10 +1750,17 @@ fn compile_stmt(
             expr: let_stmt
                 .expr()
                 .as_ref()
-                .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                .map(|expr| {
+                    require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, expr),
+                        "let value",
+                    )
+                })
+                .transpose()?,
         }),
         ParserStmt::FnDecl(function) => {
-            let Some((name, compiled)) = compile_function_decl(source, function) else {
+            let Some((name, compiled)) = compile_function_decl(source, function, expr_ids) else {
                 return Err(EvalError::new(
                     EvalErrorKind::Internal,
                     "function declaration could not be compiled",
@@ -1454,7 +1772,14 @@ fn compile_stmt(
                 compiled,
             })
         }
-        ParserStmt::Expr(expr) => Stmt::Expr(ProgramNodeHandle::for_node(source, expr)),
+        ParserStmt::Expr(expr) => Stmt::Expr(ExprStmt {
+            handle,
+            expr: require_expr_id(
+                expr_ids,
+                ProgramNodeHandle::for_node(source, expr),
+                "expression statement",
+            )?,
+        }),
         other => Stmt::Unsupported {
             handle,
             kind: other.syntax().kind(),
@@ -1509,6 +1834,7 @@ fn compile_struct_literal_type_name(
 fn compile_struct_literal_parts(
     source: SourceId,
     struct_literal: &vx_parser::StructLiteralExpr,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
 ) -> Result<Vec<StructLiteralPart>, EvalError> {
     struct_literal
         .fields()
@@ -1517,12 +1843,18 @@ fn compile_struct_literal_parts(
                 if let Some(name_token) = field.name() {
                     Ok(StructLiteralPart::Field {
                         name: Arc::from(name_token.text()),
-                        expr: Some(ProgramNodeHandle::for_node(source, &expr)),
+                        expr: Some(require_expr_id(
+                            expr_ids,
+                            ProgramNodeHandle::for_node(source, &expr),
+                            "struct field value",
+                        )?),
                     })
                 } else {
-                    Ok(StructLiteralPart::Spread(ProgramNodeHandle::for_node(
-                        source, &expr,
-                    )))
+                    Ok(StructLiteralPart::Spread(require_expr_id(
+                        expr_ids,
+                        ProgramNodeHandle::for_node(source, &expr),
+                        "struct spread",
+                    )?))
                 }
             }
             None => {
@@ -1541,6 +1873,7 @@ fn compile_struct_literal_parts(
 fn compile_where_keyword_bindings(
     source: SourceId,
     where_expr: &vx_parser::WhereExpr,
+    expr_ids: &BTreeMap<ProgramNodeHandle, ExprId>,
 ) -> Result<Vec<KeywordBinding>, EvalError> {
     let keywords = where_expr.keywords().ok_or_else(|| {
         EvalError::new(
@@ -1568,7 +1901,14 @@ fn compile_where_keyword_bindings(
                 expr: field
                     .value()
                     .as_ref()
-                    .map(|expr| ProgramNodeHandle::for_node(source, expr)),
+                    .map(|expr| {
+                        require_expr_id(
+                            expr_ids,
+                            ProgramNodeHandle::for_node(source, expr),
+                            "where keyword binding",
+                        )
+                    })
+                    .transpose()?,
             })
         })
         .collect()
