@@ -142,7 +142,8 @@ pub(super) enum ContinuationFrame {
         type_args: Arc<[Ty]>,
         env: EvalEnv,
         args: Vec<Value>,
-        remaining_args: Vec<ExprHandle>,
+        remaining_args: Arc<[ProgramNodeHandle]>,
+        next_arg_index: usize,
     },
     CallAfterArg {
         node_id: EvalNodeId,
@@ -151,7 +152,8 @@ pub(super) enum ContinuationFrame {
         call_source: SourceSpan,
         type_args: Arc<[Ty]>,
         args: Vec<Value>,
-        remaining_args: Vec<ExprHandle>,
+        remaining_args: Arc<[ProgramNodeHandle]>,
+        next_arg_index: usize,
         env: EvalEnv,
     },
     ArrayAfterItem {

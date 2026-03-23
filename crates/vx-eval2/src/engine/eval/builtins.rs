@@ -1747,7 +1747,8 @@ fn continue_builtin_call_inner(
                 call_source,
                 Arc::from([]),
                 vec![host],
-                Vec::new(),
+                Arc::from([]),
+                0,
                 empty_env(),
             )
             .map(Some)
@@ -1816,7 +1817,8 @@ fn continue_builtin_call_inner(
                 call_source,
                 Arc::from([]),
                 vec![process, vfs],
-                Vec::new(),
+                Arc::from([]),
+                0,
                 empty_env(),
             )
             .map(Some)

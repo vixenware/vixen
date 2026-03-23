@@ -207,7 +207,8 @@ pub(in crate::engine) fn resume_frame(
                         call_source,
                         type_args,
                         args,
-                        Vec::new(),
+                        Arc::from([]),
+                        0,
                         empty_env(),
                     )
                 }
@@ -223,6 +224,7 @@ pub(in crate::engine) fn resume_frame(
             env,
             args,
             remaining_args,
+            next_arg_index,
         } => {
             let result = match input {
                 Ok(callee) => continue_call_from_args(
@@ -234,6 +236,7 @@ pub(in crate::engine) fn resume_frame(
                     type_args,
                     args,
                     remaining_args,
+                    next_arg_index,
                     env,
                 ),
                 Err(error) => Err(error),
@@ -291,6 +294,7 @@ pub(in crate::engine) fn resume_frame(
             type_args,
             mut args,
             remaining_args,
+            next_arg_index,
             env,
         } => {
             let result = match input {
@@ -305,6 +309,7 @@ pub(in crate::engine) fn resume_frame(
                         type_args,
                         args,
                         remaining_args,
+                        next_arg_index,
                         env,
                     )
                 }

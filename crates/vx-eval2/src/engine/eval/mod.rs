@@ -844,18 +844,13 @@ pub(super) fn eval_call(
             .map(|ty| state.program.resolve_type_handle(ty))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = call
-        .positional_args
-        .iter()
-        .copied()
-        .map(|arg| ExprHandle { key: arg })
-        .collect::<Vec<_>>();
+    let positional_args = Arc::clone(&call.positional_args);
     let callee = state.program.resolve_expr(callee)?;
     if let Some(callee_value) = immediate_call_callee_value(state, &callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
             let child_nodes = positional_args
                 .iter()
-                .map(|arg| queue_child_expr_handle(state, *arg, env))
+                .map(|arg| queue_child_expr_handle(state, ExprHandle { key: *arg }, env))
                 .collect::<Vec<_>>();
             return Ok(wait_on_child_dependency(
                 state,
@@ -879,7 +874,8 @@ pub(super) fn eval_call(
             call_source,
             Arc::clone(&type_args),
             Vec::new(),
-            positional_args.clone(),
+            Arc::clone(&positional_args),
+            0,
             env.clone(),
         );
     }
@@ -895,7 +891,8 @@ pub(super) fn eval_call(
                     type_args: Arc::clone(&type_args),
                     env: env.clone(),
                     args: Vec::new(),
-                    remaining_args: positional_args.clone(),
+                    remaining_args: Arc::clone(&positional_args),
+                    next_arg_index: 0,
                 },
             ));
         }
@@ -909,6 +906,7 @@ pub(super) fn eval_call(
         type_args,
         Vec::new(),
         positional_args,
+        0,
         env.clone(),
     )
 }
@@ -1364,7 +1362,8 @@ pub(super) fn continue_call_from_args(
     call_source: SourceSpan,
     type_args: Arc<[Ty]>,
     mut args: Vec<Value>,
-    remaining_args: Vec<ExprHandle>,
+    remaining_args: Arc<[ProgramNodeHandle]>,
+    mut next_arg_index: usize,
     mut env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if state.current_parent() != Some(node_id) {
@@ -1378,12 +1377,14 @@ pub(super) fn continue_call_from_args(
                 type_args,
                 args,
                 remaining_args,
+                next_arg_index,
                 env,
             )
         });
     }
-    let mut remaining = remaining_args.into_iter();
-    while let Some(arg_handle) = remaining.next() {
+    while let Some(arg_handle) = remaining_args.get(next_arg_index).copied() {
+        let arg_handle = ExprHandle { key: arg_handle };
+        next_arg_index += 1;
         let arg_index = args.len();
         let adapter = function_adapter_value_for_arg(state, &callee, arg_index, arg_handle, &env)?;
         let arg_step = match adapter {
@@ -1393,7 +1394,6 @@ pub(super) fn continue_call_from_args(
         match arg_step {
             EvalStep::Ready(value) => args.push(value),
             EvalStep::Suspended(suspension) => {
-                let remaining_args = remaining.collect::<Vec<_>>();
                 return Ok(extend_suspension(
                     suspension,
                     ContinuationFrame::CallAfterArg {
@@ -1404,6 +1404,7 @@ pub(super) fn continue_call_from_args(
                         type_args: Arc::clone(&type_args),
                         args,
                         remaining_args,
+                        next_arg_index,
                         env,
                     },
                 ));
@@ -1426,7 +1427,8 @@ pub(super) fn continue_call_from_args(
             call_source,
             type_args,
             args,
-            Vec::new(),
+            Arc::from([]),
+            0,
             empty_env(),
         ) {
             Ok(EvalStep::Ready(value)) => {
@@ -2465,12 +2467,7 @@ fn eval_call_with_keyword_bindings(
             .map(|ty| state.program.resolve_type_handle(ty))
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let positional_args = call
-        .positional_args
-        .iter()
-        .copied()
-        .map(|arg| ExprHandle { key: arg })
-        .collect::<Vec<_>>();
+    let positional_args = Arc::clone(&call.positional_args);
     let callee = state.program.resolve_expr(callee)?;
     let Some(callee_value) = immediate_call_callee_value(state, &callee, &env)? else {
         return Err(EvalError::new(
@@ -2482,7 +2479,7 @@ fn eval_call_with_keyword_bindings(
     if state.queue_child_work && !positional_args.is_empty() {
         let child_nodes = positional_args
             .iter()
-            .map(|arg| queue_child_expr_handle(state, *arg, &env))
+            .map(|arg| queue_child_expr_handle(state, ExprHandle { key: *arg }, &env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -2507,6 +2504,7 @@ fn eval_call_with_keyword_bindings(
         type_args,
         Vec::new(),
         positional_args,
+        0,
         env,
     )
 }
