@@ -1157,6 +1157,9 @@ pub(super) fn eval_name_ref(
     name_ref: &NameRefExpr,
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
+    if let Some(resolved) = &name_ref.resolved {
+        return resolved_name_ref_value(state, name_ref.handle, resolved);
+    }
     let name_token = name_ref
         .token
         .as_ref()
@@ -1218,6 +1221,58 @@ pub(super) fn eval_name_ref(
     ))
 }
 
+fn resolved_name_ref_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    resolved: &ResolvedNameRef,
+) -> Result<Value, EvalError> {
+    match resolved {
+        ResolvedNameRef::Function {
+            resolved_name,
+            function,
+        } => Ok(Value::function(function_ref_from_compiled(
+            state,
+            resolved_name.clone(),
+            function.clone(),
+            Arc::from([]),
+            Some(resolved_name.clone()),
+        ))
+        .with_provenance(Provenance::binding(
+            state.program.span_for_handle(handle),
+            resolved_name.to_string(),
+        ))),
+        ResolvedNameRef::VariantConstructor(constructor) => Ok(enum_constructor_or_value(
+            state,
+            constructor.name.clone(),
+            constructor.fields.clone(),
+            state.program.span_for_handle(handle),
+        )),
+        ResolvedNameRef::NewtypeConstructor {
+            display_name,
+            newtype_name,
+        } => {
+            let source = state.program.span_for_handle(handle);
+            let captures = Arc::from([(
+                Arc::from("__newtype_ctor"),
+                Value::bool(true).with_provenance(Provenance::binding(
+                    source.clone(),
+                    display_name.to_string(),
+                )),
+            )]);
+            Ok(Value::function(FunctionRef::new(
+                state.program.source_id(state.current_source()),
+                newtype_name.clone(),
+                Arc::from([]),
+                false,
+                None,
+                captures,
+                Some(display_name.clone()),
+            ))
+            .with_provenance(Provenance::binding(source, display_name.to_string())))
+        }
+    }
+}
+
 fn name_ref_text(name_ref: &NameRefExpr) -> Arc<str> {
     name_ref.name.clone()
 }
@@ -1249,6 +1304,9 @@ pub(super) fn static_namespace_member_value(
     field: &FieldExpr,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
+    if let Some(static_member) = &field.static_member {
+        return static_member_value(state, field.handle, static_member).map(Some);
+    }
     let Some(receiver) = field.receiver else {
         return Ok(None);
     };
@@ -1290,6 +1348,35 @@ pub(super) fn static_namespace_member_value(
     Ok(Some(
         Value::function(function).with_provenance(Provenance::binding(source, full_name)),
     ))
+}
+
+fn static_member_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    static_member: &StaticMemberPlan,
+) -> Result<Value, EvalError> {
+    if let Some(constructor) = &static_member.variant_constructor {
+        return Ok(enum_constructor_or_value(
+            state,
+            constructor.name.clone(),
+            constructor.fields.clone(),
+            state.program.span_for_handle(handle),
+        ));
+    }
+    let source = state.program.span_for_handle(handle);
+    Ok(Value::function(FunctionRef::new(
+        state.program.source_id(state.current_source()),
+        static_member.full_name.clone(),
+        Arc::from([]),
+        false,
+        None,
+        Arc::from([]),
+        None,
+    ))
+    .with_provenance(Provenance::binding(
+        source,
+        static_member.full_name.to_string(),
+    )))
 }
 
 fn bound_method_name(receiver: &Value, field_name: &str) -> Option<&'static str> {

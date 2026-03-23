@@ -22,7 +22,8 @@ use crate::{
         ClosureExpr, CompiledParameter, CompiledProgram, EvalProgram, Expr, ExprId, ExprKind,
         FailExpr, FallibleExpr, FieldExpr, IfExpr, InterpolatedStringExpr, LiteralExpr, MapExpr,
         MatchExpr, NameRefExpr, PathLiteralExpr, PrefixExpr, ProgramNodeHandle, RangeExpr,
-        StringPart, StructLiteralExpr, Token, TupleExpr, WhereExpr,
+        ResolvedNameRef, StaticMemberPlan, StringPart, StructLiteralExpr, Token, TupleExpr,
+        WhereExpr,
     },
 };
 

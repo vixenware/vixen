@@ -25,7 +25,7 @@ use crate::{
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
-    program::{BlockStep, CallCallee, CompiledProgram, ExprKind},
+    program::{BlockStep, CallCallee, CompiledProgram, ExprKind, ResolvedNameRef},
     resolution_to_outcome, value_to_envelope,
 };
 use tempfile::tempdir;
@@ -1012,6 +1012,67 @@ fn compiled_program_lowers_static_member_call_callee_to_call_callee_plan() {
         panic!("expected lowered step to be a call expr, got {expr:?}");
     };
     assert!(matches!(call.callee, Some(CallCallee::StaticMember { .. })));
+}
+
+#[test]
+fn compiled_program_lowers_name_ref_expr_to_resolved_plan() {
+    let program = CompiledProgram::new(
+        "lowered-name-ref-expr",
+        "fn helper() { 1 }\nfn build() { helper }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(name_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain name ref expression");
+    };
+    let expr = program
+        .resolve_expr_id(name_expr)
+        .expect("resolve name ref expr");
+    let ExprKind::NameRef(name_ref) = expr.kind() else {
+        panic!("expected lowered step to be a name ref expr, got {expr:?}");
+    };
+    assert!(matches!(
+        name_ref.resolved,
+        Some(ResolvedNameRef::Function { .. })
+    ));
+}
+
+#[test]
+fn compiled_program_lowers_static_member_field_expr_to_plan() {
+    let program = CompiledProgram::new(
+        "lowered-static-member-field-expr",
+        "fn build() { String.len }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(field_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain field expression");
+    };
+    let expr = program
+        .resolve_expr_id(field_expr)
+        .expect("resolve field expr");
+    let ExprKind::Field(field) = expr.kind() else {
+        panic!("expected lowered step to be a field expr, got {expr:?}");
+    };
+    assert!(field.static_member.is_some());
 }
 
 #[test]

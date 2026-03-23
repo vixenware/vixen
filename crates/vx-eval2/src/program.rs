@@ -366,6 +366,20 @@ pub(crate) struct NameRefExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) token: Option<Token>,
     pub(crate) name: Arc<str>,
+    pub(crate) resolved: Option<ResolvedNameRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedNameRef {
+    Function {
+        resolved_name: Arc<str>,
+        function: CompiledFunction,
+    },
+    VariantConstructor(VariantConstructor),
+    NewtypeConstructor {
+        display_name: Arc<str>,
+        newtype_name: Arc<str>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +535,13 @@ pub(crate) struct FieldExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) receiver: Option<ExprId>,
     pub(crate) field_name: Option<Token>,
+    pub(crate) static_member: Option<StaticMemberPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaticMemberPlan {
+    pub(crate) full_name: Arc<str>,
+    pub(crate) variant_constructor: Option<VariantConstructor>,
 }
 
 macro_rules! impl_has_handle {
@@ -829,45 +850,65 @@ impl CompiledProgram {
         for source_key in source_ids {
             let source_id = SourceId(source_key);
             let rewrites = self
-                .collect_call_callee_rewrites(source_id)
-                .expect("compiled call callees should resolve");
+                .collect_execution_ref_rewrites(source_id)
+                .expect("compiled execution refs should resolve");
             let source = self
                 .sources
                 .get_mut(&source_key)
-                .expect("compiled source should exist for call callee rewrites");
+                .expect("compiled source should exist for execution ref rewrites");
             source
-                .apply_call_callee_rewrites(rewrites)
+                .apply_call_callee_rewrites(rewrites.call_callees)
                 .expect("compiled call callee rewrites should target call expressions");
+            source
+                .apply_expr_ref_rewrites(rewrites.expr_refs)
+                .expect("compiled expression ref rewrites should target name or field expressions");
         }
         self
     }
 
-    fn collect_call_callee_rewrites(
+    fn collect_execution_ref_rewrites(
         &self,
         source_id: SourceId,
-    ) -> Result<Vec<(ExprId, CallCallee)>, EvalError> {
+    ) -> Result<ExecutionRefRewrites, EvalError> {
         let source = self.source(source_id)?;
         source.ensure_parsed()?;
-        let mut rewrites = Vec::new();
+        let mut call_callees = Vec::new();
+        let mut expr_refs = Vec::new();
         for (index, expr) in source.exprs.iter().enumerate() {
-            let ExprKind::Call(call) = expr.kind() else {
-                continue;
+            let expr_id = ExprId {
+                source: source_id.0,
+                index: index as u32,
             };
-            let Some(callee) = call.callee.as_ref() else {
-                continue;
-            };
-            let resolved = self.resolve_call_callee(callee)?;
-            if resolved != *callee {
-                rewrites.push((
-                    ExprId {
-                        source: source_id.0,
-                        index: index as u32,
-                    },
-                    resolved,
-                ));
+            match expr.kind() {
+                ExprKind::Call(call) => {
+                    let Some(callee) = call.callee.as_ref() else {
+                        continue;
+                    };
+                    let resolved = self.resolve_call_callee(callee)?;
+                    if resolved != *callee {
+                        call_callees.push((expr_id, resolved));
+                    }
+                }
+                ExprKind::NameRef(name_ref) => {
+                    if let Some(resolved) = self.resolve_name_ref_expr(name_ref)? {
+                        expr_refs.push(ExprRefRewrite::NameRef { expr_id, resolved });
+                    }
+                }
+                ExprKind::Field(field) => {
+                    if let Some(static_member) = self.resolve_static_member_expr(field)? {
+                        expr_refs.push(ExprRefRewrite::Field {
+                            expr_id,
+                            static_member,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
-        Ok(rewrites)
+        Ok(ExecutionRefRewrites {
+            call_callees,
+            expr_refs,
+        })
     }
 
     fn resolve_call_callee(&self, callee: &CallCallee) -> Result<CallCallee, EvalError> {
@@ -879,47 +920,87 @@ impl CompiledProgram {
     }
 
     fn resolve_name_call_callee(&self, name_ref: &NameRefExpr) -> Result<CallCallee, EvalError> {
+        match self.resolve_name_ref_expr(name_ref)? {
+            Some(ResolvedNameRef::Function {
+                resolved_name,
+                function,
+            }) => Ok(CallCallee::ResolvedFunction {
+                resolved_name,
+                function,
+            }),
+            Some(ResolvedNameRef::VariantConstructor(constructor)) => {
+                Ok(CallCallee::VariantConstructor {
+                    handle: name_ref.handle,
+                    constructor,
+                })
+            }
+            Some(ResolvedNameRef::NewtypeConstructor {
+                display_name,
+                newtype_name,
+            }) => Ok(CallCallee::NewtypeConstructor {
+                handle: name_ref.handle,
+                display_name,
+                newtype_name,
+            }),
+            None => Ok(CallCallee::NameRef(name_ref.clone())),
+        }
+    }
+
+    fn resolve_field_call_callee(&self, field: &FieldExpr) -> Result<CallCallee, EvalError> {
+        match self.resolve_static_member_expr(field)? {
+            Some(static_member) => Ok(CallCallee::StaticMember {
+                handle: field.handle,
+                full_name: static_member.full_name,
+                variant_constructor: static_member.variant_constructor,
+            }),
+            None => Ok(CallCallee::Field(field.clone())),
+        }
+    }
+
+    fn resolve_name_ref_expr(
+        &self,
+        name_ref: &NameRefExpr,
+    ) -> Result<Option<ResolvedNameRef>, EvalError> {
         let Some(name_token) = name_ref.token.as_ref() else {
-            return Ok(CallCallee::NameRef(name_ref.clone()));
+            return Ok(None);
         };
         let reference = name_token.handle();
         let name = name_ref.name.as_ref();
         if let Some((resolved_name, function)) = self.resolve_function_reference(reference, name)? {
-            return Ok(CallCallee::ResolvedFunction {
+            return Ok(Some(ResolvedNameRef::Function {
                 resolved_name,
                 function,
-            });
+            }));
         }
         let constructor_name = name.rsplit('.').next().unwrap_or(name);
         if let Some(constructor) = self.resolve_variant_constructor(constructor_name) {
-            return Ok(CallCallee::VariantConstructor {
-                handle: name_ref.handle,
-                constructor,
-            });
+            return Ok(Some(ResolvedNameRef::VariantConstructor(constructor)));
         }
         if let Some(newtype_name) = self.resolve_newtype_constructor(constructor_name) {
-            return Ok(CallCallee::NewtypeConstructor {
-                handle: name_ref.handle,
+            return Ok(Some(ResolvedNameRef::NewtypeConstructor {
                 display_name: name_ref.name.clone(),
                 newtype_name,
-            });
+            }));
         }
-        Ok(CallCallee::NameRef(name_ref.clone()))
+        Ok(None)
     }
 
-    fn resolve_field_call_callee(&self, field: &FieldExpr) -> Result<CallCallee, EvalError> {
+    fn resolve_static_member_expr(
+        &self,
+        field: &FieldExpr,
+    ) -> Result<Option<StaticMemberPlan>, EvalError> {
         let Some(receiver) = field.receiver else {
-            return Ok(CallCallee::Field(field.clone()));
+            return Ok(None);
         };
         let receiver = self.resolve_expr_id(receiver)?;
         let ExprKind::NameRef(receiver) = receiver.kind() else {
-            return Ok(CallCallee::Field(field.clone()));
+            return Ok(None);
         };
         let Some(receiver_token) = receiver.token.as_ref() else {
-            return Ok(CallCallee::Field(field.clone()));
+            return Ok(None);
         };
         if receiver_token.kind() != SyntaxKind::UPPER_IDENT {
-            return Ok(CallCallee::Field(field.clone()));
+            return Ok(None);
         }
         if let Some(scope) = self
             .scopes
@@ -935,22 +1016,36 @@ impl CompiledProgram {
                     definition.kind,
                     DefKind::Binding | DefKind::Parameter | DefKind::Function
                 ) {
-                    return Ok(CallCallee::Field(field.clone()));
+                    return Ok(None);
                 }
             }
         }
         let Some(field_name) = field.field_name.as_ref() else {
-            return Ok(CallCallee::Field(field.clone()));
+            return Ok(None);
         };
-        let variant_constructor = self.resolve_variant_constructor(field_name.text());
-        let full_name =
-            Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name.text()));
-        Ok(CallCallee::StaticMember {
-            handle: field.handle,
-            full_name,
-            variant_constructor,
-        })
+        Ok(Some(StaticMemberPlan {
+            full_name: Arc::<str>::from(format!("{}.{}", receiver_token.text(), field_name.text())),
+            variant_constructor: self.resolve_variant_constructor(field_name.text()),
+        }))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExprRefRewrite {
+    NameRef {
+        expr_id: ExprId,
+        resolved: ResolvedNameRef,
+    },
+    Field {
+        expr_id: ExprId,
+        static_member: StaticMemberPlan,
+    },
+}
+
+#[derive(Debug, Default)]
+struct ExecutionRefRewrites {
+    call_callees: Vec<(ExprId, CallCallee)>,
+    expr_refs: Vec<ExprRefRewrite>,
 }
 
 impl CompiledProgramSource {
@@ -1100,6 +1195,53 @@ impl CompiledProgramSource {
                 ));
             };
             call.callee = Some(callee);
+        }
+        Ok(())
+    }
+
+    fn apply_expr_ref_rewrites(&mut self, rewrites: Vec<ExprRefRewrite>) -> Result<(), EvalError> {
+        for rewrite in rewrites {
+            match rewrite {
+                ExprRefRewrite::NameRef { expr_id, resolved } => {
+                    let expr = self.exprs.get_mut(expr_id.index as usize).ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("expression id {:?} was not found", expr_id),
+                        )
+                    })?;
+                    let ExprKind::NameRef(name_ref) = &mut expr.kind else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!(
+                                "expression ref rewrite targeted non-name expression {:?}",
+                                expr_id
+                            ),
+                        ));
+                    };
+                    name_ref.resolved = Some(resolved);
+                }
+                ExprRefRewrite::Field {
+                    expr_id,
+                    static_member,
+                } => {
+                    let expr = self.exprs.get_mut(expr_id.index as usize).ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("expression id {:?} was not found", expr_id),
+                        )
+                    })?;
+                    let ExprKind::Field(field) = &mut expr.kind else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!(
+                                "expression ref rewrite targeted non-field expression {:?}",
+                                expr_id
+                            ),
+                        ));
+                    };
+                    field.static_member = Some(static_member);
+                }
+            }
         }
         Ok(())
     }
@@ -1430,6 +1572,7 @@ fn compile_expr(
             handle,
             token: name_ref.token().map(|token| compile_token(source, &token)),
             name: Arc::from(name_ref_text_from_ast(name_ref)),
+            resolved: None,
         }),
         ParserExpr::Call(call) => {
             let raw_type_args: Arc<[ProgramNodeHandle]> = Arc::from(
@@ -1452,6 +1595,7 @@ fn compile_expr(
                             handle: ProgramNodeHandle::for_node(source, name_ref),
                             token: name_ref.token().map(|token| compile_token(source, &token)),
                             name: Arc::from(name_ref_text_from_ast(name_ref)),
+                            resolved: None,
                         })),
                         ParserExpr::Field(field) => Ok(CallCallee::Field(compile_field_expr_ast(
                             source, field, expr_ids,
@@ -2255,6 +2399,7 @@ fn compile_field_expr_ast(
         field_name: field
             .field_name()
             .map(|token| compile_token(source, &token)),
+        static_member: None,
     })
 }
 
