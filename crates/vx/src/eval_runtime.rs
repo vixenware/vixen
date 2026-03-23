@@ -16,6 +16,8 @@ use vx_eval2::{
     Value as EvalValue, ValueRep,
 };
 
+use crate::eval_progress::EvalProgressReporter;
+
 pub(crate) enum EvalCliRuntime {
     Local(LocalEvalRuntime),
     CargoSketch(CargoSketchRuntime),
@@ -27,12 +29,23 @@ pub(crate) struct LocalEvalRuntime {
 
 pub(crate) struct CargoSketchRuntime {
     root_dir: PathBuf,
+    progress: Option<EvalProgressReporter>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_eval_runtime(
     mode: &str,
     source_dir: PathBuf,
     cwd: PathBuf,
+) -> Result<EvalCliRuntime> {
+    build_eval_runtime_with_progress(mode, source_dir, cwd, None)
+}
+
+pub(crate) fn build_eval_runtime_with_progress(
+    mode: &str,
+    source_dir: PathBuf,
+    cwd: PathBuf,
+    progress: Option<EvalProgressReporter>,
 ) -> Result<EvalCliRuntime> {
     match mode {
         "local" => Ok(EvalCliRuntime::Local(LocalEvalRuntime {
@@ -41,6 +54,7 @@ pub(crate) fn build_eval_runtime(
         "cargo-sketch" | "cargo_sketch" | "build-sketch" | "build_sketch" => {
             Ok(EvalCliRuntime::CargoSketch(CargoSketchRuntime {
                 root_dir: cwd,
+                progress,
             }))
         }
         other => bail!(
@@ -437,6 +451,10 @@ impl CargoSketchRuntime {
                 "Http.get() argument must evaluate to String",
             ));
         };
+        let progress = self
+            .progress
+            .as_ref()
+            .map(|reporter| reporter.begin_runtime_call("Http.get", Some(url.to_string()), source));
         let contents = local_sparse_index_http_response(url.as_ref()).or_else(|| {
             block_on_runtime(vx_http::get_text(url.as_ref()))
                 .map_err(|error| {
@@ -456,16 +474,24 @@ impl CargoSketchRuntime {
                 .ok()
         });
         let Some(contents) = contents else {
-            return Err(EvalError::new(
+            let error = EvalError::new(
                 EvalErrorKind::UserFail,
                 format!("Http.get() failed for {url}"),
-            ));
+            );
+            if let Some(progress) = progress {
+                progress.finish_failed();
+            }
+            return Err(error);
         };
-        Ok(RuntimeCallOutcome::Ready(
+        let ready = RuntimeCallOutcome::Ready(
             runtime_external("Blob", contents, source)
                 .with_reuse(ReuseClass::Observed)
                 .with_crossing(CrossingPolicy::ByValue),
-        ))
+        );
+        if let Some(progress) = progress {
+            progress.finish_ready();
+        }
+        Ok(ready)
     }
 
     fn runtime_acquire(
@@ -488,6 +514,10 @@ impl CargoSketchRuntime {
         };
         let digest = capture_string(callee, "digest")?;
         let extract = capture_optional_string(callee, "extract")?;
+        let progress = self
+            .progress
+            .as_ref()
+            .map(|reporter| reporter.begin_runtime_call("acquire", Some(url.to_string()), source));
         let bytes = block_on_runtime(vx_http::get_bytes(url.as_ref()))
             .map_err(|error| {
                 EvalError::new(
@@ -502,7 +532,7 @@ impl CargoSketchRuntime {
                 )
             })?;
         verify_sha256_digest(&bytes, &digest)?;
-        match extract.as_deref() {
+        let outcome = match extract.as_deref() {
             Some("tar.gz") => {
                 let extracted = self.extract_tar_gz(url.as_ref(), &digest, &bytes)?;
                 Ok(RuntimeCallOutcome::Ready(runtime_external(
@@ -519,6 +549,20 @@ impl CargoSketchRuntime {
                 EvalErrorKind::UserFail,
                 "acquire() without extract is not supported in vx eval yet",
             )),
+        };
+        match outcome {
+            Ok(ready) => {
+                if let Some(progress) = progress {
+                    progress.finish_ready();
+                }
+                Ok(ready)
+            }
+            Err(error) => {
+                if let Some(progress) = progress {
+                    progress.finish_failed();
+                }
+                Err(error)
+            }
         }
     }
 
@@ -639,6 +683,10 @@ impl CargoSketchRuntime {
         }
 
         let program = render_exec_value(&request.args[0], &sandbox_root, "exec program")?;
+        let progress = self
+            .progress
+            .as_ref()
+            .map(|reporter| reporter.begin_runtime_call("exec", Some(program.clone()), source));
         let mut command = sandboxed_eval_command(&program, &sandbox_root);
         hermetic_eval_env(&mut command, &sandbox_root);
         command.current_dir(&sandbox_root);
@@ -696,11 +744,15 @@ impl CargoSketchRuntime {
         )
         .with_provenance(Provenance::unknown(source.clone()));
         let vfs = runtime_external("Tree", sandbox_root.to_string_lossy().into_owned(), source);
-        Ok(RuntimeExecReady {
+        let ready = RuntimeExecReady {
             process,
             vfs,
             events: Vec::new(),
-        })
+        };
+        if let Some(progress) = progress {
+            progress.finish_ready();
+        }
+        Ok(ready)
     }
 }
 

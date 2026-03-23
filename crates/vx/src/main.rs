@@ -5,6 +5,7 @@
 mod build_json;
 mod cli;
 mod diagnostics;
+mod eval_progress;
 mod eval_runtime;
 mod progress_listener;
 mod tui;
@@ -37,7 +38,8 @@ use vxd_proto::{BuildRequest, PsResult, VxdClient};
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, EvalArgs, KillArgs, StartArgs},
-    eval_runtime::build_eval_runtime,
+    eval_progress::EvalProgressReporter,
+    eval_runtime::build_eval_runtime_with_progress,
     progress_listener::ProgressListenerImpl,
 };
 use vx_io::boot::BootStatusState;
@@ -586,7 +588,12 @@ impl CliContext {
     async fn cmd_eval(&mut self, args: EvalArgs) -> Result<()> {
         let (source, source_id, source_dir) = read_eval_source(&args.file)?;
         let cwd = std::env::current_dir()?;
-        let runtime = build_eval_runtime(&args.runtime, source_dir, cwd)?;
+        let runtime = build_eval_runtime_with_progress(
+            &args.runtime,
+            source_dir,
+            cwd,
+            EvalProgressReporter::maybe_new(&self.mode),
+        )?;
         let eval_args = parse_eval_args(&args.arg_json)?;
         let mut session = EvalSession::new(
             source,

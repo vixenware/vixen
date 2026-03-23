@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use vx_eval2::ValueRep;
 
+use crate::eval_runtime::build_eval_runtime;
+
 #[test]
 fn parse_eval_arg_converts_nested_json_values() {
     let value = parse_eval_arg(r#"{"name":"serde","versions":[1,2]}"#).expect("parse arg");
