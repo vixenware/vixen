@@ -1,7 +1,7 @@
 use super::*;
 use crate::program::{
-    AccessPlan, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan,
-    ControlPlan, DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    AccessPlan, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallCalleePlanKind, CallPlan,
+    ClosurePlan, ControlPlan, DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
     InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
     PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
 };
@@ -1430,9 +1430,11 @@ fn immediate_call_callee_plan_value(
     callee: &CallCalleePlan,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
-    match callee {
-        CallCalleePlan::NameRef(name_ref) => {
-            let name_ref = state.program.resolve_name_ref_plan(*name_ref)?;
+    match callee.kind() {
+        CallCalleePlanKind::NameRef => {
+            let name_ref = state
+                .program
+                .resolve_name_ref_plan(callee.name_ref_plan_id(state.current_source()))?;
             let name: Arc<str> = Arc::clone(&name_ref.name);
             if let Some(value) = env.get(name.as_ref()) {
                 return Ok(Some(value.clone()));
@@ -1447,15 +1449,19 @@ fn immediate_call_callee_plan_value(
                 Some(name),
             ))))
         }
-        CallCalleePlan::Direct(direct) => {
-            let direct = state.program.resolve_direct_call_callee_plan(*direct)?;
+        CallCalleePlanKind::Direct => {
+            let direct = state.program.resolve_direct_call_callee_plan(
+                callee.direct_call_callee_plan_id(state.current_source()),
+            )?;
             immediate_direct_call_callee_plan_value(state, direct)
         }
-        CallCalleePlan::Field(field) => {
-            let field = state.program.resolve_field_plan(*field)?;
+        CallCalleePlanKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(callee.field_plan_id(state.current_source()))?;
             static_namespace_member_plan_value(state, field)
         }
-        CallCalleePlan::Expr(_) => Ok(None),
+        CallCalleePlanKind::Expr => Ok(None),
     }
 }
 
@@ -1547,13 +1553,17 @@ fn eval_call_callee_plan(
     if let Some(value) = immediate_call_callee_plan_value(state, callee, env)? {
         return Ok(EvalStep::Ready(value));
     }
-    match callee {
-        CallCalleePlan::Expr(callee) => eval_child_expr_id(state, *callee, env),
-        CallCalleePlan::Field(field) => {
-            let field = state.program.resolve_field_plan(*field)?;
+    match callee.kind() {
+        CallCalleePlanKind::Expr => {
+            eval_child_expr_id(state, callee.expr_id(state.current_source()), env)
+        }
+        CallCalleePlanKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(callee.field_plan_id(state.current_source()))?;
             eval_field_plan(state, field, env)
         }
-        CallCalleePlan::NameRef(_) | CallCalleePlan::Direct(_) => Err(EvalError::new(
+        CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
             EvalErrorKind::Internal,
             "direct call callee should resolve immediately",
         )),

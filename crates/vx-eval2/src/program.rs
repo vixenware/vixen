@@ -802,12 +802,60 @@ pub(crate) enum DirectCallCalleePlan {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallCalleePlanKind {
+    NameRef,
+    Direct,
+    Field,
+    Expr,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CallCalleePlan {
-    NameRef(NameRefPlanId),
-    Direct(DirectCallCalleePlanId),
-    Field(FieldPlanId),
-    Expr(ExprId),
+pub(crate) struct CallCalleePlan {
+    kind: CallCalleePlanKind,
+    payload: u32,
+}
+
+impl CallCalleePlan {
+    fn new(kind: CallCalleePlanKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn kind(&self) -> CallCalleePlanKind {
+        self.kind
+    }
+
+    pub(crate) fn name_ref_plan_id(&self, source: SourceId) -> NameRefPlanId {
+        debug_assert_eq!(self.kind, CallCalleePlanKind::NameRef);
+        NameRefPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn direct_call_callee_plan_id(&self, source: SourceId) -> DirectCallCalleePlanId {
+        debug_assert_eq!(self.kind, CallCalleePlanKind::Direct);
+        DirectCallCalleePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn field_plan_id(&self, source: SourceId) -> FieldPlanId {
+        debug_assert_eq!(self.kind, CallCalleePlanKind::Field);
+        FieldPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn expr_id(&self, source: SourceId) -> ExprId {
+        debug_assert_eq!(self.kind, CallCalleePlanKind::Expr);
+        ExprId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3076,57 +3124,83 @@ fn compile_call_callee_plan(
     match callee {
         CallCallee::NameRef(name_ref) => {
             let plan = compile_name_ref_plan(name_ref);
-            CallCalleePlan::NameRef(plans.push_name_ref(source, plan))
+            CallCalleePlan::new(
+                CallCalleePlanKind::NameRef,
+                plans.push_name_ref(source, plan).index,
+            )
         }
         CallCallee::ResolvedFunction {
             resolved_name,
             function,
-        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
-            source,
-            DirectCallCalleePlan::ResolvedFunction {
-                resolved_name: resolved_name.clone(),
-                function: function.clone(),
-            },
-        )),
+        } => CallCalleePlan::new(
+            CallCalleePlanKind::Direct,
+            plans
+                .push_direct_call_callee(
+                    source,
+                    DirectCallCalleePlan::ResolvedFunction {
+                        resolved_name: resolved_name.clone(),
+                        function: function.clone(),
+                    },
+                )
+                .index,
+        ),
         CallCallee::VariantConstructor {
             handle,
             constructor,
-        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
-            source,
-            DirectCallCalleePlan::VariantConstructor {
-                handle: *handle,
-                constructor: constructor.clone(),
-            },
-        )),
+        } => CallCalleePlan::new(
+            CallCalleePlanKind::Direct,
+            plans
+                .push_direct_call_callee(
+                    source,
+                    DirectCallCalleePlan::VariantConstructor {
+                        handle: *handle,
+                        constructor: constructor.clone(),
+                    },
+                )
+                .index,
+        ),
         CallCallee::NewtypeConstructor {
             handle,
             display_name,
             newtype_name,
-        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
-            source,
-            DirectCallCalleePlan::NewtypeConstructor {
-                handle: *handle,
-                display_name: display_name.clone(),
-                newtype_name: newtype_name.clone(),
-            },
-        )),
+        } => CallCalleePlan::new(
+            CallCalleePlanKind::Direct,
+            plans
+                .push_direct_call_callee(
+                    source,
+                    DirectCallCalleePlan::NewtypeConstructor {
+                        handle: *handle,
+                        display_name: display_name.clone(),
+                        newtype_name: newtype_name.clone(),
+                    },
+                )
+                .index,
+        ),
         CallCallee::StaticMember {
             handle,
             full_name,
             variant_constructor,
-        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
-            source,
-            DirectCallCalleePlan::StaticMember {
-                handle: *handle,
-                full_name: full_name.clone(),
-                variant_constructor: variant_constructor.clone(),
-            },
-        )),
+        } => CallCalleePlan::new(
+            CallCalleePlanKind::Direct,
+            plans
+                .push_direct_call_callee(
+                    source,
+                    DirectCallCalleePlan::StaticMember {
+                        handle: *handle,
+                        full_name: full_name.clone(),
+                        variant_constructor: variant_constructor.clone(),
+                    },
+                )
+                .index,
+        ),
         CallCallee::Field(field) => {
             let plan = compile_field_plan(field);
-            CallCalleePlan::Field(plans.push_field(source, plan))
+            CallCalleePlan::new(
+                CallCalleePlanKind::Field,
+                plans.push_field(source, plan).index,
+            )
         }
-        CallCallee::Expr(expr) => CallCalleePlan::Expr(*expr),
+        CallCallee::Expr(expr) => CallCalleePlan::new(CallCalleePlanKind::Expr, expr.index),
     }
 }
 
