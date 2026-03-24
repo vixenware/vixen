@@ -1,7 +1,7 @@
 use super::*;
 use crate::program::{
-    BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan, LiteralPlan,
-    NameRefPlan, PathLiteralPlan, PrefixPlan, WherePlan,
+    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan, LiteralPlan,
+    MapPlan, NameRefPlan, PathLiteralPlan, PrefixPlan, RangePlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -923,10 +923,22 @@ fn eval_prepared_body_step(
             let field = state.program.resolve_field_plan(*field)?;
             eval_field_plan(state, field, env)
         }
-        ExprExecPlan::Array(array) => eval_array(state, &array, env),
-        ExprExecPlan::Tuple(tuple) => eval_tuple(state, &tuple, env),
-        ExprExecPlan::Range(range) => eval_range(state, &range, env),
-        ExprExecPlan::Map(map) => eval_map(state, &map, env),
+        ExprExecPlan::Array(array) => {
+            let array = state.program.resolve_array_plan(*array)?;
+            eval_array_plan(state, array, env)
+        }
+        ExprExecPlan::Tuple(tuple) => {
+            let tuple = state.program.resolve_tuple_plan(*tuple)?;
+            eval_tuple_plan(state, tuple, env)
+        }
+        ExprExecPlan::Range(range) => {
+            let range = state.program.resolve_range_plan(*range)?;
+            eval_range_plan(state, range, env)
+        }
+        ExprExecPlan::Map(map) => {
+            let map = state.program.resolve_map_plan(*map)?;
+            eval_map_plan(state, map, env)
+        }
         ExprExecPlan::Fail(fail) => eval_fail(state, &fail, env),
         ExprExecPlan::Fallible(fallible) => {
             let fallible = state.program.resolve_fallible_plan(*fallible)?;
@@ -2483,6 +2495,23 @@ pub(super) fn eval_array(
     array: &ArrayExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_array_inner(state, array.handle, &array.items, env)
+}
+
+fn eval_array_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    array: &ArrayPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_array_inner(state, array.handle, &array.items, env)
+}
+
+fn eval_array_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    items: &[ArrayItem],
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
@@ -2491,7 +2520,7 @@ pub(super) fn eval_array(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     if state.queue_child_work {
         let mut child_nodes = Vec::new();
-        for item in array.items.iter() {
+        for item in items.iter() {
             match item {
                 ArrayItem::Expr(expr) => {
                     child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_id(
@@ -2506,7 +2535,7 @@ pub(super) fn eval_array(
             }
         }
         if child_nodes.is_empty() {
-            let provenance = Provenance::literal(state.span_for_node(array));
+            let provenance = Provenance::literal(state.program.span_for_handle(handle));
             return Ok(EvalStep::Ready(Value::array(Vec::new()).with_meta(
                 ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
             )));
@@ -2522,7 +2551,7 @@ pub(super) fn eval_array(
                 node_id,
                 parent_id,
                 child_nodes,
-                array_source: state.span_for_node(array),
+                array_source: state.program.span_for_handle(handle),
             }],
         ));
     }
@@ -2533,8 +2562,7 @@ pub(super) fn eval_array(
         ArrayState {
             items: Vec::new(),
             spread: false,
-            remaining_items: array
-                .items
+            remaining_items: items
                 .iter()
                 .map(|item| match item {
                     ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_id_for(*expr)?)),
@@ -2542,7 +2570,7 @@ pub(super) fn eval_array(
                 })
                 .collect::<Result<Vec<_>, EvalError>>()?,
             env: env.clone(),
-            array_source: state.span_for_node(array),
+            array_source: state.program.span_for_handle(handle),
         },
     )
 }
@@ -2567,13 +2595,30 @@ pub(super) fn eval_tuple(
     tuple: &TupleExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_tuple_inner(state, tuple.handle, &tuple.items, env)
+}
+
+fn eval_tuple_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    tuple: &TuplePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_tuple_inner(state, tuple.handle, &tuple.items, env)
+}
+
+fn eval_tuple_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    items: &[ExprId],
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("tuple should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let items = tuple.items.iter().copied().collect::<Vec<_>>();
+    let items = items.to_vec();
     if state.queue_child_work {
         let child_nodes = items
             .iter()
@@ -2588,7 +2633,7 @@ pub(super) fn eval_tuple(
             })
             .collect::<Vec<_>>();
         if child_nodes.is_empty() {
-            let provenance = Provenance::literal(state.span_for_node(tuple));
+            let provenance = Provenance::literal(state.program.span_for_handle(handle));
             return Ok(EvalStep::Ready(Value::tuple(Vec::new()).with_meta(
                 ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
             )));
@@ -2601,7 +2646,7 @@ pub(super) fn eval_tuple(
                 node_id,
                 parent_id,
                 child_nodes,
-                tuple_source: state.span_for_node(tuple),
+                tuple_source: state.program.span_for_handle(handle),
             }],
         ));
     }
@@ -2617,7 +2662,7 @@ pub(super) fn eval_tuple(
                 .map(|item| state.expr_id_for(item))
                 .collect::<Result<Vec<_>, _>>()?,
             env: env.clone(),
-            tuple_source: state.span_for_node(tuple),
+            tuple_source: state.program.span_for_handle(handle),
         },
     )
 }
@@ -2691,16 +2736,46 @@ pub(super) fn eval_range(
     range: &RangeExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_range_inner(
+        state,
+        range.handle,
+        range.start,
+        range.end,
+        range.inclusive_end,
+        env,
+    )
+}
+
+fn eval_range_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    range: &RangePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_range_inner(
+        state,
+        range.handle,
+        range.start,
+        range.end,
+        range.inclusive_end,
+        env,
+    )
+}
+
+fn eval_range_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    start: Option<ExprId>,
+    end: Option<ExprId>,
+    inclusive_end: bool,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("range should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let range_source = state.span_for_node(range);
-    let start = range.start;
-    let end = range.end;
-    let inclusive_end = range.inclusive_end;
+    let range_source = state.program.span_for_handle(handle);
 
     if state.queue_child_work {
         let start_child = start.map(|expr| {
@@ -2793,14 +2868,30 @@ pub(super) fn eval_map(
     map: &MapExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_map_inner(state, map.handle, &map.entries, env)
+}
+
+fn eval_map_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    map: &MapPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_map_inner(state, map.handle, &map.entries, env)
+}
+
+fn eval_map_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    entries: &[(ExprId, ExprId)],
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("map should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let entries = map
-        .entries
+    let entries = entries
         .iter()
         .copied()
         .map(|(key, value)| Ok((state.expr_id_for(key)?, state.expr_id_for(value)?)))
@@ -2815,7 +2906,7 @@ pub(super) fn eval_map(
             value_expr: None,
             remaining_entries: entries,
             env: env.clone(),
-            map_source: state.span_for_node(map),
+            map_source: state.program.span_for_handle(handle),
         },
     )
 }

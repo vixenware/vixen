@@ -299,6 +299,54 @@ impl BinaryPlanId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ArrayPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl ArrayPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct TuplePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl TuplePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RangePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl RangePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct MapPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl MapPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledParameter {
     pub(crate) label: Arc<str>,
@@ -447,10 +495,10 @@ pub(crate) enum ExprExecPlan {
     Closure(ClosureExpr),
     NameRef(NameRefPlanId),
     Call(CallPlanId),
-    Array(ArrayExpr),
-    Tuple(TupleExpr),
-    Range(RangeExpr),
-    Map(MapExpr),
+    Array(ArrayPlanId),
+    Tuple(TuplePlanId),
+    Range(RangePlanId),
+    Map(MapPlanId),
     Fail(FailExpr),
     Fallible(FalliblePlanId),
     If(IfPlanId),
@@ -573,6 +621,32 @@ pub(crate) struct BinaryPlan {
     pub(crate) lhs: Option<ExprId>,
     pub(crate) rhs: Option<ExprId>,
     pub(crate) operator: Option<SyntaxKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArrayPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) items: Arc<[ArrayItem]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuplePlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) items: Arc<[ExprId]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RangePlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) start: Option<ExprId>,
+    pub(crate) end: Option<ExprId>,
+    pub(crate) inclusive_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) entries: Arc<[(ExprId, ExprId)]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -871,6 +945,10 @@ struct ExprPlanTables {
     if_plans: Vec<IfPlan>,
     prefix_plans: Vec<PrefixPlan>,
     binary_plans: Vec<BinaryPlan>,
+    array_plans: Vec<ArrayPlan>,
+    tuple_plans: Vec<TuplePlan>,
+    range_plans: Vec<RangePlan>,
+    map_plans: Vec<MapPlan>,
 }
 
 struct CompiledProgramSource {
@@ -891,6 +969,10 @@ struct CompiledProgramSource {
     if_plans: Vec<IfPlan>,
     prefix_plans: Vec<PrefixPlan>,
     binary_plans: Vec<BinaryPlan>,
+    array_plans: Vec<ArrayPlan>,
+    tuple_plans: Vec<TuplePlan>,
+    range_plans: Vec<RangePlan>,
+    map_plans: Vec<MapPlan>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
@@ -1083,6 +1165,22 @@ impl CompiledProgram {
 
     pub(crate) fn resolve_binary_plan(&self, id: BinaryPlanId) -> Result<&BinaryPlan, EvalError> {
         self.source(id.source())?.resolve_binary_plan(id)
+    }
+
+    pub(crate) fn resolve_array_plan(&self, id: ArrayPlanId) -> Result<&ArrayPlan, EvalError> {
+        self.source(id.source())?.resolve_array_plan(id)
+    }
+
+    pub(crate) fn resolve_tuple_plan(&self, id: TuplePlanId) -> Result<&TuplePlan, EvalError> {
+        self.source(id.source())?.resolve_tuple_plan(id)
+    }
+
+    pub(crate) fn resolve_range_plan(&self, id: RangePlanId) -> Result<&RangePlan, EvalError> {
+        self.source(id.source())?.resolve_range_plan(id)
+    }
+
+    pub(crate) fn resolve_map_plan(&self, id: MapPlanId) -> Result<&MapPlan, EvalError> {
+        self.source(id.source())?.resolve_map_plan(id)
     }
 
     pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
@@ -1433,6 +1531,10 @@ impl CompiledProgramSource {
         let if_plans = Vec::new();
         let prefix_plans = Vec::new();
         let binary_plans = Vec::new();
+        let array_plans = Vec::new();
+        let tuple_plans = Vec::new();
+        let range_plans = Vec::new();
+        let map_plans = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -1496,6 +1598,10 @@ impl CompiledProgramSource {
             if_plans,
             prefix_plans,
             binary_plans,
+            array_plans,
+            tuple_plans,
+            range_plans,
+            map_plans,
             expr_ids,
             block_bodies,
             type_nodes,
@@ -1809,6 +1915,46 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_array_plan(&self, id: ArrayPlanId) -> Result<&ArrayPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.array_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("array plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_tuple_plan(&self, id: TuplePlanId) -> Result<&TuplePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.tuple_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("tuple plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_range_plan(&self, id: RangePlanId) -> Result<&RangePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.range_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("range plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_map_plan(&self, id: MapPlanId) -> Result<&MapPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.map_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("map plan {:?} was not found", id),
+            )
+        })
+    }
+
     fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
         self.block_bodies.get(id.index as usize).ok_or_else(|| {
@@ -1840,6 +1986,10 @@ impl CompiledProgramSource {
         self.if_plans = plans.if_plans;
         self.prefix_plans = plans.prefix_plans;
         self.binary_plans = plans.binary_plans;
+        self.array_plans = plans.array_plans;
+        self.tuple_plans = plans.tuple_plans;
+        self.range_plans = plans.range_plans;
+        self.map_plans = plans.map_plans;
     }
 
     #[cfg(test)]
@@ -1973,6 +2123,42 @@ impl ExprPlanTables {
         self.binary_plans.push(plan);
         id
     }
+
+    fn push_array(&mut self, source: SourceId, plan: ArrayPlan) -> ArrayPlanId {
+        let id = ArrayPlanId {
+            source: source.0,
+            index: self.array_plans.len() as u32,
+        };
+        self.array_plans.push(plan);
+        id
+    }
+
+    fn push_tuple(&mut self, source: SourceId, plan: TuplePlan) -> TuplePlanId {
+        let id = TuplePlanId {
+            source: source.0,
+            index: self.tuple_plans.len() as u32,
+        };
+        self.tuple_plans.push(plan);
+        id
+    }
+
+    fn push_range(&mut self, source: SourceId, plan: RangePlan) -> RangePlanId {
+        let id = RangePlanId {
+            source: source.0,
+            index: self.range_plans.len() as u32,
+        };
+        self.range_plans.push(plan);
+        id
+    }
+
+    fn push_map(&mut self, source: SourceId, plan: MapPlan) -> MapPlanId {
+        let id = MapPlanId {
+            source: source.0,
+            index: self.map_plans.len() as u32,
+        };
+        self.map_plans.push(plan);
+        id
+    }
 }
 
 fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
@@ -1993,10 +2179,16 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
         ExprKind::Call(call) => {
             ExprExecPlan::Call(plans.push_call(source, compile_call_plan(call)))
         }
-        ExprKind::Array(array) => ExprExecPlan::Array(array.clone()),
-        ExprKind::Tuple(tuple) => ExprExecPlan::Tuple(tuple.clone()),
-        ExprKind::Range(range) => ExprExecPlan::Range(range.clone()),
-        ExprKind::Map(map) => ExprExecPlan::Map(map.clone()),
+        ExprKind::Array(array) => {
+            ExprExecPlan::Array(plans.push_array(source, compile_array_plan(array)))
+        }
+        ExprKind::Tuple(tuple) => {
+            ExprExecPlan::Tuple(plans.push_tuple(source, compile_tuple_plan(tuple)))
+        }
+        ExprKind::Range(range) => {
+            ExprExecPlan::Range(plans.push_range(source, compile_range_plan(range)))
+        }
+        ExprKind::Map(map) => ExprExecPlan::Map(plans.push_map(source, compile_map_plan(map))),
         ExprKind::Fail(fail) => ExprExecPlan::Fail(fail.clone()),
         ExprKind::Fallible(fallible) => {
             ExprExecPlan::Fallible(plans.push_fallible(source, compile_fallible_plan(fallible)))
@@ -2132,6 +2324,36 @@ fn compile_call_plan(call: &CallExpr) -> CallPlan {
         callee: call.callee.as_ref().map(compile_call_callee_plan),
         type_args: Arc::clone(&call.type_args),
         positional_args: Arc::clone(&call.positional_args),
+    }
+}
+
+fn compile_array_plan(array: &ArrayExpr) -> ArrayPlan {
+    ArrayPlan {
+        handle: array.handle,
+        items: Arc::clone(&array.items),
+    }
+}
+
+fn compile_tuple_plan(tuple: &TupleExpr) -> TuplePlan {
+    TuplePlan {
+        handle: tuple.handle,
+        items: Arc::clone(&tuple.items),
+    }
+}
+
+fn compile_range_plan(range: &RangeExpr) -> RangePlan {
+    RangePlan {
+        handle: range.handle,
+        start: range.start,
+        end: range.end,
+        inclusive_end: range.inclusive_end,
+    }
+}
+
+fn compile_map_plan(map: &MapExpr) -> MapPlan {
+    MapPlan {
+        handle: map.handle,
+        entries: Arc::clone(&map.entries),
     }
 }
 
