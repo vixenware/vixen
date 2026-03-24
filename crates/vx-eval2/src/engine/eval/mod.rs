@@ -30,10 +30,14 @@ impl PreparedBodyRef {
         program: &CompiledProgram,
         expr_id: ExprId,
     ) -> Result<Self, EvalError> {
-        Ok(Self {
-            root_expr_id: expr_id,
-            plan: program.resolve_expr_plan(expr_id)?,
-        })
+        Ok(Self::from_body_ref(program.resolve_expr_body_ref(expr_id)?))
+    }
+
+    pub(super) fn from_body_ref(body: ExprBodyRef) -> Self {
+        Self {
+            root_expr_id: body.expr_id(),
+            plan: body.plan(),
+        }
     }
 
     pub(super) fn root_expr_id(&self) -> ExprId {
@@ -361,7 +365,7 @@ fn function_adapter_value_for_arg(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     callee: &Value,
     arg_index: usize,
-    arg_id: ExprId,
+    arg: ExprBodyRef,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
     let ValueRep::Function(function) = &callee.rep else {
@@ -370,6 +374,7 @@ fn function_adapter_value_for_arg(
     if !builtin_adapter_arg_index(function.name.as_ref(), arg_index) {
         return Ok(None);
     }
+    let arg_id = arg.expr_id();
     let expr = state.program.resolve_expr_id(arg_id)?;
     let Some(parameters) = compile_adapter_parameters(state.program, expr, expr.handle())? else {
         return Ok(None);
@@ -910,6 +915,52 @@ pub(super) fn eval_child_expr_id(
     ))
 }
 
+pub(super) fn eval_child_body_ref(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let prepared = PreparedBodyRef::from_body_ref(body);
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(
+            child_id,
+            Some(state.program.span_for_expr_id(prepared.root_expr_id())?),
+        );
+        return eval_prepared_body_with_node_id(
+            state,
+            child_id,
+            PreparedEntry {
+                body: prepared,
+                env: env.clone(),
+            },
+        );
+    }
+    let child_id = queue_child_body_ref(state, body, env);
+    let resume_node = state
+        .current_parent()
+        .expect("child expression should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
+pub(super) fn eval_dependent_body_ref(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    body: ExprBodyRef,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() == Some(node_id) {
+        eval_child_body_ref(state, body, env)
+    } else {
+        state.with_active_node(node_id, |state| eval_child_body_ref(state, body, env))
+    }
+}
+
 fn eval_literal_plan(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     literal: &LiteralPlan,
@@ -1201,12 +1252,12 @@ fn eval_call_plan(
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let type_args = Arc::clone(&call.type_args);
-    let positional_args: Arc<[ExprId]> = Arc::clone(&call.positional_args);
+    let positional_args: Arc<[ExprBodyRef]> = Arc::clone(&call.positional_args);
     if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? {
         if state.queue_child_work && !positional_args.is_empty() {
             let child_nodes = positional_args
                 .iter()
-                .map(|arg| queue_child_expr_id(state, *arg, env))
+                .map(|arg| queue_child_body_ref(state, *arg, env))
                 .collect::<Vec<_>>();
             return Ok(wait_on_child_dependency(
                 state,
@@ -1800,7 +1851,7 @@ pub(super) fn continue_call(
             function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
         let arg_step = match adapter {
             Some(value) => EvalStep::Ready(value),
-            None => eval_dependent_expr_id(state, node_id, arg_handle, &mut call.env)?,
+            None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
         };
         match arg_step {
             EvalStep::Ready(value) => call.args.push(value),
@@ -2581,7 +2632,7 @@ fn eval_fail_plan(
 
 fn eval_fail_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    message: Option<ExprId>,
+    message: Option<ExprBodyRef>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2590,12 +2641,12 @@ fn eval_fail_inner(
         .copied()
         .expect("fail expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let failure = match eval_dependent_expr_id(
+    let failure = match eval_dependent_body_ref(
         state,
         node_id,
-        state.expr_id_for(message.ok_or_else(|| {
+        message.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
-        })?)?,
+        })?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2674,7 +2725,7 @@ fn eval_fallible_plan(
 fn eval_fallible_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    expr: Option<ExprId>,
+    expr: Option<ExprBodyRef>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2690,7 +2741,7 @@ fn eval_fallible_inner(
             "fallible expression has no operand",
         ));
     };
-    match eval_dependent_expr_id(state, node_id, state.expr_id_for(expr)?, env) {
+    match eval_dependent_body_ref(state, node_id, expr, env) {
         Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
         Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
             suspension,
@@ -2745,9 +2796,9 @@ fn eval_if_plan(
 
 fn eval_if_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    condition: Option<ExprId>,
-    then_branch: Option<ExprId>,
-    else_branch: Option<ExprId>,
+    condition: Option<ExprBodyRef>,
+    then_branch: Option<ExprBodyRef>,
+    else_branch: Option<ExprBodyRef>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2756,22 +2807,19 @@ fn eval_if_inner(
         .copied()
         .expect("if expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let if_state =
-        IfState {
-            then_branch: state.expr_id_for(then_branch.ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-            })?)?,
-            else_branch: state.expr_id_for(else_branch.ok_or_else(|| {
-                EvalError::new(EvalErrorKind::Internal, "if branch is missing")
-            })?)?,
-            env: env.clone(),
-        };
-    let condition = match eval_dependent_expr_id(
+    let if_state = IfState {
+        then_branch: then_branch
+            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?,
+        else_branch: else_branch
+            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?,
+        env: env.clone(),
+    };
+    let condition = match eval_dependent_body_ref(
         state,
         node_id,
-        state.expr_id_for(condition.ok_or_else(|| {
+        condition.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
-        })?)?,
+        })?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2992,7 +3040,7 @@ fn eval_call_with_keyword_bindings(
     if state.queue_child_work && !positional_args.is_empty() {
         let child_nodes = positional_args
             .iter()
-            .map(|arg| queue_child_expr_id(state, *arg, &env))
+            .map(|arg| queue_child_body_ref(state, *arg, &env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -3076,7 +3124,7 @@ fn eval_field_plan(
     let field_state = FieldState {
         field_expr: state.expr_id_for(field.handle)?,
     };
-    let receiver = match eval_child_expr_id(state, receiver, env)? {
+    let receiver = match eval_child_body_ref(state, receiver, env)? {
         EvalStep::Ready(value) => value,
         EvalStep::Suspended(suspension) => {
             return Ok(extend_suspension(
@@ -3131,8 +3179,8 @@ fn eval_binary_plan(
 
 fn eval_binary_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    lhs: Option<ExprId>,
-    rhs: Option<ExprId>,
+    lhs: Option<ExprBodyRef>,
+    rhs: Option<ExprBodyRef>,
     operator: Option<SyntaxKind>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
@@ -3149,11 +3197,11 @@ fn eval_binary_inner(
     let operator = binary_operator_kind(operator)?;
     let mut binary = BinaryState {
         operator,
-        rhs: state.expr_id_for(rhs)?,
+        rhs,
         env: env.clone(),
         lhs: None,
     };
-    match eval_child_expr_id(state, lhs, env)? {
+    match eval_child_body_ref(state, lhs, env)? {
         EvalStep::Ready(lhs) => {
             binary.lhs = Some(lhs);
             continue_binary(state, node_id, parent_id, binary)
@@ -3181,7 +3229,7 @@ fn eval_prefix_plan(
 fn eval_prefix_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     operator: Option<SyntaxKind>,
-    expr: Option<ExprId>,
+    expr: Option<ExprBodyRef>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -3196,7 +3244,7 @@ fn eval_prefix_inner(
     let operator = operator.ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
     })?;
-    match eval_child_expr_id(state, operand, env)? {
+    match eval_child_body_ref(state, operand, env)? {
         EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
         EvalStep::Suspended(suspension) => Ok(extend_suspension(
             suspension,
@@ -3728,6 +3776,14 @@ pub(super) fn queue_child_expr_id(
     queue_child_expr_body(state, body, env)
 }
 
+pub(super) fn queue_child_body_ref(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    env: &EvalEnv,
+) -> EvalNodeId {
+    queue_child_expr_body(state, PreparedBodyRef::from_body_ref(body), env)
+}
+
 fn queue_child_expr_body(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     body: PreparedBodyRef,
@@ -4036,7 +4092,7 @@ pub(super) fn continue_binary(
         return Ok(EvalStep::Ready(short_circuit));
     }
 
-    match eval_dependent_expr_id(state, node_id, binary.rhs, &mut binary.env)? {
+    match eval_dependent_body_ref(state, node_id, binary.rhs, &mut binary.env)? {
         EvalStep::Ready(rhs) => {
             apply_binary_operator(lhs, binary.operator, rhs).map(EvalStep::Ready)
         }
@@ -4069,9 +4125,9 @@ pub(super) fn continue_if(
         state,
         node_id,
         if value {
-            if_state.then_branch
+            if_state.then_branch.expr_id()
         } else {
-            if_state.else_branch
+            if_state.else_branch.expr_id()
         },
         &mut if_state.env,
     )? {

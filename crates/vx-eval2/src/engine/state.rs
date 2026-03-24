@@ -115,7 +115,7 @@ pub(super) struct CallState {
     pub(super) env: EvalEnv,
     pub(super) callee: Option<Value>,
     pub(super) args: Vec<Value>,
-    pub(super) remaining_args: Arc<[ExprId]>,
+    pub(super) remaining_args: Arc<[ExprBodyRef]>,
     pub(super) next_arg_index: usize,
     pub(super) queued_arg_nodes: Vec<EvalNodeId>,
 }
@@ -134,7 +134,7 @@ pub(super) enum BinaryResumeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BinaryState {
     pub(super) operator: SyntaxKind,
-    pub(super) rhs: ExprId,
+    pub(super) rhs: ExprBodyRef,
     pub(super) env: EvalEnv,
     pub(super) lhs: Option<Value>,
 }
@@ -156,8 +156,8 @@ pub(super) struct RangeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IfState {
-    pub(super) then_branch: ExprId,
-    pub(super) else_branch: ExprId,
+    pub(super) then_branch: ExprBodyRef,
+    pub(super) else_branch: ExprBodyRef,
     pub(super) env: EvalEnv,
 }
 
@@ -189,7 +189,7 @@ pub(super) struct WhereCallPlan {
     pub(super) call_source: SourceSpan,
     pub(super) callee: Value,
     pub(super) type_args: Arc<[Ty]>,
-    pub(super) positional_args: Arc<[ExprId]>,
+    pub(super) positional_args: Arc<[ExprBodyRef]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

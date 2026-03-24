@@ -600,6 +600,13 @@ pub(crate) struct ExprExecPlan {
     payload: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExprBodyRef {
+    source: u32,
+    index: u32,
+    plan: ExprExecPlan,
+}
+
 impl ExprExecPlan {
     fn new(kind: ExprExecKind, trace_kind: EvalExprKind, detail: u8, payload: u32) -> Self {
         Self {
@@ -861,6 +868,35 @@ impl ExprExecPlan {
     }
 }
 
+impl ExprBodyRef {
+    pub(crate) fn unresolved(expr: ExprId) -> Self {
+        Self {
+            source: expr.source,
+            index: expr.index,
+            plan: ExprExecPlan::expr(),
+        }
+    }
+
+    pub(crate) fn expr_id(self) -> ExprId {
+        ExprId {
+            source: self.source,
+            index: self.index,
+        }
+    }
+
+    pub(crate) fn plan(self) -> ExprExecPlan {
+        self.plan
+    }
+
+    fn with_plan(self, plan: ExprExecPlan) -> Self {
+        Self {
+            source: self.source,
+            index: self.index,
+            plan,
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReadyPlanKind {
@@ -1067,13 +1103,13 @@ pub(crate) struct CallPlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) callee: Option<CallCalleePlanId>,
     pub(crate) type_args: Arc<[Ty]>,
-    pub(crate) positional_args: Arc<[ExprId]>,
+    pub(crate) positional_args: Arc<[ExprBodyRef]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FieldPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) receiver: Option<ExprId>,
+    pub(crate) receiver: Option<ExprBodyRef>,
     pub(crate) field_name: Option<Arc<str>>,
     pub(crate) static_member: Option<StaticMemberPlan>,
 }
@@ -1088,29 +1124,29 @@ pub(crate) struct WherePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FalliblePlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) expr: Option<ExprId>,
+    pub(crate) expr: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IfPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) condition: Option<ExprId>,
-    pub(crate) then_branch: Option<ExprId>,
-    pub(crate) else_branch: Option<ExprId>,
+    pub(crate) condition: Option<ExprBodyRef>,
+    pub(crate) then_branch: Option<ExprBodyRef>,
+    pub(crate) else_branch: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrefixPlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) operator: Option<SyntaxKind>,
-    pub(crate) expr: Option<ExprId>,
+    pub(crate) expr: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BinaryPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) lhs: Option<ExprId>,
-    pub(crate) rhs: Option<ExprId>,
+    pub(crate) lhs: Option<ExprBodyRef>,
+    pub(crate) rhs: Option<ExprBodyRef>,
     pub(crate) operator: Option<SyntaxKind>,
 }
 
@@ -1143,7 +1179,7 @@ pub(crate) struct MapPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) message: Option<ExprId>,
+    pub(crate) message: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1665,8 +1701,13 @@ impl CompiledProgram {
         self.source(id.source())?.resolve_expr(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_expr_plan(&self, id: ExprId) -> Result<ExprExecPlan, EvalError> {
         self.source(id.source())?.resolve_expr_plan(id)
+    }
+
+    pub(crate) fn resolve_expr_body_ref(&self, id: ExprId) -> Result<ExprBodyRef, EvalError> {
+        self.source(id.source())?.resolve_expr_body_ref(id)
     }
 
     pub(crate) fn resolve_literal_plan(
@@ -2469,6 +2510,14 @@ impl CompiledProgramSource {
             })
     }
 
+    fn resolve_expr_body_ref(&self, id: ExprId) -> Result<ExprBodyRef, EvalError> {
+        Ok(ExprBodyRef {
+            source: id.source,
+            index: id.index,
+            plan: self.resolve_expr_plan(id)?,
+        })
+    }
+
     fn resolve_literal_plan(&self, id: LiteralPlanId) -> Result<&LiteralPlan, EvalError> {
         self.ensure_parsed()?;
         self.literal_plans.get(id.index as usize).ok_or_else(|| {
@@ -2821,6 +2870,48 @@ impl CompiledProgramSource {
         self.paren_plans = plans.paren_plans;
         self.closure_plans = plans.closure_plans;
         self.match_plans = plans.match_plans;
+        self.resolve_plan_child_body_refs();
+    }
+
+    fn resolve_plan_child_body_refs(&mut self) {
+        let resolve = |body: ExprBodyRef, expr_plans: &[ExprExecPlan]| -> ExprBodyRef {
+            body.with_plan(
+                *expr_plans
+                    .get(body.index as usize)
+                    .expect("child body ref should resolve to a cached plan"),
+            )
+        };
+
+        for plan in &mut self.call_plans {
+            plan.positional_args = Arc::from(
+                plan.positional_args
+                    .iter()
+                    .copied()
+                    .map(|body| resolve(body, &self.expr_plans))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.field_plans {
+            plan.receiver = plan.receiver.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.fail_plans {
+            plan.message = plan.message.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.fallible_plans {
+            plan.expr = plan.expr.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.if_plans {
+            plan.condition = plan.condition.map(|body| resolve(body, &self.expr_plans));
+            plan.then_branch = plan.then_branch.map(|body| resolve(body, &self.expr_plans));
+            plan.else_branch = plan.else_branch.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.prefix_plans {
+            plan.expr = plan.expr.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.binary_plans {
+            plan.lhs = plan.lhs.map(|body| resolve(body, &self.expr_plans));
+            plan.rhs = plan.rhs.map(|body| resolve(body, &self.expr_plans));
+        }
     }
 
     #[cfg(test)]
@@ -3418,7 +3509,13 @@ fn compile_call_plan(source: SourceId, call: &CallExpr, plans: &mut ExprPlanTabl
             plans.push_call_callee(source, plan)
         }),
         type_args: Arc::clone(&call.type_args),
-        positional_args: Arc::clone(&call.positional_args),
+        positional_args: Arc::from(
+            call.positional_args
+                .iter()
+                .copied()
+                .map(ExprBodyRef::unresolved)
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -3455,7 +3552,7 @@ fn compile_map_plan(map: &MapExpr) -> MapPlan {
 fn compile_fail_plan(fail: &FailExpr) -> FailPlan {
     FailPlan {
         handle: fail.handle,
-        message: fail.message,
+        message: fail.message.map(ExprBodyRef::unresolved),
     }
 }
 
@@ -3479,7 +3576,7 @@ fn compile_struct_literal_plan(struct_literal: &StructLiteralExpr) -> StructLite
 fn compile_field_plan(field: &FieldExpr) -> FieldPlan {
     FieldPlan {
         handle: field.handle,
-        receiver: field.receiver,
+        receiver: field.receiver.map(ExprBodyRef::unresolved),
         field_name: field.field_name.clone(),
         static_member: field.static_member.clone(),
     }
@@ -3504,16 +3601,16 @@ fn compile_where_plan(
 fn compile_fallible_plan(fallible: &FallibleExpr) -> FalliblePlan {
     FalliblePlan {
         handle: fallible.handle,
-        expr: fallible.expr,
+        expr: fallible.expr.map(ExprBodyRef::unresolved),
     }
 }
 
 fn compile_if_plan(if_expr: &IfExpr) -> IfPlan {
     IfPlan {
         handle: if_expr.handle,
-        condition: if_expr.condition,
-        then_branch: if_expr.then_branch,
-        else_branch: if_expr.else_branch,
+        condition: if_expr.condition.map(ExprBodyRef::unresolved),
+        then_branch: if_expr.then_branch.map(ExprBodyRef::unresolved),
+        else_branch: if_expr.else_branch.map(ExprBodyRef::unresolved),
     }
 }
 
@@ -3521,15 +3618,15 @@ fn compile_prefix_plan(prefix: &PrefixExpr) -> PrefixPlan {
     PrefixPlan {
         handle: prefix.handle,
         operator: prefix.operator,
-        expr: prefix.expr,
+        expr: prefix.expr.map(ExprBodyRef::unresolved),
     }
 }
 
 fn compile_binary_plan(binary: &BinaryExpr) -> BinaryPlan {
     BinaryPlan {
         handle: binary.handle,
-        lhs: binary.lhs,
-        rhs: binary.rhs,
+        lhs: binary.lhs.map(ExprBodyRef::unresolved),
+        rhs: binary.rhs.map(ExprBodyRef::unresolved),
         operator: binary.operator,
     }
 }
