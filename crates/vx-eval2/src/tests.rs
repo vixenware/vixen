@@ -947,8 +947,14 @@ fn compiled_program_caches_string_literal_exec_plan() {
     let plan = program
         .resolve_expr_plan(literal_expr)
         .expect("resolve cached literal plan");
-    let ExprExecPlan::Literal(LiteralPlan::String { value, .. }) = plan.as_ref() else {
+    let ExprExecPlan::Literal(literal_plan) = plan.as_ref() else {
         panic!("expected cached literal exec plan, got {plan:?}");
+    };
+    let LiteralPlan::String { value, .. } = program
+        .resolve_literal_plan(*literal_plan)
+        .expect("resolve cached literal payload")
+    else {
+        panic!("expected cached literal payload, got {plan:?}");
     };
     assert_eq!(value.as_ref(), "hello");
 }
@@ -979,6 +985,9 @@ fn compiled_program_caches_resolved_name_ref_exec_plan() {
     let ExprExecPlan::NameRef(name_ref) = plan.as_ref() else {
         panic!("expected cached name ref exec plan, got {plan:?}");
     };
+    let name_ref = program
+        .resolve_name_ref_plan(*name_ref)
+        .expect("resolve cached name ref payload");
     assert!(matches!(
         name_ref.resolved,
         Some(ResolvedNameRef::Function { .. })
@@ -1011,6 +1020,9 @@ fn compiled_program_caches_resolved_call_exec_plan() {
     let ExprExecPlan::Call(call) = plan.as_ref() else {
         panic!("expected cached call exec plan, got {plan:?}");
     };
+    let call = program
+        .resolve_call_plan(*call)
+        .expect("resolve cached call payload");
     assert!(matches!(
         call.callee,
         Some(CallCalleePlan::ResolvedFunction { .. })
@@ -1260,14 +1272,16 @@ fn compiled_program_caches_where_exec_plan() {
     let plan = program
         .resolve_expr_plan(where_expr)
         .expect("resolve cached where plan");
-    let ExprExecPlan::Where(WherePlan {
+    let ExprExecPlan::Where(where_plan) = plan.as_ref() else {
+        panic!("expected cached where exec plan, got {plan:?}");
+    };
+    let WherePlan {
         call,
         keyword_bindings,
         ..
-    }) = plan.as_ref()
-    else {
-        panic!("expected cached where exec plan, got {plan:?}");
-    };
+    } = program
+        .resolve_where_plan(*where_plan)
+        .expect("resolve cached where payload");
     let call = call
         .as_ref()
         .expect("cached where plan should contain call");

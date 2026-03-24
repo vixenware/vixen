@@ -897,17 +897,31 @@ fn eval_prepared_body_step(
             *body,
             0,
         ),
-        ExprExecPlan::Literal(literal) => eval_literal_plan(state, literal).map(EvalStep::Ready),
-        ExprExecPlan::PathLiteral(path_literal) => {
-            eval_path_literal_plan(state, path_literal).map(EvalStep::Ready)
-        }
+        ExprExecPlan::Literal(literal) => state
+            .program
+            .resolve_literal_plan(*literal)
+            .and_then(|literal| eval_literal_plan(state, literal))
+            .map(EvalStep::Ready),
+        ExprExecPlan::PathLiteral(path_literal) => state
+            .program
+            .resolve_path_literal_plan(*path_literal)
+            .and_then(|path_literal| eval_path_literal_plan(state, path_literal))
+            .map(EvalStep::Ready),
         ExprExecPlan::Paren(paren) => eval_paren(state, node_id, parent_id, &paren, env),
         ExprExecPlan::Closure(closure) => eval_closure(state, &closure, env).map(EvalStep::Ready),
-        ExprExecPlan::NameRef(name_ref) => {
-            eval_name_ref_plan(state, name_ref, env).map(EvalStep::Ready)
+        ExprExecPlan::NameRef(name_ref) => state
+            .program
+            .resolve_name_ref_plan(*name_ref)
+            .and_then(|name_ref| eval_name_ref_plan(state, name_ref, env))
+            .map(EvalStep::Ready),
+        ExprExecPlan::Call(call) => {
+            let call = state.program.resolve_call_plan(*call)?;
+            eval_call_plan(state, call, env)
         }
-        ExprExecPlan::Call(call) => eval_call_plan(state, call, env),
-        ExprExecPlan::Field(field) => eval_field_plan(state, field, env),
+        ExprExecPlan::Field(field) => {
+            let field = state.program.resolve_field_plan(*field)?;
+            eval_field_plan(state, field, env)
+        }
         ExprExecPlan::Array(array) => eval_array(state, &array, env),
         ExprExecPlan::Tuple(tuple) => eval_tuple(state, &tuple, env),
         ExprExecPlan::Range(range) => eval_range(state, &range, env),
@@ -916,7 +930,10 @@ fn eval_prepared_body_step(
         ExprExecPlan::Fallible(fallible) => eval_fallible(state, &fallible, env),
         ExprExecPlan::If(if_expr) => eval_if(state, &if_expr, env),
         ExprExecPlan::Match(match_expr) => eval_match(state, body.root_expr_id, &match_expr, env),
-        ExprExecPlan::Where(where_expr) => eval_where_plan(state, where_expr, env),
+        ExprExecPlan::Where(where_expr) => {
+            let where_expr = state.program.resolve_where_plan(*where_expr)?;
+            eval_where_plan(state, where_expr, env)
+        }
         ExprExecPlan::Prefix(prefix) => eval_prefix(state, &prefix, env),
         ExprExecPlan::Binary(binary) => eval_binary(state, &binary, env),
         ExprExecPlan::InterpolatedString(interpolated) => {
