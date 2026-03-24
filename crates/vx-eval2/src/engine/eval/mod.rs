@@ -1,11 +1,11 @@
 use super::*;
 use crate::program::{
     AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BuilderPlanKind, BytecodeOp,
-    CallCalleePlan, CallCalleePlanKind, CallPlan, CallPlanId, ClosurePlan, ControlPlanKind,
+    CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlanKind,
     DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
     InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
-    MatchPlan, MatchPlanId, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan,
-    ReadyPlanKind, StructLiteralPlan, StructLiteralPlanPart, TuplePlan, WherePlan, WherePlanId,
+    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlanKind,
+    StructLiteralPlan, StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -24,9 +24,9 @@ pub(super) struct PreparedBodyRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreparedBodyKind {
     ExprPlan(ExprExecPlan),
-    CallPlan(CallPlanId),
-    MatchPlan(MatchPlanId),
-    WherePlan(WherePlanId),
+    CallPlan(CallPlan),
+    MatchPlan(MatchPlan),
+    WherePlan(WherePlan),
 }
 
 pub(super) struct PreparedEntry {
@@ -63,21 +63,21 @@ impl PreparedBodyRef {
         }
     }
 
-    fn from_call_plan(root_expr_id: ExprId, plan: CallPlanId) -> Self {
+    fn from_call_plan(root_expr_id: ExprId, plan: CallPlan) -> Self {
         Self {
             root_expr_id,
             kind: PreparedBodyKind::CallPlan(plan),
         }
     }
 
-    fn from_match_plan(root_expr_id: ExprId, plan: MatchPlanId) -> Self {
+    fn from_match_plan(root_expr_id: ExprId, plan: MatchPlan) -> Self {
         Self {
             root_expr_id,
             kind: PreparedBodyKind::MatchPlan(plan),
         }
     }
 
-    fn from_where_plan(root_expr_id: ExprId, plan: WherePlanId) -> Self {
+    fn from_where_plan(root_expr_id: ExprId, plan: WherePlan) -> Self {
         Self {
             root_expr_id,
             kind: PreparedBodyKind::WherePlan(plan),
@@ -883,17 +883,12 @@ fn eval_prepared_body_step(
                 eval_control_plan(state, plan, env)
             }
         },
-        PreparedBodyKind::CallPlan(plan_id) => {
-            let call = state.program.resolve_call_plan(plan_id)?;
-            start_call_plan(state, node_id, parent_id, call, env)
+        PreparedBodyKind::CallPlan(plan) => start_call_plan(state, node_id, parent_id, &plan, env),
+        PreparedBodyKind::MatchPlan(plan) => {
+            start_match_plan(state, node_id, parent_id, &plan, env)
         }
-        PreparedBodyKind::MatchPlan(plan_id) => {
-            let match_plan = state.program.resolve_match_plan(plan_id)?;
-            start_match_plan(state, node_id, parent_id, match_plan, env)
-        }
-        PreparedBodyKind::WherePlan(plan_id) => {
-            let where_plan = state.program.resolve_where_plan(plan_id)?;
-            start_where_plan(state, node_id, parent_id, where_plan, env)
+        PreparedBodyKind::WherePlan(plan) => {
+            start_where_plan(state, node_id, parent_id, &plan, env)
         }
     }
 }
@@ -3616,11 +3611,11 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalCall { body, plan } => {
+            BytecodeOp::EvalCall { body, call } => {
                 bytecode.pc += 1;
-                let body_source = plan.source();
+                let body_source = body.expr_id().source();
                 let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_call_plan(body.expr_id(), *plan),
+                    body: PreparedBodyRef::from_call_plan(body.expr_id(), call.clone()),
                     env: bytecode.scope.clone(),
                 };
                 let step = if state.queue_child_work {
@@ -3629,7 +3624,7 @@ pub(super) fn continue_bytecode_body(
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_expr_id(body.expr_id())?;
+                    let child_source = state.program.span_for_handle(call.handle);
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
                         eval_prepared_body_with_node_id(state, child_id, prepared)
@@ -3649,11 +3644,11 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalMatch { body, plan } => {
+            BytecodeOp::EvalMatch { body, match_plan } => {
                 bytecode.pc += 1;
-                let body_source = plan.source();
+                let body_source = body.expr_id().source();
                 let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_match_plan(body.expr_id(), *plan),
+                    body: PreparedBodyRef::from_match_plan(body.expr_id(), match_plan.clone()),
                     env: bytecode.scope.clone(),
                 };
                 let step = if state.queue_child_work {
@@ -3662,7 +3657,7 @@ pub(super) fn continue_bytecode_body(
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_expr_id(body.expr_id())?;
+                    let child_source = state.program.span_for_handle(match_plan.handle);
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
                         eval_prepared_body_with_node_id(state, child_id, prepared)
@@ -3682,11 +3677,11 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalWhere { body, plan } => {
+            BytecodeOp::EvalWhere { body, where_plan } => {
                 bytecode.pc += 1;
-                let body_source = plan.source();
+                let body_source = body.expr_id().source();
                 let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_where_plan(body.expr_id(), *plan),
+                    body: PreparedBodyRef::from_where_plan(body.expr_id(), where_plan.clone()),
                     env: bytecode.scope.clone(),
                 };
                 let step = if state.queue_child_work {
@@ -3695,7 +3690,7 @@ pub(super) fn continue_bytecode_body(
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_expr_id(body.expr_id())?;
+                    let child_source = state.program.span_for_handle(where_plan.handle);
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
                         eval_prepared_body_with_node_id(state, child_id, prepared)

@@ -1317,15 +1317,15 @@ pub(crate) enum BytecodeOp {
     EvalBytecodeBody(BytecodeBodyId),
     EvalCall {
         body: ExprBodyRef,
-        plan: CallPlanId,
+        call: CallPlan,
     },
     EvalMatch {
         body: ExprBodyRef,
-        plan: MatchPlanId,
+        match_plan: MatchPlan,
     },
     EvalWhere {
         body: ExprBodyRef,
-        plan: WherePlanId,
+        where_plan: WherePlan,
     },
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
@@ -4785,9 +4785,12 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
+                let call = source
+                    .resolve_call_plan(plan.call_plan_id(expr.expr_id().source()))
+                    .expect("bytecode call plan should resolve");
                 ops.push(BytecodeOp::EvalCall {
                     body: expr,
-                    plan: plan.call_plan_id(expr.expr_id().source()),
+                    call: call.clone(),
                 });
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
@@ -4864,15 +4867,21 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
+                let match_plan = source
+                    .resolve_match_plan(plan.match_plan_id(expr.expr_id().source()))
+                    .expect("bytecode match plan should resolve");
                 ops.push(BytecodeOp::EvalMatch {
                     body: expr,
-                    plan: plan.match_plan_id(expr.expr_id().source()),
+                    match_plan: match_plan.clone(),
                 });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
+                let where_plan = source
+                    .resolve_where_plan(plan.where_plan_id(expr.expr_id().source()))
+                    .expect("bytecode where plan should resolve");
                 ops.push(BytecodeOp::EvalWhere {
                     body: expr,
-                    plan: plan.where_plan_id(expr.expr_id().source()),
+                    where_plan: where_plan.clone(),
                 });
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
