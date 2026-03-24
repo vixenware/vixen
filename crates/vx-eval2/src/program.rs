@@ -765,25 +765,161 @@ impl ReadyPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BuilderPlan {
-    Array(ArrayPlanId),
-    Tuple(TuplePlanId),
-    Range(RangePlanId),
-    Map(MapPlanId),
-    InterpolatedString(InterpolatedStringPlanId),
-    StructLiteral(StructLiteralPlanId),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuilderPlanKind {
+    Array,
+    Tuple,
+    Range,
+    Map,
+    InterpolatedString,
+    StructLiteral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ControlPlan {
-    Fail(FailPlanId),
-    Fallible(FalliblePlanId),
-    If(IfPlanId),
-    Match(MatchPlanId),
-    Where(WherePlanId),
-    Prefix(PrefixPlanId),
-    Binary(BinaryPlanId),
+pub(crate) struct BuilderPlan {
+    kind: BuilderPlanKind,
+    payload: u32,
+}
+
+impl BuilderPlan {
+    fn new(kind: BuilderPlanKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn kind(&self) -> BuilderPlanKind {
+        self.kind
+    }
+
+    pub(crate) fn array_plan_id(&self, source: SourceId) -> ArrayPlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::Array);
+        ArrayPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn tuple_plan_id(&self, source: SourceId) -> TuplePlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::Tuple);
+        TuplePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn range_plan_id(&self, source: SourceId) -> RangePlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::Range);
+        RangePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn map_plan_id(&self, source: SourceId) -> MapPlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::Map);
+        MapPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn interpolated_string_plan_id(&self, source: SourceId) -> InterpolatedStringPlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::InterpolatedString);
+        InterpolatedStringPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn struct_literal_plan_id(&self, source: SourceId) -> StructLiteralPlanId {
+        debug_assert_eq!(self.kind, BuilderPlanKind::StructLiteral);
+        StructLiteralPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlPlanKind {
+    Fail,
+    Fallible,
+    If,
+    Match,
+    Where,
+    Prefix,
+    Binary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControlPlan {
+    kind: ControlPlanKind,
+    payload: u32,
+}
+
+impl ControlPlan {
+    fn new(kind: ControlPlanKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn kind(&self) -> ControlPlanKind {
+        self.kind
+    }
+
+    pub(crate) fn fail_plan_id(&self, source: SourceId) -> FailPlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Fail);
+        FailPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn fallible_plan_id(&self, source: SourceId) -> FalliblePlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Fallible);
+        FalliblePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn if_plan_id(&self, source: SourceId) -> IfPlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::If);
+        IfPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn match_plan_id(&self, source: SourceId) -> MatchPlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Match);
+        MatchPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn where_plan_id(&self, source: SourceId) -> WherePlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Where);
+        WherePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn prefix_plan_id(&self, source: SourceId) -> PrefixPlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Prefix);
+        PrefixPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn binary_plan_id(&self, source: SourceId) -> BinaryPlanId {
+        debug_assert_eq!(self.kind, ControlPlanKind::Binary);
+        BinaryPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3038,7 +3174,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Builder,
                 EvalExprKind::Array,
-                plans.push_builder(source, BuilderPlan::Array(plan)).index,
+                plans
+                    .push_builder(source, BuilderPlan::new(BuilderPlanKind::Array, plan.index))
+                    .index,
             )
         }
         ExprKind::Tuple(tuple) => {
@@ -3046,7 +3184,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Builder,
                 EvalExprKind::Tuple,
-                plans.push_builder(source, BuilderPlan::Tuple(plan)).index,
+                plans
+                    .push_builder(source, BuilderPlan::new(BuilderPlanKind::Tuple, plan.index))
+                    .index,
             )
         }
         ExprKind::Range(range) => {
@@ -3054,7 +3194,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Builder,
                 EvalExprKind::Range,
-                plans.push_builder(source, BuilderPlan::Range(plan)).index,
+                plans
+                    .push_builder(source, BuilderPlan::new(BuilderPlanKind::Range, plan.index))
+                    .index,
             )
         }
         ExprKind::Map(map) => {
@@ -3062,7 +3204,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Builder,
                 EvalExprKind::Map,
-                plans.push_builder(source, BuilderPlan::Map(plan)).index,
+                plans
+                    .push_builder(source, BuilderPlan::new(BuilderPlanKind::Map, plan.index))
+                    .index,
             )
         }
         ExprKind::Fail(fail) => {
@@ -3070,7 +3214,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::Fail,
-                plans.push_control(source, ControlPlan::Fail(plan)).index,
+                plans
+                    .push_control(source, ControlPlan::new(ControlPlanKind::Fail, plan.index))
+                    .index,
             )
         }
         ExprKind::Fallible(fallible) => {
@@ -3079,7 +3225,10 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
                 ExprExecKind::Control,
                 EvalExprKind::Unsupported,
                 plans
-                    .push_control(source, ControlPlan::Fallible(plan))
+                    .push_control(
+                        source,
+                        ControlPlan::new(ControlPlanKind::Fallible, plan.index),
+                    )
                     .index,
             )
         }
@@ -3088,7 +3237,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::If,
-                plans.push_control(source, ControlPlan::If(plan)).index,
+                plans
+                    .push_control(source, ControlPlan::new(ControlPlanKind::If, plan.index))
+                    .index,
             )
         }
         ExprKind::Match(match_expr) => {
@@ -3096,7 +3247,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::Match,
-                plans.push_control(source, ControlPlan::Match(plan)).index,
+                plans
+                    .push_control(source, ControlPlan::new(ControlPlanKind::Match, plan.index))
+                    .index,
             )
         }
         ExprKind::Where(where_expr) => {
@@ -3105,7 +3258,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::Where,
-                plans.push_control(source, ControlPlan::Where(plan)).index,
+                plans
+                    .push_control(source, ControlPlan::new(ControlPlanKind::Where, plan.index))
+                    .index,
             )
         }
         ExprKind::Prefix(prefix) => {
@@ -3113,7 +3268,12 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::Prefix,
-                plans.push_control(source, ControlPlan::Prefix(plan)).index,
+                plans
+                    .push_control(
+                        source,
+                        ControlPlan::new(ControlPlanKind::Prefix, plan.index),
+                    )
+                    .index,
             )
         }
         ExprKind::Binary(binary) => {
@@ -3121,7 +3281,12 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Control,
                 EvalExprKind::Binary,
-                plans.push_control(source, ControlPlan::Binary(plan)).index,
+                plans
+                    .push_control(
+                        source,
+                        ControlPlan::new(ControlPlanKind::Binary, plan.index),
+                    )
+                    .index,
             )
         }
         ExprKind::InterpolatedString(interpolated) => {
@@ -3131,7 +3296,10 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
                 ExprExecKind::Builder,
                 EvalExprKind::InterpolatedString,
                 plans
-                    .push_builder(source, BuilderPlan::InterpolatedString(plan))
+                    .push_builder(
+                        source,
+                        BuilderPlan::new(BuilderPlanKind::InterpolatedString, plan.index),
+                    )
                     .index,
             )
         }
@@ -3142,7 +3310,10 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
                 ExprExecKind::Builder,
                 EvalExprKind::StructLiteral,
                 plans
-                    .push_builder(source, BuilderPlan::StructLiteral(plan))
+                    .push_builder(
+                        source,
+                        BuilderPlan::new(BuilderPlanKind::StructLiteral, plan.index),
+                    )
                     .index,
             )
         }

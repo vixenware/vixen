@@ -1,10 +1,10 @@
 use super::*;
 use crate::program::{
-    AccessPlan, AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan,
-    CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlan, DirectCallCalleePlan, ExprExecKind,
-    FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan,
-    NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, ReadyPlanKind,
-    StructLiteralPlan, TuplePlan, WherePlan,
+    AccessPlan, AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlan, BuilderPlanKind,
+    CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlan, ControlPlanKind,
+    DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan,
+    LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan,
+    RangePlan, ReadyPlan, ReadyPlanKind, StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -1204,31 +1204,41 @@ fn eval_builder_plan(
     builder: &BuilderPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match builder {
-        BuilderPlan::Array(array) => {
-            let array = state.program.resolve_array_plan(*array)?;
+    match builder.kind() {
+        BuilderPlanKind::Array => {
+            let array = state
+                .program
+                .resolve_array_plan(builder.array_plan_id(state.current_source()))?;
             eval_array_plan(state, array, env)
         }
-        BuilderPlan::Tuple(tuple) => {
-            let tuple = state.program.resolve_tuple_plan(*tuple)?;
+        BuilderPlanKind::Tuple => {
+            let tuple = state
+                .program
+                .resolve_tuple_plan(builder.tuple_plan_id(state.current_source()))?;
             eval_tuple_plan(state, tuple, env)
         }
-        BuilderPlan::Range(range) => {
-            let range = state.program.resolve_range_plan(*range)?;
+        BuilderPlanKind::Range => {
+            let range = state
+                .program
+                .resolve_range_plan(builder.range_plan_id(state.current_source()))?;
             eval_range_plan(state, range, env)
         }
-        BuilderPlan::Map(map) => {
-            let map = state.program.resolve_map_plan(*map)?;
+        BuilderPlanKind::Map => {
+            let map = state
+                .program
+                .resolve_map_plan(builder.map_plan_id(state.current_source()))?;
             eval_map_plan(state, map, env)
         }
-        BuilderPlan::InterpolatedString(interpolated) => {
-            let interpolated = state
-                .program
-                .resolve_interpolated_string_plan(*interpolated)?;
+        BuilderPlanKind::InterpolatedString => {
+            let interpolated = state.program.resolve_interpolated_string_plan(
+                builder.interpolated_string_plan_id(state.current_source()),
+            )?;
             eval_interpolated_string_plan(state, interpolated, env)
         }
-        BuilderPlan::StructLiteral(struct_literal) => {
-            let struct_literal = state.program.resolve_struct_literal_plan(*struct_literal)?;
+        BuilderPlanKind::StructLiteral => {
+            let struct_literal = state.program.resolve_struct_literal_plan(
+                builder.struct_literal_plan_id(state.current_source()),
+            )?;
             eval_struct_literal_plan(state, struct_literal, env)
         }
     }
@@ -1239,33 +1249,47 @@ fn eval_control_plan(
     control: &ControlPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match control {
-        ControlPlan::Fail(fail) => {
-            let fail = state.program.resolve_fail_plan(*fail)?;
+    match control.kind() {
+        ControlPlanKind::Fail => {
+            let fail = state
+                .program
+                .resolve_fail_plan(control.fail_plan_id(state.current_source()))?;
             eval_fail_plan(state, fail, env)
         }
-        ControlPlan::Fallible(fallible) => {
-            let fallible = state.program.resolve_fallible_plan(*fallible)?;
+        ControlPlanKind::Fallible => {
+            let fallible = state
+                .program
+                .resolve_fallible_plan(control.fallible_plan_id(state.current_source()))?;
             eval_fallible_plan(state, fallible, env)
         }
-        ControlPlan::If(if_expr) => {
-            let if_expr = state.program.resolve_if_plan(*if_expr)?;
+        ControlPlanKind::If => {
+            let if_expr = state
+                .program
+                .resolve_if_plan(control.if_plan_id(state.current_source()))?;
             eval_if_plan(state, if_expr, env)
         }
-        ControlPlan::Match(match_expr) => {
-            let match_expr = state.program.resolve_match_plan(*match_expr)?;
+        ControlPlanKind::Match => {
+            let match_expr = state
+                .program
+                .resolve_match_plan(control.match_plan_id(state.current_source()))?;
             eval_match_plan(state, match_expr, env)
         }
-        ControlPlan::Where(where_expr) => {
-            let where_expr = state.program.resolve_where_plan(*where_expr)?;
+        ControlPlanKind::Where => {
+            let where_expr = state
+                .program
+                .resolve_where_plan(control.where_plan_id(state.current_source()))?;
             eval_where_plan(state, where_expr, env)
         }
-        ControlPlan::Prefix(prefix) => {
-            let prefix = state.program.resolve_prefix_plan(*prefix)?;
+        ControlPlanKind::Prefix => {
+            let prefix = state
+                .program
+                .resolve_prefix_plan(control.prefix_plan_id(state.current_source()))?;
             eval_prefix_plan(state, prefix, env)
         }
-        ControlPlan::Binary(binary) => {
-            let binary = state.program.resolve_binary_plan(*binary)?;
+        ControlPlanKind::Binary => {
+            let binary = state
+                .program
+                .resolve_binary_plan(control.binary_plan_id(state.current_source()))?;
             eval_binary_plan(state, binary, env)
         }
     }
