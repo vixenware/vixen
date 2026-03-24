@@ -1299,7 +1299,7 @@ pub(crate) struct BytecodeBody {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BytecodeOp {
     EvalBody(ExprBodyRef),
-    EvalReady(ExprExecPlan),
+    EvalPlan(ExprBodyRef),
     BindLet(LetPattern),
     BindFnDecl(FunctionStmt),
     SetLast,
@@ -4670,7 +4670,10 @@ fn compile_block_step(
 fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
     fn compile_eval_op(expr: ExprBodyRef) -> BytecodeOp {
         match expr.plan().kind() {
-            ExprExecKind::Ready => BytecodeOp::EvalReady(expr.plan()),
+            ExprExecKind::Ready
+            | ExprExecKind::Access
+            | ExprExecKind::Builder
+            | ExprExecKind::Control => BytecodeOp::EvalPlan(expr),
             _ => BytecodeOp::EvalBody(expr),
         }
     }

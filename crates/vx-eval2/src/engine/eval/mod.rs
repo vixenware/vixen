@@ -1123,6 +1123,101 @@ fn ready_plan_source(
     }
 }
 
+fn expr_plan_source(
+    program: &CompiledProgram,
+    source: SourceId,
+    plan: ExprExecPlan,
+) -> Result<SourceSpan, EvalError> {
+    match plan.kind() {
+        ExprExecKind::Ready => ready_plan_source(program, source, plan),
+        ExprExecKind::Access => match plan.access_kind() {
+            AccessPlanKind::Paren => Ok(program.span_for_handle(
+                program
+                    .resolve_paren_plan(plan.paren_plan_id(source))?
+                    .handle,
+            )),
+            AccessPlanKind::Call => Ok(program
+                .span_for_handle(program.resolve_call_plan(plan.call_plan_id(source))?.handle)),
+            AccessPlanKind::Field => Ok(program.span_for_handle(
+                program
+                    .resolve_field_plan(plan.field_plan_id(source))?
+                    .handle,
+            )),
+        },
+        ExprExecKind::Builder => {
+            match plan.builder_kind() {
+                BuilderPlanKind::Array => Ok(program.span_for_handle(
+                    program
+                        .resolve_array_plan(plan.array_plan_id(source))?
+                        .handle,
+                )),
+                BuilderPlanKind::Tuple => Ok(program.span_for_handle(
+                    program
+                        .resolve_tuple_plan(plan.tuple_plan_id(source))?
+                        .handle,
+                )),
+                BuilderPlanKind::Range => Ok(program.span_for_handle(
+                    program
+                        .resolve_range_plan(plan.range_plan_id(source))?
+                        .handle,
+                )),
+                BuilderPlanKind::Map => Ok(program
+                    .span_for_handle(program.resolve_map_plan(plan.map_plan_id(source))?.handle)),
+                BuilderPlanKind::InterpolatedString => Ok(program.span_for_handle(
+                    program
+                        .resolve_interpolated_string_plan(plan.interpolated_string_plan_id(source))?
+                        .handle,
+                )),
+                BuilderPlanKind::StructLiteral => Ok(program.span_for_handle(
+                    program
+                        .resolve_struct_literal_plan(plan.struct_literal_plan_id(source))?
+                        .handle,
+                )),
+            }
+        }
+        ExprExecKind::Control => {
+            match plan.control_kind() {
+                ControlPlanKind::Fail => Ok(program
+                    .span_for_handle(program.resolve_fail_plan(plan.fail_plan_id(source))?.handle)),
+                ControlPlanKind::Fallible => Ok(program.span_for_handle(
+                    program
+                        .resolve_fallible_plan(plan.fallible_plan_id(source))?
+                        .handle,
+                )),
+                ControlPlanKind::If => Ok(program
+                    .span_for_handle(program.resolve_if_plan(plan.if_plan_id(source))?.handle)),
+                ControlPlanKind::Match => Ok(program.span_for_handle(
+                    program
+                        .resolve_match_plan(plan.match_plan_id(source))?
+                        .handle,
+                )),
+                ControlPlanKind::Where => Ok(program.span_for_handle(
+                    program
+                        .resolve_where_plan(plan.where_plan_id(source))?
+                        .handle,
+                )),
+                ControlPlanKind::Prefix => Ok(program.span_for_handle(
+                    program
+                        .resolve_prefix_plan(plan.prefix_plan_id(source))?
+                        .handle,
+                )),
+                ControlPlanKind::Binary => Ok(program.span_for_handle(
+                    program
+                        .resolve_binary_plan(plan.binary_plan_id(source))?
+                        .handle,
+                )),
+            }
+        }
+        ExprExecKind::Block | ExprExecKind::Expr => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "bytecode op does not support direct plan kind {:?}",
+                plan.kind()
+            ),
+        )),
+    }
+}
+
 fn eval_builder_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     builder: ExprExecPlan,
@@ -3274,6 +3369,25 @@ pub(super) fn continue_bytecode_body(
     parent_id: Option<EvalNodeId>,
     mut bytecode: BytecodeState,
 ) -> Result<EvalStep, EvalError> {
+    fn eval_bytecode_plan(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        plan: ExprExecPlan,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        env: &mut EvalEnv,
+    ) -> Result<EvalStep, EvalError> {
+        match plan.kind() {
+            ExprExecKind::Ready => eval_ready_plan(state, plan, env).map(EvalStep::Ready),
+            ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, plan, env),
+            ExprExecKind::Builder => eval_builder_plan(state, plan, env),
+            ExprExecKind::Control => eval_control_plan(state, plan, env),
+            ExprExecKind::Block | ExprExecKind::Expr => Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("bytecode op cannot execute plan kind {:?}", plan.kind()),
+            )),
+        }
+    }
+
     let ops = Arc::clone(&state.program.resolve_bytecode_body(bytecode.body)?.ops);
     let source = bytecode.body.source();
     while bytecode.pc < ops.len() {
@@ -3296,24 +3410,43 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalReady(plan) => {
+            BytecodeOp::EvalPlan(body_ref) => {
                 bytecode.pc += 1;
-                let child_id = state.alloc_node_id();
-                let kind = plan.trace_kind();
-                let child_source = ready_plan_source(state.program, source, *plan)?;
-                state.emit_current_dependency(child_id, Some(child_source.clone()));
-                let value = state.with_source(source, |state| {
-                    eval_node_with_kind(state, child_id, kind, child_source, |state| {
-                        eval_ready_plan(state, *plan, &bytecode.scope).map(EvalStep::Ready)
-                    })
-                })?;
-                let EvalStep::Ready(value) = value else {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode ready op unexpectedly suspended",
-                    ));
+                let plan = body_ref.plan();
+                let step = if state.queue_child_work && plan.kind() != ExprExecKind::Ready {
+                    state.with_source(source, |state| {
+                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
+                    })?
+                } else {
+                    let child_id = state.alloc_node_id();
+                    let kind = plan.trace_kind();
+                    let child_source = expr_plan_source(state.program, source, plan)?;
+                    state.emit_current_dependency(child_id, Some(child_source.clone()));
+                    state.with_source(source, |state| {
+                        eval_node_with_kind(state, child_id, kind, child_source, |state| {
+                            eval_bytecode_plan(
+                                state,
+                                plan,
+                                child_id,
+                                Some(node_id),
+                                &mut bytecode.scope,
+                            )
+                        })
+                    })?
                 };
-                bytecode.acc = Some(value);
+                match step {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::Bytecode {
+                                node_id,
+                                parent_id,
+                                bytecode,
+                            },
+                        ));
+                    }
+                }
             }
             BytecodeOp::BindLet(pattern) => {
                 let value = bytecode.acc.take().ok_or_else(|| {
