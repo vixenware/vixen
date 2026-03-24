@@ -927,7 +927,7 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet { .. }));
     assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl { .. }));
-    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalCall(_)));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalCall { .. }));
     assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
 }
@@ -1129,7 +1129,7 @@ fn compiled_program_lowers_call_expr_to_bytecode_ops() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalCall(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalCall { .. }));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
 }
@@ -1152,7 +1152,7 @@ fn compiled_program_lowers_where_expr_to_bytecode_ops() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalWhere(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalWhere { .. }));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
 }
@@ -1175,7 +1175,7 @@ fn compiled_program_lowers_match_expr_to_bytecode_ops() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalMatch(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalMatch { .. }));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
 }

@@ -1402,6 +1402,22 @@ fn eval_call_plan(
     call: &CallPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("call expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    start_call_plan(state, node_id, parent_id, call, env)
+}
+
+fn start_call_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    call: &CallPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let callee = call
         .callee
         .map(|callee| state.program.resolve_call_callee_plan(callee))
@@ -1410,12 +1426,6 @@ fn eval_call_plan(
         .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.program.span_for_handle(call.handle);
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("call expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
     let type_args = Arc::clone(&call.type_args);
     let positional_args: Arc<[ExprBodyRef]> = Arc::clone(&call.positional_args);
     if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? {
@@ -2971,20 +2981,22 @@ fn eval_match_plan(
     match_plan: &MatchPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    eval_match_inner(state, match_plan, env)
-}
-
-fn eval_match_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    match_expr: &MatchPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("match expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    start_match_plan(state, node_id, parent_id, match_plan, env)
+}
+
+fn start_match_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    match_expr: &MatchPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let scrutinee = match eval_dependent_body_ref(
         state,
         node_id,
@@ -3056,6 +3068,16 @@ fn eval_where_plan(
         .copied()
         .expect("where expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
+    start_where_plan(state, node_id, parent_id, where_expr, env)
+}
+
+fn start_where_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    where_expr: &WherePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let call_expr = where_expr.call.ok_or_else(|| {
         EvalError::new(
             EvalErrorKind::Internal,
@@ -3543,28 +3565,36 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalCall(body_ref) => {
+            BytecodeOp::EvalCall { body, plan } => {
                 bytecode.pc += 1;
-                let body_source = body_ref.expr_id().source();
+                let body_source = plan.source();
                 let step = if state.queue_child_work {
                     state.with_source(body_source, |state| {
-                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
+                        eval_dependent_body_ref(state, node_id, *body, &mut bytecode.scope)
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source =
-                        expr_plan_source(state.program, body_source, body_ref.plan())?;
+                    let child_source = state
+                        .program
+                        .resolve_call_plan(*plan)
+                        .map(|call| state.program.span_for_handle(call.handle))?;
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
-                        let call = state
-                            .program
-                            .resolve_call_plan(body_ref.plan().call_plan_id(body_source))?;
+                        let call = state.program.resolve_call_plan(*plan)?;
                         eval_node_with_kind(
                             state,
                             child_id,
                             EvalExprKind::Call,
                             child_source,
-                            |state| eval_call_plan(state, call, &mut bytecode.scope),
+                            |state| {
+                                start_call_plan(
+                                    state,
+                                    child_id,
+                                    Some(node_id),
+                                    call,
+                                    &mut bytecode.scope,
+                                )
+                            },
                         )
                     })?
                 };
@@ -3582,28 +3612,36 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalMatch(body_ref) => {
+            BytecodeOp::EvalMatch { body, plan } => {
                 bytecode.pc += 1;
-                let body_source = body_ref.expr_id().source();
+                let body_source = plan.source();
                 let step = if state.queue_child_work {
                     state.with_source(body_source, |state| {
-                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
+                        eval_dependent_body_ref(state, node_id, *body, &mut bytecode.scope)
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source =
-                        expr_plan_source(state.program, body_source, body_ref.plan())?;
+                    let child_source = state
+                        .program
+                        .resolve_match_plan(*plan)
+                        .map(|match_plan| state.program.span_for_handle(match_plan.handle))?;
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
-                        let match_plan = state
-                            .program
-                            .resolve_match_plan(body_ref.plan().match_plan_id(body_source))?;
+                        let match_plan = state.program.resolve_match_plan(*plan)?;
                         eval_node_with_kind(
                             state,
                             child_id,
                             EvalExprKind::Match,
                             child_source,
-                            |state| eval_match_plan(state, match_plan, &mut bytecode.scope),
+                            |state| {
+                                start_match_plan(
+                                    state,
+                                    child_id,
+                                    Some(node_id),
+                                    match_plan,
+                                    &mut bytecode.scope,
+                                )
+                            },
                         )
                     })?
                 };
@@ -3621,28 +3659,36 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalWhere(body_ref) => {
+            BytecodeOp::EvalWhere { body, plan } => {
                 bytecode.pc += 1;
-                let body_source = body_ref.expr_id().source();
+                let body_source = plan.source();
                 let step = if state.queue_child_work {
                     state.with_source(body_source, |state| {
-                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
+                        eval_dependent_body_ref(state, node_id, *body, &mut bytecode.scope)
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
-                    let child_source =
-                        expr_plan_source(state.program, body_source, body_ref.plan())?;
+                    let child_source = state
+                        .program
+                        .resolve_where_plan(*plan)
+                        .map(|where_plan| state.program.span_for_handle(where_plan.handle))?;
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
                     state.with_source(body_source, |state| {
-                        let where_plan = state
-                            .program
-                            .resolve_where_plan(body_ref.plan().where_plan_id(body_source))?;
+                        let where_plan = state.program.resolve_where_plan(*plan)?;
                         eval_node_with_kind(
                             state,
                             child_id,
                             EvalExprKind::Where,
                             child_source,
-                            |state| eval_where_plan(state, where_plan, &mut bytecode.scope),
+                            |state| {
+                                start_where_plan(
+                                    state,
+                                    child_id,
+                                    Some(node_id),
+                                    where_plan,
+                                    &mut bytecode.scope,
+                                )
+                            },
                         )
                     })?
                 };

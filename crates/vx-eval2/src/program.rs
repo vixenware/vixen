@@ -1315,9 +1315,18 @@ pub(crate) enum BytecodeOp {
         source: SourceSpan,
     },
     EvalBytecodeBody(BytecodeBodyId),
-    EvalCall(ExprBodyRef),
-    EvalMatch(ExprBodyRef),
-    EvalWhere(ExprBodyRef),
+    EvalCall {
+        body: ExprBodyRef,
+        plan: CallPlanId,
+    },
+    EvalMatch {
+        body: ExprBodyRef,
+        plan: MatchPlanId,
+    },
+    EvalWhere {
+        body: ExprBodyRef,
+        plan: WherePlanId,
+    },
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
     EvalIfBranches {
@@ -4776,7 +4785,10 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
-                ops.push(BytecodeOp::EvalCall(expr));
+                ops.push(BytecodeOp::EvalCall {
+                    body: expr,
+                    plan: plan.call_plan_id(expr.expr_id().source()),
+                });
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
                 let field = source
@@ -4852,10 +4864,16 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
-                ops.push(BytecodeOp::EvalMatch(expr));
+                ops.push(BytecodeOp::EvalMatch {
+                    body: expr,
+                    plan: plan.match_plan_id(expr.expr_id().source()),
+                });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
-                ops.push(BytecodeOp::EvalWhere(expr));
+                ops.push(BytecodeOp::EvalWhere {
+                    body: expr,
+                    plan: plan.where_plan_id(expr.expr_id().source()),
+                });
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
                 ops.push(BytecodeOp::EvalPlan(expr));
