@@ -251,6 +251,54 @@ impl WherePlanId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FalliblePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl FalliblePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct IfPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl IfPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PrefixPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl PrefixPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct BinaryPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl BinaryPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledParameter {
     pub(crate) label: Arc<str>,
@@ -404,12 +452,12 @@ pub(crate) enum ExprExecPlan {
     Range(RangeExpr),
     Map(MapExpr),
     Fail(FailExpr),
-    Fallible(FallibleExpr),
-    If(IfExpr),
+    Fallible(FalliblePlanId),
+    If(IfPlanId),
     Match(MatchExpr),
     Where(WherePlanId),
-    Prefix(PrefixExpr),
-    Binary(BinaryExpr),
+    Prefix(PrefixPlanId),
+    Binary(BinaryPlanId),
     InterpolatedString(InterpolatedStringExpr),
     StructLiteral(StructLiteralExpr),
     Field(FieldPlanId),
@@ -496,6 +544,35 @@ pub(crate) struct WherePlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) call: Option<CallPlan>,
     pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FalliblePlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) expr: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IfPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) condition: Option<ExprId>,
+    pub(crate) then_branch: Option<ExprId>,
+    pub(crate) else_branch: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrefixPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) operator: Option<SyntaxKind>,
+    pub(crate) expr: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BinaryPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) lhs: Option<ExprId>,
+    pub(crate) rhs: Option<ExprId>,
+    pub(crate) operator: Option<SyntaxKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,6 +867,10 @@ struct ExprPlanTables {
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
+    fallible_plans: Vec<FalliblePlan>,
+    if_plans: Vec<IfPlan>,
+    prefix_plans: Vec<PrefixPlan>,
+    binary_plans: Vec<BinaryPlan>,
 }
 
 struct CompiledProgramSource {
@@ -806,6 +887,10 @@ struct CompiledProgramSource {
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
+    fallible_plans: Vec<FalliblePlan>,
+    if_plans: Vec<IfPlan>,
+    prefix_plans: Vec<PrefixPlan>,
+    binary_plans: Vec<BinaryPlan>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
@@ -979,6 +1064,25 @@ impl CompiledProgram {
 
     pub(crate) fn resolve_where_plan(&self, id: WherePlanId) -> Result<&WherePlan, EvalError> {
         self.source(id.source())?.resolve_where_plan(id)
+    }
+
+    pub(crate) fn resolve_fallible_plan(
+        &self,
+        id: FalliblePlanId,
+    ) -> Result<&FalliblePlan, EvalError> {
+        self.source(id.source())?.resolve_fallible_plan(id)
+    }
+
+    pub(crate) fn resolve_if_plan(&self, id: IfPlanId) -> Result<&IfPlan, EvalError> {
+        self.source(id.source())?.resolve_if_plan(id)
+    }
+
+    pub(crate) fn resolve_prefix_plan(&self, id: PrefixPlanId) -> Result<&PrefixPlan, EvalError> {
+        self.source(id.source())?.resolve_prefix_plan(id)
+    }
+
+    pub(crate) fn resolve_binary_plan(&self, id: BinaryPlanId) -> Result<&BinaryPlan, EvalError> {
+        self.source(id.source())?.resolve_binary_plan(id)
     }
 
     pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
@@ -1325,6 +1429,10 @@ impl CompiledProgramSource {
         let call_plans = Vec::new();
         let field_plans = Vec::new();
         let where_plans = Vec::new();
+        let fallible_plans = Vec::new();
+        let if_plans = Vec::new();
+        let prefix_plans = Vec::new();
+        let binary_plans = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -1384,6 +1492,10 @@ impl CompiledProgramSource {
             call_plans,
             field_plans,
             where_plans,
+            fallible_plans,
+            if_plans,
+            prefix_plans,
+            binary_plans,
             expr_ids,
             block_bodies,
             type_nodes,
@@ -1657,6 +1769,46 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_fallible_plan(&self, id: FalliblePlanId) -> Result<&FalliblePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.fallible_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("fallible plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_if_plan(&self, id: IfPlanId) -> Result<&IfPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.if_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("if plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_prefix_plan(&self, id: PrefixPlanId) -> Result<&PrefixPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.prefix_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("prefix plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_binary_plan(&self, id: BinaryPlanId) -> Result<&BinaryPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.binary_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("binary plan {:?} was not found", id),
+            )
+        })
+    }
+
     fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
         self.block_bodies.get(id.index as usize).ok_or_else(|| {
@@ -1684,6 +1836,10 @@ impl CompiledProgramSource {
         self.call_plans = plans.call_plans;
         self.field_plans = plans.field_plans;
         self.where_plans = plans.where_plans;
+        self.fallible_plans = plans.fallible_plans;
+        self.if_plans = plans.if_plans;
+        self.prefix_plans = plans.prefix_plans;
+        self.binary_plans = plans.binary_plans;
     }
 
     #[cfg(test)]
@@ -1781,6 +1937,42 @@ impl ExprPlanTables {
         self.where_plans.push(plan);
         id
     }
+
+    fn push_fallible(&mut self, source: SourceId, plan: FalliblePlan) -> FalliblePlanId {
+        let id = FalliblePlanId {
+            source: source.0,
+            index: self.fallible_plans.len() as u32,
+        };
+        self.fallible_plans.push(plan);
+        id
+    }
+
+    fn push_if(&mut self, source: SourceId, plan: IfPlan) -> IfPlanId {
+        let id = IfPlanId {
+            source: source.0,
+            index: self.if_plans.len() as u32,
+        };
+        self.if_plans.push(plan);
+        id
+    }
+
+    fn push_prefix(&mut self, source: SourceId, plan: PrefixPlan) -> PrefixPlanId {
+        let id = PrefixPlanId {
+            source: source.0,
+            index: self.prefix_plans.len() as u32,
+        };
+        self.prefix_plans.push(plan);
+        id
+    }
+
+    fn push_binary(&mut self, source: SourceId, plan: BinaryPlan) -> BinaryPlanId {
+        let id = BinaryPlanId {
+            source: source.0,
+            index: self.binary_plans.len() as u32,
+        };
+        self.binary_plans.push(plan);
+        id
+    }
 }
 
 fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
@@ -1806,14 +1998,20 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
         ExprKind::Range(range) => ExprExecPlan::Range(range.clone()),
         ExprKind::Map(map) => ExprExecPlan::Map(map.clone()),
         ExprKind::Fail(fail) => ExprExecPlan::Fail(fail.clone()),
-        ExprKind::Fallible(fallible) => ExprExecPlan::Fallible(fallible.clone()),
-        ExprKind::If(if_expr) => ExprExecPlan::If(if_expr.clone()),
+        ExprKind::Fallible(fallible) => {
+            ExprExecPlan::Fallible(plans.push_fallible(source, compile_fallible_plan(fallible)))
+        }
+        ExprKind::If(if_expr) => ExprExecPlan::If(plans.push_if(source, compile_if_plan(if_expr))),
         ExprKind::Match(match_expr) => ExprExecPlan::Match(match_expr.clone()),
         ExprKind::Where(where_expr) => {
             ExprExecPlan::Where(plans.push_where(source, compile_where_plan(where_expr)))
         }
-        ExprKind::Prefix(prefix) => ExprExecPlan::Prefix(prefix.clone()),
-        ExprKind::Binary(binary) => ExprExecPlan::Binary(binary.clone()),
+        ExprKind::Prefix(prefix) => {
+            ExprExecPlan::Prefix(plans.push_prefix(source, compile_prefix_plan(prefix)))
+        }
+        ExprKind::Binary(binary) => {
+            ExprExecPlan::Binary(plans.push_binary(source, compile_binary_plan(binary)))
+        }
         ExprKind::InterpolatedString(interpolated) => {
             ExprExecPlan::InterpolatedString(interpolated.clone())
         }
@@ -1951,6 +2149,39 @@ fn compile_where_plan(where_expr: &WhereExpr) -> WherePlan {
         handle: where_expr.handle,
         call: where_expr.call.as_ref().map(compile_call_plan),
         keyword_bindings: Arc::clone(&where_expr.keyword_bindings),
+    }
+}
+
+fn compile_fallible_plan(fallible: &FallibleExpr) -> FalliblePlan {
+    FalliblePlan {
+        handle: fallible.handle,
+        expr: fallible.expr,
+    }
+}
+
+fn compile_if_plan(if_expr: &IfExpr) -> IfPlan {
+    IfPlan {
+        handle: if_expr.handle,
+        condition: if_expr.condition,
+        then_branch: if_expr.then_branch,
+        else_branch: if_expr.else_branch,
+    }
+}
+
+fn compile_prefix_plan(prefix: &PrefixExpr) -> PrefixPlan {
+    PrefixPlan {
+        handle: prefix.handle,
+        operator: prefix.operator,
+        expr: prefix.expr,
+    }
+}
+
+fn compile_binary_plan(binary: &BinaryExpr) -> BinaryPlan {
+    BinaryPlan {
+        handle: binary.handle,
+        lhs: binary.lhs,
+        rhs: binary.rhs,
+        operator: binary.operator,
     }
 }
 

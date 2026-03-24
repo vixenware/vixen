@@ -26,13 +26,14 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
-        BlockStep, CallCallee, CallCalleePlan, CompiledProgram, ExprExecPlan, ExprKind,
-        LiteralPlan, ResolvedNameRef, WherePlan,
+        BinaryPlan, BlockStep, CallCallee, CallCalleePlan, CompiledProgram, ExprExecPlan, ExprKind,
+        FalliblePlan, IfPlan, LiteralPlan, PrefixPlan, ResolvedNameRef, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
 use tempfile::tempdir;
 use vx_eval2_proto::EvalOutcome;
+use vx_parser::SyntaxKind;
 
 fn expect_ready(resolution: Resolution) -> Value {
     let Resolution::Ready(value) = resolution else {
@@ -1290,6 +1291,134 @@ fn compiled_program_caches_where_exec_plan() {
         Some(CallCalleePlan::ResolvedFunction { .. })
     ));
     assert_eq!(keyword_bindings.len(), 2);
+}
+
+#[test]
+fn compiled_program_caches_fallible_exec_plan() {
+    let program = CompiledProgram::new("cached-fallible-plan", "fn build() { read_file? }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(fallible_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain fallible expression");
+    };
+    let plan = program
+        .resolve_expr_plan(fallible_expr)
+        .expect("resolve cached fallible plan");
+    let ExprExecPlan::Fallible(fallible) = plan.as_ref() else {
+        panic!("expected cached fallible exec plan, got {plan:?}");
+    };
+    let FalliblePlan { expr, .. } = program
+        .resolve_fallible_plan(*fallible)
+        .expect("resolve cached fallible payload");
+    assert!(expr.is_some());
+}
+
+#[test]
+fn compiled_program_caches_if_exec_plan() {
+    let program = CompiledProgram::new("cached-if-plan", "fn build() { if true { 1 } else { 2 } }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(if_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain if expression");
+    };
+    let plan = program
+        .resolve_expr_plan(if_expr)
+        .expect("resolve cached if plan");
+    let ExprExecPlan::If(if_plan) = plan.as_ref() else {
+        panic!("expected cached if exec plan, got {plan:?}");
+    };
+    let IfPlan {
+        condition,
+        then_branch,
+        else_branch,
+        ..
+    } = program
+        .resolve_if_plan(*if_plan)
+        .expect("resolve cached if payload");
+    assert!(condition.is_some());
+    assert!(then_branch.is_some());
+    assert!(else_branch.is_some());
+}
+
+#[test]
+fn compiled_program_caches_prefix_exec_plan() {
+    let program = CompiledProgram::new("cached-prefix-plan", "fn build() { !true }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(prefix_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain prefix expression");
+    };
+    let plan = program
+        .resolve_expr_plan(prefix_expr)
+        .expect("resolve cached prefix plan");
+    let ExprExecPlan::Prefix(prefix) = plan.as_ref() else {
+        panic!("expected cached prefix exec plan, got {plan:?}");
+    };
+    let PrefixPlan { operator, expr, .. } = program
+        .resolve_prefix_plan(*prefix)
+        .expect("resolve cached prefix payload");
+    assert_eq!(*operator, Some(SyntaxKind::BANG));
+    assert!(expr.is_some());
+}
+
+#[test]
+fn compiled_program_caches_binary_exec_plan() {
+    let program = CompiledProgram::new("cached-binary-plan", "fn build() { 1 + 2 }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(binary_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain binary expression");
+    };
+    let plan = program
+        .resolve_expr_plan(binary_expr)
+        .expect("resolve cached binary plan");
+    let ExprExecPlan::Binary(binary) = plan.as_ref() else {
+        panic!("expected cached binary exec plan, got {plan:?}");
+    };
+    let BinaryPlan {
+        lhs, rhs, operator, ..
+    } = program
+        .resolve_binary_plan(*binary)
+        .expect("resolve cached binary payload");
+    assert!(lhs.is_some());
+    assert!(rhs.is_some());
+    assert_eq!(*operator, Some(SyntaxKind::PLUS));
 }
 
 #[test]

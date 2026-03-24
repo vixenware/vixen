@@ -1,6 +1,7 @@
 use super::*;
 use crate::program::{
-    CallCalleePlan, CallPlan, FieldPlan, LiteralPlan, NameRefPlan, PathLiteralPlan, WherePlan,
+    BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan, LiteralPlan,
+    NameRefPlan, PathLiteralPlan, PrefixPlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -927,15 +928,27 @@ fn eval_prepared_body_step(
         ExprExecPlan::Range(range) => eval_range(state, &range, env),
         ExprExecPlan::Map(map) => eval_map(state, &map, env),
         ExprExecPlan::Fail(fail) => eval_fail(state, &fail, env),
-        ExprExecPlan::Fallible(fallible) => eval_fallible(state, &fallible, env),
-        ExprExecPlan::If(if_expr) => eval_if(state, &if_expr, env),
+        ExprExecPlan::Fallible(fallible) => {
+            let fallible = state.program.resolve_fallible_plan(*fallible)?;
+            eval_fallible_plan(state, fallible, env)
+        }
+        ExprExecPlan::If(if_expr) => {
+            let if_expr = state.program.resolve_if_plan(*if_expr)?;
+            eval_if_plan(state, if_expr, env)
+        }
         ExprExecPlan::Match(match_expr) => eval_match(state, body.root_expr_id, &match_expr, env),
         ExprExecPlan::Where(where_expr) => {
             let where_expr = state.program.resolve_where_plan(*where_expr)?;
             eval_where_plan(state, where_expr, env)
         }
-        ExprExecPlan::Prefix(prefix) => eval_prefix(state, &prefix, env),
-        ExprExecPlan::Binary(binary) => eval_binary(state, &binary, env),
+        ExprExecPlan::Prefix(prefix) => {
+            let prefix = state.program.resolve_prefix_plan(*prefix)?;
+            eval_prefix_plan(state, prefix, env)
+        }
+        ExprExecPlan::Binary(binary) => {
+            let binary = state.program.resolve_binary_plan(*binary)?;
+            eval_binary_plan(state, binary, env)
+        }
         ExprExecPlan::InterpolatedString(interpolated) => {
             eval_interpolated_string(state, &interpolated, env)
         }
@@ -2896,14 +2909,31 @@ pub(super) fn eval_fallible(
     fallible: &FallibleExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_fallible_inner(state, fallible.handle, fallible.expr, env)
+}
+
+fn eval_fallible_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    fallible: &FalliblePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_fallible_inner(state, fallible.handle, fallible.expr, env)
+}
+
+fn eval_fallible_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    expr: Option<ExprId>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("fallible expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let source = state.span_for_node(fallible);
-    let Some(expr) = fallible.expr else {
+    let source = state.program.span_for_handle(handle);
+    let Some(expr) = expr else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "fallible expression has no operand",
@@ -2953,6 +2983,36 @@ pub(super) fn eval_if(
     if_expr: &IfExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_if_inner(
+        state,
+        if_expr.condition,
+        if_expr.then_branch,
+        if_expr.else_branch,
+        env,
+    )
+}
+
+fn eval_if_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    if_expr: &IfPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_if_inner(
+        state,
+        if_expr.condition,
+        if_expr.then_branch,
+        if_expr.else_branch,
+        env,
+    )
+}
+
+fn eval_if_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    condition: Option<ExprId>,
+    then_branch: Option<ExprId>,
+    else_branch: Option<ExprId>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
@@ -2961,10 +3021,10 @@ pub(super) fn eval_if(
     let parent_id = state.stack.iter().rev().nth(1).copied();
     let if_state =
         IfState {
-            then_branch: state.expr_id_for(if_expr.then_branch.ok_or_else(|| {
+            then_branch: state.expr_id_for(then_branch.ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "if branch is missing")
             })?)?,
-            else_branch: state.expr_id_for(if_expr.else_branch.ok_or_else(|| {
+            else_branch: state.expr_id_for(else_branch.ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "if branch is missing")
             })?)?,
             env: env.clone(),
@@ -2972,7 +3032,7 @@ pub(super) fn eval_if(
     let condition = match eval_dependent_expr_id(
         state,
         node_id,
-        state.expr_id_for(if_expr.condition.ok_or_else(|| {
+        state.expr_id_for(condition.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
         })?)?,
         env,
@@ -3432,19 +3492,35 @@ pub(super) fn eval_binary(
     binary: &BinaryExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_binary_inner(state, binary.lhs, binary.rhs, binary.operator, env)
+}
+
+fn eval_binary_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    binary: &BinaryPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_binary_inner(state, binary.lhs, binary.rhs, binary.operator, env)
+}
+
+fn eval_binary_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    lhs: Option<ExprId>,
+    rhs: Option<ExprId>,
+    operator: Option<SyntaxKind>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("binary expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let lhs = binary
-        .lhs
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no lhs"))?;
-    let rhs = binary
-        .rhs
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
-    let operator = binary_operator(binary)?;
+    let lhs =
+        lhs.ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no lhs"))?;
+    let rhs =
+        rhs.ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
+    let operator = binary_operator_kind(operator)?;
     let mut binary = BinaryState {
         operator,
         rhs: state.expr_id_for(rhs)?,
@@ -3473,16 +3549,33 @@ pub(super) fn eval_prefix(
     prefix: &PrefixExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_prefix_inner(state, prefix.operator, prefix.expr, env)
+}
+
+fn eval_prefix_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prefix: &PrefixPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_prefix_inner(state, prefix.operator, prefix.expr, env)
+}
+
+fn eval_prefix_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    operator: Option<SyntaxKind>,
+    expr: Option<ExprId>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("prefix expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let operand = prefix.expr.ok_or_else(|| {
+    let operand = expr.ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "prefix expression has no operand")
     })?;
-    let operator = prefix.operator.ok_or_else(|| {
+    let operator = operator.ok_or_else(|| {
         EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
     })?;
     match eval_child_expr_id(state, operand, env)? {
@@ -4304,9 +4397,8 @@ pub(super) fn project_struct_field(
     Ok(value.project(ProjectionStep::Field(field_name.to_string())))
 }
 
-pub(super) fn binary_operator(binary: &BinaryExpr) -> Result<SyntaxKind, EvalError> {
-    binary
-        .operator
+fn binary_operator_kind(operator: Option<SyntaxKind>) -> Result<SyntaxKind, EvalError> {
+    operator
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
 }
 
