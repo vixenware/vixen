@@ -2306,10 +2306,13 @@ pub(super) fn execute_ready_task(
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
-            let body = state
-                .program
-                .resolve_expr_id(prepared.body.root_expr_id())?;
-            let body_kind = expr_kind(body);
+            let body_kind = match &prepared.body {
+                PreparedBodyRef::Expr(expr_id) => {
+                    let body = state.program.resolve_expr_id(*expr_id)?;
+                    expr_kind(body)
+                }
+                _ => prepared_body_kind(&prepared.body),
+            };
             let body_source = state
                 .program
                 .span_for_expr_id(prepared.body.root_expr_id())?;
