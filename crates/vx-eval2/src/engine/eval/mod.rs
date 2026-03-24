@@ -43,6 +43,58 @@ pub(super) enum PreparedBodyRef {
         root_expr_id: ExprId,
         field: FieldExpr,
     },
+    Array {
+        root_expr_id: ExprId,
+        array: ArrayExpr,
+    },
+    Tuple {
+        root_expr_id: ExprId,
+        tuple: TupleExpr,
+    },
+    Range {
+        root_expr_id: ExprId,
+        range: RangeExpr,
+    },
+    Map {
+        root_expr_id: ExprId,
+        map: MapExpr,
+    },
+    Fail {
+        root_expr_id: ExprId,
+        fail: FailExpr,
+    },
+    Fallible {
+        root_expr_id: ExprId,
+        fallible: FallibleExpr,
+    },
+    If {
+        root_expr_id: ExprId,
+        if_expr: IfExpr,
+    },
+    Match {
+        root_expr_id: ExprId,
+        match_expr: MatchExpr,
+    },
+    Where {
+        root_expr_id: ExprId,
+        where_expr: WhereExpr,
+    },
+    Prefix {
+        root_expr_id: ExprId,
+        prefix: PrefixExpr,
+    },
+    Binary {
+        root_expr_id: ExprId,
+        binary: BinaryExpr,
+    },
+    InterpolatedString {
+        root_expr_id: ExprId,
+        interpolated: InterpolatedStringExpr,
+    },
+    StructLiteral {
+        root_expr_id: ExprId,
+        struct_literal: StructLiteralExpr,
+    },
 }
 
 pub(super) struct PreparedEntry {
@@ -89,6 +141,58 @@ impl PreparedBodyRef {
                 root_expr_id: expr_id,
                 field: field.clone(),
             }),
+            ExprKind::Array(array) => Ok(Self::Array {
+                root_expr_id: expr_id,
+                array: array.clone(),
+            }),
+            ExprKind::Tuple(tuple) => Ok(Self::Tuple {
+                root_expr_id: expr_id,
+                tuple: tuple.clone(),
+            }),
+            ExprKind::Range(range) => Ok(Self::Range {
+                root_expr_id: expr_id,
+                range: range.clone(),
+            }),
+            ExprKind::Map(map) => Ok(Self::Map {
+                root_expr_id: expr_id,
+                map: map.clone(),
+            }),
+            ExprKind::Fail(fail) => Ok(Self::Fail {
+                root_expr_id: expr_id,
+                fail: fail.clone(),
+            }),
+            ExprKind::Fallible(fallible) => Ok(Self::Fallible {
+                root_expr_id: expr_id,
+                fallible: fallible.clone(),
+            }),
+            ExprKind::If(if_expr) => Ok(Self::If {
+                root_expr_id: expr_id,
+                if_expr: if_expr.clone(),
+            }),
+            ExprKind::Match(match_expr) => Ok(Self::Match {
+                root_expr_id: expr_id,
+                match_expr: match_expr.clone(),
+            }),
+            ExprKind::Where(where_expr) => Ok(Self::Where {
+                root_expr_id: expr_id,
+                where_expr: where_expr.clone(),
+            }),
+            ExprKind::Prefix(prefix) => Ok(Self::Prefix {
+                root_expr_id: expr_id,
+                prefix: prefix.clone(),
+            }),
+            ExprKind::Binary(binary) => Ok(Self::Binary {
+                root_expr_id: expr_id,
+                binary: binary.clone(),
+            }),
+            ExprKind::InterpolatedString(interpolated) => Ok(Self::InterpolatedString {
+                root_expr_id: expr_id,
+                interpolated: interpolated.clone(),
+            }),
+            ExprKind::StructLiteral(struct_literal) => Ok(Self::StructLiteral {
+                root_expr_id: expr_id,
+                struct_literal: struct_literal.clone(),
+            }),
             _ => Ok(Self::Expr(expr_id)),
         }
     }
@@ -104,6 +208,19 @@ impl PreparedBodyRef {
             Self::NameRef { root_expr_id, .. } => *root_expr_id,
             Self::Call { root_expr_id, .. } => *root_expr_id,
             Self::Field { root_expr_id, .. } => *root_expr_id,
+            Self::Array { root_expr_id, .. } => *root_expr_id,
+            Self::Tuple { root_expr_id, .. } => *root_expr_id,
+            Self::Range { root_expr_id, .. } => *root_expr_id,
+            Self::Map { root_expr_id, .. } => *root_expr_id,
+            Self::Fail { root_expr_id, .. } => *root_expr_id,
+            Self::Fallible { root_expr_id, .. } => *root_expr_id,
+            Self::If { root_expr_id, .. } => *root_expr_id,
+            Self::Match { root_expr_id, .. } => *root_expr_id,
+            Self::Where { root_expr_id, .. } => *root_expr_id,
+            Self::Prefix { root_expr_id, .. } => *root_expr_id,
+            Self::Binary { root_expr_id, .. } => *root_expr_id,
+            Self::InterpolatedString { root_expr_id, .. } => *root_expr_id,
+            Self::StructLiteral { root_expr_id, .. } => *root_expr_id,
         }
     }
 }
@@ -911,11 +1028,15 @@ pub(super) fn eval_expr_with_node_id(
     expr: &Expr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let kind = expr_kind(expr);
+    let body = PreparedBodyRef::from_expr_id(state.program, state.expr_id(expr))?;
+    let kind = match &body {
+        PreparedBodyRef::Expr(_) => expr_kind(expr),
+        _ => prepared_body_kind(&body),
+    };
     let source = state.span_for_node(expr);
     let parent_id = state.current_parent();
     eval_node_with_kind(state, node_id, kind, source, |state| {
-        eval_expr_step(state, node_id, parent_id, expr, env)
+        eval_prepared_body_step(state, node_id, parent_id, body, env)
     })
 }
 
@@ -930,6 +1051,19 @@ pub(super) fn prepared_body_kind(body: &PreparedBodyRef) -> EvalExprKind {
         PreparedBodyRef::NameRef { .. } => EvalExprKind::NameRef,
         PreparedBodyRef::Call { .. } => EvalExprKind::Call,
         PreparedBodyRef::Field { .. } => EvalExprKind::Field,
+        PreparedBodyRef::Array { .. } => EvalExprKind::Array,
+        PreparedBodyRef::Tuple { .. } => EvalExprKind::Tuple,
+        PreparedBodyRef::Range { .. } => EvalExprKind::Range,
+        PreparedBodyRef::Map { .. } => EvalExprKind::Map,
+        PreparedBodyRef::Fail { .. } => EvalExprKind::Fail,
+        PreparedBodyRef::Fallible { .. } => EvalExprKind::Unsupported,
+        PreparedBodyRef::If { .. } => EvalExprKind::If,
+        PreparedBodyRef::Match { .. } => EvalExprKind::Match,
+        PreparedBodyRef::Where { .. } => EvalExprKind::Where,
+        PreparedBodyRef::Prefix { .. } => EvalExprKind::Prefix,
+        PreparedBodyRef::Binary { .. } => EvalExprKind::Binary,
+        PreparedBodyRef::InterpolatedString { .. } => EvalExprKind::InterpolatedString,
+        PreparedBodyRef::StructLiteral { .. } => EvalExprKind::StructLiteral,
     }
 }
 
@@ -969,6 +1103,26 @@ fn eval_prepared_body_step(
         }
         PreparedBodyRef::Call { call, .. } => eval_call(state, &call, env),
         PreparedBodyRef::Field { field, .. } => eval_field(state, &field, env),
+        PreparedBodyRef::Array { array, .. } => eval_array(state, &array, env),
+        PreparedBodyRef::Tuple { tuple, .. } => eval_tuple(state, &tuple, env),
+        PreparedBodyRef::Range { range, .. } => eval_range(state, &range, env),
+        PreparedBodyRef::Map { map, .. } => eval_map(state, &map, env),
+        PreparedBodyRef::Fail { fail, .. } => eval_fail(state, &fail, env),
+        PreparedBodyRef::Fallible { fallible, .. } => eval_fallible(state, &fallible, env),
+        PreparedBodyRef::If { if_expr, .. } => eval_if(state, &if_expr, env),
+        PreparedBodyRef::Match {
+            root_expr_id,
+            match_expr,
+        } => eval_match(state, root_expr_id, &match_expr, env),
+        PreparedBodyRef::Where { where_expr, .. } => eval_where(state, &where_expr, env),
+        PreparedBodyRef::Prefix { prefix, .. } => eval_prefix(state, &prefix, env),
+        PreparedBodyRef::Binary { binary, .. } => eval_binary(state, &binary, env),
+        PreparedBodyRef::InterpolatedString { interpolated, .. } => {
+            eval_interpolated_string(state, &interpolated, env)
+        }
+        PreparedBodyRef::StructLiteral { struct_literal, .. } => {
+            eval_struct_literal(state, &struct_literal, env)
+        }
     }
 }
 
