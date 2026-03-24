@@ -925,15 +925,15 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 6);
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
-    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
-    assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl { .. }));
     assert!(matches!(bytecode.ops[3], BytecodeOp::EvalCall(_)));
     assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
 }
 
 #[test]
-fn compiled_program_lowers_ready_name_refs_to_bytecode_ready_ops() {
+fn compiled_program_lowers_ready_name_refs_to_bytecode_local_loads() {
     let program = CompiledProgram::new(
         "lowered-bytecode-ready-name-ref",
         "fn build() { let x = 41; x }",
@@ -951,8 +951,8 @@ fn compiled_program_lowers_ready_name_refs_to_bytecode_ready_ops() {
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 5);
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
-    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
-    assert!(matches!(bytecode.ops[2], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::LoadLocal(_)));
     assert!(matches!(bytecode.ops[3], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[4], BytecodeOp::ReturnLast));
 }
@@ -1130,6 +1130,29 @@ fn compiled_program_lowers_where_expr_to_bytecode_ops() {
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalWhere(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_match_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-match",
+        "fn build(value: Bool) { match value { true => 1, false => 2 } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 3);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalMatch(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
 }

@@ -98,6 +98,7 @@ pub(super) type MatchPattern = crate::program::MatchPattern;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BytecodeState {
     pub(super) scope: EvalEnv,
+    pub(super) locals: Vec<Option<Value>>,
     pub(super) last: Value,
     pub(super) body: BytecodeBodyId,
     pub(super) pc: usize,
