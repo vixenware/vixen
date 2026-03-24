@@ -2,8 +2,8 @@ use super::*;
 use crate::program::{
     ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, DirectCallCalleePlan,
     ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan,
-    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan,
-    TuplePlan, WherePlan,
+    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan,
+    StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -950,30 +950,18 @@ fn eval_prepared_body_step(
             body.plan.block_body_id(body_source),
             0,
         ),
-        ExprExecKind::Literal => state
+        ExprExecKind::Literal
+        | ExprExecKind::PathLiteral
+        | ExprExecKind::Closure
+        | ExprExecKind::NameRef => state
             .program
-            .resolve_literal_plan(body.plan.literal_plan_id(body_source))
-            .and_then(|literal| eval_literal_plan(state, literal))
-            .map(EvalStep::Ready),
-        ExprExecKind::PathLiteral => state
-            .program
-            .resolve_path_literal_plan(body.plan.path_literal_plan_id(body_source))
-            .and_then(|path_literal| eval_path_literal_plan(state, path_literal))
+            .resolve_ready_plan(body.plan.ready_plan_id(body_source))
+            .and_then(|ready| eval_ready_plan(state, ready, env))
             .map(EvalStep::Ready),
         ExprExecKind::Paren => state
             .program
             .resolve_paren_plan(body.plan.paren_plan_id(body_source))
             .and_then(|paren| eval_paren_plan(state, node_id, parent_id, paren, env)),
-        ExprExecKind::Closure => state
-            .program
-            .resolve_closure_plan(body.plan.closure_plan_id(body_source))
-            .and_then(|closure| eval_closure_plan(state, closure, env))
-            .map(EvalStep::Ready),
-        ExprExecKind::NameRef => state
-            .program
-            .resolve_name_ref_plan(body.plan.name_ref_plan_id(body_source))
-            .and_then(|name_ref| eval_name_ref_plan(state, name_ref, env))
-            .map(EvalStep::Ready),
         ExprExecKind::Call => {
             let call = state
                 .program
@@ -1247,6 +1235,31 @@ fn eval_path_literal_plan(
         .with_provenance(Provenance::literal(path_source))
         .with_reuse(ReuseClass::Stable)
         .with_crossing(CrossingPolicy::ByValue))
+}
+
+fn eval_ready_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    ready: &ReadyPlan,
+    env: &EvalEnv,
+) -> Result<Value, EvalError> {
+    match ready {
+        ReadyPlan::Literal(literal) => {
+            let literal = state.program.resolve_literal_plan(*literal)?;
+            eval_literal_plan(state, literal)
+        }
+        ReadyPlan::PathLiteral(path_literal) => {
+            let path_literal = state.program.resolve_path_literal_plan(*path_literal)?;
+            eval_path_literal_plan(state, path_literal)
+        }
+        ReadyPlan::Closure(closure) => {
+            let closure = state.program.resolve_closure_plan(*closure)?;
+            eval_closure_plan(state, closure, env)
+        }
+        ReadyPlan::NameRef(name_ref) => {
+            let name_ref = state.program.resolve_name_ref_plan(*name_ref)?;
+            eval_name_ref_plan(state, name_ref, env)
+        }
+    }
 }
 
 fn eval_name_ref_plan(

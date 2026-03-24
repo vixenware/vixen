@@ -29,7 +29,7 @@ use crate::{
         ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, ClosurePlan, CompiledProgram,
         DirectCallCalleePlan, ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan,
         InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan,
-        ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
+        ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -951,8 +951,14 @@ fn compiled_program_caches_string_literal_exec_plan() {
         .resolve_expr_plan(literal_expr)
         .expect("resolve cached literal plan");
     assert_eq!(plan.kind(), ExprExecKind::Literal);
+    let ReadyPlan::Literal(literal) = program
+        .resolve_ready_plan(plan.ready_plan_id(literal_expr.source()))
+        .expect("resolve cached ready payload")
+    else {
+        panic!("expected cached ready literal payload, got {plan:?}");
+    };
     let LiteralPlan::String { value, .. } = program
-        .resolve_literal_plan(plan.literal_plan_id(literal_expr.source()))
+        .resolve_literal_plan(*literal)
         .expect("resolve cached literal payload")
     else {
         panic!("expected cached literal payload, got {plan:?}");
@@ -984,8 +990,14 @@ fn compiled_program_caches_resolved_name_ref_exec_plan() {
         .resolve_expr_plan(name_expr)
         .expect("resolve cached name ref plan");
     assert_eq!(plan.kind(), ExprExecKind::NameRef);
+    let ReadyPlan::NameRef(name_ref) = program
+        .resolve_ready_plan(plan.ready_plan_id(name_expr.source()))
+        .expect("resolve cached ready name ref payload")
+    else {
+        panic!("expected cached ready name ref payload, got {plan:?}");
+    };
     let name_ref = program
-        .resolve_name_ref_plan(plan.name_ref_plan_id(name_expr.source()))
+        .resolve_name_ref_plan(*name_ref)
         .expect("resolve cached name ref payload");
     assert!(matches!(
         name_ref.resolved,
@@ -1728,7 +1740,15 @@ fn compiled_program_caches_closure_exec_plan() {
         .resolve_expr_plan(closure_expr)
         .expect("resolve cached closure plan");
     let closure = match plan.kind() {
-        ExprExecKind::Closure => plan.closure_plan_id(closure_expr.source()),
+        ExprExecKind::Closure => {
+            let ReadyPlan::Closure(closure) = program
+                .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
+                .expect("resolve cached ready closure payload")
+            else {
+                panic!("expected cached ready closure payload, got {plan:?}");
+            };
+            *closure
+        }
         ExprExecKind::Paren => {
             let ParenPlan { expr, .. } = program
                 .resolve_paren_plan(plan.paren_plan_id(closure_expr.source()))
@@ -1738,7 +1758,13 @@ fn compiled_program_caches_closure_exec_plan() {
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
             assert_eq!(plan.kind(), ExprExecKind::Closure);
-            plan.closure_plan_id(closure_expr.source())
+            let ReadyPlan::Closure(closure) = program
+                .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
+                .expect("resolve cached inner ready closure payload")
+            else {
+                panic!("expected cached inner ready closure payload, got {plan:?}");
+            };
+            *closure
         }
         _ => panic!("expected cached closure exec plan, got {plan:?}"),
     };
