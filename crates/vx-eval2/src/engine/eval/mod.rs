@@ -1,4 +1,7 @@
 use super::*;
+use crate::program::{
+    CallCalleePlan, CallPlan, FieldPlan, LiteralPlan, NameRefPlan, PathLiteralPlan,
+};
 use crate::value::compare_value_reps;
 
 mod builtins;
@@ -894,17 +897,17 @@ fn eval_prepared_body_step(
             *body,
             0,
         ),
-        ExprExecPlan::Literal(literal) => eval_literal(state, &literal).map(EvalStep::Ready),
+        ExprExecPlan::Literal(literal) => eval_literal_plan(state, literal).map(EvalStep::Ready),
         ExprExecPlan::PathLiteral(path_literal) => {
-            eval_path_literal(state, &path_literal).map(EvalStep::Ready)
+            eval_path_literal_plan(state, path_literal).map(EvalStep::Ready)
         }
         ExprExecPlan::Paren(paren) => eval_paren(state, node_id, parent_id, &paren, env),
         ExprExecPlan::Closure(closure) => eval_closure(state, &closure, env).map(EvalStep::Ready),
         ExprExecPlan::NameRef(name_ref) => {
-            eval_name_ref(state, &name_ref, env).map(EvalStep::Ready)
+            eval_name_ref_plan(state, name_ref, env).map(EvalStep::Ready)
         }
-        ExprExecPlan::Call(call) => eval_call(state, &call, env),
-        ExprExecPlan::Field(field) => eval_field(state, &field, env),
+        ExprExecPlan::Call(call) => eval_call_plan(state, call, env),
+        ExprExecPlan::Field(field) => eval_field_plan(state, field, env),
         ExprExecPlan::Array(array) => eval_array(state, &array, env),
         ExprExecPlan::Tuple(tuple) => eval_tuple(state, &tuple, env),
         ExprExecPlan::Range(range) => eval_range(state, &range, env),
@@ -1030,6 +1033,369 @@ pub(super) fn eval_child_expr_id(
     ))
 }
 
+fn eval_literal_plan(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    literal: &LiteralPlan,
+) -> Result<Value, EvalError> {
+    let literal_source = match literal {
+        LiteralPlan::U64 { handle, .. }
+        | LiteralPlan::Bool { handle, .. }
+        | LiteralPlan::String { handle, .. }
+        | LiteralPlan::RawToken { handle, .. } => state.program.span_for_handle(*handle),
+    };
+    match literal {
+        LiteralPlan::U64 { value, .. } => {
+            Ok(Value::u64(*value).with_provenance(Provenance::literal(literal_source)))
+        }
+        LiteralPlan::Bool { value, .. } => {
+            Ok(Value::bool(*value).with_provenance(Provenance::literal(literal_source)))
+        }
+        LiteralPlan::String { value, .. } => {
+            Ok(Value::string(Arc::clone(value))
+                .with_provenance(Provenance::literal(literal_source)))
+        }
+        LiteralPlan::RawToken { kind, text, .. } => match kind {
+            SyntaxKind::INT => {
+                let value = text.parse::<u64>().map_err(|source| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("invalid integer literal {text}: {source}"),
+                    )
+                })?;
+                Ok(Value::u64(value).with_provenance(Provenance::literal(literal_source)))
+            }
+            SyntaxKind::TRUE_KW => {
+                Ok(Value::bool(true).with_provenance(Provenance::literal(literal_source)))
+            }
+            SyntaxKind::FALSE_KW => {
+                Ok(Value::bool(false).with_provenance(Provenance::literal(literal_source)))
+            }
+            SyntaxKind::STRING => Ok(Value::string(decode_string_literal(text)?)
+                .with_provenance(Provenance::literal(literal_source))),
+            other => Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!("unsupported literal token: {other:?}"),
+            )),
+        },
+    }
+}
+
+fn eval_path_literal_plan(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    path_literal: &PathLiteralPlan,
+) -> Result<Value, EvalError> {
+    let path_source = state.program.span_for_handle(path_literal.handle);
+    if path_literal.interpolated {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "interpolated path literals are not supported yet",
+        ));
+    }
+
+    let descriptor = path_literal
+        .descriptor
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if descriptor.is_empty() {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "path literal had no literal payload",
+        ));
+    }
+
+    Ok(Value::external("Path", descriptor)
+        .with_provenance(Provenance::literal(path_source))
+        .with_reuse(ReuseClass::Stable)
+        .with_crossing(CrossingPolicy::ByValue))
+}
+
+fn eval_name_ref_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    name_ref: &NameRefPlan,
+    env: &EvalEnv,
+) -> Result<Value, EvalError> {
+    if let Some(resolved) = &name_ref.resolved {
+        return resolved_name_ref_value(state, name_ref.handle, resolved);
+    }
+    let name: Arc<str> = Arc::clone(&name_ref.name);
+    if let Some(value) = env.get(name.as_ref()) {
+        return Ok(value.clone());
+    }
+    let reference = name_ref.handle;
+    if let Some((resolved_name, function)) =
+        state.program.resolve_function_reference(reference, &name)?
+    {
+        let name_source = state.program.span_for_handle(reference);
+        let function = function_ref_from_compiled(
+            state,
+            resolved_name.clone(),
+            function,
+            Arc::from([]),
+            Some(resolved_name),
+        );
+        return Ok(Value::function(function)
+            .with_provenance(Provenance::binding(name_source, name.to_string())));
+    }
+    if let Some(constructor) = state
+        .program
+        .resolve_variant_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
+        return Ok(enum_constructor_or_value(
+            state,
+            constructor.name,
+            constructor.fields,
+            state.program.span_for_handle(reference),
+        ));
+    }
+    if let Some(newtype_name) = state
+        .program
+        .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
+    {
+        let source = state.program.span_for_handle(reference);
+        let captures = Arc::from([(
+            Arc::from("__newtype_ctor"),
+            Value::bool(true)
+                .with_provenance(Provenance::binding(source.clone(), name.to_string())),
+        )]);
+        return Ok(Value::function(FunctionRef::new(
+            state.program.source_id(state.current_source()),
+            newtype_name,
+            Arc::from([]),
+            false,
+            None,
+            captures,
+            Some(name.clone()),
+        ))
+        .with_provenance(Provenance::binding(source, name.to_string())));
+    }
+    Err(EvalError::new(
+        EvalErrorKind::Internal,
+        format!("name {name} is not bound in this scope"),
+    ))
+}
+
+fn eval_call_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    call: &CallPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let callee = call
+        .callee
+        .as_ref()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
+    let call_source = state.program.span_for_handle(call.handle);
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("call expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let type_args = Arc::clone(&call.type_args);
+    let positional_args: Arc<[ExprId]> = Arc::clone(&call.positional_args);
+    if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? {
+        if state.queue_child_work && !positional_args.is_empty() {
+            let child_nodes = positional_args
+                .iter()
+                .map(|arg| queue_child_expr_id(state, *arg, env))
+                .collect::<Vec<_>>();
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_nodes[0],
+                vec![ContinuationFrame::Call {
+                    node_id,
+                    parent_id,
+                    call: CallState {
+                        call_source,
+                        type_args: Arc::clone(&type_args),
+                        env: empty_env(),
+                        callee: Some(callee_value),
+                        args: Vec::new(),
+                        remaining_args: Arc::from([]),
+                        next_arg_index: 0,
+                        queued_arg_nodes: child_nodes,
+                    },
+                    pending: CallResumeKind::JoinArgs,
+                }],
+            ));
+        }
+        return continue_call(
+            state,
+            node_id,
+            parent_id,
+            CallState {
+                call_source,
+                type_args: Arc::clone(&type_args),
+                env: env.clone(),
+                callee: Some(callee_value),
+                args: Vec::new(),
+                remaining_args: Arc::clone(&positional_args),
+                next_arg_index: 0,
+                queued_arg_nodes: Vec::new(),
+            },
+        );
+    }
+    let callee_value = match eval_call_callee_plan(state, callee, env)? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Suspended(suspension) => {
+            return Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::Call {
+                    node_id,
+                    parent_id,
+                    call: CallState {
+                        call_source,
+                        type_args: Arc::clone(&type_args),
+                        env: env.clone(),
+                        callee: None,
+                        args: Vec::new(),
+                        remaining_args: Arc::clone(&positional_args),
+                        next_arg_index: 0,
+                        queued_arg_nodes: Vec::new(),
+                    },
+                    pending: CallResumeKind::Callee,
+                },
+            ));
+        }
+    };
+    continue_call(
+        state,
+        node_id,
+        parent_id,
+        CallState {
+            call_source,
+            type_args,
+            env: env.clone(),
+            callee: Some(callee_value),
+            args: Vec::new(),
+            remaining_args: positional_args,
+            next_arg_index: 0,
+            queued_arg_nodes: Vec::new(),
+        },
+    )
+}
+
+fn immediate_call_callee_plan_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee: &CallCalleePlan,
+    env: &EvalEnv,
+) -> Result<Option<Value>, EvalError> {
+    match callee {
+        CallCalleePlan::NameRef(name_ref) => {
+            let name: Arc<str> = Arc::clone(&name_ref.name);
+            if let Some(value) = env.get(name.as_ref()) {
+                return Ok(Some(value.clone()));
+            }
+            Ok(Some(Value::function(FunctionRef::new(
+                state.program.source_id(state.current_source()),
+                Arc::clone(&name),
+                Arc::from([]),
+                false,
+                None,
+                Arc::from([]),
+                Some(name),
+            ))))
+        }
+        CallCalleePlan::ResolvedFunction {
+            resolved_name,
+            function,
+        } => Ok(Some(Value::function(function_ref_from_compiled(
+            state,
+            resolved_name.clone(),
+            function.clone(),
+            Arc::from([]),
+            Some(resolved_name.clone()),
+        )))),
+        CallCalleePlan::VariantConstructor {
+            handle,
+            constructor,
+        } => Ok(Some(enum_constructor_or_value(
+            state,
+            constructor.name.clone(),
+            constructor.fields.clone(),
+            state.program.span_for_handle(*handle),
+        ))),
+        CallCalleePlan::NewtypeConstructor {
+            handle,
+            display_name,
+            newtype_name,
+        } => {
+            let source = state.program.span_for_handle(*handle);
+            let captures = Arc::from([(
+                Arc::from("__newtype_ctor"),
+                Value::bool(true).with_provenance(Provenance::binding(
+                    source.clone(),
+                    display_name.to_string(),
+                )),
+            )]);
+            Ok(Some(
+                Value::function(FunctionRef::new(
+                    state.program.source_id(state.current_source()),
+                    newtype_name.clone(),
+                    Arc::from([]),
+                    false,
+                    None,
+                    captures,
+                    Some(display_name.clone()),
+                ))
+                .with_provenance(Provenance::binding(source, display_name.to_string())),
+            ))
+        }
+        CallCalleePlan::StaticMember {
+            handle,
+            full_name,
+            variant_constructor,
+        } => {
+            if let Some(constructor) = variant_constructor {
+                return Ok(Some(enum_constructor_or_value(
+                    state,
+                    constructor.name.clone(),
+                    constructor.fields.clone(),
+                    state.program.span_for_handle(*handle),
+                )));
+            }
+            let source = state.program.span_for_handle(*handle);
+            Ok(Some(
+                Value::function(FunctionRef::new(
+                    state.program.source_id(state.current_source()),
+                    full_name.clone(),
+                    Arc::from([]),
+                    false,
+                    None,
+                    Arc::from([]),
+                    None,
+                ))
+                .with_provenance(Provenance::binding(source, full_name.to_string())),
+            ))
+        }
+        CallCalleePlan::Field(field) => static_namespace_member_plan_value(state, field),
+        CallCalleePlan::Expr(_) => Ok(None),
+    }
+}
+
+fn eval_call_callee_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    callee: &CallCalleePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if let Some(value) = immediate_call_callee_plan_value(state, callee, env)? {
+        return Ok(EvalStep::Ready(value));
+    }
+    match callee {
+        CallCalleePlan::Expr(callee) => eval_child_expr_id(state, *callee, env),
+        CallCalleePlan::Field(field) => eval_field_plan(state, field, env),
+        CallCalleePlan::NameRef(_)
+        | CallCalleePlan::ResolvedFunction { .. }
+        | CallCalleePlan::VariantConstructor { .. }
+        | CallCalleePlan::NewtypeConstructor { .. }
+        | CallCalleePlan::StaticMember { .. } => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "direct call callee should resolve immediately",
+        )),
+    }
+}
+
 pub(super) fn eval_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     call: &CallExpr,
@@ -1129,6 +1495,16 @@ pub(super) fn eval_call(
             queued_arg_nodes: Vec::new(),
         },
     )
+}
+
+fn static_namespace_member_plan_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    field: &FieldPlan,
+) -> Result<Option<Value>, EvalError> {
+    if let Some(static_member) = &field.static_member {
+        return static_member_value(state, field.handle, static_member).map(Some);
+    }
+    Ok(None)
 }
 
 pub(super) fn immediate_call_callee_value(
@@ -2867,6 +3243,50 @@ pub(super) fn eval_field(
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     if let Some(value) = static_namespace_member_value(state, field)? {
+        return Ok(EvalStep::Ready(value));
+    }
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("field expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let receiver = field.receiver.ok_or_else(|| {
+        EvalError::new(EvalErrorKind::Internal, "field expression has no receiver")
+    })?;
+    let field_source = state.program.span_for_handle(field.handle);
+    let field_state = FieldState {
+        field_expr: state.expr_id_for(field.handle)?,
+    };
+    let receiver = match eval_child_expr_id(state, receiver, env)? {
+        EvalStep::Ready(value) => value,
+        EvalStep::Suspended(suspension) => {
+            return Ok(extend_suspension(
+                suspension,
+                ContinuationFrame::Field {
+                    node_id,
+                    parent_id,
+                    field: field_state,
+                },
+            ));
+        }
+    };
+    let field_name = field.field_name.as_ref().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "field expression has no field name",
+        )
+    })?;
+    project_field_or_method_value(state, receiver, field_name.clone(), field_source)
+        .map(EvalStep::Ready)
+}
+
+fn eval_field_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    field: &FieldPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if let Some(value) = static_namespace_member_plan_value(state, field)? {
         return Ok(EvalStep::Ready(value));
     }
     let node_id = state

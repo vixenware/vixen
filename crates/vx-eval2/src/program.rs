@@ -321,12 +321,12 @@ pub(crate) enum ExprKind {
 pub(crate) enum ExprExecPlan {
     Expr,
     Block { body: BlockBodyId },
-    Literal(LiteralExpr),
-    PathLiteral(PathLiteralExpr),
+    Literal(LiteralPlan),
+    PathLiteral(PathLiteralPlan),
     Paren(ParenExpr),
     Closure(ClosureExpr),
-    NameRef(NameRefExpr),
-    Call(CallExpr),
+    NameRef(NameRefPlan),
+    Call(CallPlan),
     Array(ArrayExpr),
     Tuple(TupleExpr),
     Range(RangeExpr),
@@ -340,7 +340,83 @@ pub(crate) enum ExprExecPlan {
     Binary(BinaryExpr),
     InterpolatedString(InterpolatedStringExpr),
     StructLiteral(StructLiteralExpr),
-    Field(FieldExpr),
+    Field(FieldPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiteralPlan {
+    U64 {
+        handle: ProgramNodeHandle,
+        value: u64,
+    },
+    Bool {
+        handle: ProgramNodeHandle,
+        value: bool,
+    },
+    String {
+        handle: ProgramNodeHandle,
+        value: Arc<str>,
+    },
+    RawToken {
+        handle: ProgramNodeHandle,
+        kind: SyntaxKind,
+        text: Arc<str>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathLiteralPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) descriptor: Option<Arc<str>>,
+    pub(crate) interpolated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NameRefPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) name: Arc<str>,
+    pub(crate) resolved: Option<ResolvedNameRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallCalleePlan {
+    NameRef(NameRefPlan),
+    ResolvedFunction {
+        resolved_name: Arc<str>,
+        function: CompiledFunction,
+    },
+    VariantConstructor {
+        handle: ProgramNodeHandle,
+        constructor: VariantConstructor,
+    },
+    NewtypeConstructor {
+        handle: ProgramNodeHandle,
+        display_name: Arc<str>,
+        newtype_name: Arc<str>,
+    },
+    StaticMember {
+        handle: ProgramNodeHandle,
+        full_name: Arc<str>,
+        variant_constructor: Option<VariantConstructor>,
+    },
+    Field(FieldPlan),
+    Expr(ExprId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) callee: Option<CallCalleePlan>,
+    pub(crate) type_args: Arc<[Ty]>,
+    pub(crate) positional_args: Arc<[ExprId]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) receiver: Option<ExprId>,
+    pub(crate) field_name: Option<Arc<str>>,
+    pub(crate) static_member: Option<StaticMemberPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1442,12 +1518,14 @@ impl CompiledProgramSource {
 fn compile_expr_plan(expr: &Expr) -> ExprExecPlan {
     match expr.kind() {
         ExprKind::Block(block) => ExprExecPlan::Block { body: block.body },
-        ExprKind::Literal(literal) => ExprExecPlan::Literal(literal.clone()),
-        ExprKind::PathLiteral(path_literal) => ExprExecPlan::PathLiteral(path_literal.clone()),
+        ExprKind::Literal(literal) => ExprExecPlan::Literal(compile_literal_plan(literal)),
+        ExprKind::PathLiteral(path_literal) => {
+            ExprExecPlan::PathLiteral(compile_path_literal_plan(path_literal))
+        }
         ExprKind::Paren(paren) => ExprExecPlan::Paren(paren.clone()),
         ExprKind::Closure(closure) => ExprExecPlan::Closure(closure.clone()),
-        ExprKind::NameRef(name_ref) => ExprExecPlan::NameRef(name_ref.clone()),
-        ExprKind::Call(call) => ExprExecPlan::Call(call.clone()),
+        ExprKind::NameRef(name_ref) => ExprExecPlan::NameRef(compile_name_ref_plan(name_ref)),
+        ExprKind::Call(call) => ExprExecPlan::Call(compile_call_plan(call)),
         ExprKind::Array(array) => ExprExecPlan::Array(array.clone()),
         ExprKind::Tuple(tuple) => ExprExecPlan::Tuple(tuple.clone()),
         ExprKind::Range(range) => ExprExecPlan::Range(range.clone()),
@@ -1465,8 +1543,127 @@ fn compile_expr_plan(expr: &Expr) -> ExprExecPlan {
         ExprKind::StructLiteral(struct_literal) => {
             ExprExecPlan::StructLiteral(struct_literal.clone())
         }
-        ExprKind::Field(field) => ExprExecPlan::Field(field.clone()),
+        ExprKind::Field(field) => ExprExecPlan::Field(compile_field_plan(field)),
         ExprKind::Unsupported { .. } => ExprExecPlan::Expr,
+    }
+}
+
+fn compile_literal_plan(literal: &LiteralExpr) -> LiteralPlan {
+    let handle = literal.handle;
+    match literal.token.as_ref() {
+        Some(token) => match token.kind() {
+            SyntaxKind::INT => token
+                .text()
+                .parse::<u64>()
+                .map(|value| LiteralPlan::U64 { handle, value })
+                .unwrap_or_else(|_| LiteralPlan::RawToken {
+                    handle,
+                    kind: token.kind(),
+                    text: Arc::from(token.text()),
+                }),
+            SyntaxKind::TRUE_KW => LiteralPlan::Bool {
+                handle,
+                value: true,
+            },
+            SyntaxKind::FALSE_KW => LiteralPlan::Bool {
+                handle,
+                value: false,
+            },
+            SyntaxKind::STRING => decode_string_literal(token.text())
+                .map(|value| LiteralPlan::String {
+                    handle,
+                    value: Arc::from(value),
+                })
+                .unwrap_or_else(|_| LiteralPlan::RawToken {
+                    handle,
+                    kind: token.kind(),
+                    text: Arc::from(token.text()),
+                }),
+            _ => LiteralPlan::RawToken {
+                handle,
+                kind: token.kind(),
+                text: Arc::from(token.text()),
+            },
+        },
+        None => LiteralPlan::RawToken {
+            handle,
+            kind: SyntaxKind::ERROR,
+            text: Arc::from(""),
+        },
+    }
+}
+
+fn compile_path_literal_plan(path_literal: &PathLiteralExpr) -> PathLiteralPlan {
+    PathLiteralPlan {
+        handle: path_literal.handle,
+        descriptor: path_literal.descriptor.clone(),
+        interpolated: path_literal.interpolated,
+    }
+}
+
+fn compile_name_ref_plan(name_ref: &NameRefExpr) -> NameRefPlan {
+    NameRefPlan {
+        handle: name_ref.handle,
+        name: name_ref.name.clone(),
+        resolved: name_ref.resolved.clone(),
+    }
+}
+
+fn compile_call_callee_plan(callee: &CallCallee) -> CallCalleePlan {
+    match callee {
+        CallCallee::NameRef(name_ref) => CallCalleePlan::NameRef(compile_name_ref_plan(name_ref)),
+        CallCallee::ResolvedFunction {
+            resolved_name,
+            function,
+        } => CallCalleePlan::ResolvedFunction {
+            resolved_name: resolved_name.clone(),
+            function: function.clone(),
+        },
+        CallCallee::VariantConstructor {
+            handle,
+            constructor,
+        } => CallCalleePlan::VariantConstructor {
+            handle: *handle,
+            constructor: constructor.clone(),
+        },
+        CallCallee::NewtypeConstructor {
+            handle,
+            display_name,
+            newtype_name,
+        } => CallCalleePlan::NewtypeConstructor {
+            handle: *handle,
+            display_name: display_name.clone(),
+            newtype_name: newtype_name.clone(),
+        },
+        CallCallee::StaticMember {
+            handle,
+            full_name,
+            variant_constructor,
+        } => CallCalleePlan::StaticMember {
+            handle: *handle,
+            full_name: full_name.clone(),
+            variant_constructor: variant_constructor.clone(),
+        },
+        CallCallee::Field(field) => CallCalleePlan::Field(compile_field_plan(field)),
+        CallCallee::Expr(expr) => CallCalleePlan::Expr(*expr),
+    }
+}
+
+fn compile_call_plan(call: &CallExpr) -> CallPlan {
+    CallPlan {
+        handle: call.handle,
+        callee: call.callee.as_ref().map(compile_call_callee_plan),
+        type_args: Arc::clone(&call.type_args),
+        positional_args: Arc::clone(&call.positional_args),
+    }
+}
+
+fn compile_field_plan(field: &FieldExpr) -> FieldPlan {
+    FieldPlan {
+        handle: field.handle,
+        receiver: field.receiver,
+        field_name: field.field_name.clone(),
+        static_member: field.static_member.clone(),
     }
 }
 
