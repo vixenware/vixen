@@ -1,11 +1,10 @@
 use super::*;
 use crate::program::{
-    AccessPlan, AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlan, BuilderPlanKind,
-    CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlan, ControlPlanKind,
-    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
-    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
-    PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, ReadyPlanKind, StructLiteralPlan, TuplePlan,
-    WherePlan,
+    AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlanKind, CallCalleePlan, CallCalleePlanKind,
+    CallPlan, ClosurePlan, ControlPlanKind, DirectCallCalleePlan, DirectCallCalleePlanKind,
+    ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan,
+    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlanKind,
+    StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -737,10 +736,10 @@ fn eval_access_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    access: &AccessPlan,
+    access: ExprExecPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match access.kind() {
+    match access.access_kind() {
         AccessPlanKind::Paren => {
             let paren = state
                 .program
@@ -946,7 +945,6 @@ fn eval_prepared_body_step(
     body: PreparedBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let body_source = body.root_expr_id.source();
     match body.plan.kind() {
         ExprExecKind::Expr => {
             let expr = state.program.resolve_expr_id(body.root_expr_id)?;
@@ -958,30 +956,13 @@ fn eval_prepared_body_step(
             parent_id,
             std::mem::take(env),
             Value::unit(),
-            body.plan.block_body_id(body_source),
+            body.plan.block_body_id(body.root_expr_id.source()),
             0,
         ),
-        ExprExecKind::Ready => state
-            .program
-            .resolve_ready_plan(body.plan.ready_plan_id(body_source))
-            .and_then(|ready| eval_ready_plan(state, ready, env))
-            .map(EvalStep::Ready),
-        ExprExecKind::Access => state
-            .program
-            .resolve_access_plan(body.plan.access_plan_id(body_source))
-            .and_then(|access| eval_access_plan(state, node_id, parent_id, access, env)),
-        ExprExecKind::Builder => {
-            let builder = state
-                .program
-                .resolve_builder_plan(body.plan.builder_plan_id(body_source))?;
-            eval_builder_plan(state, builder, env)
-        }
-        ExprExecKind::Control => {
-            let control = state
-                .program
-                .resolve_control_plan(body.plan.control_plan_id(body_source))?;
-            eval_control_plan(state, control, env)
-        }
+        ExprExecKind::Ready => eval_ready_plan(state, body.plan, env).map(EvalStep::Ready),
+        ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, body.plan, env),
+        ExprExecKind::Builder => eval_builder_plan(state, body.plan, env),
+        ExprExecKind::Control => eval_control_plan(state, body.plan, env),
     }
 }
 
@@ -1169,10 +1150,10 @@ fn eval_path_literal_plan(
 
 fn eval_ready_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    ready: &ReadyPlan,
+    ready: ExprExecPlan,
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
-    match ready.kind() {
+    match ready.ready_kind() {
         ReadyPlanKind::Literal => {
             let literal = state
                 .program
@@ -1202,10 +1183,10 @@ fn eval_ready_plan(
 
 fn eval_builder_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    builder: &BuilderPlan,
+    builder: ExprExecPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match builder.kind() {
+    match builder.builder_kind() {
         BuilderPlanKind::Array => {
             let array = state
                 .program
@@ -1247,10 +1228,10 @@ fn eval_builder_plan(
 
 fn eval_control_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    control: &ControlPlan,
+    control: ExprExecPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match control.kind() {
+    match control.control_kind() {
         ControlPlanKind::Fail => {
             let fail = state
                 .program

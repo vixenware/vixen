@@ -952,15 +952,12 @@ fn compiled_program_caches_string_literal_exec_plan() {
         .resolve_expr_plan(literal_expr)
         .expect("resolve cached literal plan");
     assert_eq!(plan.kind(), ExprExecKind::Ready);
-    let ready = program
-        .resolve_ready_plan(plan.ready_plan_id(literal_expr.source()))
-        .expect("resolve cached ready payload");
-    assert_eq!(ready.kind(), ReadyPlanKind::Literal);
-    let LiteralPlan::String { value, .. } = program
-        .resolve_literal_plan(ready.literal_plan_id(literal_expr.source()))
-        .expect("resolve cached literal payload")
-    else {
-        panic!("expected cached literal payload, got {plan:?}");
+    assert_eq!(plan.ready_kind(), ReadyPlanKind::Literal);
+    let literal = program
+        .resolve_literal_plan(plan.literal_plan_id(literal_expr.source()))
+        .expect("resolve cached literal payload");
+    let LiteralPlan::String { value, .. } = literal else {
+        panic!("expected cached string literal payload, got {literal:?}");
     };
     assert_eq!(value.as_ref(), "hello");
 }
@@ -989,12 +986,9 @@ fn compiled_program_caches_resolved_name_ref_exec_plan() {
         .resolve_expr_plan(name_expr)
         .expect("resolve cached name ref plan");
     assert_eq!(plan.kind(), ExprExecKind::Ready);
-    let ready = program
-        .resolve_ready_plan(plan.ready_plan_id(name_expr.source()))
-        .expect("resolve cached ready name ref payload");
-    assert_eq!(ready.kind(), ReadyPlanKind::NameRef);
+    assert_eq!(plan.ready_kind(), ReadyPlanKind::NameRef);
     let name_ref = program
-        .resolve_name_ref_plan(ready.name_ref_plan_id(name_expr.source()))
+        .resolve_name_ref_plan(plan.name_ref_plan_id(name_expr.source()))
         .expect("resolve cached name ref payload");
     assert!(matches!(
         name_ref.resolved,
@@ -1026,12 +1020,9 @@ fn compiled_program_caches_resolved_call_exec_plan() {
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let access = program
-        .resolve_access_plan(plan.access_plan_id(call_expr.source()))
-        .expect("resolve cached access payload");
-    assert_eq!(access.kind(), AccessPlanKind::Call);
+    assert_eq!(plan.access_kind(), AccessPlanKind::Call);
     let call = program
-        .resolve_call_plan(access.call_plan_id(call_expr.source()))
+        .resolve_call_plan(plan.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1072,12 +1063,9 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let access = program
-        .resolve_access_plan(plan.access_plan_id(call_expr.source()))
-        .expect("resolve cached access payload");
-    assert_eq!(access.kind(), AccessPlanKind::Call);
+    assert_eq!(plan.access_kind(), AccessPlanKind::Call);
     let call = program
-        .resolve_call_plan(access.call_plan_id(call_expr.source()))
+        .resolve_call_plan(plan.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1338,16 +1326,13 @@ fn compiled_program_caches_where_exec_plan() {
         .resolve_expr_plan(where_expr)
         .expect("resolve cached where plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(where_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Where);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Where);
     let WherePlan {
         call,
         keyword_bindings,
         ..
     } = program
-        .resolve_where_plan(control.where_plan_id(where_expr.source()))
+        .resolve_where_plan(plan.where_plan_id(where_expr.source()))
         .expect("resolve cached where payload");
     let call = call.expect("cached where plan should contain call");
     let call = program
@@ -1390,12 +1375,9 @@ fn compiled_program_caches_fallible_exec_plan() {
         .resolve_expr_plan(fallible_expr)
         .expect("resolve cached fallible plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(fallible_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Fallible);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Fallible);
     let FalliblePlan { expr, .. } = program
-        .resolve_fallible_plan(control.fallible_plan_id(fallible_expr.source()))
+        .resolve_fallible_plan(plan.fallible_plan_id(fallible_expr.source()))
         .expect("resolve cached fallible payload");
     assert!(expr.is_some());
 }
@@ -1421,17 +1403,14 @@ fn compiled_program_caches_if_exec_plan() {
         .resolve_expr_plan(if_expr)
         .expect("resolve cached if plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(if_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::If);
+    assert_eq!(plan.control_kind(), ControlPlanKind::If);
     let IfPlan {
         condition,
         then_branch,
         else_branch,
         ..
     } = program
-        .resolve_if_plan(control.if_plan_id(if_expr.source()))
+        .resolve_if_plan(plan.if_plan_id(if_expr.source()))
         .expect("resolve cached if payload");
     assert!(condition.is_some());
     assert!(then_branch.is_some());
@@ -1459,12 +1438,9 @@ fn compiled_program_caches_prefix_exec_plan() {
         .resolve_expr_plan(prefix_expr)
         .expect("resolve cached prefix plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(prefix_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Prefix);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Prefix);
     let PrefixPlan { operator, expr, .. } = program
-        .resolve_prefix_plan(control.prefix_plan_id(prefix_expr.source()))
+        .resolve_prefix_plan(plan.prefix_plan_id(prefix_expr.source()))
         .expect("resolve cached prefix payload");
     assert_eq!(*operator, Some(SyntaxKind::BANG));
     assert!(expr.is_some());
@@ -1491,14 +1467,11 @@ fn compiled_program_caches_binary_exec_plan() {
         .resolve_expr_plan(binary_expr)
         .expect("resolve cached binary plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(binary_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Binary);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Binary);
     let BinaryPlan {
         lhs, rhs, operator, ..
     } = program
-        .resolve_binary_plan(control.binary_plan_id(binary_expr.source()))
+        .resolve_binary_plan(plan.binary_plan_id(binary_expr.source()))
         .expect("resolve cached binary payload");
     assert!(lhs.is_some());
     assert!(rhs.is_some());
@@ -1526,12 +1499,9 @@ fn compiled_program_caches_array_exec_plan() {
         .resolve_expr_plan(array_expr)
         .expect("resolve cached array plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(array_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::Array);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::Array);
     let ArrayPlan { items, .. } = program
-        .resolve_array_plan(builder.array_plan_id(array_expr.source()))
+        .resolve_array_plan(plan.array_plan_id(array_expr.source()))
         .expect("resolve cached array payload");
     assert_eq!(items.len(), 2);
 }
@@ -1557,12 +1527,9 @@ fn compiled_program_caches_tuple_exec_plan() {
         .resolve_expr_plan(tuple_expr)
         .expect("resolve cached tuple plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(tuple_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::Tuple);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::Tuple);
     let TuplePlan { items, .. } = program
-        .resolve_tuple_plan(builder.tuple_plan_id(tuple_expr.source()))
+        .resolve_tuple_plan(plan.tuple_plan_id(tuple_expr.source()))
         .expect("resolve cached tuple payload");
     assert_eq!(items.len(), 2);
 }
@@ -1588,17 +1555,14 @@ fn compiled_program_caches_range_exec_plan() {
         .resolve_expr_plan(range_expr)
         .expect("resolve cached range plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(range_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::Range);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::Range);
     let RangePlan {
         start,
         end,
         inclusive_end,
         ..
     } = program
-        .resolve_range_plan(builder.range_plan_id(range_expr.source()))
+        .resolve_range_plan(plan.range_plan_id(range_expr.source()))
         .expect("resolve cached range payload");
     assert!(start.is_some());
     assert!(end.is_some());
@@ -1629,12 +1593,9 @@ fn compiled_program_caches_map_exec_plan() {
         .resolve_expr_plan(map_expr)
         .expect("resolve cached map plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(map_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::Map);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::Map);
     let MapPlan { entries, .. } = program
-        .resolve_map_plan(builder.map_plan_id(map_expr.source()))
+        .resolve_map_plan(plan.map_plan_id(map_expr.source()))
         .expect("resolve cached map payload");
     assert_eq!(entries.len(), 2);
 }
@@ -1660,12 +1621,9 @@ fn compiled_program_caches_fail_exec_plan() {
         .resolve_expr_plan(fail_expr)
         .expect("resolve cached fail plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(fail_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Fail);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Fail);
     let FailPlan { message, .. } = program
-        .resolve_fail_plan(control.fail_plan_id(fail_expr.source()))
+        .resolve_fail_plan(plan.fail_plan_id(fail_expr.source()))
         .expect("resolve cached fail payload");
     assert!(message.is_some());
 }
@@ -1694,12 +1652,9 @@ fn compiled_program_caches_interpolated_string_exec_plan() {
         .resolve_expr_plan(string_expr)
         .expect("resolve cached interpolated string plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(string_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::InterpolatedString);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::InterpolatedString);
     let InterpolatedStringPlan { parts, .. } = program
-        .resolve_interpolated_string_plan(builder.interpolated_string_plan_id(string_expr.source()))
+        .resolve_interpolated_string_plan(plan.interpolated_string_plan_id(string_expr.source()))
         .expect("resolve cached interpolated string payload");
     assert_eq!(parts.len(), 2);
 }
@@ -1728,14 +1683,11 @@ fn compiled_program_caches_struct_literal_exec_plan() {
         .resolve_expr_plan(struct_expr)
         .expect("resolve cached struct literal plan");
     assert_eq!(plan.kind(), ExprExecKind::Builder);
-    let builder = program
-        .resolve_builder_plan(plan.builder_plan_id(struct_expr.source()))
-        .expect("resolve cached builder payload");
-    assert_eq!(builder.kind(), BuilderPlanKind::StructLiteral);
+    assert_eq!(plan.builder_kind(), BuilderPlanKind::StructLiteral);
     let StructLiteralPlan {
         type_name, parts, ..
     } = program
-        .resolve_struct_literal_plan(builder.struct_literal_plan_id(struct_expr.source()))
+        .resolve_struct_literal_plan(plan.struct_literal_plan_id(struct_expr.source()))
         .expect("resolve cached struct literal payload");
     assert_eq!(type_name.as_deref(), Some("Box"));
     assert_eq!(parts.len(), 1);
@@ -1762,12 +1714,9 @@ fn compiled_program_caches_paren_exec_plan() {
         .resolve_expr_plan(paren_expr)
         .expect("resolve cached paren plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let access = program
-        .resolve_access_plan(plan.access_plan_id(paren_expr.source()))
-        .expect("resolve cached access payload");
-    assert_eq!(access.kind(), AccessPlanKind::Paren);
+    assert_eq!(plan.access_kind(), AccessPlanKind::Paren);
     let ParenPlan { expr, .. } = program
-        .resolve_paren_plan(access.paren_plan_id(paren_expr.source()))
+        .resolve_paren_plan(plan.paren_plan_id(paren_expr.source()))
         .expect("resolve cached paren payload");
     assert!(expr.is_some());
 }
@@ -1795,30 +1744,21 @@ fn compiled_program_caches_closure_exec_plan() {
         .expect("resolve cached closure plan");
     let closure = match plan.kind() {
         ExprExecKind::Ready => {
-            let ready = program
-                .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
-                .expect("resolve cached ready closure payload");
-            assert_eq!(ready.kind(), ReadyPlanKind::Closure);
-            ready.closure_plan_id(closure_expr.source())
+            assert_eq!(plan.ready_kind(), ReadyPlanKind::Closure);
+            plan.closure_plan_id(closure_expr.source())
         }
         ExprExecKind::Access => {
-            let access = program
-                .resolve_access_plan(plan.access_plan_id(closure_expr.source()))
-                .expect("resolve cached access payload");
-            assert_eq!(access.kind(), AccessPlanKind::Paren);
+            assert_eq!(plan.access_kind(), AccessPlanKind::Paren);
             let ParenPlan { expr, .. } = program
-                .resolve_paren_plan(access.paren_plan_id(closure_expr.source()))
+                .resolve_paren_plan(plan.paren_plan_id(closure_expr.source()))
                 .expect("resolve cached paren payload");
             closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
             let plan = program
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
             assert_eq!(plan.kind(), ExprExecKind::Ready);
-            let ready = program
-                .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
-                .expect("resolve cached inner ready closure payload");
-            assert_eq!(ready.kind(), ReadyPlanKind::Closure);
-            ready.closure_plan_id(closure_expr.source())
+            assert_eq!(plan.ready_kind(), ReadyPlanKind::Closure);
+            plan.closure_plan_id(closure_expr.source())
         }
         _ => panic!("expected cached closure exec plan, got {plan:?}"),
     };
@@ -1855,14 +1795,11 @@ fn compiled_program_caches_match_exec_plan() {
         .resolve_expr_plan(match_expr)
         .expect("resolve cached match plan");
     assert_eq!(plan.kind(), ExprExecKind::Control);
-    let control = program
-        .resolve_control_plan(plan.control_plan_id(match_expr.source()))
-        .expect("resolve cached control payload");
-    assert_eq!(control.kind(), ControlPlanKind::Match);
+    assert_eq!(plan.control_kind(), ControlPlanKind::Match);
     let MatchPlan {
         scrutinee, arms, ..
     } = program
-        .resolve_match_plan(control.match_plan_id(match_expr.source()))
+        .resolve_match_plan(plan.match_plan_id(match_expr.source()))
         .expect("resolve cached match payload");
     assert!(scrutinee.is_some());
     assert_eq!(arms.len(), 2);
