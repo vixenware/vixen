@@ -197,7 +197,7 @@ pub(super) struct WhereState {
     pub(super) call: WhereCallPlan,
     pub(super) pending_keyword_name: Option<Arc<str>>,
     pub(super) keyword_bindings: Vec<(Arc<str>, Value)>,
-    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprId)>,
+    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprBodyRef)>,
     pub(super) env: EvalEnv,
 }
 

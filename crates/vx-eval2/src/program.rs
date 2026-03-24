@@ -1118,7 +1118,13 @@ pub(crate) struct FieldPlan {
 pub(crate) struct WherePlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) call: Option<CallPlanId>,
-    pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
+    pub(crate) keyword_bindings: Arc<[KeywordBindingPlan]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeywordBindingPlan {
+    pub(crate) name: Arc<str>,
+    pub(crate) expr: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2894,6 +2900,18 @@ impl CompiledProgramSource {
         for plan in &mut self.field_plans {
             plan.receiver = plan.receiver.map(|body| resolve(body, &self.expr_plans));
         }
+        for plan in &mut self.where_plans {
+            plan.keyword_bindings = Arc::from(
+                plan.keyword_bindings
+                    .iter()
+                    .cloned()
+                    .map(|binding| KeywordBindingPlan {
+                        name: binding.name,
+                        expr: binding.expr.map(|body| resolve(body, &self.expr_plans)),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
         for plan in &mut self.fail_plans {
             plan.message = plan.message.map(|body| resolve(body, &self.expr_plans));
         }
@@ -3594,7 +3612,16 @@ fn compile_where_plan(
     WherePlan {
         handle: where_expr.handle,
         call,
-        keyword_bindings: Arc::clone(&where_expr.keyword_bindings),
+        keyword_bindings: Arc::from(
+            where_expr
+                .keyword_bindings
+                .iter()
+                .map(|binding| KeywordBindingPlan {
+                    name: binding.name.clone(),
+                    expr: binding.expr.map(ExprBodyRef::unresolved),
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 

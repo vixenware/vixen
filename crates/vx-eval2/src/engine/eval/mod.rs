@@ -2995,8 +2995,8 @@ pub(super) fn continue_where(
     mut where_state: WhereState,
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = where_state.remaining_keyword_bindings.into_iter();
-    while let Some((name, expr_id)) = remaining.next() {
-        match eval_dependent_expr_id(state, node_id, expr_id, &mut where_state.env)? {
+    while let Some((name, expr)) = remaining.next() {
+        match eval_dependent_body_ref(state, node_id, expr, &mut where_state.env)? {
             EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
             EvalStep::Suspended(suspension) => {
                 where_state.pending_keyword_name = Some(name);
