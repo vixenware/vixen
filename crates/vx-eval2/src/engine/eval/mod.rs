@@ -804,6 +804,19 @@ fn eval_prepared_body_step(
     body: PreparedBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    fn init_bytecode_locals(
+        body: &crate::program::BytecodeBody,
+        scope: &EvalEnv,
+    ) -> Vec<Option<Value>> {
+        let mut locals = vec![None; body.local_count];
+        for (slot, local) in body.local_slots.iter().enumerate() {
+            if local.prefill_from_scope {
+                locals[slot] = scope.get(local.name.as_ref()).cloned();
+            }
+        }
+        locals
+    }
+
     match body.plan.kind() {
         ExprExecKind::Expr => {
             let expr = state.program.resolve_expr_id(body.root_expr_id)?;
@@ -813,28 +826,20 @@ fn eval_prepared_body_step(
                 format!("unsupported expression: {:?}", expr.kind()),
             ))
         }
-        ExprExecKind::Block => continue_bytecode_body(
-            state,
-            node_id,
-            parent_id,
+        ExprExecKind::Block => continue_bytecode_body(state, node_id, parent_id, {
+            let body_id = body.plan.block_body_id(body.root_expr_id.source()).into();
+            let scope = std::mem::take(env);
+            let bytecode_body = state.program.resolve_bytecode_body(body_id)?;
             BytecodeState {
-                scope: std::mem::take(env),
-                locals: vec![
-                    None;
-                    state
-                        .program
-                        .resolve_bytecode_body(
-                            body.plan.block_body_id(body.root_expr_id.source()).into()
-                        )?
-                        .local_count
-                ],
+                scope: scope.clone(),
+                locals: init_bytecode_locals(bytecode_body, &scope),
                 last: Value::unit(),
-                body: body.plan.block_body_id(body.root_expr_id.source()).into(),
+                body: body_id,
                 pc: 0,
                 acc: None,
                 temp: None,
-            },
-        ),
+            }
+        }),
         ExprExecKind::Ready => eval_ready_plan(state, body.plan, env).map(EvalStep::Ready),
         ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, body.plan, env),
         ExprExecKind::Builder => eval_builder_plan(state, body.plan, env),
@@ -3382,6 +3387,19 @@ pub(super) fn continue_bytecode_body(
     parent_id: Option<EvalNodeId>,
     mut bytecode: BytecodeState,
 ) -> Result<EvalStep, EvalError> {
+    fn init_bytecode_locals(
+        body: &crate::program::BytecodeBody,
+        scope: &EvalEnv,
+    ) -> Vec<Option<Value>> {
+        let mut locals = vec![None; body.local_count];
+        for (slot, local) in body.local_slots.iter().enumerate() {
+            if local.prefill_from_scope {
+                locals[slot] = scope.get(local.name.as_ref()).cloned();
+            }
+        }
+        locals
+    }
+
     fn eval_inline_ready_bytecode_plan(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
         node_id: EvalNodeId,
@@ -3463,7 +3481,10 @@ pub(super) fn continue_bytecode_body(
                     )
                 })?);
             }
-            BytecodeOp::LoadLocal(slot) => {
+            BytecodeOp::LoadLocal {
+                slot,
+                source: name_source,
+            } => {
                 let value = bytecode
                     .locals
                     .get(*slot as usize)
@@ -3474,14 +3495,32 @@ pub(super) fn continue_bytecode_body(
                             format!("bytecode local slot {slot} is not initialized"),
                         )
                     })?;
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(name_source.clone()),
+                    EvalEventKind::EnterExpr {
+                        kind: EvalExprKind::NameRef,
+                    },
+                );
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(name_source.clone()),
+                    EvalEventKind::ExitReady {
+                        reuse: value.meta.reuse.clone(),
+                        crossing: value.meta.crossing.clone(),
+                    },
+                );
                 bytecode.pc += 1;
                 bytecode.acc = Some(value);
             }
             BytecodeOp::EvalBytecodeBody(body) => {
                 bytecode.pc += 1;
+                let bytecode_body = state.program.resolve_bytecode_body(*body)?;
                 let nested = BytecodeState {
                     scope: bytecode.scope.clone(),
-                    locals: vec![None; state.program.resolve_bytecode_body(*body)?.local_count],
+                    locals: init_bytecode_locals(bytecode_body, &bytecode.scope),
                     last: Value::unit(),
                     body: *body,
                     pc: 0,
@@ -3819,7 +3858,7 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::BindLet {
                 pattern,
-                local_slot,
+                local_bindings,
             } => {
                 let value = bytecode.acc.take().ok_or_else(|| {
                     EvalError::new(
@@ -3828,8 +3867,8 @@ pub(super) fn continue_bytecode_body(
                     )
                 })?;
                 bind_let_pattern(&mut bytecode.scope, pattern, value)?;
-                if let (Some(slot), LetPattern::Binding { name, .. }) = (local_slot, pattern) {
-                    let value = bytecode.scope.get(name.as_str()).cloned().ok_or_else(|| {
+                for (name, slot) in local_bindings.iter() {
+                    let value = bytecode.scope.get(name.as_ref()).cloned().ok_or_else(|| {
                         EvalError::new(
                             EvalErrorKind::Internal,
                             format!("bytecode let binding {name} was not written to scope"),

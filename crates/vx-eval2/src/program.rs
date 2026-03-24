@@ -1296,14 +1296,24 @@ pub(crate) struct BlockBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BytecodeBody {
+    pub(crate) local_slots: Arc<[BytecodeLocalSlot]>,
     pub(crate) local_count: usize,
     pub(crate) ops: Arc<[BytecodeOp]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BytecodeLocalSlot {
+    pub(crate) name: Arc<str>,
+    pub(crate) prefill_from_scope: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BytecodeOp {
     EvalReady(ExprExecPlan),
-    LoadLocal(u32),
+    LoadLocal {
+        slot: u32,
+        source: SourceSpan,
+    },
     EvalBytecodeBody(BytecodeBodyId),
     EvalCall(ExprBodyRef),
     EvalMatch(ExprBodyRef),
@@ -1328,7 +1338,7 @@ pub(crate) enum BytecodeOp {
     },
     BindLet {
         pattern: LetPattern,
-        local_slot: Option<u32>,
+        local_bindings: Arc<[(Arc<str>, u32)]>,
     },
     BindFnDecl {
         function: FunctionStmt,
@@ -4700,10 +4710,32 @@ fn compile_block_step(
 }
 
 fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> BytecodeBody {
+    fn local_slot_for_name(
+        local_slots: &mut HashMap<String, u32>,
+        local_slot_defs: &mut Vec<BytecodeLocalSlot>,
+        name: &str,
+        prefill_from_scope: bool,
+    ) -> u32 {
+        if let Some(&slot) = local_slots.get(name) {
+            if prefill_from_scope && let Some(existing) = local_slot_defs.get_mut(slot as usize) {
+                existing.prefill_from_scope = true;
+            }
+            return slot;
+        }
+        let slot = local_slot_defs.len() as u32;
+        local_slots.insert(name.to_string(), slot);
+        local_slot_defs.push(BytecodeLocalSlot {
+            name: Arc::from(name),
+            prefill_from_scope,
+        });
+        slot
+    }
+
     fn push_eval_ops(
         source: &CompiledProgramSource,
         ops: &mut Vec<BytecodeOp>,
-        local_slots: &HashMap<String, u32>,
+        local_slots: &mut HashMap<String, u32>,
+        local_slot_defs: &mut Vec<BytecodeLocalSlot>,
         expr: ExprBodyRef,
     ) {
         let plan = expr.plan();
@@ -4713,10 +4745,17 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     .resolve_name_ref_plan(plan.name_ref_plan_id(expr.expr_id().source()))
                     .expect("bytecode name ref plan should resolve");
                 if name_ref.resolved.is_none() {
-                    if let Some(slot) = local_slots.get(name_ref.name.as_ref()) {
-                        ops.push(BytecodeOp::LoadLocal(*slot));
-                        return;
-                    }
+                    let slot = local_slot_for_name(
+                        local_slots,
+                        local_slot_defs,
+                        name_ref.name.as_ref(),
+                        true,
+                    );
+                    ops.push(BytecodeOp::LoadLocal {
+                        slot,
+                        source: source.span_for_range(name_ref.handle.to_range()),
+                    });
+                    return;
                 }
                 ops.push(BytecodeOp::EvalReady(plan));
             }
@@ -4734,7 +4773,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 };
-                push_eval_ops(source, ops, local_slots, inner);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
                 ops.push(BytecodeOp::EvalCall(expr));
@@ -4753,7 +4792,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 }
-                push_eval_ops(source, ops, local_slots, receiver);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, receiver);
                 ops.push(BytecodeOp::ProjectField {
                     field_name: Arc::clone(field_name),
                     field_source: source.span_for_range(field.handle.to_range()),
@@ -4769,7 +4808,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 };
-                push_eval_ops(source, ops, local_slots, condition);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, condition);
                 ops.push(BytecodeOp::EvalIfBranches {
                     then_branch,
                     else_branch,
@@ -4783,7 +4822,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 };
-                push_eval_ops(source, ops, local_slots, operand);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, operand);
                 ops.push(BytecodeOp::ApplyPrefix(operator));
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Binary => {
@@ -4796,7 +4835,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 };
-                push_eval_ops(source, ops, local_slots, lhs);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, lhs);
                 ops.push(BytecodeOp::EvalBinary { operator, rhs });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Fail => {
@@ -4807,7 +4846,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     ops.push(BytecodeOp::EvalPlan(expr));
                     return;
                 };
-                push_eval_ops(source, ops, local_slots, message);
+                push_eval_ops(source, ops, local_slots, local_slot_defs, message);
                 ops.push(BytecodeOp::RaiseUserFail {
                     fail_source: source.span_for_range(fail.handle.to_range()),
                 });
@@ -4825,52 +4864,79 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
         }
     }
 
+    fn collect_pattern_local_bindings(
+        pattern: &LetPattern,
+        local_slots: &mut HashMap<String, u32>,
+        local_slot_defs: &mut Vec<BytecodeLocalSlot>,
+        out: &mut Vec<(Arc<str>, u32)>,
+    ) {
+        match pattern {
+            LetPattern::Binding { name, .. } => {
+                let slot = local_slot_for_name(local_slots, local_slot_defs, name.as_str(), false);
+                out.push((Arc::from(name.as_str()), slot));
+            }
+            LetPattern::Tuple(items) => {
+                for item in items {
+                    collect_pattern_local_bindings(item, local_slots, local_slot_defs, out);
+                }
+            }
+            LetPattern::Wildcard | LetPattern::Unit => {}
+        }
+    }
+
     let mut ops = Vec::new();
     let mut local_slots = HashMap::new();
-    let mut next_local = 0_u32;
+    let mut local_slot_defs = Vec::new();
     for step in block.steps.iter() {
         match step {
             BlockStep::Let { pattern, expr } => {
-                push_eval_ops(source, &mut ops, &local_slots, *expr);
-                let local_slot = match pattern {
-                    LetPattern::Binding { name, .. } => {
-                        Some(*local_slots.entry(name.clone()).or_insert_with(|| {
-                            let slot = next_local;
-                            next_local += 1;
-                            slot
-                        }))
-                    }
-                    _ => None,
-                };
+                push_eval_ops(
+                    source,
+                    &mut ops,
+                    &mut local_slots,
+                    &mut local_slot_defs,
+                    *expr,
+                );
+                let mut local_bindings = Vec::new();
+                collect_pattern_local_bindings(
+                    pattern,
+                    &mut local_slots,
+                    &mut local_slot_defs,
+                    &mut local_bindings,
+                );
                 ops.push(BytecodeOp::BindLet {
                     pattern: pattern.clone(),
-                    local_slot,
+                    local_bindings: Arc::from(local_bindings),
                 });
             }
             BlockStep::FnDecl(function) => {
-                let local_slot = Some(
-                    *local_slots
-                        .entry(function.name.to_string())
-                        .or_insert_with(|| {
-                            let slot = next_local;
-                            next_local += 1;
-                            slot
-                        }),
-                );
+                let local_slot = Some(local_slot_for_name(
+                    &mut local_slots,
+                    &mut local_slot_defs,
+                    function.name.as_ref(),
+                    false,
+                ));
                 ops.push(BytecodeOp::BindFnDecl {
                     function: function.clone(),
                     local_slot,
                 });
             }
             BlockStep::Expr(expr) => {
-                push_eval_ops(source, &mut ops, &local_slots, *expr);
+                push_eval_ops(
+                    source,
+                    &mut ops,
+                    &mut local_slots,
+                    &mut local_slot_defs,
+                    *expr,
+                );
                 ops.push(BytecodeOp::SetLast);
             }
         }
     }
     ops.push(BytecodeOp::ReturnLast);
     BytecodeBody {
-        local_count: next_local as usize,
+        local_slots: Arc::from(local_slot_defs),
+        local_count: local_slots.len(),
         ops: Arc::from(ops),
     }
 }
