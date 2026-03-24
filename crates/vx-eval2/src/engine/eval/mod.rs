@@ -1,6 +1,6 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan,
+    ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan, ControlPlan,
     DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan,
     LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan,
     RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
@@ -985,47 +985,17 @@ fn eval_prepared_body_step(
                 .resolve_builder_plan(body.plan.builder_plan_id(body_source))?;
             eval_builder_plan(state, builder, env)
         }
-        ExprExecKind::Fail => {
-            let fail = state
+        ExprExecKind::Fail
+        | ExprExecKind::Fallible
+        | ExprExecKind::If
+        | ExprExecKind::Match
+        | ExprExecKind::Where
+        | ExprExecKind::Prefix
+        | ExprExecKind::Binary => {
+            let control = state
                 .program
-                .resolve_fail_plan(body.plan.fail_plan_id(body_source))?;
-            eval_fail_plan(state, fail, env)
-        }
-        ExprExecKind::Fallible => {
-            let fallible = state
-                .program
-                .resolve_fallible_plan(body.plan.fallible_plan_id(body_source))?;
-            eval_fallible_plan(state, fallible, env)
-        }
-        ExprExecKind::If => {
-            let if_expr = state
-                .program
-                .resolve_if_plan(body.plan.if_plan_id(body_source))?;
-            eval_if_plan(state, if_expr, env)
-        }
-        ExprExecKind::Match => {
-            let match_expr = state
-                .program
-                .resolve_match_plan(body.plan.match_plan_id(body_source))?;
-            eval_match_plan(state, match_expr, env)
-        }
-        ExprExecKind::Where => {
-            let where_expr = state
-                .program
-                .resolve_where_plan(body.plan.where_plan_id(body_source))?;
-            eval_where_plan(state, where_expr, env)
-        }
-        ExprExecKind::Prefix => {
-            let prefix = state
-                .program
-                .resolve_prefix_plan(body.plan.prefix_plan_id(body_source))?;
-            eval_prefix_plan(state, prefix, env)
-        }
-        ExprExecKind::Binary => {
-            let binary = state
-                .program
-                .resolve_binary_plan(body.plan.binary_plan_id(body_source))?;
-            eval_binary_plan(state, binary, env)
+                .resolve_control_plan(body.plan.control_plan_id(body_source))?;
+            eval_control_plan(state, control, env)
         }
     }
 }
@@ -1268,6 +1238,43 @@ fn eval_builder_plan(
         BuilderPlan::StructLiteral(struct_literal) => {
             let struct_literal = state.program.resolve_struct_literal_plan(*struct_literal)?;
             eval_struct_literal_plan(state, struct_literal, env)
+        }
+    }
+}
+
+fn eval_control_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    control: &ControlPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    match control {
+        ControlPlan::Fail(fail) => {
+            let fail = state.program.resolve_fail_plan(*fail)?;
+            eval_fail_plan(state, fail, env)
+        }
+        ControlPlan::Fallible(fallible) => {
+            let fallible = state.program.resolve_fallible_plan(*fallible)?;
+            eval_fallible_plan(state, fallible, env)
+        }
+        ControlPlan::If(if_expr) => {
+            let if_expr = state.program.resolve_if_plan(*if_expr)?;
+            eval_if_plan(state, if_expr, env)
+        }
+        ControlPlan::Match(match_expr) => {
+            let match_expr = state.program.resolve_match_plan(*match_expr)?;
+            eval_match_plan(state, match_expr, env)
+        }
+        ControlPlan::Where(where_expr) => {
+            let where_expr = state.program.resolve_where_plan(*where_expr)?;
+            eval_where_plan(state, where_expr, env)
+        }
+        ControlPlan::Prefix(prefix) => {
+            let prefix = state.program.resolve_prefix_plan(*prefix)?;
+            eval_prefix_plan(state, prefix, env)
+        }
+        ControlPlan::Binary(binary) => {
+            let binary = state.program.resolve_binary_plan(*binary)?;
+            eval_binary_plan(state, binary, env)
         }
     }
 }

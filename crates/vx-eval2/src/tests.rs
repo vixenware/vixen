@@ -27,9 +27,9 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         ArrayPlan, BinaryPlan, BlockStep, BuilderPlan, CallCallee, CallCalleePlan, ClosurePlan,
-        CompiledProgram, DirectCallCalleePlan, ExprExecKind, ExprKind, FailPlan, FalliblePlan,
-        IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan,
-        RangePlan, ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
+        CompiledProgram, ControlPlan, DirectCallCalleePlan, ExprExecKind, ExprKind, FailPlan,
+        FalliblePlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan,
+        PrefixPlan, RangePlan, ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1339,9 +1339,17 @@ fn compiled_program_caches_where_exec_plan() {
         call,
         keyword_bindings,
         ..
-    } = program
-        .resolve_where_plan(plan.where_plan_id(where_expr.source()))
-        .expect("resolve cached where payload");
+    } = {
+        let ControlPlan::Where(where_plan) = program
+            .resolve_control_plan(plan.control_plan_id(where_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached where control payload, got {plan:?}");
+        };
+        program
+            .resolve_where_plan(*where_plan)
+            .expect("resolve cached where payload")
+    };
     let call = call.expect("cached where plan should contain call");
     let call = program
         .resolve_call_plan(call)
@@ -1384,9 +1392,17 @@ fn compiled_program_caches_fallible_exec_plan() {
         .resolve_expr_plan(fallible_expr)
         .expect("resolve cached fallible plan");
     assert_eq!(plan.kind(), ExprExecKind::Fallible);
-    let FalliblePlan { expr, .. } = program
-        .resolve_fallible_plan(plan.fallible_plan_id(fallible_expr.source()))
-        .expect("resolve cached fallible payload");
+    let FalliblePlan { expr, .. } = {
+        let ControlPlan::Fallible(fallible) = program
+            .resolve_control_plan(plan.control_plan_id(fallible_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached fallible control payload, got {plan:?}");
+        };
+        program
+            .resolve_fallible_plan(*fallible)
+            .expect("resolve cached fallible payload")
+    };
     assert!(expr.is_some());
 }
 
@@ -1416,9 +1432,17 @@ fn compiled_program_caches_if_exec_plan() {
         then_branch,
         else_branch,
         ..
-    } = program
-        .resolve_if_plan(plan.if_plan_id(if_expr.source()))
-        .expect("resolve cached if payload");
+    } = {
+        let ControlPlan::If(if_plan) = program
+            .resolve_control_plan(plan.control_plan_id(if_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached if control payload, got {plan:?}");
+        };
+        program
+            .resolve_if_plan(*if_plan)
+            .expect("resolve cached if payload")
+    };
     assert!(condition.is_some());
     assert!(then_branch.is_some());
     assert!(else_branch.is_some());
@@ -1445,9 +1469,17 @@ fn compiled_program_caches_prefix_exec_plan() {
         .resolve_expr_plan(prefix_expr)
         .expect("resolve cached prefix plan");
     assert_eq!(plan.kind(), ExprExecKind::Prefix);
-    let PrefixPlan { operator, expr, .. } = program
-        .resolve_prefix_plan(plan.prefix_plan_id(prefix_expr.source()))
-        .expect("resolve cached prefix payload");
+    let PrefixPlan { operator, expr, .. } = {
+        let ControlPlan::Prefix(prefix) = program
+            .resolve_control_plan(plan.control_plan_id(prefix_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached prefix control payload, got {plan:?}");
+        };
+        program
+            .resolve_prefix_plan(*prefix)
+            .expect("resolve cached prefix payload")
+    };
     assert_eq!(*operator, Some(SyntaxKind::BANG));
     assert!(expr.is_some());
 }
@@ -1475,9 +1507,17 @@ fn compiled_program_caches_binary_exec_plan() {
     assert_eq!(plan.kind(), ExprExecKind::Binary);
     let BinaryPlan {
         lhs, rhs, operator, ..
-    } = program
-        .resolve_binary_plan(plan.binary_plan_id(binary_expr.source()))
-        .expect("resolve cached binary payload");
+    } = {
+        let ControlPlan::Binary(binary) = program
+            .resolve_control_plan(plan.control_plan_id(binary_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached binary control payload, got {plan:?}");
+        };
+        program
+            .resolve_binary_plan(*binary)
+            .expect("resolve cached binary payload")
+    };
     assert!(lhs.is_some());
     assert!(rhs.is_some());
     assert_eq!(*operator, Some(SyntaxKind::PLUS));
@@ -1646,9 +1686,17 @@ fn compiled_program_caches_fail_exec_plan() {
         .resolve_expr_plan(fail_expr)
         .expect("resolve cached fail plan");
     assert_eq!(plan.kind(), ExprExecKind::Fail);
-    let FailPlan { message, .. } = program
-        .resolve_fail_plan(plan.fail_plan_id(fail_expr.source()))
-        .expect("resolve cached fail payload");
+    let FailPlan { message, .. } = {
+        let ControlPlan::Fail(fail) = program
+            .resolve_control_plan(plan.control_plan_id(fail_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached fail control payload, got {plan:?}");
+        };
+        program
+            .resolve_fail_plan(*fail)
+            .expect("resolve cached fail payload")
+    };
     assert!(message.is_some());
 }
 
@@ -1839,9 +1887,17 @@ fn compiled_program_caches_match_exec_plan() {
     assert_eq!(plan.kind(), ExprExecKind::Match);
     let MatchPlan {
         scrutinee, arms, ..
-    } = program
-        .resolve_match_plan(plan.match_plan_id(match_expr.source()))
-        .expect("resolve cached match payload");
+    } = {
+        let ControlPlan::Match(match_plan) = program
+            .resolve_control_plan(plan.control_plan_id(match_expr.source()))
+            .expect("resolve cached control payload")
+        else {
+            panic!("expected cached match control payload, got {plan:?}");
+        };
+        program
+            .resolve_match_plan(*match_plan)
+            .expect("resolve cached match payload")
+    };
     assert!(scrutinee.is_some());
     assert_eq!(arms.len(), 2);
 }

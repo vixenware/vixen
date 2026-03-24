@@ -204,6 +204,18 @@ impl BuilderPlanId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ControlPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl ControlPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LiteralPlanId {
     source: u32,
     index: u32,
@@ -702,16 +714,26 @@ impl ExprExecPlan {
         }
     }
 
+    pub(crate) fn control_plan_id(self, source: SourceId) -> ControlPlanId {
+        debug_assert!(matches!(
+            self.kind,
+            ExprExecKind::Fail
+                | ExprExecKind::Fallible
+                | ExprExecKind::If
+                | ExprExecKind::Match
+                | ExprExecKind::Where
+                | ExprExecKind::Prefix
+                | ExprExecKind::Binary
+        ));
+        ControlPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
     impl_expr_exec_plan_accessors!(
         Paren => paren_plan_id: ParenPlanId,
         Call => call_plan_id: CallPlanId,
-        Fail => fail_plan_id: FailPlanId,
-        Fallible => fallible_plan_id: FalliblePlanId,
-        If => if_plan_id: IfPlanId,
-        Match => match_plan_id: MatchPlanId,
-        Where => where_plan_id: WherePlanId,
-        Prefix => prefix_plan_id: PrefixPlanId,
-        Binary => binary_plan_id: BinaryPlanId,
         Field => field_plan_id: FieldPlanId,
     );
 }
@@ -732,6 +754,17 @@ pub(crate) enum BuilderPlan {
     Map(MapPlanId),
     InterpolatedString(InterpolatedStringPlanId),
     StructLiteral(StructLiteralPlanId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlPlan {
+    Fail(FailPlanId),
+    Fallible(FalliblePlanId),
+    If(IfPlanId),
+    Match(MatchPlanId),
+    Where(WherePlanId),
+    Prefix(PrefixPlanId),
+    Binary(BinaryPlanId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1204,6 +1237,7 @@ struct IndexedNode {
 struct ExprPlanTables {
     ready_plans: Vec<ReadyPlan>,
     builder_plans: Vec<BuilderPlan>,
+    control_plans: Vec<ControlPlan>,
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
@@ -1238,6 +1272,7 @@ struct CompiledProgramSource {
     expr_plans: Vec<ExprExecPlan>,
     ready_plans: Vec<ReadyPlan>,
     builder_plans: Vec<BuilderPlan>,
+    control_plans: Vec<ControlPlan>,
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
@@ -1411,6 +1446,13 @@ impl CompiledProgram {
         id: BuilderPlanId,
     ) -> Result<&BuilderPlan, EvalError> {
         self.source(id.source())?.resolve_builder_plan(id)
+    }
+
+    pub(crate) fn resolve_control_plan(
+        &self,
+        id: ControlPlanId,
+    ) -> Result<&ControlPlan, EvalError> {
+        self.source(id.source())?.resolve_control_plan(id)
     }
 
     pub(crate) fn resolve_literal_plan(
@@ -1870,6 +1912,7 @@ impl CompiledProgramSource {
         let expr_plans = Vec::new();
         let ready_plans = Vec::new();
         let builder_plans = Vec::new();
+        let control_plans = Vec::new();
         let literal_plans = Vec::new();
         let path_literal_plans = Vec::new();
         let name_ref_plans = Vec::new();
@@ -1947,6 +1990,7 @@ impl CompiledProgramSource {
             expr_plans,
             ready_plans,
             builder_plans,
+            control_plans,
             literal_plans,
             path_literal_plans,
             name_ref_plans,
@@ -2193,6 +2237,16 @@ impl CompiledProgramSource {
             EvalError::new(
                 EvalErrorKind::Internal,
                 format!("builder plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_control_plan(&self, id: ControlPlanId) -> Result<&ControlPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.control_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("control plan {:?} was not found", id),
             )
         })
     }
@@ -2462,6 +2516,7 @@ impl CompiledProgramSource {
             .collect();
         self.ready_plans = plans.ready_plans;
         self.builder_plans = plans.builder_plans;
+        self.control_plans = plans.control_plans;
         self.literal_plans = plans.literal_plans;
         self.path_literal_plans = plans.path_literal_plans;
         self.name_ref_plans = plans.name_ref_plans;
@@ -2543,6 +2598,15 @@ impl ExprPlanTables {
             index: self.builder_plans.len() as u32,
         };
         self.builder_plans.push(plan);
+        id
+    }
+
+    fn push_control(&mut self, source: SourceId, plan: ControlPlan) -> ControlPlanId {
+        let id = ControlPlanId {
+            source: source.0,
+            index: self.control_plans.len() as u32,
+        };
+        self.control_plans.push(plan);
         id
     }
 
@@ -2825,38 +2889,58 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
                 plans.push_builder(source, BuilderPlan::Map(plan)).index,
             )
         }
-        ExprKind::Fail(fail) => ExprExecPlan::new(
-            ExprExecKind::Fail,
-            plans.push_fail(source, compile_fail_plan(fail)).index,
-        ),
-        ExprKind::Fallible(fallible) => ExprExecPlan::new(
-            ExprExecKind::Fallible,
-            plans
-                .push_fallible(source, compile_fallible_plan(fallible))
-                .index,
-        ),
-        ExprKind::If(if_expr) => ExprExecPlan::new(
-            ExprExecKind::If,
-            plans.push_if(source, compile_if_plan(if_expr)).index,
-        ),
-        ExprKind::Match(match_expr) => ExprExecPlan::new(
-            ExprExecKind::Match,
-            plans
-                .push_match(source, compile_match_plan(match_expr))
-                .index,
-        ),
+        ExprKind::Fail(fail) => {
+            let plan = plans.push_fail(source, compile_fail_plan(fail));
+            ExprExecPlan::new(
+                ExprExecKind::Fail,
+                plans.push_control(source, ControlPlan::Fail(plan)).index,
+            )
+        }
+        ExprKind::Fallible(fallible) => {
+            let plan = plans.push_fallible(source, compile_fallible_plan(fallible));
+            ExprExecPlan::new(
+                ExprExecKind::Fallible,
+                plans
+                    .push_control(source, ControlPlan::Fallible(plan))
+                    .index,
+            )
+        }
+        ExprKind::If(if_expr) => {
+            let plan = plans.push_if(source, compile_if_plan(if_expr));
+            ExprExecPlan::new(
+                ExprExecKind::If,
+                plans.push_control(source, ControlPlan::If(plan)).index,
+            )
+        }
+        ExprKind::Match(match_expr) => {
+            let plan = plans.push_match(source, compile_match_plan(match_expr));
+            ExprExecPlan::new(
+                ExprExecKind::Match,
+                plans.push_control(source, ControlPlan::Match(plan)).index,
+            )
+        }
         ExprKind::Where(where_expr) => {
             let plan = compile_where_plan(source, where_expr, plans);
-            ExprExecPlan::new(ExprExecKind::Where, plans.push_where(source, plan).index)
+            let plan = plans.push_where(source, plan);
+            ExprExecPlan::new(
+                ExprExecKind::Where,
+                plans.push_control(source, ControlPlan::Where(plan)).index,
+            )
         }
-        ExprKind::Prefix(prefix) => ExprExecPlan::new(
-            ExprExecKind::Prefix,
-            plans.push_prefix(source, compile_prefix_plan(prefix)).index,
-        ),
-        ExprKind::Binary(binary) => ExprExecPlan::new(
-            ExprExecKind::Binary,
-            plans.push_binary(source, compile_binary_plan(binary)).index,
-        ),
+        ExprKind::Prefix(prefix) => {
+            let plan = plans.push_prefix(source, compile_prefix_plan(prefix));
+            ExprExecPlan::new(
+                ExprExecKind::Prefix,
+                plans.push_control(source, ControlPlan::Prefix(plan)).index,
+            )
+        }
+        ExprKind::Binary(binary) => {
+            let plan = plans.push_binary(source, compile_binary_plan(binary));
+            ExprExecPlan::new(
+                ExprExecKind::Binary,
+                plans.push_control(source, ControlPlan::Binary(plan)).index,
+            )
+        }
         ExprKind::InterpolatedString(interpolated) => {
             let plan = plans
                 .push_interpolated_string(source, compile_interpolated_string_plan(interpolated));
