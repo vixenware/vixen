@@ -18,7 +18,7 @@ use crate::{
     SourceSpan, StructValue, Value, ValueMeta, ValueRep,
     decode::{StructuredFormat, parse_blob_as_value},
     program::{
-        ArrayItem, BlockBodyId, BlockStep, CallCallee, CallExpr, CompiledParameter,
+        ArrayItem, BlockStep, BytecodeBodyId, CallCallee, CallExpr, CompiledParameter,
         CompiledProgram, EvalProgram, Expr, ExprBodyRef, ExprExecPlan, ExprId, ExprKind, FieldExpr,
         MatchPlan, NameRefExpr, ProgramNodeHandle, ResolvedNameRef, StaticMemberPlan, StringPart,
     },

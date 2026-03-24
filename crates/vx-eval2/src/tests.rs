@@ -27,7 +27,7 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BlockStep, BuilderPlanKind,
-        CallCallee, CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind,
+        BytecodeOp, CallCallee, CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind,
         DirectCallCalleePlanKind, ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan,
         InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapPlan, MatchPlan,
         ParenPlan, PrefixPlan, RangePlan, ReadyPlanKind, ResolvedNameRef, StructLiteralPlan,
@@ -904,6 +904,32 @@ fn compiled_program_lowers_block_expr_to_block_steps() {
     assert!(matches!(block_body.steps[0], BlockStep::Let { .. }));
     assert!(matches!(block_body.steps[1], BlockStep::FnDecl(_)));
     assert!(matches!(block_body.steps[2], BlockStep::Expr(_)));
+}
+
+#[test]
+fn compiled_program_lowers_block_expr_to_bytecode_body() {
+    let program = CompiledProgram::new(
+        "lowered-block-bytecode",
+        "fn build() {\n  let captured = 41;\n  fn helper() { captured }\n  helper()\n}",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 6);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::Eval(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl(_)));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::Eval(_)));
+    assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
 }
 
 #[test]

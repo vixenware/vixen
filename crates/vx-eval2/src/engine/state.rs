@@ -96,9 +96,12 @@ pub(super) type MatchFieldPattern = crate::program::MatchFieldPattern;
 pub(super) type MatchPattern = crate::program::MatchPattern;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum BlockResumeKind {
-    Let { pattern: LetPattern },
-    Expr,
+pub(super) struct BytecodeState {
+    pub(super) scope: EvalEnv,
+    pub(super) last: Value,
+    pub(super) body: BytecodeBodyId,
+    pub(super) pc: usize,
+    pub(super) acc: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,14 +303,10 @@ pub(super) enum ContinuationFrame {
         call: CallState,
         pending: CallResumeKind,
     },
-    BlockBody {
+    Bytecode {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
-        scope: EvalEnv,
-        last: Value,
-        body: BlockBodyId,
-        next_step_index: usize,
-        pending: BlockResumeKind,
+        bytecode: BytecodeState,
     },
     Array {
         node_id: EvalNodeId,

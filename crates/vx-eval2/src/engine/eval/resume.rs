@@ -207,26 +207,18 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::BlockBody {
+        ContinuationFrame::Bytecode {
             node_id,
             parent_id,
-            scope,
-            last,
-            body,
-            next_step_index,
-            pending,
+            mut bytecode,
         } => {
-            let result = resume_block_body(
-                state,
-                node_id,
-                parent_id,
-                scope,
-                last,
-                body,
-                next_step_index,
-                pending,
-                input,
-            );
+            let result = match input {
+                Ok(value) => {
+                    bytecode.acc = Some(value);
+                    continue_bytecode_body(state, node_id, parent_id, bytecode)
+                }
+                Err(error) => Err(error),
+            };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
         ContinuationFrame::Array {

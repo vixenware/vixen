@@ -1,8 +1,8 @@
 use super::*;
 use crate::program::{
-    AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BuilderPlanKind, CallCalleePlan,
-    CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlanKind, DirectCallCalleePlan,
-    DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BuilderPlanKind, BytecodeOp,
+    CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlanKind,
+    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
     InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
     MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlanKind,
     StructLiteralPlan, StructLiteralPlanPart, TuplePlan, WherePlan,
@@ -810,14 +810,17 @@ fn eval_prepared_body_step(
                 format!("unsupported expression: {:?}", expr.kind()),
             ))
         }
-        ExprExecKind::Block => continue_block_body(
+        ExprExecKind::Block => continue_bytecode_body(
             state,
             node_id,
             parent_id,
-            std::mem::take(env),
-            Value::unit(),
-            body.plan.block_body_id(body.root_expr_id.source()),
-            0,
+            BytecodeState {
+                scope: std::mem::take(env),
+                last: Value::unit(),
+                body: body.plan.block_body_id(body.root_expr_id.source()).into(),
+                pc: 0,
+                acc: None,
+            },
         ),
         ExprExecKind::Ready => eval_ready_plan(state, body.plan, env).map(EvalStep::Ready),
         ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, body.plan, env),
@@ -3232,103 +3235,64 @@ fn eval_prefix_inner(
     }
 }
 
-pub(super) fn continue_block_body(
+pub(super) fn continue_bytecode_body(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut scope: EvalEnv,
-    mut last: Value,
-    body: BlockBodyId,
-    next_step_index: usize,
+    mut bytecode: BytecodeState,
 ) -> Result<EvalStep, EvalError> {
-    let steps = Arc::clone(&state.program.resolve_block_body(body)?.steps);
-    let source = body.source();
-    for (index, step) in steps.iter().enumerate().skip(next_step_index) {
-        match step {
-            BlockStep::Let { pattern, expr } => {
+    let ops = Arc::clone(&state.program.resolve_bytecode_body(bytecode.body)?.ops);
+    let source = bytecode.body.source();
+    while bytecode.pc < ops.len() {
+        match &ops[bytecode.pc] {
+            BytecodeOp::Eval(body_ref) => {
+                bytecode.pc += 1;
                 match state.with_source(source, |state| {
-                    eval_dependent_body_ref(state, node_id, *expr, &mut scope)
+                    eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
                 })? {
-                    EvalStep::Ready(value) => {
-                        bind_let_pattern(&mut scope, pattern, value)?;
-                    }
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
                         return Ok(extend_suspension(
                             suspension,
-                            ContinuationFrame::BlockBody {
+                            ContinuationFrame::Bytecode {
                                 node_id,
                                 parent_id,
-                                scope,
-                                last,
-                                body,
-                                next_step_index: index + 1,
-                                pending: BlockResumeKind::Let {
-                                    pattern: pattern.clone(),
-                                },
+                                bytecode,
                             },
                         ));
                     }
                 }
             }
-            BlockStep::FnDecl(function) => {
-                let (name, _name_source, value) = state.with_source(source, |state| {
-                    bind_named_function_decl(state, function, &scope)
+            BytecodeOp::BindLet(pattern) => {
+                let value = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode let binding has no pending value",
+                    )
                 })?;
-                env_mut(&mut scope).insert(name, value);
+                bind_let_pattern(&mut bytecode.scope, pattern, value)?;
+                bytecode.pc += 1;
             }
-            BlockStep::Expr(expr) => match state.with_source(source, |state| {
-                eval_dependent_body_ref(state, node_id, *expr, &mut scope)
-            })? {
-                EvalStep::Ready(value) => last = value,
-                EvalStep::Suspended(suspension) => {
-                    return Ok(extend_suspension(
-                        suspension,
-                        ContinuationFrame::BlockBody {
-                            node_id,
-                            parent_id,
-                            scope,
-                            last,
-                            body,
-                            next_step_index: index + 1,
-                            pending: BlockResumeKind::Expr,
-                        },
-                    ));
-                }
-            },
+            BytecodeOp::BindFnDecl(function) => {
+                let (name, _name_source, value) = state.with_source(source, |state| {
+                    bind_named_function_decl(state, function, &bytecode.scope)
+                })?;
+                env_mut(&mut bytecode.scope).insert(name, value);
+                bytecode.pc += 1;
+            }
+            BytecodeOp::SetLast => {
+                bytecode.last = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode set-last has no pending value",
+                    )
+                })?;
+                bytecode.pc += 1;
+            }
+            BytecodeOp::ReturnLast => return Ok(EvalStep::Ready(bytecode.last)),
         }
     }
-    Ok(EvalStep::Ready(last))
-}
-
-pub(super) fn resume_block_body(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut scope: EvalEnv,
-    mut last: Value,
-    body: BlockBodyId,
-    next_step_index: usize,
-    pending: BlockResumeKind,
-    input: Result<Value, EvalError>,
-) -> Result<EvalStep, EvalError> {
-    match input {
-        Ok(value) => match pending {
-            BlockResumeKind::Let { pattern } => {
-                bind_let_pattern(&mut scope, &pattern, value)?;
-            }
-            BlockResumeKind::Expr => last = value,
-        },
-        Err(error) => return Err(error),
-    }
-    continue_block_body(
-        state,
-        node_id,
-        parent_id,
-        scope,
-        last,
-        body,
-        next_step_index,
-    )
+    Ok(EvalStep::Ready(bytecode.last))
 }
 
 pub(super) fn continue_array_items(

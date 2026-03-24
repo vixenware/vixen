@@ -181,6 +181,27 @@ impl BlockBodyId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct BytecodeBodyId {
+    source: u32,
+    index: u32,
+}
+
+impl BytecodeBodyId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+impl From<BlockBodyId> for BytecodeBodyId {
+    fn from(value: BlockBodyId) -> Self {
+        Self {
+            source: value.source,
+            index: value.index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LiteralPlanId {
     source: u32,
     index: u32,
@@ -1271,6 +1292,20 @@ pub(crate) struct BlockBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BytecodeBody {
+    pub(crate) ops: Arc<[BytecodeOp]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BytecodeOp {
+    Eval(ExprBodyRef),
+    BindLet(LetPattern),
+    BindFnDecl(FunctionStmt),
+    SetLast,
+    ReturnLast,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlockStep {
     Let {
         pattern: LetPattern,
@@ -1612,6 +1647,7 @@ struct CompiledProgramSource {
     match_plans: Vec<MatchPlan>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
+    bytecode_bodies: Vec<BytecodeBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
     pending_call_type_args: Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
     parse_error: Option<EvalError>,
@@ -1926,6 +1962,13 @@ impl CompiledProgram {
 
     pub(crate) fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.source(id.source())?.resolve_block_body(id)
+    }
+
+    pub(crate) fn resolve_bytecode_body(
+        &self,
+        id: BytecodeBodyId,
+    ) -> Result<&BytecodeBody, EvalError> {
+        self.source(id.source())?.resolve_bytecode_body(id)
     }
 
     pub(crate) fn span_for_handle(&self, handle: ProgramNodeHandle) -> SourceSpan {
@@ -2279,6 +2322,7 @@ impl CompiledProgramSource {
         let paren_plans = Vec::new();
         let closure_plans = Vec::new();
         let match_plans = Vec::new();
+        let bytecode_bodies = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -2360,6 +2404,7 @@ impl CompiledProgramSource {
             match_plans,
             expr_ids,
             block_bodies,
+            bytecode_bodies,
             type_nodes,
             pending_call_type_args,
             parse_error,
@@ -2886,6 +2931,16 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_bytecode_body(&self, id: BytecodeBodyId) -> Result<&BytecodeBody, EvalError> {
+        self.ensure_parsed()?;
+        self.bytecode_bodies.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("bytecode body id {:?} was not found", id),
+            )
+        })
+    }
+
     fn source_id(&self) -> Arc<str> {
         Arc::clone(&self.source_id)
     }
@@ -2927,6 +2982,7 @@ impl CompiledProgramSource {
         self.closure_plans = plans.closure_plans;
         self.match_plans = plans.match_plans;
         self.resolve_plan_child_body_refs();
+        self.rebuild_bytecode_bodies();
     }
 
     fn resolve_plan_child_body_refs(&mut self) {
@@ -3107,6 +3163,14 @@ impl CompiledProgramSource {
                     .collect::<Vec<_>>(),
             );
         }
+    }
+
+    fn rebuild_bytecode_bodies(&mut self) {
+        self.bytecode_bodies = self
+            .block_bodies
+            .iter()
+            .map(compile_bytecode_body)
+            .collect();
     }
 
     #[cfg(test)]
@@ -4600,6 +4664,29 @@ fn compile_block_step(
             ));
         }
     })
+}
+
+fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
+    let mut ops = Vec::new();
+    for step in block.steps.iter() {
+        match step {
+            BlockStep::Let { pattern, expr } => {
+                ops.push(BytecodeOp::Eval(*expr));
+                ops.push(BytecodeOp::BindLet(pattern.clone()));
+            }
+            BlockStep::FnDecl(function) => {
+                ops.push(BytecodeOp::BindFnDecl(function.clone()));
+            }
+            BlockStep::Expr(expr) => {
+                ops.push(BytecodeOp::Eval(*expr));
+                ops.push(BytecodeOp::SetLast);
+            }
+        }
+    }
+    ops.push(BytecodeOp::ReturnLast);
+    BytecodeBody {
+        ops: Arc::from(ops),
+    }
 }
 
 fn compile_token(source: SourceId, token: &SyntaxToken) -> Token {
