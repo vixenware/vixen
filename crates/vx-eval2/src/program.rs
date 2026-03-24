@@ -240,6 +240,18 @@ impl CallCalleePlanId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct DirectCallCalleePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl DirectCallCalleePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FieldPlanId {
     source: u32,
     index: u32,
@@ -631,8 +643,7 @@ pub(crate) struct NameRefPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CallCalleePlan {
-    NameRef(NameRefPlanId),
+pub(crate) enum DirectCallCalleePlan {
     ResolvedFunction {
         resolved_name: Arc<str>,
         function: CompiledFunction,
@@ -651,6 +662,12 @@ pub(crate) enum CallCalleePlan {
         full_name: Arc<str>,
         variant_constructor: Option<VariantConstructor>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallCalleePlan {
+    NameRef(NameRefPlanId),
+    Direct(DirectCallCalleePlanId),
     Field(FieldPlanId),
     Expr(ExprId),
 }
@@ -1061,6 +1078,7 @@ struct ExprPlanTables {
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
+    direct_call_callee_plans: Vec<DirectCallCalleePlan>,
     call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
@@ -1092,6 +1110,7 @@ struct CompiledProgramSource {
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
+    direct_call_callee_plans: Vec<DirectCallCalleePlan>,
     call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
@@ -1271,6 +1290,14 @@ impl CompiledProgram {
         id: NameRefPlanId,
     ) -> Result<&NameRefPlan, EvalError> {
         self.source(id.source())?.resolve_name_ref_plan(id)
+    }
+
+    pub(crate) fn resolve_direct_call_callee_plan(
+        &self,
+        id: DirectCallCalleePlanId,
+    ) -> Result<&DirectCallCalleePlan, EvalError> {
+        self.source(id.source())?
+            .resolve_direct_call_callee_plan(id)
     }
 
     pub(crate) fn resolve_call_callee_plan(
@@ -1702,6 +1729,7 @@ impl CompiledProgramSource {
         let literal_plans = Vec::new();
         let path_literal_plans = Vec::new();
         let name_ref_plans = Vec::new();
+        let direct_call_callee_plans = Vec::new();
         let call_callee_plans = Vec::new();
         let call_plans = Vec::new();
         let field_plans = Vec::new();
@@ -1776,6 +1804,7 @@ impl CompiledProgramSource {
             literal_plans,
             path_literal_plans,
             name_ref_plans,
+            direct_call_callee_plans,
             call_callee_plans,
             call_plans,
             field_plans,
@@ -2037,6 +2066,21 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_direct_call_callee_plan(
+        &self,
+        id: DirectCallCalleePlanId,
+    ) -> Result<&DirectCallCalleePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.direct_call_callee_plans
+            .get(id.index as usize)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("direct call callee plan {:?} was not found", id),
+                )
+            })
+    }
+
     fn resolve_call_callee_plan(&self, id: CallCalleePlanId) -> Result<&CallCalleePlan, EvalError> {
         self.ensure_parsed()?;
         self.call_callee_plans
@@ -2253,6 +2297,7 @@ impl CompiledProgramSource {
         self.literal_plans = plans.literal_plans;
         self.path_literal_plans = plans.path_literal_plans;
         self.name_ref_plans = plans.name_ref_plans;
+        self.direct_call_callee_plans = plans.direct_call_callee_plans;
         self.call_callee_plans = plans.call_callee_plans;
         self.call_plans = plans.call_plans;
         self.field_plans = plans.field_plans;
@@ -2339,6 +2384,19 @@ impl ExprPlanTables {
             index: self.name_ref_plans.len() as u32,
         };
         self.name_ref_plans.push(plan);
+        id
+    }
+
+    fn push_direct_call_callee(
+        &mut self,
+        source: SourceId,
+        plan: DirectCallCalleePlan,
+    ) -> DirectCallCalleePlanId {
+        let id = DirectCallCalleePlanId {
+            source: source.0,
+            index: self.direct_call_callee_plans.len() as u32,
+        };
+        self.direct_call_callee_plans.push(plan);
         id
     }
 
@@ -2653,35 +2711,47 @@ fn compile_call_callee_plan(
         CallCallee::ResolvedFunction {
             resolved_name,
             function,
-        } => CallCalleePlan::ResolvedFunction {
-            resolved_name: resolved_name.clone(),
-            function: function.clone(),
-        },
+        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
+            source,
+            DirectCallCalleePlan::ResolvedFunction {
+                resolved_name: resolved_name.clone(),
+                function: function.clone(),
+            },
+        )),
         CallCallee::VariantConstructor {
             handle,
             constructor,
-        } => CallCalleePlan::VariantConstructor {
-            handle: *handle,
-            constructor: constructor.clone(),
-        },
+        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
+            source,
+            DirectCallCalleePlan::VariantConstructor {
+                handle: *handle,
+                constructor: constructor.clone(),
+            },
+        )),
         CallCallee::NewtypeConstructor {
             handle,
             display_name,
             newtype_name,
-        } => CallCalleePlan::NewtypeConstructor {
-            handle: *handle,
-            display_name: display_name.clone(),
-            newtype_name: newtype_name.clone(),
-        },
+        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
+            source,
+            DirectCallCalleePlan::NewtypeConstructor {
+                handle: *handle,
+                display_name: display_name.clone(),
+                newtype_name: newtype_name.clone(),
+            },
+        )),
         CallCallee::StaticMember {
             handle,
             full_name,
             variant_constructor,
-        } => CallCalleePlan::StaticMember {
-            handle: *handle,
-            full_name: full_name.clone(),
-            variant_constructor: variant_constructor.clone(),
-        },
+        } => CallCalleePlan::Direct(plans.push_direct_call_callee(
+            source,
+            DirectCallCalleePlan::StaticMember {
+                handle: *handle,
+                full_name: full_name.clone(),
+                variant_constructor: variant_constructor.clone(),
+            },
+        )),
         CallCallee::Field(field) => {
             let plan = compile_field_plan(field);
             CallCalleePlan::Field(plans.push_field(source, plan))

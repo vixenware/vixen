@@ -27,9 +27,9 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, ClosurePlan, CompiledProgram,
-        ExprExecPlan, ExprKind, FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan,
-        LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan, ResolvedNameRef,
-        StructLiteralPlan, TuplePlan, WherePlan,
+        DirectCallCalleePlan, ExprExecPlan, ExprKind, FailPlan, FalliblePlan, IfPlan,
+        InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan,
+        ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1031,9 +1031,59 @@ fn compiled_program_caches_resolved_call_exec_plan() {
         .map(|callee| program.resolve_call_callee_plan(callee))
         .transpose()
         .expect("resolve cached call callee payload");
+    let Some(CallCalleePlan::Direct(direct)) = callee else {
+        panic!("expected cached call callee to lower to a direct plan");
+    };
     assert!(matches!(
-        callee,
-        Some(CallCalleePlan::ResolvedFunction { .. })
+        program
+            .resolve_direct_call_callee_plan(*direct)
+            .expect("resolve direct call callee payload"),
+        DirectCallCalleePlan::ResolvedFunction { .. }
+    ));
+}
+
+#[test]
+fn compiled_program_caches_static_member_call_callee_direct_plan() {
+    let program = CompiledProgram::new(
+        "cached-static-member-call-plan",
+        "fn build() { String.len(\"hi\") }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(call_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain call expression");
+    };
+    let plan = program
+        .resolve_expr_plan(call_expr)
+        .expect("resolve cached call plan");
+    let ExprExecPlan::Call(call) = plan.as_ref() else {
+        panic!("expected cached call exec plan, got {plan:?}");
+    };
+    let call = program
+        .resolve_call_plan(*call)
+        .expect("resolve cached call payload");
+    let callee = call
+        .callee
+        .map(|callee| program.resolve_call_callee_plan(callee))
+        .transpose()
+        .expect("resolve cached call callee payload");
+    let Some(CallCalleePlan::Direct(direct)) = callee else {
+        panic!("expected cached static member callee to lower to a direct plan");
+    };
+    assert!(matches!(
+        program
+            .resolve_direct_call_callee_plan(*direct)
+            .expect("resolve direct static member payload"),
+        DirectCallCalleePlan::StaticMember { .. }
     ));
 }
 
@@ -1299,9 +1349,14 @@ fn compiled_program_caches_where_exec_plan() {
         .map(|callee| program.resolve_call_callee_plan(callee))
         .transpose()
         .expect("resolve cached where callee payload");
+    let Some(CallCalleePlan::Direct(direct)) = callee else {
+        panic!("expected cached where callee to lower to a direct plan");
+    };
     assert!(matches!(
-        callee,
-        Some(CallCalleePlan::ResolvedFunction { .. })
+        program
+            .resolve_direct_call_callee_plan(*direct)
+            .expect("resolve direct where callee payload"),
+        DirectCallCalleePlan::ResolvedFunction { .. }
     ));
     assert_eq!(keyword_bindings.len(), 2);
 }

@@ -1,8 +1,9 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, FalliblePlan, FieldPlan, IfPlan,
-    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
-    PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan, TuplePlan, WherePlan,
+    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, DirectCallCalleePlan,
+    FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan,
+    NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan, TuplePlan,
+    WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -1410,7 +1411,24 @@ fn immediate_call_callee_plan_value(
                 Some(name),
             ))))
         }
-        CallCalleePlan::ResolvedFunction {
+        CallCalleePlan::Direct(direct) => {
+            let direct = state.program.resolve_direct_call_callee_plan(*direct)?;
+            immediate_direct_call_callee_plan_value(state, direct)
+        }
+        CallCalleePlan::Field(field) => {
+            let field = state.program.resolve_field_plan(*field)?;
+            static_namespace_member_plan_value(state, field)
+        }
+        CallCalleePlan::Expr(_) => Ok(None),
+    }
+}
+
+fn immediate_direct_call_callee_plan_value(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    direct: &DirectCallCalleePlan,
+) -> Result<Option<Value>, EvalError> {
+    match direct {
+        DirectCallCalleePlan::ResolvedFunction {
             resolved_name,
             function,
         } => Ok(Some(Value::function(function_ref_from_compiled(
@@ -1420,7 +1438,7 @@ fn immediate_call_callee_plan_value(
             Arc::from([]),
             Some(resolved_name.clone()),
         )))),
-        CallCalleePlan::VariantConstructor {
+        DirectCallCalleePlan::VariantConstructor {
             handle,
             constructor,
         } => Ok(Some(enum_constructor_or_value(
@@ -1429,7 +1447,7 @@ fn immediate_call_callee_plan_value(
             constructor.fields.clone(),
             state.program.span_for_handle(*handle),
         ))),
-        CallCalleePlan::NewtypeConstructor {
+        DirectCallCalleePlan::NewtypeConstructor {
             handle,
             display_name,
             newtype_name,
@@ -1455,7 +1473,7 @@ fn immediate_call_callee_plan_value(
                 .with_provenance(Provenance::binding(source, display_name.to_string())),
             ))
         }
-        CallCalleePlan::StaticMember {
+        DirectCallCalleePlan::StaticMember {
             handle,
             full_name,
             variant_constructor,
@@ -1482,11 +1500,6 @@ fn immediate_call_callee_plan_value(
                 .with_provenance(Provenance::binding(source, full_name.to_string())),
             ))
         }
-        CallCalleePlan::Field(field) => {
-            let field = state.program.resolve_field_plan(*field)?;
-            static_namespace_member_plan_value(state, field)
-        }
-        CallCalleePlan::Expr(_) => Ok(None),
     }
 }
 
@@ -1504,11 +1517,7 @@ fn eval_call_callee_plan(
             let field = state.program.resolve_field_plan(*field)?;
             eval_field_plan(state, field, env)
         }
-        CallCalleePlan::NameRef(_)
-        | CallCalleePlan::ResolvedFunction { .. }
-        | CallCalleePlan::VariantConstructor { .. }
-        | CallCalleePlan::NewtypeConstructor { .. }
-        | CallCalleePlan::StaticMember { .. } => Err(EvalError::new(
+        CallCalleePlan::NameRef(_) | CallCalleePlan::Direct(_) => Err(EvalError::new(
             EvalErrorKind::Internal,
             "direct call callee should resolve immediately",
         )),
