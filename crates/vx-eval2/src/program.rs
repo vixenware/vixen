@@ -1298,6 +1298,7 @@ pub(crate) struct BytecodeBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BytecodeOp {
+    EvalReady(ExprExecPlan),
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
     BindLet(LetPattern),
@@ -4670,10 +4671,10 @@ fn compile_block_step(
 fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
     fn compile_eval_op(expr: ExprBodyRef) -> BytecodeOp {
         match expr.plan().kind() {
-            ExprExecKind::Ready
-            | ExprExecKind::Access
-            | ExprExecKind::Builder
-            | ExprExecKind::Control => BytecodeOp::EvalPlan(expr),
+            ExprExecKind::Ready => BytecodeOp::EvalReady(expr.plan()),
+            ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
+                BytecodeOp::EvalPlan(expr)
+            }
             _ => BytecodeOp::EvalBody(expr),
         }
     }

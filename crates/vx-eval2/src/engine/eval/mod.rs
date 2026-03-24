@@ -3369,6 +3369,51 @@ pub(super) fn continue_bytecode_body(
     parent_id: Option<EvalNodeId>,
     mut bytecode: BytecodeState,
 ) -> Result<EvalStep, EvalError> {
+    fn eval_inline_ready_bytecode_plan(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        source: SourceId,
+        ready: ExprExecPlan,
+        env: &EvalEnv,
+    ) -> Result<Value, EvalError> {
+        let ready_source = ready_plan_source(state.program, source, ready)?;
+        state.emit(
+            node_id,
+            parent_id,
+            Some(ready_source.clone()),
+            EvalEventKind::EnterExpr {
+                kind: ready.trace_kind(),
+            },
+        );
+        match eval_ready_plan(state, ready, env) {
+            Ok(value) => {
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(ready_source),
+                    EvalEventKind::ExitReady {
+                        reuse: value.meta.reuse.clone(),
+                        crossing: value.meta.crossing.clone(),
+                    },
+                );
+                Ok(value)
+            }
+            Err(error) => {
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(ready_source),
+                    EvalEventKind::ExitPoison {
+                        kind: error.kind,
+                        message: error.message.clone(),
+                    },
+                );
+                Err(error)
+            }
+        }
+    }
+
     fn eval_bytecode_plan(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
         plan: ExprExecPlan,
@@ -3392,6 +3437,19 @@ pub(super) fn continue_bytecode_body(
     let source = bytecode.body.source();
     while bytecode.pc < ops.len() {
         match &ops[bytecode.pc] {
+            BytecodeOp::EvalReady(ready) => {
+                bytecode.pc += 1;
+                bytecode.acc = Some(state.with_source(source, |state| {
+                    eval_inline_ready_bytecode_plan(
+                        state,
+                        node_id,
+                        parent_id,
+                        source,
+                        *ready,
+                        &bytecode.scope,
+                    )
+                })?);
+            }
             BytecodeOp::EvalBody(body_ref) => {
                 bytecode.pc += 1;
                 match state.with_source(source, |state| {

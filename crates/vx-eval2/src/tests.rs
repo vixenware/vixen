@@ -924,7 +924,7 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 6);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalPlan(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
     assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl(_)));
     assert!(matches!(bytecode.ops[3], BytecodeOp::EvalPlan(_)));
@@ -950,9 +950,9 @@ fn compiled_program_lowers_ready_name_refs_to_bytecode_ready_ops() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 5);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalPlan(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
-    assert!(matches!(bytecode.ops[2], BytecodeOp::EvalPlan(_)));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[3], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[4], BytecodeOp::ReturnLast));
 }
