@@ -1,9 +1,9 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, DirectCallCalleePlan,
-    ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan,
-    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan,
-    StructLiteralPlan, TuplePlan, WherePlan,
+    ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan,
+    DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan,
+    LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan,
+    RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -974,29 +974,16 @@ fn eval_prepared_body_step(
                 .resolve_field_plan(body.plan.field_plan_id(body_source))?;
             eval_field_plan(state, field, env)
         }
-        ExprExecKind::Array => {
-            let array = state
+        ExprExecKind::Array
+        | ExprExecKind::Tuple
+        | ExprExecKind::Range
+        | ExprExecKind::Map
+        | ExprExecKind::InterpolatedString
+        | ExprExecKind::StructLiteral => {
+            let builder = state
                 .program
-                .resolve_array_plan(body.plan.array_plan_id(body_source))?;
-            eval_array_plan(state, array, env)
-        }
-        ExprExecKind::Tuple => {
-            let tuple = state
-                .program
-                .resolve_tuple_plan(body.plan.tuple_plan_id(body_source))?;
-            eval_tuple_plan(state, tuple, env)
-        }
-        ExprExecKind::Range => {
-            let range = state
-                .program
-                .resolve_range_plan(body.plan.range_plan_id(body_source))?;
-            eval_range_plan(state, range, env)
-        }
-        ExprExecKind::Map => {
-            let map = state
-                .program
-                .resolve_map_plan(body.plan.map_plan_id(body_source))?;
-            eval_map_plan(state, map, env)
+                .resolve_builder_plan(body.plan.builder_plan_id(body_source))?;
+            eval_builder_plan(state, builder, env)
         }
         ExprExecKind::Fail => {
             let fail = state
@@ -1039,18 +1026,6 @@ fn eval_prepared_body_step(
                 .program
                 .resolve_binary_plan(body.plan.binary_plan_id(body_source))?;
             eval_binary_plan(state, binary, env)
-        }
-        ExprExecKind::InterpolatedString => {
-            let interpolated = state.program.resolve_interpolated_string_plan(
-                body.plan.interpolated_string_plan_id(body_source),
-            )?;
-            eval_interpolated_string_plan(state, interpolated, env)
-        }
-        ExprExecKind::StructLiteral => {
-            let struct_literal = state
-                .program
-                .resolve_struct_literal_plan(body.plan.struct_literal_plan_id(body_source))?;
-            eval_struct_literal_plan(state, struct_literal, env)
         }
     }
 }
@@ -1258,6 +1233,41 @@ fn eval_ready_plan(
         ReadyPlan::NameRef(name_ref) => {
             let name_ref = state.program.resolve_name_ref_plan(*name_ref)?;
             eval_name_ref_plan(state, name_ref, env)
+        }
+    }
+}
+
+fn eval_builder_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    builder: &BuilderPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    match builder {
+        BuilderPlan::Array(array) => {
+            let array = state.program.resolve_array_plan(*array)?;
+            eval_array_plan(state, array, env)
+        }
+        BuilderPlan::Tuple(tuple) => {
+            let tuple = state.program.resolve_tuple_plan(*tuple)?;
+            eval_tuple_plan(state, tuple, env)
+        }
+        BuilderPlan::Range(range) => {
+            let range = state.program.resolve_range_plan(*range)?;
+            eval_range_plan(state, range, env)
+        }
+        BuilderPlan::Map(map) => {
+            let map = state.program.resolve_map_plan(*map)?;
+            eval_map_plan(state, map, env)
+        }
+        BuilderPlan::InterpolatedString(interpolated) => {
+            let interpolated = state
+                .program
+                .resolve_interpolated_string_plan(*interpolated)?;
+            eval_interpolated_string_plan(state, interpolated, env)
+        }
+        BuilderPlan::StructLiteral(struct_literal) => {
+            let struct_literal = state.program.resolve_struct_literal_plan(*struct_literal)?;
+            eval_struct_literal_plan(state, struct_literal, env)
         }
     }
 }

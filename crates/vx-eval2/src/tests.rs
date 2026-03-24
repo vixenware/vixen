@@ -26,10 +26,10 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
-        ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, ClosurePlan, CompiledProgram,
-        DirectCallCalleePlan, ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan,
-        InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan,
-        ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
+        ArrayPlan, BinaryPlan, BlockStep, BuilderPlan, CallCallee, CallCalleePlan, ClosurePlan,
+        CompiledProgram, DirectCallCalleePlan, ExprExecKind, ExprKind, FailPlan, FalliblePlan,
+        IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan,
+        RangePlan, ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1504,8 +1504,14 @@ fn compiled_program_caches_array_exec_plan() {
         .resolve_expr_plan(array_expr)
         .expect("resolve cached array plan");
     assert_eq!(plan.kind(), ExprExecKind::Array);
+    let BuilderPlan::Array(array) = program
+        .resolve_builder_plan(plan.builder_plan_id(array_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached array builder payload, got {plan:?}");
+    };
     let ArrayPlan { items, .. } = program
-        .resolve_array_plan(plan.array_plan_id(array_expr.source()))
+        .resolve_array_plan(*array)
         .expect("resolve cached array payload");
     assert_eq!(items.len(), 2);
 }
@@ -1531,8 +1537,14 @@ fn compiled_program_caches_tuple_exec_plan() {
         .resolve_expr_plan(tuple_expr)
         .expect("resolve cached tuple plan");
     assert_eq!(plan.kind(), ExprExecKind::Tuple);
+    let BuilderPlan::Tuple(tuple) = program
+        .resolve_builder_plan(plan.builder_plan_id(tuple_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached tuple builder payload, got {plan:?}");
+    };
     let TuplePlan { items, .. } = program
-        .resolve_tuple_plan(plan.tuple_plan_id(tuple_expr.source()))
+        .resolve_tuple_plan(*tuple)
         .expect("resolve cached tuple payload");
     assert_eq!(items.len(), 2);
 }
@@ -1558,13 +1570,19 @@ fn compiled_program_caches_range_exec_plan() {
         .resolve_expr_plan(range_expr)
         .expect("resolve cached range plan");
     assert_eq!(plan.kind(), ExprExecKind::Range);
+    let BuilderPlan::Range(range) = program
+        .resolve_builder_plan(plan.builder_plan_id(range_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached range builder payload, got {plan:?}");
+    };
     let RangePlan {
         start,
         end,
         inclusive_end,
         ..
     } = program
-        .resolve_range_plan(plan.range_plan_id(range_expr.source()))
+        .resolve_range_plan(*range)
         .expect("resolve cached range payload");
     assert!(start.is_some());
     assert!(end.is_some());
@@ -1595,8 +1613,14 @@ fn compiled_program_caches_map_exec_plan() {
         .resolve_expr_plan(map_expr)
         .expect("resolve cached map plan");
     assert_eq!(plan.kind(), ExprExecKind::Map);
+    let BuilderPlan::Map(map) = program
+        .resolve_builder_plan(plan.builder_plan_id(map_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached map builder payload, got {plan:?}");
+    };
     let MapPlan { entries, .. } = program
-        .resolve_map_plan(plan.map_plan_id(map_expr.source()))
+        .resolve_map_plan(*map)
         .expect("resolve cached map payload");
     assert_eq!(entries.len(), 2);
 }
@@ -1652,8 +1676,14 @@ fn compiled_program_caches_interpolated_string_exec_plan() {
         .resolve_expr_plan(string_expr)
         .expect("resolve cached interpolated string plan");
     assert_eq!(plan.kind(), ExprExecKind::InterpolatedString);
+    let BuilderPlan::InterpolatedString(interpolated) = program
+        .resolve_builder_plan(plan.builder_plan_id(string_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached interpolated string builder payload, got {plan:?}");
+    };
     let InterpolatedStringPlan { parts, .. } = program
-        .resolve_interpolated_string_plan(plan.interpolated_string_plan_id(string_expr.source()))
+        .resolve_interpolated_string_plan(*interpolated)
         .expect("resolve cached interpolated string payload");
     assert_eq!(parts.len(), 2);
 }
@@ -1682,10 +1712,16 @@ fn compiled_program_caches_struct_literal_exec_plan() {
         .resolve_expr_plan(struct_expr)
         .expect("resolve cached struct literal plan");
     assert_eq!(plan.kind(), ExprExecKind::StructLiteral);
+    let BuilderPlan::StructLiteral(struct_literal) = program
+        .resolve_builder_plan(plan.builder_plan_id(struct_expr.source()))
+        .expect("resolve cached builder payload")
+    else {
+        panic!("expected cached struct literal builder payload, got {plan:?}");
+    };
     let StructLiteralPlan {
         type_name, parts, ..
     } = program
-        .resolve_struct_literal_plan(plan.struct_literal_plan_id(struct_expr.source()))
+        .resolve_struct_literal_plan(*struct_literal)
         .expect("resolve cached struct literal payload");
     assert_eq!(type_name.as_deref(), Some("Box"));
     assert_eq!(parts.len(), 1);
