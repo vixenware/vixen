@@ -950,11 +950,11 @@ fn compiled_program_caches_string_literal_exec_plan() {
     let plan = program
         .resolve_expr_plan(literal_expr)
         .expect("resolve cached literal plan");
-    let ExprExecPlan::Literal(literal_plan) = plan.as_ref() else {
+    let ExprExecPlan::Literal(literal_plan) = plan else {
         panic!("expected cached literal exec plan, got {plan:?}");
     };
     let LiteralPlan::String { value, .. } = program
-        .resolve_literal_plan(*literal_plan)
+        .resolve_literal_plan(literal_plan)
         .expect("resolve cached literal payload")
     else {
         panic!("expected cached literal payload, got {plan:?}");
@@ -985,11 +985,11 @@ fn compiled_program_caches_resolved_name_ref_exec_plan() {
     let plan = program
         .resolve_expr_plan(name_expr)
         .expect("resolve cached name ref plan");
-    let ExprExecPlan::NameRef(name_ref) = plan.as_ref() else {
+    let ExprExecPlan::NameRef(name_ref) = plan else {
         panic!("expected cached name ref exec plan, got {plan:?}");
     };
     let name_ref = program
-        .resolve_name_ref_plan(*name_ref)
+        .resolve_name_ref_plan(name_ref)
         .expect("resolve cached name ref payload");
     assert!(matches!(
         name_ref.resolved,
@@ -1020,11 +1020,11 @@ fn compiled_program_caches_resolved_call_exec_plan() {
     let plan = program
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
-    let ExprExecPlan::Call(call) = plan.as_ref() else {
+    let ExprExecPlan::Call(call) = plan else {
         panic!("expected cached call exec plan, got {plan:?}");
     };
     let call = program
-        .resolve_call_plan(*call)
+        .resolve_call_plan(call)
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1065,11 +1065,11 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
     let plan = program
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
-    let ExprExecPlan::Call(call) = plan.as_ref() else {
+    let ExprExecPlan::Call(call) = plan else {
         panic!("expected cached call exec plan, got {plan:?}");
     };
     let call = program
-        .resolve_call_plan(*call)
+        .resolve_call_plan(call)
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1330,7 +1330,7 @@ fn compiled_program_caches_where_exec_plan() {
     let plan = program
         .resolve_expr_plan(where_expr)
         .expect("resolve cached where plan");
-    let ExprExecPlan::Where(where_plan) = plan.as_ref() else {
+    let ExprExecPlan::Where(where_plan) = plan else {
         panic!("expected cached where exec plan, got {plan:?}");
     };
     let WherePlan {
@@ -1338,7 +1338,7 @@ fn compiled_program_caches_where_exec_plan() {
         keyword_bindings,
         ..
     } = program
-        .resolve_where_plan(*where_plan)
+        .resolve_where_plan(where_plan)
         .expect("resolve cached where payload");
     let call = call.expect("cached where plan should contain call");
     let call = program
@@ -1381,11 +1381,11 @@ fn compiled_program_caches_fallible_exec_plan() {
     let plan = program
         .resolve_expr_plan(fallible_expr)
         .expect("resolve cached fallible plan");
-    let ExprExecPlan::Fallible(fallible) = plan.as_ref() else {
+    let ExprExecPlan::Fallible(fallible) = plan else {
         panic!("expected cached fallible exec plan, got {plan:?}");
     };
     let FalliblePlan { expr, .. } = program
-        .resolve_fallible_plan(*fallible)
+        .resolve_fallible_plan(fallible)
         .expect("resolve cached fallible payload");
     assert!(expr.is_some());
 }
@@ -1410,7 +1410,7 @@ fn compiled_program_caches_if_exec_plan() {
     let plan = program
         .resolve_expr_plan(if_expr)
         .expect("resolve cached if plan");
-    let ExprExecPlan::If(if_plan) = plan.as_ref() else {
+    let ExprExecPlan::If(if_plan) = plan else {
         panic!("expected cached if exec plan, got {plan:?}");
     };
     let IfPlan {
@@ -1419,7 +1419,7 @@ fn compiled_program_caches_if_exec_plan() {
         else_branch,
         ..
     } = program
-        .resolve_if_plan(*if_plan)
+        .resolve_if_plan(if_plan)
         .expect("resolve cached if payload");
     assert!(condition.is_some());
     assert!(then_branch.is_some());
@@ -1446,11 +1446,11 @@ fn compiled_program_caches_prefix_exec_plan() {
     let plan = program
         .resolve_expr_plan(prefix_expr)
         .expect("resolve cached prefix plan");
-    let ExprExecPlan::Prefix(prefix) = plan.as_ref() else {
+    let ExprExecPlan::Prefix(prefix) = plan else {
         panic!("expected cached prefix exec plan, got {plan:?}");
     };
     let PrefixPlan { operator, expr, .. } = program
-        .resolve_prefix_plan(*prefix)
+        .resolve_prefix_plan(prefix)
         .expect("resolve cached prefix payload");
     assert_eq!(*operator, Some(SyntaxKind::BANG));
     assert!(expr.is_some());
@@ -1476,13 +1476,13 @@ fn compiled_program_caches_binary_exec_plan() {
     let plan = program
         .resolve_expr_plan(binary_expr)
         .expect("resolve cached binary plan");
-    let ExprExecPlan::Binary(binary) = plan.as_ref() else {
+    let ExprExecPlan::Binary(binary) = plan else {
         panic!("expected cached binary exec plan, got {plan:?}");
     };
     let BinaryPlan {
         lhs, rhs, operator, ..
     } = program
-        .resolve_binary_plan(*binary)
+        .resolve_binary_plan(binary)
         .expect("resolve cached binary payload");
     assert!(lhs.is_some());
     assert!(rhs.is_some());
@@ -1509,11 +1509,11 @@ fn compiled_program_caches_array_exec_plan() {
     let plan = program
         .resolve_expr_plan(array_expr)
         .expect("resolve cached array plan");
-    let ExprExecPlan::Array(array) = plan.as_ref() else {
+    let ExprExecPlan::Array(array) = plan else {
         panic!("expected cached array exec plan, got {plan:?}");
     };
     let ArrayPlan { items, .. } = program
-        .resolve_array_plan(*array)
+        .resolve_array_plan(array)
         .expect("resolve cached array payload");
     assert_eq!(items.len(), 2);
 }
@@ -1538,11 +1538,11 @@ fn compiled_program_caches_tuple_exec_plan() {
     let plan = program
         .resolve_expr_plan(tuple_expr)
         .expect("resolve cached tuple plan");
-    let ExprExecPlan::Tuple(tuple) = plan.as_ref() else {
+    let ExprExecPlan::Tuple(tuple) = plan else {
         panic!("expected cached tuple exec plan, got {plan:?}");
     };
     let TuplePlan { items, .. } = program
-        .resolve_tuple_plan(*tuple)
+        .resolve_tuple_plan(tuple)
         .expect("resolve cached tuple payload");
     assert_eq!(items.len(), 2);
 }
@@ -1567,7 +1567,7 @@ fn compiled_program_caches_range_exec_plan() {
     let plan = program
         .resolve_expr_plan(range_expr)
         .expect("resolve cached range plan");
-    let ExprExecPlan::Range(range) = plan.as_ref() else {
+    let ExprExecPlan::Range(range) = plan else {
         panic!("expected cached range exec plan, got {plan:?}");
     };
     let RangePlan {
@@ -1576,7 +1576,7 @@ fn compiled_program_caches_range_exec_plan() {
         inclusive_end,
         ..
     } = program
-        .resolve_range_plan(*range)
+        .resolve_range_plan(range)
         .expect("resolve cached range payload");
     assert!(start.is_some());
     assert!(end.is_some());
@@ -1606,11 +1606,11 @@ fn compiled_program_caches_map_exec_plan() {
     let plan = program
         .resolve_expr_plan(map_expr)
         .expect("resolve cached map plan");
-    let ExprExecPlan::Map(map) = plan.as_ref() else {
+    let ExprExecPlan::Map(map) = plan else {
         panic!("expected cached map exec plan, got {plan:?}");
     };
     let MapPlan { entries, .. } = program
-        .resolve_map_plan(*map)
+        .resolve_map_plan(map)
         .expect("resolve cached map payload");
     assert_eq!(entries.len(), 2);
 }
@@ -1635,11 +1635,11 @@ fn compiled_program_caches_fail_exec_plan() {
     let plan = program
         .resolve_expr_plan(fail_expr)
         .expect("resolve cached fail plan");
-    let ExprExecPlan::Fail(fail) = plan.as_ref() else {
+    let ExprExecPlan::Fail(fail) = plan else {
         panic!("expected cached fail exec plan, got {plan:?}");
     };
     let FailPlan { message, .. } = program
-        .resolve_fail_plan(*fail)
+        .resolve_fail_plan(fail)
         .expect("resolve cached fail payload");
     assert!(message.is_some());
 }
@@ -1667,11 +1667,11 @@ fn compiled_program_caches_interpolated_string_exec_plan() {
     let plan = program
         .resolve_expr_plan(string_expr)
         .expect("resolve cached interpolated string plan");
-    let ExprExecPlan::InterpolatedString(string) = plan.as_ref() else {
+    let ExprExecPlan::InterpolatedString(string) = plan else {
         panic!("expected cached interpolated string exec plan, got {plan:?}");
     };
     let InterpolatedStringPlan { parts, .. } = program
-        .resolve_interpolated_string_plan(*string)
+        .resolve_interpolated_string_plan(string)
         .expect("resolve cached interpolated string payload");
     assert_eq!(parts.len(), 2);
 }
@@ -1699,13 +1699,13 @@ fn compiled_program_caches_struct_literal_exec_plan() {
     let plan = program
         .resolve_expr_plan(struct_expr)
         .expect("resolve cached struct literal plan");
-    let ExprExecPlan::StructLiteral(struct_literal) = plan.as_ref() else {
+    let ExprExecPlan::StructLiteral(struct_literal) = plan else {
         panic!("expected cached struct literal exec plan, got {plan:?}");
     };
     let StructLiteralPlan {
         type_name, parts, ..
     } = program
-        .resolve_struct_literal_plan(*struct_literal)
+        .resolve_struct_literal_plan(struct_literal)
         .expect("resolve cached struct literal payload");
     assert_eq!(type_name.as_deref(), Some("Box"));
     assert_eq!(parts.len(), 1);
@@ -1731,11 +1731,11 @@ fn compiled_program_caches_paren_exec_plan() {
     let plan = program
         .resolve_expr_plan(paren_expr)
         .expect("resolve cached paren plan");
-    let ExprExecPlan::Paren(paren) = plan.as_ref() else {
+    let ExprExecPlan::Paren(paren) = plan else {
         panic!("expected cached paren exec plan, got {plan:?}");
     };
     let ParenPlan { expr, .. } = program
-        .resolve_paren_plan(*paren)
+        .resolve_paren_plan(paren)
         .expect("resolve cached paren payload");
     assert!(expr.is_some());
 }
@@ -1761,20 +1761,20 @@ fn compiled_program_caches_closure_exec_plan() {
     let plan = program
         .resolve_expr_plan(closure_expr)
         .expect("resolve cached closure plan");
-    let closure = match plan.as_ref() {
-        ExprExecPlan::Closure(closure) => *closure,
+    let closure = match plan {
+        ExprExecPlan::Closure(closure) => closure,
         ExprExecPlan::Paren(paren) => {
             let ParenPlan { expr, .. } = program
-                .resolve_paren_plan(*paren)
+                .resolve_paren_plan(paren)
                 .expect("resolve cached paren payload");
             closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
             let plan = program
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
-            let ExprExecPlan::Closure(closure) = plan.as_ref() else {
+            let ExprExecPlan::Closure(closure) = plan else {
                 panic!("expected cached inner closure exec plan, got {plan:?}");
             };
-            *closure
+            closure
         }
         _ => panic!("expected cached closure exec plan, got {plan:?}"),
     };
@@ -1810,13 +1810,13 @@ fn compiled_program_caches_match_exec_plan() {
     let plan = program
         .resolve_expr_plan(match_expr)
         .expect("resolve cached match plan");
-    let ExprExecPlan::Match(match_plan) = plan.as_ref() else {
+    let ExprExecPlan::Match(match_plan) = plan else {
         panic!("expected cached match exec plan, got {plan:?}");
     };
     let MatchPlan {
         scrutinee, arms, ..
     } = program
-        .resolve_match_plan(*match_plan)
+        .resolve_match_plan(match_plan)
         .expect("resolve cached match payload");
     assert!(scrutinee.is_some());
     assert_eq!(arms.len(), 2);

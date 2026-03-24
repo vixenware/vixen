@@ -16,7 +16,7 @@ pub(in crate::engine) use resume::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreparedBodyRef {
     root_expr_id: ExprId,
-    plan: Arc<ExprExecPlan>,
+    plan: ExprExecPlan,
 }
 
 pub(super) struct PreparedEntry {
@@ -902,7 +902,7 @@ pub(super) fn eval_expr_with_node_id(
 }
 
 pub(super) fn prepared_body_kind(body: &PreparedBodyRef) -> EvalExprKind {
-    match body.plan.as_ref() {
+    match body.plan {
         ExprExecPlan::Expr => EvalExprKind::Unsupported,
         ExprExecPlan::Block { .. } => EvalExprKind::Block,
         ExprExecPlan::Literal(_) => EvalExprKind::Literal,
@@ -935,7 +935,7 @@ fn eval_prepared_body_step(
     body: PreparedBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match body.plan.as_ref() {
+    match body.plan {
         ExprExecPlan::Expr => {
             let expr = state.program.resolve_expr_id(body.root_expr_id)?;
             eval_expr_step(state, node_id, parent_id, expr, env)
@@ -946,93 +946,93 @@ fn eval_prepared_body_step(
             parent_id,
             std::mem::take(env),
             Value::unit(),
-            *body,
+            body,
             0,
         ),
         ExprExecPlan::Literal(literal) => state
             .program
-            .resolve_literal_plan(*literal)
+            .resolve_literal_plan(literal)
             .and_then(|literal| eval_literal_plan(state, literal))
             .map(EvalStep::Ready),
         ExprExecPlan::PathLiteral(path_literal) => state
             .program
-            .resolve_path_literal_plan(*path_literal)
+            .resolve_path_literal_plan(path_literal)
             .and_then(|path_literal| eval_path_literal_plan(state, path_literal))
             .map(EvalStep::Ready),
         ExprExecPlan::Paren(paren) => state
             .program
-            .resolve_paren_plan(*paren)
+            .resolve_paren_plan(paren)
             .and_then(|paren| eval_paren_plan(state, node_id, parent_id, paren, env)),
         ExprExecPlan::Closure(closure) => state
             .program
-            .resolve_closure_plan(*closure)
+            .resolve_closure_plan(closure)
             .and_then(|closure| eval_closure_plan(state, closure, env))
             .map(EvalStep::Ready),
         ExprExecPlan::NameRef(name_ref) => state
             .program
-            .resolve_name_ref_plan(*name_ref)
+            .resolve_name_ref_plan(name_ref)
             .and_then(|name_ref| eval_name_ref_plan(state, name_ref, env))
             .map(EvalStep::Ready),
         ExprExecPlan::Call(call) => {
-            let call = state.program.resolve_call_plan(*call)?;
+            let call = state.program.resolve_call_plan(call)?;
             eval_call_plan(state, call, env)
         }
         ExprExecPlan::Field(field) => {
-            let field = state.program.resolve_field_plan(*field)?;
+            let field = state.program.resolve_field_plan(field)?;
             eval_field_plan(state, field, env)
         }
         ExprExecPlan::Array(array) => {
-            let array = state.program.resolve_array_plan(*array)?;
+            let array = state.program.resolve_array_plan(array)?;
             eval_array_plan(state, array, env)
         }
         ExprExecPlan::Tuple(tuple) => {
-            let tuple = state.program.resolve_tuple_plan(*tuple)?;
+            let tuple = state.program.resolve_tuple_plan(tuple)?;
             eval_tuple_plan(state, tuple, env)
         }
         ExprExecPlan::Range(range) => {
-            let range = state.program.resolve_range_plan(*range)?;
+            let range = state.program.resolve_range_plan(range)?;
             eval_range_plan(state, range, env)
         }
         ExprExecPlan::Map(map) => {
-            let map = state.program.resolve_map_plan(*map)?;
+            let map = state.program.resolve_map_plan(map)?;
             eval_map_plan(state, map, env)
         }
         ExprExecPlan::Fail(fail) => {
-            let fail = state.program.resolve_fail_plan(*fail)?;
+            let fail = state.program.resolve_fail_plan(fail)?;
             eval_fail_plan(state, fail, env)
         }
         ExprExecPlan::Fallible(fallible) => {
-            let fallible = state.program.resolve_fallible_plan(*fallible)?;
+            let fallible = state.program.resolve_fallible_plan(fallible)?;
             eval_fallible_plan(state, fallible, env)
         }
         ExprExecPlan::If(if_expr) => {
-            let if_expr = state.program.resolve_if_plan(*if_expr)?;
+            let if_expr = state.program.resolve_if_plan(if_expr)?;
             eval_if_plan(state, if_expr, env)
         }
         ExprExecPlan::Match(match_expr) => {
-            let match_expr = state.program.resolve_match_plan(*match_expr)?;
+            let match_expr = state.program.resolve_match_plan(match_expr)?;
             eval_match_plan(state, match_expr, env)
         }
         ExprExecPlan::Where(where_expr) => {
-            let where_expr = state.program.resolve_where_plan(*where_expr)?;
+            let where_expr = state.program.resolve_where_plan(where_expr)?;
             eval_where_plan(state, where_expr, env)
         }
         ExprExecPlan::Prefix(prefix) => {
-            let prefix = state.program.resolve_prefix_plan(*prefix)?;
+            let prefix = state.program.resolve_prefix_plan(prefix)?;
             eval_prefix_plan(state, prefix, env)
         }
         ExprExecPlan::Binary(binary) => {
-            let binary = state.program.resolve_binary_plan(*binary)?;
+            let binary = state.program.resolve_binary_plan(binary)?;
             eval_binary_plan(state, binary, env)
         }
         ExprExecPlan::InterpolatedString(interpolated) => {
             let interpolated = state
                 .program
-                .resolve_interpolated_string_plan(*interpolated)?;
+                .resolve_interpolated_string_plan(interpolated)?;
             eval_interpolated_string_plan(state, interpolated, env)
         }
         ExprExecPlan::StructLiteral(struct_literal) => {
-            let struct_literal = state.program.resolve_struct_literal_plan(*struct_literal)?;
+            let struct_literal = state.program.resolve_struct_literal_plan(struct_literal)?;
             eval_struct_literal_plan(state, struct_literal, env)
         }
     }

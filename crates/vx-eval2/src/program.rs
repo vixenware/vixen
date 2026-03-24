@@ -581,7 +581,7 @@ pub(crate) enum ExprKind {
     Unsupported { kind: SyntaxKind },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExprExecPlan {
     Expr,
     Block { body: BlockBodyId },
@@ -1106,7 +1106,7 @@ struct CompiledProgramSource {
     functions_by_name: BTreeMap<String, CompiledFunction>,
     functions_by_definition: BTreeMap<ProgramNodeHandle, (Arc<str>, CompiledFunction)>,
     exprs: Vec<Expr>,
-    expr_plans: Vec<Arc<ExprExecPlan>>,
+    expr_plans: Vec<ExprExecPlan>,
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
@@ -1267,7 +1267,7 @@ impl CompiledProgram {
         self.source(id.source())?.resolve_expr(id)
     }
 
-    pub(crate) fn resolve_expr_plan(&self, id: ExprId) -> Result<Arc<ExprExecPlan>, EvalError> {
+    pub(crate) fn resolve_expr_plan(&self, id: ExprId) -> Result<ExprExecPlan, EvalError> {
         self.source(id.source())?.resolve_expr_plan(id)
     }
 
@@ -2018,7 +2018,7 @@ impl CompiledProgramSource {
         })
     }
 
-    fn resolve_expr_plan(&self, id: ExprId) -> Result<Arc<ExprExecPlan>, EvalError> {
+    fn resolve_expr_plan(&self, id: ExprId) -> Result<ExprExecPlan, EvalError> {
         self.ensure_parsed()?;
         self.expr_plans
             .get(id.index as usize)
@@ -2292,7 +2292,7 @@ impl CompiledProgramSource {
         self.expr_plans = self
             .exprs
             .iter()
-            .map(|expr| Arc::new(compile_expr_plan(expr, &mut plans)))
+            .map(|expr| compile_expr_plan(expr, &mut plans))
             .collect();
         self.literal_plans = plans.literal_plans;
         self.path_literal_plans = plans.path_literal_plans;
