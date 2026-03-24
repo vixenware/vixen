@@ -924,12 +924,37 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
     assert_eq!(bytecode.ops.len(), 6);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::Eval(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
     assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl(_)));
-    assert!(matches!(bytecode.ops[3], BytecodeOp::Eval(_)));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalBody(_)));
     assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_ready_name_refs_to_bytecode_ready_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-ready-name-ref",
+        "fn build() { let x = 41; x }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 5);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet(_)));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[4], BytecodeOp::ReturnLast));
 }
 
 #[test]
@@ -10393,17 +10418,13 @@ fn session_queues_child_expression_work_and_resumes_parent_block() {
     };
     assert_eq!(value.rep, ValueRep::String("windows".into()));
 
-    let mut progressed_after_child = 0;
     let value = loop {
         match session.step().expect("finish queued parent work") {
-            EvalSessionStep::Progressed => {
-                progressed_after_child += 1;
-            }
+            EvalSessionStep::Progressed => {}
             EvalSessionStep::Ready(value) => break value,
             other => panic!("expected progress or ready, got {other:?}"),
         }
     };
-    assert!(progressed_after_child >= 1);
     assert_eq!(value.rep, ValueRep::String("windows".into()));
     assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
 }

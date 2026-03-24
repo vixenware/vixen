@@ -1090,6 +1090,39 @@ fn eval_ready_plan(
     }
 }
 
+fn ready_plan_source(
+    program: &CompiledProgram,
+    source: SourceId,
+    ready: ExprExecPlan,
+) -> Result<SourceSpan, EvalError> {
+    match ready.ready_kind() {
+        ReadyPlanKind::Literal => {
+            let handle = match program.resolve_literal_plan(ready.literal_plan_id(source))? {
+                LiteralPlan::U64 { handle, .. }
+                | LiteralPlan::Bool { handle, .. }
+                | LiteralPlan::String { handle, .. }
+                | LiteralPlan::RawToken { handle, .. } => *handle,
+            };
+            Ok(program.span_for_handle(handle))
+        }
+        ReadyPlanKind::PathLiteral => Ok(program.span_for_handle(
+            program
+                .resolve_path_literal_plan(ready.path_literal_plan_id(source))?
+                .handle,
+        )),
+        ReadyPlanKind::Closure => Ok(program.span_for_handle(
+            program
+                .resolve_closure_plan(ready.closure_plan_id(source))?
+                .handle,
+        )),
+        ReadyPlanKind::NameRef => Ok(program.span_for_handle(
+            program
+                .resolve_name_ref_plan(ready.name_ref_plan_id(source))?
+                .handle,
+        )),
+    }
+}
+
 fn eval_builder_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     builder: ExprExecPlan,
@@ -3245,7 +3278,7 @@ pub(super) fn continue_bytecode_body(
     let source = bytecode.body.source();
     while bytecode.pc < ops.len() {
         match &ops[bytecode.pc] {
-            BytecodeOp::Eval(body_ref) => {
+            BytecodeOp::EvalBody(body_ref) => {
                 bytecode.pc += 1;
                 match state.with_source(source, |state| {
                     eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
@@ -3262,6 +3295,25 @@ pub(super) fn continue_bytecode_body(
                         ));
                     }
                 }
+            }
+            BytecodeOp::EvalReady(plan) => {
+                bytecode.pc += 1;
+                let child_id = state.alloc_node_id();
+                let kind = plan.trace_kind();
+                let child_source = ready_plan_source(state.program, source, *plan)?;
+                state.emit_current_dependency(child_id, Some(child_source.clone()));
+                let value = state.with_source(source, |state| {
+                    eval_node_with_kind(state, child_id, kind, child_source, |state| {
+                        eval_ready_plan(state, *plan, &bytecode.scope).map(EvalStep::Ready)
+                    })
+                })?;
+                let EvalStep::Ready(value) = value else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode ready op unexpectedly suspended",
+                    ));
+                };
+                bytecode.acc = Some(value);
             }
             BytecodeOp::BindLet(pattern) => {
                 let value = bytecode.acc.take().ok_or_else(|| {

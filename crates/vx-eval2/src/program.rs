@@ -1298,7 +1298,8 @@ pub(crate) struct BytecodeBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BytecodeOp {
-    Eval(ExprBodyRef),
+    EvalBody(ExprBodyRef),
+    EvalReady(ExprExecPlan),
     BindLet(LetPattern),
     BindFnDecl(FunctionStmt),
     SetLast,
@@ -4667,18 +4668,25 @@ fn compile_block_step(
 }
 
 fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
+    fn compile_eval_op(expr: ExprBodyRef) -> BytecodeOp {
+        match expr.plan().kind() {
+            ExprExecKind::Ready => BytecodeOp::EvalReady(expr.plan()),
+            _ => BytecodeOp::EvalBody(expr),
+        }
+    }
+
     let mut ops = Vec::new();
     for step in block.steps.iter() {
         match step {
             BlockStep::Let { pattern, expr } => {
-                ops.push(BytecodeOp::Eval(*expr));
+                ops.push(compile_eval_op(*expr));
                 ops.push(BytecodeOp::BindLet(pattern.clone()));
             }
             BlockStep::FnDecl(function) => {
                 ops.push(BytecodeOp::BindFnDecl(function.clone()));
             }
             BlockStep::Expr(expr) => {
-                ops.push(BytecodeOp::Eval(*expr));
+                ops.push(compile_eval_op(*expr));
                 ops.push(BytecodeOp::SetLast);
             }
         }
