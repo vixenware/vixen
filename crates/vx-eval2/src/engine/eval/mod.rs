@@ -1,10 +1,11 @@
 use super::*;
 use crate::program::{
-    AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlanKind, CallCalleePlan, CallCalleePlanKind,
-    CallPlan, ClosurePlan, ControlPlanKind, DirectCallCalleePlan, DirectCallCalleePlanKind,
-    ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan,
+    AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BuilderPlanKind, CallCalleePlan,
+    CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlanKind, DirectCallCalleePlan,
+    DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
     MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlanKind,
-    StructLiteralPlan, TuplePlan, WherePlan,
+    StructLiteralPlan, StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -195,7 +196,7 @@ fn collect_adapter_parameters(
             for arm in match_expr.arms.iter() {
                 collect_adapter_parameters(
                     program,
-                    program.resolve_expr(arm.body)?,
+                    program.resolve_expr(arm.body.expr_id())?,
                     names_by_index,
                 )?;
             }
@@ -688,11 +689,11 @@ fn eval_paren_expr(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    inner: Option<ExprId>,
+    inner: Option<ExprBodyRef>,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     match inner {
-        Some(inner) => match eval_child_expr_id(state, state.expr_id_for(inner)?, env)? {
+        Some(inner) => match eval_child_body_ref(state, inner, env)? {
             EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
             EvalStep::Suspended(suspension) => Ok(extend_suspension(
                 suspension,
@@ -751,7 +752,7 @@ fn eval_closure_plan(
         state,
         closure.handle,
         Arc::clone(&closure.parameters),
-        closure.body,
+        closure.body.map(ExprBodyRef::expr_id),
         env,
     )
 }
@@ -2140,7 +2141,7 @@ fn eval_struct_literal_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
     type_name: Option<Arc<str>>,
-    parts: &[crate::program::StructLiteralPart],
+    parts: &[StructLiteralPlanPart],
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let type_name = struct_literal_type_name(type_name)?;
@@ -2155,19 +2156,19 @@ fn eval_struct_literal_inner(
     let mut remaining_parts = Vec::new();
     for field in parts.iter() {
         match field {
-            crate::program::StructLiteralPart::Field {
+            StructLiteralPlanPart::Field {
                 name,
                 expr: Some(expr),
             } => {
                 remaining_parts.push(StructLiteralPart::Field {
                     name: name.clone(),
-                    expr: state.expr_id_for(*expr)?,
+                    expr: *expr,
                 });
             }
-            crate::program::StructLiteralPart::Spread(expr) => {
-                remaining_parts.push(StructLiteralPart::Spread(state.expr_id_for(*expr)?));
+            StructLiteralPlanPart::Spread(expr) => {
+                remaining_parts.push(StructLiteralPart::Spread(*expr));
             }
-            crate::program::StructLiteralPart::Field { name, expr: None } => {
+            StructLiteralPlanPart::Field { name, expr: None } => {
                 let Some(value) = env.get(name.as_ref()) else {
                     return Err(EvalError::new(
                         EvalErrorKind::Internal,
@@ -2196,7 +2197,7 @@ fn eval_struct_literal_inner(
             .collect::<Vec<_>>();
         let child_nodes = joinable_fields
             .iter()
-            .map(|(_, expr)| queue_child_expr_id(state, *expr, env))
+            .map(|(_, expr)| queue_child_body_ref(state, *expr, env))
             .collect::<Vec<_>>();
         return Ok(wait_on_child_dependency(
             state,
@@ -2243,7 +2244,7 @@ fn eval_array_plan(
 fn eval_array_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    items: &[ArrayItem],
+    items: &[ArrayPlanItem],
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2256,15 +2257,11 @@ fn eval_array_inner(
         let mut child_nodes = Vec::new();
         for item in items.iter() {
             match item {
-                ArrayItem::Expr(expr) => {
-                    child_nodes.push(ArrayJoinItem::Expr(queue_child_expr_id(
-                        state,
-                        state.expr_id_for(*expr)?,
-                        env,
-                    )));
+                ArrayPlanItem::Expr(body) => {
+                    child_nodes.push(ArrayJoinItem::Expr(queue_child_body_ref(state, *body, env)));
                 }
-                ArrayItem::Spread(expr) => child_nodes.push(ArrayJoinItem::Spread(
-                    queue_child_expr_id(state, state.expr_id_for(*expr)?, env),
+                ArrayPlanItem::Spread(body) => child_nodes.push(ArrayJoinItem::Spread(
+                    queue_child_body_ref(state, *body, env),
                 )),
             }
         }
@@ -2298,11 +2295,12 @@ fn eval_array_inner(
             spread: false,
             remaining_items: items
                 .iter()
+                .cloned()
                 .map(|item| match item {
-                    ArrayItem::Expr(expr) => Ok(ArrayEvalItem::Expr(state.expr_id_for(*expr)?)),
-                    ArrayItem::Spread(expr) => Ok(ArrayEvalItem::Spread(state.expr_id_for(*expr)?)),
+                    ArrayPlanItem::Expr(body) => ArrayEvalItem::Expr(body),
+                    ArrayPlanItem::Spread(body) => ArrayEvalItem::Spread(body),
                 })
-                .collect::<Result<Vec<_>, EvalError>>()?,
+                .collect::<Vec<_>>(),
             env: env.clone(),
             array_source: state.program.span_for_handle(handle),
         },
@@ -2335,7 +2333,7 @@ fn eval_tuple_plan(
 fn eval_tuple_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    items: &[ExprId],
+    items: &[ExprBodyRef],
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2348,15 +2346,7 @@ fn eval_tuple_inner(
     if state.queue_child_work {
         let child_nodes = items
             .iter()
-            .map(|item| {
-                queue_child_expr_id(
-                    state,
-                    state
-                        .expr_id_for(*item)
-                        .expect("tuple item should resolve to an expression id"),
-                    env,
-                )
-            })
+            .map(|item| queue_child_body_ref(state, *item, env))
             .collect::<Vec<_>>();
         if child_nodes.is_empty() {
             let provenance = Provenance::literal(state.program.span_for_handle(handle));
@@ -2382,11 +2372,7 @@ fn eval_tuple_inner(
         parent_id,
         TupleState {
             items: Vec::new(),
-            remaining_items: items
-                .iter()
-                .copied()
-                .map(|item| state.expr_id_for(item))
-                .collect::<Result<Vec<_>, _>>()?,
+            remaining_items: items.iter().copied().collect::<Vec<_>>(),
             env: env.clone(),
             tuple_source: state.program.span_for_handle(handle),
         },
@@ -2404,7 +2390,7 @@ fn eval_interpolated_string_plan(
 fn eval_interpolated_string_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    parts: &[StringPart],
+    parts: &[InterpolatedStringPlanPart],
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2416,20 +2402,19 @@ fn eval_interpolated_string_inner(
     let string_source = state.program.span_for_handle(handle);
     let parts = parts
         .iter()
+        .cloned()
         .map(|part| match part {
-            StringPart::Text(text) => Ok(InterpolatedPart::Text(text.clone())),
-            StringPart::Interpolation(expr) => {
-                Ok(InterpolatedPart::Expr(state.expr_id_for(*expr)?))
-            }
+            InterpolatedStringPlanPart::Text(text) => InterpolatedPart::Text(text),
+            InterpolatedStringPlanPart::Interpolation(body) => InterpolatedPart::Expr(body),
         })
-        .collect::<Result<Vec<_>, EvalError>>()?;
+        .collect::<Vec<_>>();
 
     if state.queue_child_work {
         let expr_nodes = parts
             .iter()
             .filter_map(|part| match part {
                 InterpolatedPart::Text(_) => None,
-                InterpolatedPart::Expr(expr) => Some(queue_child_expr_id(state, *expr, env)),
+                InterpolatedPart::Expr(body) => Some(queue_child_body_ref(state, *body, env)),
             })
             .collect::<Vec<_>>();
         if let Some(child_id) = expr_nodes.first().copied() {
@@ -2483,8 +2468,8 @@ fn eval_range_plan(
 fn eval_range_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    start: Option<ExprId>,
-    end: Option<ExprId>,
+    start: Option<ExprBodyRef>,
+    end: Option<ExprBodyRef>,
     inclusive_end: bool,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
@@ -2497,24 +2482,8 @@ fn eval_range_inner(
     let range_source = state.program.span_for_handle(handle);
 
     if state.queue_child_work {
-        let start_child = start.map(|expr| {
-            queue_child_expr_id(
-                state,
-                state
-                    .expr_id_for(expr)
-                    .expect("range start should resolve to an expression id"),
-                env,
-            )
-        });
-        let end_child = end.map(|expr| {
-            queue_child_expr_id(
-                state,
-                state
-                    .expr_id_for(expr)
-                    .expect("range end should resolve to an expression id"),
-                env,
-            )
-        });
+        let start_child = start.map(|body| queue_child_body_ref(state, body, env));
+        let end_child = end.map(|body| queue_child_body_ref(state, body, env));
         if let Some(child_id) = start_child.or(end_child) {
             return Ok(wait_on_child_dependency(
                 state,
@@ -2538,16 +2507,14 @@ fn eval_range_inner(
         )));
     }
 
-    let start_handle = start.map(|expr| state.expr_id_for(expr)).transpose()?;
-    let end_handle = end.map(|expr| state.expr_id_for(expr)).transpose()?;
-    if let Some(start_handle) = start_handle {
-        match eval_dependent_expr_id(state, node_id, start_handle, env)? {
+    if let Some(start_handle) = start {
+        match eval_dependent_body_ref(state, node_id, start_handle, env)? {
             EvalStep::Ready(start) => continue_range_end(
                 state,
                 node_id,
                 parent_id,
                 Some(start),
-                end_handle,
+                end,
                 env.clone(),
                 range_source,
                 inclusive_end,
@@ -2559,7 +2526,7 @@ fn eval_range_inner(
                     parent_id,
                     range: RangeState {
                         start: None,
-                        end: end_handle,
+                        end,
                         env: env.clone(),
                         range_source,
                         inclusive_end,
@@ -2574,7 +2541,7 @@ fn eval_range_inner(
             node_id,
             parent_id,
             None,
-            end_handle,
+            end,
             env.clone(),
             range_source,
             inclusive_end,
@@ -2593,7 +2560,7 @@ fn eval_map_plan(
 fn eval_map_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
-    entries: &[(ExprId, ExprId)],
+    entries: &[MapEntryPlan],
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -2602,11 +2569,6 @@ fn eval_map_inner(
         .copied()
         .expect("map should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let entries = entries
-        .iter()
-        .copied()
-        .map(|(key, value)| Ok((state.expr_id_for(key)?, state.expr_id_for(value)?)))
-        .collect::<Result<Vec<_>, EvalError>>()?;
     continue_map_entries(
         state,
         node_id,
@@ -2615,7 +2577,10 @@ fn eval_map_inner(
             entries: Vec::new(),
             key: None,
             value_expr: None,
-            remaining_entries: entries,
+            remaining_entries: entries
+                .iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect(),
             env: env.clone(),
             map_source: state.program.span_for_handle(handle),
         },
@@ -2856,12 +2821,12 @@ fn eval_match_inner(
         .copied()
         .expect("match expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let scrutinee = match eval_dependent_expr_id(
+    let scrutinee = match eval_dependent_body_ref(
         state,
         node_id,
-        state.expr_id_for(match_expr.scrutinee.ok_or_else(|| {
+        match_expr.scrutinee.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
-        })?)?,
+        })?,
         env,
     )? {
         EvalStep::Ready(value) => value,
@@ -2901,12 +2866,7 @@ pub(super) fn continue_match_arms(
     for arm in arms.iter() {
         let mut arm_env = env.clone();
         if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
-            return match eval_dependent_expr_id(
-                state,
-                node_id,
-                state.expr_id_for(arm.body)?,
-                &mut arm_env,
-            )? {
+            return match eval_dependent_body_ref(state, node_id, arm.body, &mut arm_env)? {
                 EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
                 EvalStep::Suspended(suspension) => Ok(extend_suspension(
                     suspension,
@@ -3368,7 +3328,7 @@ pub(super) fn continue_array_items(
             ArrayEvalItem::Expr(handle) => (handle, false),
             ArrayEvalItem::Spread(handle) => (handle, true),
         };
-        match eval_dependent_expr_id(state, node_id, item_handle, &mut array.env)? {
+        match eval_dependent_body_ref(state, node_id, item_handle, &mut array.env)? {
             EvalStep::Ready(value) => append_array_item(&mut array.items, value, spread)?,
             EvalStep::Suspended(suspension) => {
                 array.spread = spread;
@@ -3397,7 +3357,7 @@ pub(super) fn continue_tuple_items(
 ) -> Result<EvalStep, EvalError> {
     let mut remaining = tuple.remaining_items.into_iter();
     while let Some(item_handle) = remaining.next() {
-        match eval_dependent_expr_id(state, node_id, item_handle, &mut tuple.env)? {
+        match eval_dependent_body_ref(state, node_id, item_handle, &mut tuple.env)? {
             EvalStep::Ready(value) => tuple.items.push(value),
             EvalStep::Suspended(suspension) => {
                 tuple.remaining_items = remaining.collect();
@@ -3422,13 +3382,13 @@ pub(super) fn continue_range_end(
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
     start: Option<Value>,
-    end: Option<ExprId>,
+    end: Option<ExprBodyRef>,
     mut env: EvalEnv,
     range_source: SourceSpan,
     inclusive_end: bool,
 ) -> Result<EvalStep, EvalError> {
     let end = match end {
-        Some(end_handle) => match eval_dependent_expr_id(state, node_id, end_handle, &mut env)? {
+        Some(end_handle) => match eval_dependent_body_ref(state, node_id, end_handle, &mut env)? {
             EvalStep::Ready(end) => Some(end),
             EvalStep::Suspended(suspension) => {
                 return Ok(extend_suspension(
@@ -3469,7 +3429,7 @@ pub(super) fn continue_interpolated_string_parts(
         match part {
             InterpolatedPart::Text(text) => string.segments.push(text.to_string()),
             InterpolatedPart::Expr(expr) => {
-                match eval_dependent_expr_id(state, node_id, expr, &mut string.env)? {
+                match eval_dependent_body_ref(state, node_id, expr, &mut string.env)? {
                     EvalStep::Ready(value) => {
                         string.segments.push(interpolation_segment_text(&value)?)
                     }
@@ -3906,7 +3866,7 @@ pub(super) fn continue_map_entries(
                 break;
             };
             map.value_expr = Some(value_handle);
-            match eval_dependent_expr_id(state, node_id, key_handle, &mut map.env)? {
+            match eval_dependent_body_ref(state, node_id, key_handle, &mut map.env)? {
                 EvalStep::Ready(key) => map.key = Some(key),
                 EvalStep::Suspended(suspension) => {
                     map.remaining_entries = remaining.collect();
@@ -3930,7 +3890,7 @@ pub(super) fn continue_map_entries(
             .value_expr
             .take()
             .expect("map value evaluation should retain the current value expr");
-        let value = match eval_dependent_expr_id(state, node_id, value_handle, &mut map.env)? {
+        let value = match eval_dependent_body_ref(state, node_id, value_handle, &mut map.env)? {
             EvalStep::Ready(value) => value,
             EvalStep::Suspended(suspension) => {
                 map.key = Some(key);
@@ -3972,7 +3932,7 @@ pub(super) fn continue_struct_fields(
         let expr_handle = match &part {
             StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
         };
-        match eval_dependent_expr_id(state, node_id, expr_handle, &mut struct_state.env)? {
+        match eval_dependent_body_ref(state, node_id, expr_handle, &mut struct_state.env)? {
             EvalStep::Ready(value) => apply_struct_literal_part(
                 &struct_state.type_name,
                 &mut struct_state.fields,

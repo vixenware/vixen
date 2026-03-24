@@ -26,11 +26,12 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
-        AccessPlanKind, ArrayPlan, BinaryPlan, BlockStep, BuilderPlanKind, CallCallee,
-        CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind,
+        AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BlockStep, BuilderPlanKind,
+        CallCallee, CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind,
         DirectCallCalleePlanKind, ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan,
-        InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan,
-        ReadyPlanKind, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
+        InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapPlan, MatchPlan,
+        ParenPlan, PrefixPlan, RangePlan, ReadyPlanKind, ResolvedNameRef, StructLiteralPlan,
+        StructLiteralPlanPart, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1504,6 +1505,12 @@ fn compiled_program_caches_array_exec_plan() {
         .resolve_array_plan(plan.array_plan_id(array_expr.source()))
         .expect("resolve cached array payload");
     assert_eq!(items.len(), 2);
+    assert!(
+        matches!(items[0], ArrayPlanItem::Expr(body) if body.plan().kind() == ExprExecKind::Ready)
+    );
+    assert!(
+        matches!(items[1], ArrayPlanItem::Expr(body) if body.plan().kind() == ExprExecKind::Ready)
+    );
 }
 
 #[test]
@@ -1532,6 +1539,11 @@ fn compiled_program_caches_tuple_exec_plan() {
         .resolve_tuple_plan(plan.tuple_plan_id(tuple_expr.source()))
         .expect("resolve cached tuple payload");
     assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item.plan().kind() == ExprExecKind::Ready)
+    );
 }
 
 #[test]
@@ -1567,6 +1579,11 @@ fn compiled_program_caches_range_exec_plan() {
     assert!(start.is_some());
     assert!(end.is_some());
     assert!(*inclusive_end);
+    assert_eq!(
+        start.expect("range start").plan().kind(),
+        ExprExecKind::Ready
+    );
+    assert_eq!(end.expect("range end").plan().kind(), ExprExecKind::Ready);
 }
 
 #[test]
@@ -1598,6 +1615,10 @@ fn compiled_program_caches_map_exec_plan() {
         .resolve_map_plan(plan.map_plan_id(map_expr.source()))
         .expect("resolve cached map payload");
     assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| {
+        entry.key.plan().kind() == ExprExecKind::Ready
+            && entry.value.plan().kind() == ExprExecKind::Ready
+    }));
 }
 
 #[test]
@@ -1657,6 +1678,11 @@ fn compiled_program_caches_interpolated_string_exec_plan() {
         .resolve_interpolated_string_plan(plan.interpolated_string_plan_id(string_expr.source()))
         .expect("resolve cached interpolated string payload");
     assert_eq!(parts.len(), 2);
+    assert!(matches!(
+        &parts[1],
+        InterpolatedStringPlanPart::Interpolation(body)
+            if body.plan().kind() == ExprExecKind::Ready
+    ));
 }
 
 #[test]
@@ -1691,6 +1717,11 @@ fn compiled_program_caches_struct_literal_exec_plan() {
         .expect("resolve cached struct literal payload");
     assert_eq!(type_name.as_deref(), Some("Box"));
     assert_eq!(parts.len(), 1);
+    assert!(matches!(
+        &parts[0],
+        StructLiteralPlanPart::Field { expr: Some(body), .. }
+            if body.plan().kind() == ExprExecKind::Ready
+    ));
 }
 
 #[test]
@@ -1718,7 +1749,10 @@ fn compiled_program_caches_paren_exec_plan() {
     let ParenPlan { expr, .. } = program
         .resolve_paren_plan(plan.paren_plan_id(paren_expr.source()))
         .expect("resolve cached paren payload");
-    assert!(expr.is_some());
+    assert!(matches!(
+        expr,
+        Some(body) if body.plan().kind() == ExprExecKind::Ready
+    ));
 }
 
 #[test]
@@ -1752,7 +1786,9 @@ fn compiled_program_caches_closure_exec_plan() {
             let ParenPlan { expr, .. } = program
                 .resolve_paren_plan(plan.paren_plan_id(closure_expr.source()))
                 .expect("resolve cached paren payload");
-            closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
+            closure_expr = expr
+                .expect("paren-wrapped closure should have an inner expr")
+                .expr_id();
             let plan = program
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
@@ -1768,7 +1804,10 @@ fn compiled_program_caches_closure_exec_plan() {
         .resolve_closure_plan(closure)
         .expect("resolve cached closure payload");
     assert_eq!(parameters.len(), 1);
-    assert!(body.is_some());
+    assert!(matches!(
+        body,
+        Some(body) if body.plan().kind() == ExprExecKind::Ready
+    ));
 }
 
 #[test]
@@ -1803,6 +1842,14 @@ fn compiled_program_caches_match_exec_plan() {
         .expect("resolve cached match payload");
     assert!(scrutinee.is_some());
     assert_eq!(arms.len(), 2);
+    assert_eq!(
+        scrutinee.expect("match scrutinee").plan().kind(),
+        ExprExecKind::Ready
+    );
+    assert!(
+        arms.iter()
+            .all(|arm| arm.body.plan().kind() == ExprExecKind::Ready)
+    );
 }
 
 #[test]

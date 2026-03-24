@@ -493,7 +493,7 @@ impl Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatchArmPlan {
     pub(crate) pattern: MatchPattern,
-    pub(crate) body: ExprId,
+    pub(crate) body: ExprBodyRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1159,27 +1159,27 @@ pub(crate) struct BinaryPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArrayPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) items: Arc<[ArrayItem]>,
+    pub(crate) items: Arc<[ArrayPlanItem]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuplePlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) items: Arc<[ExprId]>,
+    pub(crate) items: Arc<[ExprBodyRef]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RangePlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) start: Option<ExprId>,
-    pub(crate) end: Option<ExprId>,
+    pub(crate) start: Option<ExprBodyRef>,
+    pub(crate) end: Option<ExprBodyRef>,
     pub(crate) inclusive_end: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MapPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) entries: Arc<[(ExprId, ExprId)]>,
+    pub(crate) entries: Arc<[MapEntryPlan]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1191,34 +1191,61 @@ pub(crate) struct FailPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InterpolatedStringPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) parts: Arc<[StringPart]>,
+    pub(crate) parts: Arc<[InterpolatedStringPlanPart]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StructLiteralPlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) type_name: Option<Arc<str>>,
-    pub(crate) parts: Arc<[StructLiteralPart]>,
+    pub(crate) parts: Arc<[StructLiteralPlanPart]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParenPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) expr: Option<ExprId>,
+    pub(crate) expr: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClosurePlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) parameters: Arc<[CompiledParameter]>,
-    pub(crate) body: Option<ExprId>,
+    pub(crate) body: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatchPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) scrutinee: Option<ExprId>,
+    pub(crate) scrutinee: Option<ExprBodyRef>,
     pub(crate) arms: Arc<[MatchArmPlan]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArrayPlanItem {
+    Expr(ExprBodyRef),
+    Spread(ExprBodyRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapEntryPlan {
+    pub(crate) key: ExprBodyRef,
+    pub(crate) value: ExprBodyRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InterpolatedStringPlanPart {
+    Text(Arc<str>),
+    Interpolation(ExprBodyRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StructLiteralPlanPart {
+    Field {
+        name: Arc<str>,
+        expr: Option<ExprBodyRef>,
+    },
+    Spread(ExprBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2930,6 +2957,104 @@ impl CompiledProgramSource {
             plan.lhs = plan.lhs.map(|body| resolve(body, &self.expr_plans));
             plan.rhs = plan.rhs.map(|body| resolve(body, &self.expr_plans));
         }
+        for plan in &mut self.array_plans {
+            plan.items = Arc::from(
+                plan.items
+                    .iter()
+                    .cloned()
+                    .map(|item| match item {
+                        ArrayPlanItem::Expr(body) => {
+                            ArrayPlanItem::Expr(resolve(body, &self.expr_plans))
+                        }
+                        ArrayPlanItem::Spread(body) => {
+                            ArrayPlanItem::Spread(resolve(body, &self.expr_plans))
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.tuple_plans {
+            plan.items = Arc::from(
+                plan.items
+                    .iter()
+                    .copied()
+                    .map(|body| resolve(body, &self.expr_plans))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.range_plans {
+            plan.start = plan.start.map(|body| resolve(body, &self.expr_plans));
+            plan.end = plan.end.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.map_plans {
+            plan.entries = Arc::from(
+                plan.entries
+                    .iter()
+                    .cloned()
+                    .map(|entry| MapEntryPlan {
+                        key: resolve(entry.key, &self.expr_plans),
+                        value: resolve(entry.value, &self.expr_plans),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.interpolated_string_plans {
+            plan.parts = Arc::from(
+                plan.parts
+                    .iter()
+                    .cloned()
+                    .map(|part| match part {
+                        InterpolatedStringPlanPart::Text(text) => {
+                            InterpolatedStringPlanPart::Text(text)
+                        }
+                        InterpolatedStringPlanPart::Interpolation(body) => {
+                            InterpolatedStringPlanPart::Interpolation(resolve(
+                                body,
+                                &self.expr_plans,
+                            ))
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.struct_literal_plans {
+            plan.parts = Arc::from(
+                plan.parts
+                    .iter()
+                    .cloned()
+                    .map(|part| match part {
+                        StructLiteralPlanPart::Field { name, expr } => {
+                            StructLiteralPlanPart::Field {
+                                name,
+                                expr: expr.map(|body| resolve(body, &self.expr_plans)),
+                            }
+                        }
+                        StructLiteralPlanPart::Spread(body) => {
+                            StructLiteralPlanPart::Spread(resolve(body, &self.expr_plans))
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for plan in &mut self.paren_plans {
+            plan.expr = plan.expr.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.closure_plans {
+            plan.body = plan.body.map(|body| resolve(body, &self.expr_plans));
+        }
+        for plan in &mut self.match_plans {
+            plan.scrutinee = plan.scrutinee.map(|body| resolve(body, &self.expr_plans));
+            plan.arms = Arc::from(
+                plan.arms
+                    .iter()
+                    .cloned()
+                    .map(|arm| MatchArmPlan {
+                        pattern: arm.pattern,
+                        body: resolve(arm.body, &self.expr_plans),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[cfg(test)]
@@ -3540,22 +3665,39 @@ fn compile_call_plan(source: SourceId, call: &CallExpr, plans: &mut ExprPlanTabl
 fn compile_array_plan(array: &ArrayExpr) -> ArrayPlan {
     ArrayPlan {
         handle: array.handle,
-        items: Arc::clone(&array.items),
+        items: Arc::from(
+            array
+                .items
+                .iter()
+                .cloned()
+                .map(|item| match item {
+                    ArrayItem::Expr(expr) => ArrayPlanItem::Expr(ExprBodyRef::unresolved(expr)),
+                    ArrayItem::Spread(expr) => ArrayPlanItem::Spread(ExprBodyRef::unresolved(expr)),
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
 fn compile_tuple_plan(tuple: &TupleExpr) -> TuplePlan {
     TuplePlan {
         handle: tuple.handle,
-        items: Arc::clone(&tuple.items),
+        items: Arc::from(
+            tuple
+                .items
+                .iter()
+                .copied()
+                .map(ExprBodyRef::unresolved)
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
 fn compile_range_plan(range: &RangeExpr) -> RangePlan {
     RangePlan {
         handle: range.handle,
-        start: range.start,
-        end: range.end,
+        start: range.start.map(ExprBodyRef::unresolved),
+        end: range.end.map(ExprBodyRef::unresolved),
         inclusive_end: range.inclusive_end,
     }
 }
@@ -3563,7 +3705,16 @@ fn compile_range_plan(range: &RangeExpr) -> RangePlan {
 fn compile_map_plan(map: &MapExpr) -> MapPlan {
     MapPlan {
         handle: map.handle,
-        entries: Arc::clone(&map.entries),
+        entries: Arc::from(
+            map.entries
+                .iter()
+                .copied()
+                .map(|(key, value)| MapEntryPlan {
+                    key: ExprBodyRef::unresolved(key),
+                    value: ExprBodyRef::unresolved(value),
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -3579,7 +3730,19 @@ fn compile_interpolated_string_plan(
 ) -> InterpolatedStringPlan {
     InterpolatedStringPlan {
         handle: interpolated.handle,
-        parts: Arc::clone(&interpolated.parts),
+        parts: Arc::from(
+            interpolated
+                .parts
+                .iter()
+                .cloned()
+                .map(|part| match part {
+                    StringPart::Text(text) => InterpolatedStringPlanPart::Text(text),
+                    StringPart::Interpolation(expr) => {
+                        InterpolatedStringPlanPart::Interpolation(ExprBodyRef::unresolved(expr))
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -3587,7 +3750,22 @@ fn compile_struct_literal_plan(struct_literal: &StructLiteralExpr) -> StructLite
     StructLiteralPlan {
         handle: struct_literal.handle,
         type_name: struct_literal.type_name.clone(),
-        parts: Arc::clone(&struct_literal.parts),
+        parts: Arc::from(
+            struct_literal
+                .parts
+                .iter()
+                .cloned()
+                .map(|part| match part {
+                    StructLiteralPart::Field { name, expr } => StructLiteralPlanPart::Field {
+                        name,
+                        expr: expr.map(ExprBodyRef::unresolved),
+                    },
+                    StructLiteralPart::Spread(expr) => {
+                        StructLiteralPlanPart::Spread(ExprBodyRef::unresolved(expr))
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -3661,7 +3839,7 @@ fn compile_binary_plan(binary: &BinaryExpr) -> BinaryPlan {
 fn compile_paren_plan(paren: &ParenExpr) -> ParenPlan {
     ParenPlan {
         handle: paren.handle,
-        expr: paren.expr,
+        expr: paren.expr.map(ExprBodyRef::unresolved),
     }
 }
 
@@ -3669,15 +3847,25 @@ fn compile_closure_plan(closure: &ClosureExpr) -> ClosurePlan {
     ClosurePlan {
         handle: closure.handle,
         parameters: Arc::clone(&closure.parameters),
-        body: closure.body,
+        body: closure.body.map(ExprBodyRef::unresolved),
     }
 }
 
 fn compile_match_plan(match_expr: &MatchExpr) -> MatchPlan {
     MatchPlan {
         handle: match_expr.handle,
-        scrutinee: match_expr.scrutinee,
-        arms: Arc::clone(&match_expr.arms),
+        scrutinee: match_expr.scrutinee.map(ExprBodyRef::unresolved),
+        arms: Arc::from(
+            match_expr
+                .arms
+                .iter()
+                .cloned()
+                .map(|arm| MatchArmPlan {
+                    pattern: arm.pattern,
+                    body: arm.body,
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -4161,11 +4349,11 @@ fn compile_expr(
                             pattern: compile_match_pattern(
                                 source, source_id, line_index, &pattern,
                             )?,
-                            body: require_expr_id(
+                            body: ExprBodyRef::unresolved(require_expr_id(
                                 expr_ids,
                                 ProgramNodeHandle::for_node(source, &body),
                                 "match arm body",
-                            )?,
+                            )?),
                         })
                     })
                     .collect::<Result<Vec<_>, EvalError>>()?,

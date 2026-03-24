@@ -28,13 +28,13 @@ pub(super) struct EvalSuspension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InterpolatedPart {
     Text(Arc<str>),
-    Expr(ExprId),
+    Expr(ExprBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ArrayEvalItem {
-    Expr(ExprId),
-    Spread(ExprId),
+    Expr(ExprBodyRef),
+    Spread(ExprBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,7 @@ pub(super) struct ArrayState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TupleState {
     pub(super) items: Vec<Value>,
-    pub(super) remaining_items: Vec<ExprId>,
+    pub(super) remaining_items: Vec<ExprBodyRef>,
     pub(super) env: EvalEnv,
     pub(super) tuple_source: SourceSpan,
 }
@@ -87,8 +87,8 @@ pub(super) enum StreamStage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StructLiteralPart {
-    Field { name: Arc<str>, expr: ExprId },
-    Spread(ExprId),
+    Field { name: Arc<str>, expr: ExprBodyRef },
+    Spread(ExprBodyRef),
 }
 
 pub(super) type LetPattern = crate::program::LetPattern;
@@ -148,7 +148,7 @@ pub(super) enum RangeResumeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RangeState {
     pub(super) start: Option<Value>,
-    pub(super) end: Option<ExprId>,
+    pub(super) end: Option<ExprBodyRef>,
     pub(super) env: EvalEnv,
     pub(super) range_source: SourceSpan,
     pub(super) inclusive_end: bool,
@@ -211,8 +211,8 @@ pub(super) enum MapResumeKind {
 pub(super) struct MapState {
     pub(super) entries: Vec<(Value, Value)>,
     pub(super) key: Option<Value>,
-    pub(super) value_expr: Option<ExprId>,
-    pub(super) remaining_entries: Vec<(ExprId, ExprId)>,
+    pub(super) value_expr: Option<ExprBodyRef>,
+    pub(super) remaining_entries: Vec<(ExprBodyRef, ExprBodyRef)>,
     pub(super) env: EvalEnv,
     pub(super) map_source: SourceSpan,
 }
