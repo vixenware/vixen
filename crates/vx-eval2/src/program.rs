@@ -582,29 +582,94 @@ pub(crate) enum ExprKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExprExecPlan {
+pub(crate) enum ExprExecKind {
     Expr,
-    Block { body: BlockBodyId },
-    Literal(LiteralPlanId),
-    PathLiteral(PathLiteralPlanId),
-    Paren(ParenPlanId),
-    Closure(ClosurePlanId),
-    NameRef(NameRefPlanId),
-    Call(CallPlanId),
-    Array(ArrayPlanId),
-    Tuple(TuplePlanId),
-    Range(RangePlanId),
-    Map(MapPlanId),
-    Fail(FailPlanId),
-    Fallible(FalliblePlanId),
-    If(IfPlanId),
-    Match(MatchPlanId),
-    Where(WherePlanId),
-    Prefix(PrefixPlanId),
-    Binary(BinaryPlanId),
-    InterpolatedString(InterpolatedStringPlanId),
-    StructLiteral(StructLiteralPlanId),
-    Field(FieldPlanId),
+    Block,
+    Literal,
+    PathLiteral,
+    Paren,
+    Closure,
+    NameRef,
+    Call,
+    Array,
+    Tuple,
+    Range,
+    Map,
+    Fail,
+    Fallible,
+    If,
+    Match,
+    Where,
+    Prefix,
+    Binary,
+    InterpolatedString,
+    StructLiteral,
+    Field,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExprExecPlan {
+    kind: ExprExecKind,
+    payload: u32,
+}
+
+macro_rules! impl_expr_exec_plan_accessors {
+    ($($kind:ident => $method:ident : $id:ident),+ $(,)?) => {
+        $(
+            pub(crate) fn $method(self, source: SourceId) -> $id {
+                debug_assert_eq!(self.kind, ExprExecKind::$kind);
+                $id {
+                    source: source.0,
+                    index: self.payload,
+                }
+            }
+        )+
+    };
+}
+
+impl ExprExecPlan {
+    fn new(kind: ExprExecKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn expr() -> Self {
+        Self::new(ExprExecKind::Expr, 0)
+    }
+
+    pub(crate) fn kind(self) -> ExprExecKind {
+        self.kind
+    }
+
+    pub(crate) fn block_body_id(self, source: SourceId) -> BlockBodyId {
+        debug_assert_eq!(self.kind, ExprExecKind::Block);
+        BlockBodyId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    impl_expr_exec_plan_accessors!(
+        Literal => literal_plan_id: LiteralPlanId,
+        PathLiteral => path_literal_plan_id: PathLiteralPlanId,
+        Paren => paren_plan_id: ParenPlanId,
+        Closure => closure_plan_id: ClosurePlanId,
+        NameRef => name_ref_plan_id: NameRefPlanId,
+        Call => call_plan_id: CallPlanId,
+        Array => array_plan_id: ArrayPlanId,
+        Tuple => tuple_plan_id: TuplePlanId,
+        Range => range_plan_id: RangePlanId,
+        Map => map_plan_id: MapPlanId,
+        Fail => fail_plan_id: FailPlanId,
+        Fallible => fallible_plan_id: FalliblePlanId,
+        If => if_plan_id: IfPlanId,
+        Match => match_plan_id: MatchPlanId,
+        Where => where_plan_id: WherePlanId,
+        Prefix => prefix_plan_id: PrefixPlanId,
+        Binary => binary_plan_id: BinaryPlanId,
+        InterpolatedString => interpolated_string_plan_id: InterpolatedStringPlanId,
+        StructLiteral => struct_literal_plan_id: StructLiteralPlanId,
+        Field => field_plan_id: FieldPlanId,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2574,66 +2639,104 @@ impl ExprPlanTables {
 fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
     let source = expr.handle().source();
     match expr.kind() {
-        ExprKind::Block(block) => ExprExecPlan::Block { body: block.body },
-        ExprKind::Literal(literal) => {
-            ExprExecPlan::Literal(plans.push_literal(source, compile_literal_plan(literal)))
-        }
-        ExprKind::PathLiteral(path_literal) => ExprExecPlan::PathLiteral(
-            plans.push_path_literal(source, compile_path_literal_plan(path_literal)),
+        ExprKind::Block(block) => ExprExecPlan::new(ExprExecKind::Block, block.body.index),
+        ExprKind::Literal(literal) => ExprExecPlan::new(
+            ExprExecKind::Literal,
+            plans
+                .push_literal(source, compile_literal_plan(literal))
+                .index,
         ),
-        ExprKind::Paren(paren) => {
-            ExprExecPlan::Paren(plans.push_paren(source, compile_paren_plan(paren)))
-        }
-        ExprKind::Closure(closure) => {
-            ExprExecPlan::Closure(plans.push_closure(source, compile_closure_plan(closure)))
-        }
-        ExprKind::NameRef(name_ref) => {
-            ExprExecPlan::NameRef(plans.push_name_ref(source, compile_name_ref_plan(name_ref)))
-        }
+        ExprKind::PathLiteral(path_literal) => ExprExecPlan::new(
+            ExprExecKind::PathLiteral,
+            plans
+                .push_path_literal(source, compile_path_literal_plan(path_literal))
+                .index,
+        ),
+        ExprKind::Paren(paren) => ExprExecPlan::new(
+            ExprExecKind::Paren,
+            plans.push_paren(source, compile_paren_plan(paren)).index,
+        ),
+        ExprKind::Closure(closure) => ExprExecPlan::new(
+            ExprExecKind::Closure,
+            plans
+                .push_closure(source, compile_closure_plan(closure))
+                .index,
+        ),
+        ExprKind::NameRef(name_ref) => ExprExecPlan::new(
+            ExprExecKind::NameRef,
+            plans
+                .push_name_ref(source, compile_name_ref_plan(name_ref))
+                .index,
+        ),
         ExprKind::Call(call) => {
             let plan = compile_call_plan(source, call, plans);
-            ExprExecPlan::Call(plans.push_call(source, plan))
+            ExprExecPlan::new(ExprExecKind::Call, plans.push_call(source, plan).index)
         }
-        ExprKind::Array(array) => {
-            ExprExecPlan::Array(plans.push_array(source, compile_array_plan(array)))
-        }
-        ExprKind::Tuple(tuple) => {
-            ExprExecPlan::Tuple(plans.push_tuple(source, compile_tuple_plan(tuple)))
-        }
-        ExprKind::Range(range) => {
-            ExprExecPlan::Range(plans.push_range(source, compile_range_plan(range)))
-        }
-        ExprKind::Map(map) => ExprExecPlan::Map(plans.push_map(source, compile_map_plan(map))),
-        ExprKind::Fail(fail) => {
-            ExprExecPlan::Fail(plans.push_fail(source, compile_fail_plan(fail)))
-        }
-        ExprKind::Fallible(fallible) => {
-            ExprExecPlan::Fallible(plans.push_fallible(source, compile_fallible_plan(fallible)))
-        }
-        ExprKind::If(if_expr) => ExprExecPlan::If(plans.push_if(source, compile_if_plan(if_expr))),
-        ExprKind::Match(match_expr) => {
-            ExprExecPlan::Match(plans.push_match(source, compile_match_plan(match_expr)))
-        }
+        ExprKind::Array(array) => ExprExecPlan::new(
+            ExprExecKind::Array,
+            plans.push_array(source, compile_array_plan(array)).index,
+        ),
+        ExprKind::Tuple(tuple) => ExprExecPlan::new(
+            ExprExecKind::Tuple,
+            plans.push_tuple(source, compile_tuple_plan(tuple)).index,
+        ),
+        ExprKind::Range(range) => ExprExecPlan::new(
+            ExprExecKind::Range,
+            plans.push_range(source, compile_range_plan(range)).index,
+        ),
+        ExprKind::Map(map) => ExprExecPlan::new(
+            ExprExecKind::Map,
+            plans.push_map(source, compile_map_plan(map)).index,
+        ),
+        ExprKind::Fail(fail) => ExprExecPlan::new(
+            ExprExecKind::Fail,
+            plans.push_fail(source, compile_fail_plan(fail)).index,
+        ),
+        ExprKind::Fallible(fallible) => ExprExecPlan::new(
+            ExprExecKind::Fallible,
+            plans
+                .push_fallible(source, compile_fallible_plan(fallible))
+                .index,
+        ),
+        ExprKind::If(if_expr) => ExprExecPlan::new(
+            ExprExecKind::If,
+            plans.push_if(source, compile_if_plan(if_expr)).index,
+        ),
+        ExprKind::Match(match_expr) => ExprExecPlan::new(
+            ExprExecKind::Match,
+            plans
+                .push_match(source, compile_match_plan(match_expr))
+                .index,
+        ),
         ExprKind::Where(where_expr) => {
             let plan = compile_where_plan(source, where_expr, plans);
-            ExprExecPlan::Where(plans.push_where(source, plan))
+            ExprExecPlan::new(ExprExecKind::Where, plans.push_where(source, plan).index)
         }
-        ExprKind::Prefix(prefix) => {
-            ExprExecPlan::Prefix(plans.push_prefix(source, compile_prefix_plan(prefix)))
-        }
-        ExprKind::Binary(binary) => {
-            ExprExecPlan::Binary(plans.push_binary(source, compile_binary_plan(binary)))
-        }
-        ExprKind::InterpolatedString(interpolated) => ExprExecPlan::InterpolatedString(
-            plans.push_interpolated_string(source, compile_interpolated_string_plan(interpolated)),
+        ExprKind::Prefix(prefix) => ExprExecPlan::new(
+            ExprExecKind::Prefix,
+            plans.push_prefix(source, compile_prefix_plan(prefix)).index,
         ),
-        ExprKind::StructLiteral(struct_literal) => ExprExecPlan::StructLiteral(
-            plans.push_struct_literal(source, compile_struct_literal_plan(struct_literal)),
+        ExprKind::Binary(binary) => ExprExecPlan::new(
+            ExprExecKind::Binary,
+            plans.push_binary(source, compile_binary_plan(binary)).index,
         ),
-        ExprKind::Field(field) => {
-            ExprExecPlan::Field(plans.push_field(source, compile_field_plan(field)))
-        }
-        ExprKind::Unsupported { .. } => ExprExecPlan::Expr,
+        ExprKind::InterpolatedString(interpolated) => ExprExecPlan::new(
+            ExprExecKind::InterpolatedString,
+            plans
+                .push_interpolated_string(source, compile_interpolated_string_plan(interpolated))
+                .index,
+        ),
+        ExprKind::StructLiteral(struct_literal) => ExprExecPlan::new(
+            ExprExecKind::StructLiteral,
+            plans
+                .push_struct_literal(source, compile_struct_literal_plan(struct_literal))
+                .index,
+        ),
+        ExprKind::Field(field) => ExprExecPlan::new(
+            ExprExecKind::Field,
+            plans.push_field(source, compile_field_plan(field)).index,
+        ),
+        ExprKind::Unsupported { .. } => ExprExecPlan::expr(),
     }
 }
 

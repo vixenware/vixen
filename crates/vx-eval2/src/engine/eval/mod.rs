@@ -1,9 +1,9 @@
 use super::*;
 use crate::program::{
     ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, DirectCallCalleePlan,
-    FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan,
-    NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan, TuplePlan,
-    WherePlan,
+    ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan,
+    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan,
+    TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -902,29 +902,29 @@ pub(super) fn eval_expr_with_node_id(
 }
 
 pub(super) fn prepared_body_kind(body: &PreparedBodyRef) -> EvalExprKind {
-    match body.plan {
-        ExprExecPlan::Expr => EvalExprKind::Unsupported,
-        ExprExecPlan::Block { .. } => EvalExprKind::Block,
-        ExprExecPlan::Literal(_) => EvalExprKind::Literal,
-        ExprExecPlan::PathLiteral(_) => EvalExprKind::Literal,
-        ExprExecPlan::Paren(_) => EvalExprKind::Paren,
-        ExprExecPlan::Closure(_) => EvalExprKind::Closure,
-        ExprExecPlan::NameRef(_) => EvalExprKind::NameRef,
-        ExprExecPlan::Call(_) => EvalExprKind::Call,
-        ExprExecPlan::Field(_) => EvalExprKind::Field,
-        ExprExecPlan::Array(_) => EvalExprKind::Array,
-        ExprExecPlan::Tuple(_) => EvalExprKind::Tuple,
-        ExprExecPlan::Range(_) => EvalExprKind::Range,
-        ExprExecPlan::Map(_) => EvalExprKind::Map,
-        ExprExecPlan::Fail(_) => EvalExprKind::Fail,
-        ExprExecPlan::Fallible(_) => EvalExprKind::Unsupported,
-        ExprExecPlan::If(_) => EvalExprKind::If,
-        ExprExecPlan::Match(_) => EvalExprKind::Match,
-        ExprExecPlan::Where(_) => EvalExprKind::Where,
-        ExprExecPlan::Prefix(_) => EvalExprKind::Prefix,
-        ExprExecPlan::Binary(_) => EvalExprKind::Binary,
-        ExprExecPlan::InterpolatedString(_) => EvalExprKind::InterpolatedString,
-        ExprExecPlan::StructLiteral(_) => EvalExprKind::StructLiteral,
+    match body.plan.kind() {
+        ExprExecKind::Expr => EvalExprKind::Unsupported,
+        ExprExecKind::Block => EvalExprKind::Block,
+        ExprExecKind::Literal => EvalExprKind::Literal,
+        ExprExecKind::PathLiteral => EvalExprKind::Literal,
+        ExprExecKind::Paren => EvalExprKind::Paren,
+        ExprExecKind::Closure => EvalExprKind::Closure,
+        ExprExecKind::NameRef => EvalExprKind::NameRef,
+        ExprExecKind::Call => EvalExprKind::Call,
+        ExprExecKind::Field => EvalExprKind::Field,
+        ExprExecKind::Array => EvalExprKind::Array,
+        ExprExecKind::Tuple => EvalExprKind::Tuple,
+        ExprExecKind::Range => EvalExprKind::Range,
+        ExprExecKind::Map => EvalExprKind::Map,
+        ExprExecKind::Fail => EvalExprKind::Fail,
+        ExprExecKind::Fallible => EvalExprKind::Unsupported,
+        ExprExecKind::If => EvalExprKind::If,
+        ExprExecKind::Match => EvalExprKind::Match,
+        ExprExecKind::Where => EvalExprKind::Where,
+        ExprExecKind::Prefix => EvalExprKind::Prefix,
+        ExprExecKind::Binary => EvalExprKind::Binary,
+        ExprExecKind::InterpolatedString => EvalExprKind::InterpolatedString,
+        ExprExecKind::StructLiteral => EvalExprKind::StructLiteral,
     }
 }
 
@@ -935,104 +935,133 @@ fn eval_prepared_body_step(
     body: PreparedBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match body.plan {
-        ExprExecPlan::Expr => {
+    let body_source = body.root_expr_id.source();
+    match body.plan.kind() {
+        ExprExecKind::Expr => {
             let expr = state.program.resolve_expr_id(body.root_expr_id)?;
             eval_expr_step(state, node_id, parent_id, expr, env)
         }
-        ExprExecPlan::Block { body } => continue_block_body(
+        ExprExecKind::Block => continue_block_body(
             state,
             node_id,
             parent_id,
             std::mem::take(env),
             Value::unit(),
-            body,
+            body.plan.block_body_id(body_source),
             0,
         ),
-        ExprExecPlan::Literal(literal) => state
+        ExprExecKind::Literal => state
             .program
-            .resolve_literal_plan(literal)
+            .resolve_literal_plan(body.plan.literal_plan_id(body_source))
             .and_then(|literal| eval_literal_plan(state, literal))
             .map(EvalStep::Ready),
-        ExprExecPlan::PathLiteral(path_literal) => state
+        ExprExecKind::PathLiteral => state
             .program
-            .resolve_path_literal_plan(path_literal)
+            .resolve_path_literal_plan(body.plan.path_literal_plan_id(body_source))
             .and_then(|path_literal| eval_path_literal_plan(state, path_literal))
             .map(EvalStep::Ready),
-        ExprExecPlan::Paren(paren) => state
+        ExprExecKind::Paren => state
             .program
-            .resolve_paren_plan(paren)
+            .resolve_paren_plan(body.plan.paren_plan_id(body_source))
             .and_then(|paren| eval_paren_plan(state, node_id, parent_id, paren, env)),
-        ExprExecPlan::Closure(closure) => state
+        ExprExecKind::Closure => state
             .program
-            .resolve_closure_plan(closure)
+            .resolve_closure_plan(body.plan.closure_plan_id(body_source))
             .and_then(|closure| eval_closure_plan(state, closure, env))
             .map(EvalStep::Ready),
-        ExprExecPlan::NameRef(name_ref) => state
+        ExprExecKind::NameRef => state
             .program
-            .resolve_name_ref_plan(name_ref)
+            .resolve_name_ref_plan(body.plan.name_ref_plan_id(body_source))
             .and_then(|name_ref| eval_name_ref_plan(state, name_ref, env))
             .map(EvalStep::Ready),
-        ExprExecPlan::Call(call) => {
-            let call = state.program.resolve_call_plan(call)?;
+        ExprExecKind::Call => {
+            let call = state
+                .program
+                .resolve_call_plan(body.plan.call_plan_id(body_source))?;
             eval_call_plan(state, call, env)
         }
-        ExprExecPlan::Field(field) => {
-            let field = state.program.resolve_field_plan(field)?;
+        ExprExecKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(body.plan.field_plan_id(body_source))?;
             eval_field_plan(state, field, env)
         }
-        ExprExecPlan::Array(array) => {
-            let array = state.program.resolve_array_plan(array)?;
+        ExprExecKind::Array => {
+            let array = state
+                .program
+                .resolve_array_plan(body.plan.array_plan_id(body_source))?;
             eval_array_plan(state, array, env)
         }
-        ExprExecPlan::Tuple(tuple) => {
-            let tuple = state.program.resolve_tuple_plan(tuple)?;
+        ExprExecKind::Tuple => {
+            let tuple = state
+                .program
+                .resolve_tuple_plan(body.plan.tuple_plan_id(body_source))?;
             eval_tuple_plan(state, tuple, env)
         }
-        ExprExecPlan::Range(range) => {
-            let range = state.program.resolve_range_plan(range)?;
+        ExprExecKind::Range => {
+            let range = state
+                .program
+                .resolve_range_plan(body.plan.range_plan_id(body_source))?;
             eval_range_plan(state, range, env)
         }
-        ExprExecPlan::Map(map) => {
-            let map = state.program.resolve_map_plan(map)?;
+        ExprExecKind::Map => {
+            let map = state
+                .program
+                .resolve_map_plan(body.plan.map_plan_id(body_source))?;
             eval_map_plan(state, map, env)
         }
-        ExprExecPlan::Fail(fail) => {
-            let fail = state.program.resolve_fail_plan(fail)?;
+        ExprExecKind::Fail => {
+            let fail = state
+                .program
+                .resolve_fail_plan(body.plan.fail_plan_id(body_source))?;
             eval_fail_plan(state, fail, env)
         }
-        ExprExecPlan::Fallible(fallible) => {
-            let fallible = state.program.resolve_fallible_plan(fallible)?;
+        ExprExecKind::Fallible => {
+            let fallible = state
+                .program
+                .resolve_fallible_plan(body.plan.fallible_plan_id(body_source))?;
             eval_fallible_plan(state, fallible, env)
         }
-        ExprExecPlan::If(if_expr) => {
-            let if_expr = state.program.resolve_if_plan(if_expr)?;
+        ExprExecKind::If => {
+            let if_expr = state
+                .program
+                .resolve_if_plan(body.plan.if_plan_id(body_source))?;
             eval_if_plan(state, if_expr, env)
         }
-        ExprExecPlan::Match(match_expr) => {
-            let match_expr = state.program.resolve_match_plan(match_expr)?;
+        ExprExecKind::Match => {
+            let match_expr = state
+                .program
+                .resolve_match_plan(body.plan.match_plan_id(body_source))?;
             eval_match_plan(state, match_expr, env)
         }
-        ExprExecPlan::Where(where_expr) => {
-            let where_expr = state.program.resolve_where_plan(where_expr)?;
+        ExprExecKind::Where => {
+            let where_expr = state
+                .program
+                .resolve_where_plan(body.plan.where_plan_id(body_source))?;
             eval_where_plan(state, where_expr, env)
         }
-        ExprExecPlan::Prefix(prefix) => {
-            let prefix = state.program.resolve_prefix_plan(prefix)?;
+        ExprExecKind::Prefix => {
+            let prefix = state
+                .program
+                .resolve_prefix_plan(body.plan.prefix_plan_id(body_source))?;
             eval_prefix_plan(state, prefix, env)
         }
-        ExprExecPlan::Binary(binary) => {
-            let binary = state.program.resolve_binary_plan(binary)?;
+        ExprExecKind::Binary => {
+            let binary = state
+                .program
+                .resolve_binary_plan(body.plan.binary_plan_id(body_source))?;
             eval_binary_plan(state, binary, env)
         }
-        ExprExecPlan::InterpolatedString(interpolated) => {
-            let interpolated = state
-                .program
-                .resolve_interpolated_string_plan(interpolated)?;
+        ExprExecKind::InterpolatedString => {
+            let interpolated = state.program.resolve_interpolated_string_plan(
+                body.plan.interpolated_string_plan_id(body_source),
+            )?;
             eval_interpolated_string_plan(state, interpolated, env)
         }
-        ExprExecPlan::StructLiteral(struct_literal) => {
-            let struct_literal = state.program.resolve_struct_literal_plan(struct_literal)?;
+        ExprExecKind::StructLiteral => {
+            let struct_literal = state
+                .program
+                .resolve_struct_literal_plan(body.plan.struct_literal_plan_id(body_source))?;
             eval_struct_literal_plan(state, struct_literal, env)
         }
     }
