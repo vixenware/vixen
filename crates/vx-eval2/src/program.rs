@@ -1301,6 +1301,7 @@ pub(crate) enum BytecodeOp {
     EvalReady(ExprExecPlan),
     EvalBytecodeBody(BytecodeBodyId),
     EvalCall(ExprBodyRef),
+    EvalWhere(ExprBodyRef),
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
     EvalIfBranches {
@@ -4781,6 +4782,9 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 ops.push(BytecodeOp::RaiseUserFail {
                     fail_source: source.span_for_range(fail.handle.to_range()),
                 });
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
+                ops.push(BytecodeOp::EvalWhere(expr));
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
                 ops.push(BytecodeOp::EvalPlan(expr));

@@ -1112,6 +1112,29 @@ fn compiled_program_lowers_call_expr_to_bytecode_ops() {
 }
 
 #[test]
+fn compiled_program_lowers_where_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-where",
+        "fn helper() { 1 }\nfn build() { helper() where { value: \"serde\", needle: \"ser\" } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 3);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalWhere(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
+}
+
+#[test]
 fn compiled_program_lowers_direct_name_call_callee_to_call_callee_plan() {
     let program = CompiledProgram::new("lowered-call-callee", "fn build() { helper(42) }");
     let function = program.find_function("build").expect("find build function");
