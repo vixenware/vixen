@@ -3450,6 +3450,31 @@ pub(super) fn continue_bytecode_body(
                     )
                 })?);
             }
+            BytecodeOp::EvalBytecodeBody(body) => {
+                bytecode.pc += 1;
+                let nested = BytecodeState {
+                    scope: bytecode.scope.clone(),
+                    last: Value::unit(),
+                    body: *body,
+                    pc: 0,
+                    acc: None,
+                };
+                match state.with_source(body.source(), |state| {
+                    continue_bytecode_body(state, node_id, parent_id, nested)
+                })? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::Bytecode {
+                                node_id,
+                                parent_id,
+                                bytecode,
+                            },
+                        ));
+                    }
+                }
+            }
             BytecodeOp::EvalBody(body_ref) => {
                 bytecode.pc += 1;
                 match state.with_source(source, |state| {
