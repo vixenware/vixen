@@ -26,10 +26,10 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
-        ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, CompiledProgram,
+        ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, ClosurePlan, CompiledProgram,
         ExprExecPlan, ExprKind, FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan,
-        LiteralPlan, MapPlan, PrefixPlan, RangePlan, ResolvedNameRef, StructLiteralPlan, TuplePlan,
-        WherePlan,
+        LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan, ResolvedNameRef,
+        StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1026,8 +1026,13 @@ fn compiled_program_caches_resolved_call_exec_plan() {
     let call = program
         .resolve_call_plan(*call)
         .expect("resolve cached call payload");
+    let callee = call
+        .callee
+        .map(|callee| program.resolve_call_callee_plan(callee))
+        .transpose()
+        .expect("resolve cached call callee payload");
     assert!(matches!(
-        call.callee,
+        callee,
         Some(CallCalleePlan::ResolvedFunction { .. })
     ));
 }
@@ -1285,11 +1290,17 @@ fn compiled_program_caches_where_exec_plan() {
     } = program
         .resolve_where_plan(*where_plan)
         .expect("resolve cached where payload");
-    let call = call
-        .as_ref()
-        .expect("cached where plan should contain call");
+    let call = call.expect("cached where plan should contain call");
+    let call = program
+        .resolve_call_plan(call)
+        .expect("resolve cached nested where call payload");
+    let callee = call
+        .callee
+        .map(|callee| program.resolve_call_callee_plan(callee))
+        .transpose()
+        .expect("resolve cached where callee payload");
     assert!(matches!(
-        call.callee,
+        callee,
         Some(CallCalleePlan::ResolvedFunction { .. })
     ));
     assert_eq!(keyword_bindings.len(), 2);
@@ -1643,6 +1654,117 @@ fn compiled_program_caches_struct_literal_exec_plan() {
         .expect("resolve cached struct literal payload");
     assert_eq!(type_name.as_deref(), Some("Box"));
     assert_eq!(parts.len(), 1);
+}
+
+#[test]
+fn compiled_program_caches_paren_exec_plan() {
+    let program = CompiledProgram::new("cached-paren-plan", "fn build() { (1) }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(paren_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain paren expression");
+    };
+    let plan = program
+        .resolve_expr_plan(paren_expr)
+        .expect("resolve cached paren plan");
+    let ExprExecPlan::Paren(paren) = plan.as_ref() else {
+        panic!("expected cached paren exec plan, got {plan:?}");
+    };
+    let ParenPlan { expr, .. } = program
+        .resolve_paren_plan(*paren)
+        .expect("resolve cached paren payload");
+    assert!(expr.is_some());
+}
+
+#[test]
+fn compiled_program_caches_closure_exec_plan() {
+    let program = CompiledProgram::new("cached-closure-plan", "fn build() { ((value) => value) }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(closure_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain closure expression");
+    };
+    let mut closure_expr = closure_expr;
+    let plan = program
+        .resolve_expr_plan(closure_expr)
+        .expect("resolve cached closure plan");
+    let closure = match plan.as_ref() {
+        ExprExecPlan::Closure(closure) => *closure,
+        ExprExecPlan::Paren(paren) => {
+            let ParenPlan { expr, .. } = program
+                .resolve_paren_plan(*paren)
+                .expect("resolve cached paren payload");
+            closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
+            let plan = program
+                .resolve_expr_plan(closure_expr)
+                .expect("resolve cached inner closure plan");
+            let ExprExecPlan::Closure(closure) = plan.as_ref() else {
+                panic!("expected cached inner closure exec plan, got {plan:?}");
+            };
+            *closure
+        }
+        _ => panic!("expected cached closure exec plan, got {plan:?}"),
+    };
+    let ClosurePlan {
+        parameters, body, ..
+    } = program
+        .resolve_closure_plan(closure)
+        .expect("resolve cached closure payload");
+    assert_eq!(parameters.len(), 1);
+    assert!(body.is_some());
+}
+
+#[test]
+fn compiled_program_caches_match_exec_plan() {
+    let program = CompiledProgram::new(
+        "cached-match-plan",
+        "fn build() { match true { true => 1, false => 2 } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(match_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain match expression");
+    };
+    let plan = program
+        .resolve_expr_plan(match_expr)
+        .expect("resolve cached match plan");
+    let ExprExecPlan::Match(match_plan) = plan.as_ref() else {
+        panic!("expected cached match exec plan, got {plan:?}");
+    };
+    let MatchPlan {
+        scrutinee, arms, ..
+    } = program
+        .resolve_match_plan(*match_plan)
+        .expect("resolve cached match payload");
+    assert!(scrutinee.is_some());
+    assert_eq!(arms.len(), 2);
 }
 
 #[test]

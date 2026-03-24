@@ -163,7 +163,7 @@ pub(super) struct IfState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MatchState {
-    pub(super) match_expr: ExprId,
+    pub(super) match_plan: MatchPlan,
     pub(super) env: EvalEnv,
 }
 

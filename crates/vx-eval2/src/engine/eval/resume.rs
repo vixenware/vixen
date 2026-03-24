@@ -784,7 +784,7 @@ pub(in crate::engine) fn resume_frame(
                     state,
                     node_id,
                     parent_id,
-                    match_state.match_expr,
+                    &match_state.match_plan,
                     scrutinee,
                     match_state.env,
                 ),

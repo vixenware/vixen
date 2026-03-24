@@ -228,6 +228,18 @@ impl CallPlanId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct CallCalleePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl CallCalleePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FieldPlanId {
     source: u32,
     index: u32,
@@ -383,6 +395,42 @@ impl StructLiteralPlanId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ParenPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl ParenPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ClosurePlanId {
+    source: u32,
+    index: u32,
+}
+
+impl ClosurePlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct MatchPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl MatchPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledParameter {
     pub(crate) label: Arc<str>,
@@ -527,8 +575,8 @@ pub(crate) enum ExprExecPlan {
     Block { body: BlockBodyId },
     Literal(LiteralPlanId),
     PathLiteral(PathLiteralPlanId),
-    Paren(ParenExpr),
-    Closure(ClosureExpr),
+    Paren(ParenPlanId),
+    Closure(ClosurePlanId),
     NameRef(NameRefPlanId),
     Call(CallPlanId),
     Array(ArrayPlanId),
@@ -538,7 +586,7 @@ pub(crate) enum ExprExecPlan {
     Fail(FailPlanId),
     Fallible(FalliblePlanId),
     If(IfPlanId),
-    Match(MatchExpr),
+    Match(MatchPlanId),
     Where(WherePlanId),
     Prefix(PrefixPlanId),
     Binary(BinaryPlanId),
@@ -584,7 +632,7 @@ pub(crate) struct NameRefPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallCalleePlan {
-    NameRef(NameRefPlan),
+    NameRef(NameRefPlanId),
     ResolvedFunction {
         resolved_name: Arc<str>,
         function: CompiledFunction,
@@ -603,14 +651,14 @@ pub(crate) enum CallCalleePlan {
         full_name: Arc<str>,
         variant_constructor: Option<VariantConstructor>,
     },
-    Field(FieldPlan),
+    Field(FieldPlanId),
     Expr(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) callee: Option<CallCalleePlan>,
+    pub(crate) callee: Option<CallCalleePlanId>,
     pub(crate) type_args: Arc<[Ty]>,
     pub(crate) positional_args: Arc<[ExprId]>,
 }
@@ -626,7 +674,7 @@ pub(crate) struct FieldPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WherePlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) call: Option<CallPlan>,
+    pub(crate) call: Option<CallPlanId>,
     pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
 }
 
@@ -702,6 +750,26 @@ pub(crate) struct StructLiteralPlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) type_name: Option<Arc<str>>,
     pub(crate) parts: Arc<[StructLiteralPart]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParenPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) expr: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClosurePlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) parameters: Arc<[CompiledParameter]>,
+    pub(crate) body: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MatchPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) scrutinee: Option<ExprId>,
+    pub(crate) arms: Arc<[MatchArmPlan]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -993,6 +1061,7 @@ struct ExprPlanTables {
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
+    call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
@@ -1007,6 +1076,9 @@ struct ExprPlanTables {
     fail_plans: Vec<FailPlan>,
     interpolated_string_plans: Vec<InterpolatedStringPlan>,
     struct_literal_plans: Vec<StructLiteralPlan>,
+    paren_plans: Vec<ParenPlan>,
+    closure_plans: Vec<ClosurePlan>,
+    match_plans: Vec<MatchPlan>,
 }
 
 struct CompiledProgramSource {
@@ -1020,6 +1092,7 @@ struct CompiledProgramSource {
     literal_plans: Vec<LiteralPlan>,
     path_literal_plans: Vec<PathLiteralPlan>,
     name_ref_plans: Vec<NameRefPlan>,
+    call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
@@ -1034,6 +1107,9 @@ struct CompiledProgramSource {
     fail_plans: Vec<FailPlan>,
     interpolated_string_plans: Vec<InterpolatedStringPlan>,
     struct_literal_plans: Vec<StructLiteralPlan>,
+    paren_plans: Vec<ParenPlan>,
+    closure_plans: Vec<ClosurePlan>,
+    match_plans: Vec<MatchPlan>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
@@ -1197,6 +1273,13 @@ impl CompiledProgram {
         self.source(id.source())?.resolve_name_ref_plan(id)
     }
 
+    pub(crate) fn resolve_call_callee_plan(
+        &self,
+        id: CallCalleePlanId,
+    ) -> Result<&CallCalleePlan, EvalError> {
+        self.source(id.source())?.resolve_call_callee_plan(id)
+    }
+
     pub(crate) fn resolve_call_plan(&self, id: CallPlanId) -> Result<&CallPlan, EvalError> {
         self.source(id.source())?.resolve_call_plan(id)
     }
@@ -1261,6 +1344,21 @@ impl CompiledProgram {
         id: StructLiteralPlanId,
     ) -> Result<&StructLiteralPlan, EvalError> {
         self.source(id.source())?.resolve_struct_literal_plan(id)
+    }
+
+    pub(crate) fn resolve_paren_plan(&self, id: ParenPlanId) -> Result<&ParenPlan, EvalError> {
+        self.source(id.source())?.resolve_paren_plan(id)
+    }
+
+    pub(crate) fn resolve_closure_plan(
+        &self,
+        id: ClosurePlanId,
+    ) -> Result<&ClosurePlan, EvalError> {
+        self.source(id.source())?.resolve_closure_plan(id)
+    }
+
+    pub(crate) fn resolve_match_plan(&self, id: MatchPlanId) -> Result<&MatchPlan, EvalError> {
+        self.source(id.source())?.resolve_match_plan(id)
     }
 
     pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
@@ -1604,6 +1702,7 @@ impl CompiledProgramSource {
         let literal_plans = Vec::new();
         let path_literal_plans = Vec::new();
         let name_ref_plans = Vec::new();
+        let call_callee_plans = Vec::new();
         let call_plans = Vec::new();
         let field_plans = Vec::new();
         let where_plans = Vec::new();
@@ -1618,6 +1717,9 @@ impl CompiledProgramSource {
         let fail_plans = Vec::new();
         let interpolated_string_plans = Vec::new();
         let struct_literal_plans = Vec::new();
+        let paren_plans = Vec::new();
+        let closure_plans = Vec::new();
+        let match_plans = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -1674,6 +1776,7 @@ impl CompiledProgramSource {
             literal_plans,
             path_literal_plans,
             name_ref_plans,
+            call_callee_plans,
             call_plans,
             field_plans,
             where_plans,
@@ -1688,6 +1791,9 @@ impl CompiledProgramSource {
             fail_plans,
             interpolated_string_plans,
             struct_literal_plans,
+            paren_plans,
+            closure_plans,
+            match_plans,
             expr_ids,
             block_bodies,
             type_nodes,
@@ -1931,6 +2037,18 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_call_callee_plan(&self, id: CallCalleePlanId) -> Result<&CallCalleePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.call_callee_plans
+            .get(id.index as usize)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("call callee plan {:?} was not found", id),
+                )
+            })
+    }
+
     fn resolve_call_plan(&self, id: CallPlanId) -> Result<&CallPlan, EvalError> {
         self.ensure_parsed()?;
         self.call_plans.get(id.index as usize).ok_or_else(|| {
@@ -2081,6 +2199,36 @@ impl CompiledProgramSource {
             })
     }
 
+    fn resolve_paren_plan(&self, id: ParenPlanId) -> Result<&ParenPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.paren_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("paren plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_closure_plan(&self, id: ClosurePlanId) -> Result<&ClosurePlan, EvalError> {
+        self.ensure_parsed()?;
+        self.closure_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("closure plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_match_plan(&self, id: MatchPlanId) -> Result<&MatchPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.match_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("match plan {:?} was not found", id),
+            )
+        })
+    }
+
     fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
         self.block_bodies.get(id.index as usize).ok_or_else(|| {
@@ -2105,6 +2253,7 @@ impl CompiledProgramSource {
         self.literal_plans = plans.literal_plans;
         self.path_literal_plans = plans.path_literal_plans;
         self.name_ref_plans = plans.name_ref_plans;
+        self.call_callee_plans = plans.call_callee_plans;
         self.call_plans = plans.call_plans;
         self.field_plans = plans.field_plans;
         self.where_plans = plans.where_plans;
@@ -2119,6 +2268,9 @@ impl CompiledProgramSource {
         self.fail_plans = plans.fail_plans;
         self.interpolated_string_plans = plans.interpolated_string_plans;
         self.struct_literal_plans = plans.struct_literal_plans;
+        self.paren_plans = plans.paren_plans;
+        self.closure_plans = plans.closure_plans;
+        self.match_plans = plans.match_plans;
     }
 
     #[cfg(test)]
@@ -2187,6 +2339,15 @@ impl ExprPlanTables {
             index: self.name_ref_plans.len() as u32,
         };
         self.name_ref_plans.push(plan);
+        id
+    }
+
+    fn push_call_callee(&mut self, source: SourceId, plan: CallCalleePlan) -> CallCalleePlanId {
+        let id = CallCalleePlanId {
+            source: source.0,
+            index: self.call_callee_plans.len() as u32,
+        };
+        self.call_callee_plans.push(plan);
         id
     }
 
@@ -2323,6 +2484,33 @@ impl ExprPlanTables {
         self.struct_literal_plans.push(plan);
         id
     }
+
+    fn push_paren(&mut self, source: SourceId, plan: ParenPlan) -> ParenPlanId {
+        let id = ParenPlanId {
+            source: source.0,
+            index: self.paren_plans.len() as u32,
+        };
+        self.paren_plans.push(plan);
+        id
+    }
+
+    fn push_closure(&mut self, source: SourceId, plan: ClosurePlan) -> ClosurePlanId {
+        let id = ClosurePlanId {
+            source: source.0,
+            index: self.closure_plans.len() as u32,
+        };
+        self.closure_plans.push(plan);
+        id
+    }
+
+    fn push_match(&mut self, source: SourceId, plan: MatchPlan) -> MatchPlanId {
+        let id = MatchPlanId {
+            source: source.0,
+            index: self.match_plans.len() as u32,
+        };
+        self.match_plans.push(plan);
+        id
+    }
 }
 
 fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
@@ -2335,13 +2523,18 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
         ExprKind::PathLiteral(path_literal) => ExprExecPlan::PathLiteral(
             plans.push_path_literal(source, compile_path_literal_plan(path_literal)),
         ),
-        ExprKind::Paren(paren) => ExprExecPlan::Paren(paren.clone()),
-        ExprKind::Closure(closure) => ExprExecPlan::Closure(closure.clone()),
+        ExprKind::Paren(paren) => {
+            ExprExecPlan::Paren(plans.push_paren(source, compile_paren_plan(paren)))
+        }
+        ExprKind::Closure(closure) => {
+            ExprExecPlan::Closure(plans.push_closure(source, compile_closure_plan(closure)))
+        }
         ExprKind::NameRef(name_ref) => {
             ExprExecPlan::NameRef(plans.push_name_ref(source, compile_name_ref_plan(name_ref)))
         }
         ExprKind::Call(call) => {
-            ExprExecPlan::Call(plans.push_call(source, compile_call_plan(call)))
+            let plan = compile_call_plan(source, call, plans);
+            ExprExecPlan::Call(plans.push_call(source, plan))
         }
         ExprKind::Array(array) => {
             ExprExecPlan::Array(plans.push_array(source, compile_array_plan(array)))
@@ -2360,9 +2553,12 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::Fallible(plans.push_fallible(source, compile_fallible_plan(fallible)))
         }
         ExprKind::If(if_expr) => ExprExecPlan::If(plans.push_if(source, compile_if_plan(if_expr))),
-        ExprKind::Match(match_expr) => ExprExecPlan::Match(match_expr.clone()),
+        ExprKind::Match(match_expr) => {
+            ExprExecPlan::Match(plans.push_match(source, compile_match_plan(match_expr)))
+        }
         ExprKind::Where(where_expr) => {
-            ExprExecPlan::Where(plans.push_where(source, compile_where_plan(where_expr)))
+            let plan = compile_where_plan(source, where_expr, plans);
+            ExprExecPlan::Where(plans.push_where(source, plan))
         }
         ExprKind::Prefix(prefix) => {
             ExprExecPlan::Prefix(plans.push_prefix(source, compile_prefix_plan(prefix)))
@@ -2444,9 +2640,16 @@ fn compile_name_ref_plan(name_ref: &NameRefExpr) -> NameRefPlan {
     }
 }
 
-fn compile_call_callee_plan(callee: &CallCallee) -> CallCalleePlan {
+fn compile_call_callee_plan(
+    source: SourceId,
+    callee: &CallCallee,
+    plans: &mut ExprPlanTables,
+) -> CallCalleePlan {
     match callee {
-        CallCallee::NameRef(name_ref) => CallCalleePlan::NameRef(compile_name_ref_plan(name_ref)),
+        CallCallee::NameRef(name_ref) => {
+            let plan = compile_name_ref_plan(name_ref);
+            CallCalleePlan::NameRef(plans.push_name_ref(source, plan))
+        }
         CallCallee::ResolvedFunction {
             resolved_name,
             function,
@@ -2479,15 +2682,21 @@ fn compile_call_callee_plan(callee: &CallCallee) -> CallCalleePlan {
             full_name: full_name.clone(),
             variant_constructor: variant_constructor.clone(),
         },
-        CallCallee::Field(field) => CallCalleePlan::Field(compile_field_plan(field)),
+        CallCallee::Field(field) => {
+            let plan = compile_field_plan(field);
+            CallCalleePlan::Field(plans.push_field(source, plan))
+        }
         CallCallee::Expr(expr) => CallCalleePlan::Expr(*expr),
     }
 }
 
-fn compile_call_plan(call: &CallExpr) -> CallPlan {
+fn compile_call_plan(source: SourceId, call: &CallExpr, plans: &mut ExprPlanTables) -> CallPlan {
     CallPlan {
         handle: call.handle,
-        callee: call.callee.as_ref().map(compile_call_callee_plan),
+        callee: call.callee.as_ref().map(|callee| {
+            let plan = compile_call_callee_plan(source, callee, plans);
+            plans.push_call_callee(source, plan)
+        }),
         type_args: Arc::clone(&call.type_args),
         positional_args: Arc::clone(&call.positional_args),
     }
@@ -2556,10 +2765,18 @@ fn compile_field_plan(field: &FieldExpr) -> FieldPlan {
     }
 }
 
-fn compile_where_plan(where_expr: &WhereExpr) -> WherePlan {
+fn compile_where_plan(
+    source: SourceId,
+    where_expr: &WhereExpr,
+    plans: &mut ExprPlanTables,
+) -> WherePlan {
+    let call = where_expr.call.as_ref().map(|call| {
+        let call_plan = compile_call_plan(source, call, plans);
+        plans.push_call(source, call_plan)
+    });
     WherePlan {
         handle: where_expr.handle,
-        call: where_expr.call.as_ref().map(compile_call_plan),
+        call,
         keyword_bindings: Arc::clone(&where_expr.keyword_bindings),
     }
 }
@@ -2594,6 +2811,29 @@ fn compile_binary_plan(binary: &BinaryExpr) -> BinaryPlan {
         lhs: binary.lhs,
         rhs: binary.rhs,
         operator: binary.operator,
+    }
+}
+
+fn compile_paren_plan(paren: &ParenExpr) -> ParenPlan {
+    ParenPlan {
+        handle: paren.handle,
+        expr: paren.expr,
+    }
+}
+
+fn compile_closure_plan(closure: &ClosureExpr) -> ClosurePlan {
+    ClosurePlan {
+        handle: closure.handle,
+        parameters: Arc::clone(&closure.parameters),
+        body: closure.body,
+    }
+}
+
+fn compile_match_plan(match_expr: &MatchExpr) -> MatchPlan {
+    MatchPlan {
+        handle: match_expr.handle,
+        scrutinee: match_expr.scrutinee,
+        arms: Arc::clone(&match_expr.arms),
     }
 }
 

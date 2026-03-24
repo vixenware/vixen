@@ -1,8 +1,8 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan,
-    InterpolatedStringPlan, LiteralPlan, MapPlan, NameRefPlan, PathLiteralPlan, PrefixPlan,
-    RangePlan, StructLiteralPlan, TuplePlan, WherePlan,
+    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, ClosurePlan, FalliblePlan, FieldPlan, IfPlan,
+    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
+    PathLiteralPlan, PrefixPlan, RangePlan, StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -412,14 +412,29 @@ pub(super) fn eval_closure(
     closure: &ClosureExpr,
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
-    let body = closure
-        .body
+    eval_closure_body(
+        state,
+        closure.handle,
+        Arc::clone(&closure.parameters),
+        closure.body,
+        env,
+    )
+}
+
+fn eval_closure_body(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    parameters: Arc<[CompiledParameter]>,
+    body: Option<ExprId>,
+    env: &EvalEnv,
+) -> Result<Value, EvalError> {
+    let body = body
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "closure expression has no body"))?;
-    let closure_source = state.span_for_node(closure);
+    let closure_source = state.program.span_for_handle(handle);
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from("<closure>"),
-        Arc::clone(&closure.parameters),
+        parameters,
         false,
         Some(body),
         captures_from_scope(env),
@@ -683,7 +698,17 @@ fn eval_paren(
     paren: &ParenExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match paren.expr {
+    eval_paren_expr(state, node_id, parent_id, paren.expr, env)
+}
+
+fn eval_paren_expr(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    inner: Option<ExprId>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    match inner {
         Some(inner) => match eval_child_expr_id(state, state.expr_id_for(inner)?, env)? {
             EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
             EvalStep::Suspended(suspension) => Ok(extend_suspension(
@@ -693,6 +718,30 @@ fn eval_paren(
         },
         None => Ok(EvalStep::Ready(Value::unit())),
     }
+}
+
+fn eval_paren_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    paren: &ParenPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_paren_expr(state, node_id, parent_id, paren.expr, env)
+}
+
+fn eval_closure_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    closure: &ClosurePlan,
+    env: &EvalEnv,
+) -> Result<Value, EvalError> {
+    eval_closure_body(
+        state,
+        closure.handle,
+        Arc::clone(&closure.parameters),
+        closure.body,
+        env,
+    )
 }
 
 fn eval_expr_step(
@@ -791,7 +840,7 @@ fn eval_expr_step(
             let ExprKind::Match(match_expr) = expr.kind() else {
                 unreachable!()
             };
-            eval_match(state, state.expr_id(expr), match_expr, env)
+            eval_match(state, match_expr, env)
         }
         _ if matches!(expr.kind(), ExprKind::Where(_)) => {
             let ExprKind::Where(where_expr) = expr.kind() else {
@@ -909,8 +958,15 @@ fn eval_prepared_body_step(
             .resolve_path_literal_plan(*path_literal)
             .and_then(|path_literal| eval_path_literal_plan(state, path_literal))
             .map(EvalStep::Ready),
-        ExprExecPlan::Paren(paren) => eval_paren(state, node_id, parent_id, &paren, env),
-        ExprExecPlan::Closure(closure) => eval_closure(state, &closure, env).map(EvalStep::Ready),
+        ExprExecPlan::Paren(paren) => state
+            .program
+            .resolve_paren_plan(*paren)
+            .and_then(|paren| eval_paren_plan(state, node_id, parent_id, paren, env)),
+        ExprExecPlan::Closure(closure) => state
+            .program
+            .resolve_closure_plan(*closure)
+            .and_then(|closure| eval_closure_plan(state, closure, env))
+            .map(EvalStep::Ready),
         ExprExecPlan::NameRef(name_ref) => state
             .program
             .resolve_name_ref_plan(*name_ref)
@@ -952,7 +1008,10 @@ fn eval_prepared_body_step(
             let if_expr = state.program.resolve_if_plan(*if_expr)?;
             eval_if_plan(state, if_expr, env)
         }
-        ExprExecPlan::Match(match_expr) => eval_match(state, body.root_expr_id, &match_expr, env),
+        ExprExecPlan::Match(match_expr) => {
+            let match_expr = state.program.resolve_match_plan(*match_expr)?;
+            eval_match_plan(state, match_expr, env)
+        }
         ExprExecPlan::Where(where_expr) => {
             let where_expr = state.program.resolve_where_plan(*where_expr)?;
             eval_where_plan(state, where_expr, env)
@@ -1232,6 +1291,9 @@ fn eval_call_plan(
 ) -> Result<EvalStep, EvalError> {
     let callee = call
         .callee
+        .map(|callee| state.program.resolve_call_callee_plan(callee))
+        .transpose()?;
+    let callee = callee
         .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let call_source = state.program.span_for_handle(call.handle);
@@ -1333,6 +1395,7 @@ fn immediate_call_callee_plan_value(
 ) -> Result<Option<Value>, EvalError> {
     match callee {
         CallCalleePlan::NameRef(name_ref) => {
+            let name_ref = state.program.resolve_name_ref_plan(*name_ref)?;
             let name: Arc<str> = Arc::clone(&name_ref.name);
             if let Some(value) = env.get(name.as_ref()) {
                 return Ok(Some(value.clone()));
@@ -1419,7 +1482,10 @@ fn immediate_call_callee_plan_value(
                 .with_provenance(Provenance::binding(source, full_name.to_string())),
             ))
         }
-        CallCalleePlan::Field(field) => static_namespace_member_plan_value(state, field),
+        CallCalleePlan::Field(field) => {
+            let field = state.program.resolve_field_plan(*field)?;
+            static_namespace_member_plan_value(state, field)
+        }
         CallCalleePlan::Expr(_) => Ok(None),
     }
 }
@@ -1434,7 +1500,10 @@ fn eval_call_callee_plan(
     }
     match callee {
         CallCalleePlan::Expr(callee) => eval_child_expr_id(state, *callee, env),
-        CallCalleePlan::Field(field) => eval_field_plan(state, field, env),
+        CallCalleePlan::Field(field) => {
+            let field = state.program.resolve_field_plan(*field)?;
+            eval_field_plan(state, field, env)
+        }
         CallCalleePlan::NameRef(_)
         | CallCalleePlan::ResolvedFunction { .. }
         | CallCalleePlan::VariantConstructor { .. }
@@ -3210,8 +3279,28 @@ fn eval_if_inner(
 
 pub(super) fn eval_match(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    match_expr_id: ExprId,
     match_expr: &MatchExpr,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let match_plan = MatchPlan {
+        handle: match_expr.handle,
+        scrutinee: match_expr.scrutinee,
+        arms: Arc::clone(&match_expr.arms),
+    };
+    eval_match_inner(state, &match_plan, env)
+}
+
+fn eval_match_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    match_plan: &MatchPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_match_inner(state, match_plan, env)
+}
+
+fn eval_match_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    match_expr: &MatchPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let node_id = state
@@ -3236,7 +3325,7 @@ pub(super) fn eval_match(
                     node_id,
                     parent_id,
                     match_state: MatchState {
-                        match_expr: match_expr_id,
+                        match_plan: match_expr.clone(),
                         env: env.clone(),
                     },
                 },
@@ -3247,7 +3336,7 @@ pub(super) fn eval_match(
         state,
         node_id,
         parent_id,
-        match_expr_id,
+        match_expr,
         scrutinee,
         env.clone(),
     )
@@ -3257,17 +3346,10 @@ pub(super) fn continue_match_arms(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    match_expr_id: ExprId,
+    match_expr: &MatchPlan,
     scrutinee: Value,
     env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let match_expr = state.program.resolve_expr_id(match_expr_id)?;
-    let ExprKind::Match(match_expr) = match_expr.kind() else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "match continuation targeted non-match expression",
-        ));
-    };
     let arms = &match_expr.arms;
     for arm in arms.iter() {
         let mut arm_env = env.clone();
@@ -3366,14 +3448,18 @@ fn eval_where_plan(
         .copied()
         .expect("where expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let call_expr = where_expr.call.as_ref().ok_or_else(|| {
+    let call_expr = where_expr.call.ok_or_else(|| {
         EvalError::new(
             EvalErrorKind::Internal,
             "where expression currently requires a compiled call plan",
         )
     })?;
+    let call_expr = state.program.resolve_call_plan(call_expr)?;
     let callee = call_expr
         .callee
+        .map(|callee| state.program.resolve_call_callee_plan(callee))
+        .transpose()?;
+    let callee = callee
         .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {
