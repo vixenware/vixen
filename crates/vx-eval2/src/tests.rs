@@ -27,10 +27,10 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         AccessPlanKind, ArrayPlan, BinaryPlan, BlockStep, BuilderPlanKind, CallCallee,
-        CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind, DirectCallCalleePlan,
-        ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan,
-        LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan, ReadyPlanKind,
-        ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
+        CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlanKind,
+        DirectCallCalleePlanKind, ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan,
+        InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan,
+        ReadyPlanKind, ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1042,12 +1042,10 @@ fn compiled_program_caches_resolved_call_exec_plan() {
         panic!("expected cached call callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);
-    assert!(matches!(
-        program
-            .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(call_expr.source()))
-            .expect("resolve direct call callee payload"),
-        DirectCallCalleePlan::ResolvedFunction { .. }
-    ));
+    let direct = program
+        .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(call_expr.source()))
+        .expect("resolve direct call callee payload");
+    assert_eq!(direct.kind(), DirectCallCalleePlanKind::ResolvedFunction);
 }
 
 #[test]
@@ -1090,12 +1088,10 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
         panic!("expected cached static member callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);
-    assert!(matches!(
-        program
-            .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(call_expr.source()))
-            .expect("resolve direct static member payload"),
-        DirectCallCalleePlan::StaticMember { .. }
-    ));
+    let direct = program
+        .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(call_expr.source()))
+        .expect("resolve direct static member payload");
+    assert_eq!(direct.kind(), DirectCallCalleePlanKind::StaticMember);
 }
 
 #[test]
@@ -1366,12 +1362,10 @@ fn compiled_program_caches_where_exec_plan() {
         panic!("expected cached where callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);
-    assert!(matches!(
-        program
-            .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(body.source()))
-            .expect("resolve direct where callee payload"),
-        DirectCallCalleePlan::ResolvedFunction { .. }
-    ));
+    let direct = program
+        .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(body.source()))
+        .expect("resolve direct where callee payload");
+    assert_eq!(direct.kind(), DirectCallCalleePlanKind::ResolvedFunction);
     assert_eq!(keyword_bindings.len(), 2);
 }
 

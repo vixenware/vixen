@@ -2,9 +2,10 @@ use super::*;
 use crate::program::{
     AccessPlan, AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlan, BuilderPlanKind,
     CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlan, ControlPlanKind,
-    DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan,
-    LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan,
-    RangePlan, ReadyPlan, ReadyPlanKind, StructLiteralPlan, TuplePlan, WherePlan,
+    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
+    PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, ReadyPlanKind, StructLiteralPlan, TuplePlan,
+    WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -1508,77 +1509,91 @@ fn immediate_direct_call_callee_plan_value(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     direct: &DirectCallCalleePlan,
 ) -> Result<Option<Value>, EvalError> {
-    match direct {
-        DirectCallCalleePlan::ResolvedFunction {
-            resolved_name,
-            function,
-        } => Ok(Some(Value::function(function_ref_from_compiled(
-            state,
-            resolved_name.clone(),
-            function.clone(),
-            Arc::from([]),
-            Some(resolved_name.clone()),
-        )))),
-        DirectCallCalleePlan::VariantConstructor {
-            handle,
-            constructor,
-        } => Ok(Some(enum_constructor_or_value(
-            state,
-            constructor.name.clone(),
-            constructor.fields.clone(),
-            state.program.span_for_handle(*handle),
-        ))),
-        DirectCallCalleePlan::NewtypeConstructor {
-            handle,
-            display_name,
-            newtype_name,
-        } => {
-            let source = state.program.span_for_handle(*handle);
+    match direct.kind() {
+        DirectCallCalleePlanKind::ResolvedFunction => {
+            let plan = state
+                .program
+                .resolve_resolved_function_direct_call_callee_plan(
+                    state.current_source(),
+                    direct.resolved_function_index(),
+                )?;
+            Ok(Some(Value::function(function_ref_from_compiled(
+                state,
+                plan.resolved_name.clone(),
+                plan.function.clone(),
+                Arc::from([]),
+                Some(plan.resolved_name.clone()),
+            ))))
+        }
+        DirectCallCalleePlanKind::VariantConstructor => {
+            let plan = state
+                .program
+                .resolve_variant_constructor_direct_call_callee_plan(
+                    state.current_source(),
+                    direct.variant_constructor_index(),
+                )?;
+            Ok(Some(enum_constructor_or_value(
+                state,
+                plan.constructor.name.clone(),
+                plan.constructor.fields.clone(),
+                state.program.span_for_handle(plan.handle),
+            )))
+        }
+        DirectCallCalleePlanKind::NewtypeConstructor => {
+            let plan = state
+                .program
+                .resolve_newtype_constructor_direct_call_callee_plan(
+                    state.current_source(),
+                    direct.newtype_constructor_index(),
+                )?;
+            let source = state.program.span_for_handle(plan.handle);
             let captures = Arc::from([(
                 Arc::from("__newtype_ctor"),
                 Value::bool(true).with_provenance(Provenance::binding(
                     source.clone(),
-                    display_name.to_string(),
+                    plan.display_name.to_string(),
                 )),
             )]);
             Ok(Some(
                 Value::function(FunctionRef::new(
                     state.program.source_id(state.current_source()),
-                    newtype_name.clone(),
+                    plan.newtype_name.clone(),
                     Arc::from([]),
                     false,
                     None,
                     captures,
-                    Some(display_name.clone()),
+                    Some(plan.display_name.clone()),
                 ))
-                .with_provenance(Provenance::binding(source, display_name.to_string())),
+                .with_provenance(Provenance::binding(source, plan.display_name.to_string())),
             ))
         }
-        DirectCallCalleePlan::StaticMember {
-            handle,
-            full_name,
-            variant_constructor,
-        } => {
-            if let Some(constructor) = variant_constructor {
+        DirectCallCalleePlanKind::StaticMember => {
+            let plan = state
+                .program
+                .resolve_static_member_direct_call_callee_plan(
+                    state.current_source(),
+                    direct.static_member_index(),
+                )?;
+            if let Some(constructor) = &plan.variant_constructor {
                 return Ok(Some(enum_constructor_or_value(
                     state,
                     constructor.name.clone(),
                     constructor.fields.clone(),
-                    state.program.span_for_handle(*handle),
+                    state.program.span_for_handle(plan.handle),
                 )));
             }
-            let source = state.program.span_for_handle(*handle);
+            let source = state.program.span_for_handle(plan.handle);
             Ok(Some(
                 Value::function(FunctionRef::new(
                     state.program.source_id(state.current_source()),
-                    full_name.clone(),
+                    plan.full_name.clone(),
                     Arc::from([]),
                     false,
                     None,
                     Arc::from([]),
                     None,
                 ))
-                .with_provenance(Provenance::binding(source, full_name.to_string())),
+                .with_provenance(Provenance::binding(source, plan.full_name.to_string())),
             ))
         }
     }
