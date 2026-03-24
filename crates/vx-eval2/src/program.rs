@@ -318,6 +318,32 @@ pub(crate) enum ExprKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExprExecPlan {
+    Expr,
+    Block { body: BlockBodyId },
+    Literal(LiteralExpr),
+    PathLiteral(PathLiteralExpr),
+    Paren(ParenExpr),
+    Closure(ClosureExpr),
+    NameRef(NameRefExpr),
+    Call(CallExpr),
+    Array(ArrayExpr),
+    Tuple(TupleExpr),
+    Range(RangeExpr),
+    Map(MapExpr),
+    Fail(FailExpr),
+    Fallible(FallibleExpr),
+    If(IfExpr),
+    Match(MatchExpr),
+    Where(WhereExpr),
+    Prefix(PrefixExpr),
+    Binary(BinaryExpr),
+    InterpolatedString(InterpolatedStringExpr),
+    StructLiteral(StructLiteralExpr),
+    Field(FieldExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockExpr {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) body: BlockBodyId,
@@ -608,6 +634,7 @@ struct CompiledProgramSource {
     functions_by_name: BTreeMap<String, CompiledFunction>,
     functions_by_definition: BTreeMap<ProgramNodeHandle, (Arc<str>, CompiledFunction)>,
     exprs: Vec<Expr>,
+    expr_plans: Vec<Arc<ExprExecPlan>>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
@@ -690,6 +717,7 @@ impl CompiledProgram {
         }
         .with_resolved_type_args()
         .with_resolved_call_callees()
+        .with_expr_plans()
     }
 
     pub(crate) fn entry_source(&self) -> SourceId {
@@ -743,6 +771,10 @@ impl CompiledProgram {
 
     pub(crate) fn resolve_expr_id(&self, id: ExprId) -> Result<&Expr, EvalError> {
         self.source(id.source())?.resolve_expr(id)
+    }
+
+    pub(crate) fn resolve_expr_plan(&self, id: ExprId) -> Result<Arc<ExprExecPlan>, EvalError> {
+        self.source(id.source())?.resolve_expr_plan(id)
     }
 
     pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
@@ -873,6 +905,13 @@ impl CompiledProgram {
             source
                 .apply_where_call_rewrites(rewrites.where_calls)
                 .expect("compiled where call rewrites should target where expressions");
+        }
+        self
+    }
+
+    fn with_expr_plans(mut self) -> Self {
+        for source in self.sources.values_mut() {
+            source.rebuild_expr_plans();
         }
         self
     }
@@ -1075,6 +1114,7 @@ impl CompiledProgramSource {
         let mut functions_by_name = BTreeMap::new();
         let mut functions_by_definition = BTreeMap::new();
         let mut exprs = Vec::new();
+        let expr_plans = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -1127,6 +1167,7 @@ impl CompiledProgramSource {
             functions_by_name,
             functions_by_definition,
             exprs,
+            expr_plans,
             expr_ids,
             block_bodies,
             type_nodes,
@@ -1322,6 +1363,19 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_expr_plan(&self, id: ExprId) -> Result<Arc<ExprExecPlan>, EvalError> {
+        self.ensure_parsed()?;
+        self.expr_plans
+            .get(id.index as usize)
+            .cloned()
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("expression plan {:?} was not found", id),
+                )
+            })
+    }
+
     fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
         self.block_bodies.get(id.index as usize).ok_or_else(|| {
@@ -1334,6 +1388,14 @@ impl CompiledProgramSource {
 
     fn source_id(&self) -> Arc<str> {
         Arc::clone(&self.source_id)
+    }
+
+    fn rebuild_expr_plans(&mut self) {
+        self.expr_plans = self
+            .exprs
+            .iter()
+            .map(|expr| Arc::new(compile_expr_plan(expr)))
+            .collect();
     }
 
     #[cfg(test)]
@@ -1374,6 +1436,37 @@ impl CompiledProgramSource {
             LineIndex(position.line),
             ColumnIndex(position.col),
         )
+    }
+}
+
+fn compile_expr_plan(expr: &Expr) -> ExprExecPlan {
+    match expr.kind() {
+        ExprKind::Block(block) => ExprExecPlan::Block { body: block.body },
+        ExprKind::Literal(literal) => ExprExecPlan::Literal(literal.clone()),
+        ExprKind::PathLiteral(path_literal) => ExprExecPlan::PathLiteral(path_literal.clone()),
+        ExprKind::Paren(paren) => ExprExecPlan::Paren(paren.clone()),
+        ExprKind::Closure(closure) => ExprExecPlan::Closure(closure.clone()),
+        ExprKind::NameRef(name_ref) => ExprExecPlan::NameRef(name_ref.clone()),
+        ExprKind::Call(call) => ExprExecPlan::Call(call.clone()),
+        ExprKind::Array(array) => ExprExecPlan::Array(array.clone()),
+        ExprKind::Tuple(tuple) => ExprExecPlan::Tuple(tuple.clone()),
+        ExprKind::Range(range) => ExprExecPlan::Range(range.clone()),
+        ExprKind::Map(map) => ExprExecPlan::Map(map.clone()),
+        ExprKind::Fail(fail) => ExprExecPlan::Fail(fail.clone()),
+        ExprKind::Fallible(fallible) => ExprExecPlan::Fallible(fallible.clone()),
+        ExprKind::If(if_expr) => ExprExecPlan::If(if_expr.clone()),
+        ExprKind::Match(match_expr) => ExprExecPlan::Match(match_expr.clone()),
+        ExprKind::Where(where_expr) => ExprExecPlan::Where(where_expr.clone()),
+        ExprKind::Prefix(prefix) => ExprExecPlan::Prefix(prefix.clone()),
+        ExprKind::Binary(binary) => ExprExecPlan::Binary(binary.clone()),
+        ExprKind::InterpolatedString(interpolated) => {
+            ExprExecPlan::InterpolatedString(interpolated.clone())
+        }
+        ExprKind::StructLiteral(struct_literal) => {
+            ExprExecPlan::StructLiteral(struct_literal.clone())
+        }
+        ExprKind::Field(field) => ExprExecPlan::Field(field.clone()),
+        ExprKind::Unsupported { .. } => ExprExecPlan::Expr,
     }
 }
 
