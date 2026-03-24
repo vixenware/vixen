@@ -2306,7 +2306,7 @@ pub(super) fn execute_ready_task(
         ReadyTask::StartEntry => {
             let prepared = prepare_entry(&mut state, entry, args)?;
             let node_id = state.alloc_node_id();
-            let body_kind = prepared_body_kind(&prepared.body);
+            let body_kind = prepared_body_kind(state.program, &prepared.body);
             let body_source = state
                 .program
                 .span_for_expr_id(prepared.body.root_expr_id())?;

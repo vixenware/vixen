@@ -1,9 +1,9 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan, ControlPlan,
-    DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan,
-    LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan,
-    RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
+    AccessPlan, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallPlan, ClosurePlan,
+    ControlPlan, DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
+    PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -731,6 +731,29 @@ fn eval_paren_plan(
     eval_paren_expr(state, node_id, parent_id, paren.expr, env)
 }
 
+fn eval_access_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    access: &AccessPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    match access {
+        AccessPlan::Paren(paren) => {
+            let paren = state.program.resolve_paren_plan(*paren)?;
+            eval_paren_plan(state, node_id, parent_id, paren, env)
+        }
+        AccessPlan::Call(call) => {
+            let call = state.program.resolve_call_plan(*call)?;
+            eval_call_plan(state, call, env)
+        }
+        AccessPlan::Field(field) => {
+            let field = state.program.resolve_field_plan(*field)?;
+            eval_field_plan(state, field, env)
+        }
+    }
+}
+
 fn eval_closure_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     closure: &ClosurePlan,
@@ -893,7 +916,7 @@ pub(super) fn eval_expr_with_node_id(
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let body = PreparedBodyRef::from_expr_id(state.program, state.expr_id(expr))?;
-    let kind = prepared_body_kind(&body);
+    let kind = prepared_body_kind(state.program, &body);
     let source = state.span_for_node(expr);
     let parent_id = state.current_parent();
     eval_node_with_kind(state, node_id, kind, source, |state| {
@@ -901,31 +924,11 @@ pub(super) fn eval_expr_with_node_id(
     })
 }
 
-pub(super) fn prepared_body_kind(body: &PreparedBodyRef) -> EvalExprKind {
-    match body.plan.kind() {
-        ExprExecKind::Expr => EvalExprKind::Unsupported,
-        ExprExecKind::Block => EvalExprKind::Block,
-        ExprExecKind::Literal => EvalExprKind::Literal,
-        ExprExecKind::PathLiteral => EvalExprKind::Literal,
-        ExprExecKind::Paren => EvalExprKind::Paren,
-        ExprExecKind::Closure => EvalExprKind::Closure,
-        ExprExecKind::NameRef => EvalExprKind::NameRef,
-        ExprExecKind::Call => EvalExprKind::Call,
-        ExprExecKind::Field => EvalExprKind::Field,
-        ExprExecKind::Array => EvalExprKind::Array,
-        ExprExecKind::Tuple => EvalExprKind::Tuple,
-        ExprExecKind::Range => EvalExprKind::Range,
-        ExprExecKind::Map => EvalExprKind::Map,
-        ExprExecKind::Fail => EvalExprKind::Fail,
-        ExprExecKind::Fallible => EvalExprKind::Unsupported,
-        ExprExecKind::If => EvalExprKind::If,
-        ExprExecKind::Match => EvalExprKind::Match,
-        ExprExecKind::Where => EvalExprKind::Where,
-        ExprExecKind::Prefix => EvalExprKind::Prefix,
-        ExprExecKind::Binary => EvalExprKind::Binary,
-        ExprExecKind::InterpolatedString => EvalExprKind::InterpolatedString,
-        ExprExecKind::StructLiteral => EvalExprKind::StructLiteral,
-    }
+pub(super) fn prepared_body_kind(
+    _program: &CompiledProgram,
+    body: &PreparedBodyRef,
+) -> EvalExprKind {
+    body.plan.trace_kind()
 }
 
 fn eval_prepared_body_step(
@@ -950,48 +953,22 @@ fn eval_prepared_body_step(
             body.plan.block_body_id(body_source),
             0,
         ),
-        ExprExecKind::Literal
-        | ExprExecKind::PathLiteral
-        | ExprExecKind::Closure
-        | ExprExecKind::NameRef => state
+        ExprExecKind::Ready => state
             .program
             .resolve_ready_plan(body.plan.ready_plan_id(body_source))
             .and_then(|ready| eval_ready_plan(state, ready, env))
             .map(EvalStep::Ready),
-        ExprExecKind::Paren => state
+        ExprExecKind::Access => state
             .program
-            .resolve_paren_plan(body.plan.paren_plan_id(body_source))
-            .and_then(|paren| eval_paren_plan(state, node_id, parent_id, paren, env)),
-        ExprExecKind::Call => {
-            let call = state
-                .program
-                .resolve_call_plan(body.plan.call_plan_id(body_source))?;
-            eval_call_plan(state, call, env)
-        }
-        ExprExecKind::Field => {
-            let field = state
-                .program
-                .resolve_field_plan(body.plan.field_plan_id(body_source))?;
-            eval_field_plan(state, field, env)
-        }
-        ExprExecKind::Array
-        | ExprExecKind::Tuple
-        | ExprExecKind::Range
-        | ExprExecKind::Map
-        | ExprExecKind::InterpolatedString
-        | ExprExecKind::StructLiteral => {
+            .resolve_access_plan(body.plan.access_plan_id(body_source))
+            .and_then(|access| eval_access_plan(state, node_id, parent_id, access, env)),
+        ExprExecKind::Builder => {
             let builder = state
                 .program
                 .resolve_builder_plan(body.plan.builder_plan_id(body_source))?;
             eval_builder_plan(state, builder, env)
         }
-        ExprExecKind::Fail
-        | ExprExecKind::Fallible
-        | ExprExecKind::If
-        | ExprExecKind::Match
-        | ExprExecKind::Where
-        | ExprExecKind::Prefix
-        | ExprExecKind::Binary => {
+        ExprExecKind::Control => {
             let control = state
                 .program
                 .resolve_control_plan(body.plan.control_plan_id(body_source))?;
@@ -1007,7 +984,7 @@ pub(super) fn eval_prepared_body_with_node_id(
 ) -> Result<EvalStep, EvalError> {
     let PreparedEntry { body, mut env } = prepared;
     let root_expr_id = body.root_expr_id();
-    let kind = prepared_body_kind(&body);
+    let kind = prepared_body_kind(state.program, &body);
     let source = state.program.span_for_expr_id(root_expr_id)?;
     let parent_id = state.current_parent();
     state.with_source(root_expr_id.source(), |state| {
@@ -4426,7 +4403,7 @@ fn queue_child_expr_body(
     env: &EvalEnv,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
-    let body_kind = prepared_body_kind(&body);
+    let body_kind = prepared_body_kind(state.program, &body);
     let resolved_source = state
         .program
         .span_for_expr_id(body.root_expr_id())
@@ -4472,7 +4449,7 @@ pub(super) fn queue_child_prepared_entry(
     prepared: PreparedEntry,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
-    let body_kind = prepared_body_kind(&prepared.body);
+    let body_kind = prepared_body_kind(state.program, &prepared.body);
     let resolved_source = state
         .program
         .span_for_expr_id(prepared.body.root_expr_id())
