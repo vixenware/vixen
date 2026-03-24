@@ -823,6 +823,7 @@ fn eval_prepared_body_step(
                 body: body.plan.block_body_id(body.root_expr_id.source()).into(),
                 pc: 0,
                 acc: None,
+                temp: None,
             },
         ),
         ExprExecKind::Ready => eval_ready_plan(state, body.plan, env).map(EvalStep::Ready),
@@ -3461,6 +3462,7 @@ pub(super) fn continue_bytecode_body(
                     body: *body,
                     pc: 0,
                     acc: None,
+                    temp: None,
                 };
                 match state.with_source(body.source(), |state| {
                     continue_bytecode_body(state, node_id, parent_id, nested)
@@ -3534,6 +3536,145 @@ pub(super) fn continue_bytecode_body(
                         ));
                     }
                 }
+            }
+            BytecodeOp::EvalIfBranches {
+                then_branch,
+                else_branch,
+            } => {
+                bytecode.pc += 1;
+                let condition = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode if-branches has no pending condition value",
+                    )
+                })?;
+                let ValueRep::Bool(condition) = condition.rep else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::TypeError,
+                        "if condition must evaluate to Bool",
+                    ));
+                };
+                let branch = if condition {
+                    *then_branch
+                } else {
+                    *else_branch
+                };
+                match state.with_source(branch.expr_id().source(), |state| {
+                    eval_dependent_body_ref(state, node_id, branch, &mut bytecode.scope)
+                })? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::Bytecode {
+                                node_id,
+                                parent_id,
+                                bytecode,
+                            },
+                        ));
+                    }
+                }
+            }
+            BytecodeOp::ApplyPrefix(operator) => {
+                let value = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode prefix has no pending operand value",
+                    )
+                })?;
+                bytecode.acc = Some(apply_prefix_operator(*operator, value)?);
+                bytecode.pc += 1;
+            }
+            BytecodeOp::EvalBinary { operator, rhs } => {
+                if let Some(lhs) = bytecode.temp.take() {
+                    let rhs = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode binary has no pending rhs value",
+                        )
+                    })?;
+                    bytecode.acc = Some(apply_binary_operator(lhs, *operator, rhs)?);
+                    bytecode.pc += 1;
+                    continue;
+                }
+
+                let lhs = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode binary has no pending lhs value",
+                    )
+                })?;
+                if let Some(short_circuit) = short_circuit_binary(&lhs, *operator)? {
+                    bytecode.acc = Some(short_circuit);
+                    bytecode.pc += 1;
+                    continue;
+                }
+
+                bytecode.temp = Some(lhs);
+                match state.with_source(rhs.expr_id().source(), |state| {
+                    eval_dependent_body_ref(state, node_id, *rhs, &mut bytecode.scope)
+                })? {
+                    EvalStep::Ready(rhs) => {
+                        let lhs = bytecode.temp.take().expect("binary lhs should be staged");
+                        bytecode.acc = Some(apply_binary_operator(lhs, *operator, rhs)?);
+                        bytecode.pc += 1;
+                    }
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::Bytecode {
+                                node_id,
+                                parent_id,
+                                bytecode,
+                            },
+                        ));
+                    }
+                }
+            }
+            BytecodeOp::ProjectField {
+                field_name,
+                field_source,
+            } => {
+                let receiver = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode field projection has no pending receiver value",
+                    )
+                })?;
+                bytecode.acc = Some(project_field_or_method_value(
+                    state,
+                    receiver,
+                    Arc::clone(field_name),
+                    field_source.clone(),
+                )?);
+                bytecode.pc += 1;
+            }
+            BytecodeOp::RaiseUserFail { fail_source } => {
+                let value = bytecode.acc.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode fail has no pending failure value",
+                    )
+                })?;
+                let error = user_fail_error(value);
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(fail_source.clone()),
+                    EvalEventKind::EnterExpr {
+                        kind: EvalExprKind::Fail,
+                    },
+                );
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(fail_source.clone()),
+                    EvalEventKind::ExitPoison {
+                        kind: error.kind,
+                        message: error.message.clone(),
+                    },
+                );
+                return Err(error);
             }
             BytecodeOp::BindLet(pattern) => {
                 let value = bytecode.acc.take().ok_or_else(|| {

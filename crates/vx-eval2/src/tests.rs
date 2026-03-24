@@ -978,6 +978,120 @@ fn compiled_program_lowers_nested_block_expr_to_nested_bytecode_op() {
 }
 
 #[test]
+fn compiled_program_lowers_if_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-if",
+        "fn build(value: Bool) { if value { 1 } else { 2 } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 4);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::EvalIfBranches { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_prefix_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-prefix",
+        "fn build(value: Bool) { !value }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 4);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::ApplyPrefix(_)));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_binary_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new(
+        "lowered-bytecode-binary",
+        "fn build(a: U64, b: U64) { a + b }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 4);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::EvalBinary { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_field_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new("lowered-bytecode-field", r#"fn build() { ("hi").len }"#);
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 4);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::ProjectField { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::ReturnLast));
+}
+
+#[test]
+fn compiled_program_lowers_fail_expr_to_bytecode_ops() {
+    let program = CompiledProgram::new("lowered-bytecode-fail", r#"fn build() { fail "boom" }"#);
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let bytecode = program
+        .resolve_bytecode_body(block.body.into())
+        .expect("resolve lowered block bytecode body");
+    assert_eq!(bytecode.ops.len(), 4);
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
+    assert!(matches!(bytecode.ops[1], BytecodeOp::RaiseUserFail { .. }));
+    assert!(matches!(bytecode.ops[2], BytecodeOp::SetLast));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::ReturnLast));
+}
+
+#[test]
 fn compiled_program_lowers_direct_name_call_callee_to_call_callee_plan() {
     let program = CompiledProgram::new("lowered-call-callee", "fn build() { helper(42) }");
     let function = program.find_function("build").expect("find build function");

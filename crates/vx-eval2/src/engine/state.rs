@@ -102,6 +102,7 @@ pub(super) struct BytecodeState {
     pub(super) body: BytecodeBodyId,
     pub(super) pc: usize,
     pub(super) acc: Option<Value>,
+    pub(super) temp: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1302,6 +1302,22 @@ pub(crate) enum BytecodeOp {
     EvalBytecodeBody(BytecodeBodyId),
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
+    EvalIfBranches {
+        then_branch: ExprBodyRef,
+        else_branch: ExprBodyRef,
+    },
+    EvalBinary {
+        operator: SyntaxKind,
+        rhs: ExprBodyRef,
+    },
+    ApplyPrefix(SyntaxKind),
+    ProjectField {
+        field_name: Arc<str>,
+        field_source: SourceSpan,
+    },
+    RaiseUserFail {
+        fail_source: SourceSpan,
+    },
     BindLet(LetPattern),
     BindFnDecl(FunctionStmt),
     SetLast,
@@ -3172,7 +3188,7 @@ impl CompiledProgramSource {
         self.bytecode_bodies = self
             .block_bodies
             .iter()
-            .map(compile_bytecode_body)
+            .map(|block| compile_bytecode_body(self, block))
             .collect();
     }
 
@@ -4669,17 +4685,103 @@ fn compile_block_step(
     })
 }
 
-fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
-    fn compile_eval_op(expr: ExprBodyRef) -> BytecodeOp {
-        match expr.plan().kind() {
-            ExprExecKind::Ready => BytecodeOp::EvalReady(expr.plan()),
-            ExprExecKind::Block => BytecodeOp::EvalBytecodeBody(
-                expr.plan().block_body_id(expr.expr_id().source()).into(),
-            ),
-            ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
-                BytecodeOp::EvalPlan(expr)
+fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> BytecodeBody {
+    fn push_eval_ops(source: &CompiledProgramSource, ops: &mut Vec<BytecodeOp>, expr: ExprBodyRef) {
+        let plan = expr.plan();
+        match plan.kind() {
+            ExprExecKind::Ready => ops.push(BytecodeOp::EvalReady(plan)),
+            ExprExecKind::Block => {
+                ops.push(BytecodeOp::EvalBytecodeBody(
+                    plan.block_body_id(expr.expr_id().source()).into(),
+                ));
             }
-            _ => BytecodeOp::EvalBody(expr),
+            ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Paren => {
+                let paren = source
+                    .resolve_paren_plan(plan.paren_plan_id(expr.expr_id().source()))
+                    .expect("bytecode paren plan should resolve");
+                let Some(inner) = paren.expr else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                push_eval_ops(source, ops, inner);
+            }
+            ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
+                let field = source
+                    .resolve_field_plan(plan.field_plan_id(expr.expr_id().source()))
+                    .expect("bytecode field plan should resolve");
+                let (Some(receiver), Some(field_name)) =
+                    (field.receiver, field.field_name.as_ref())
+                else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                if field.static_member.is_some() {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                }
+                push_eval_ops(source, ops, receiver);
+                ops.push(BytecodeOp::ProjectField {
+                    field_name: Arc::clone(field_name),
+                    field_source: source.span_for_range(field.handle.to_range()),
+                });
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::If => {
+                let if_plan = source
+                    .resolve_if_plan(plan.if_plan_id(expr.expr_id().source()))
+                    .expect("bytecode if plan should resolve");
+                let (Some(condition), Some(then_branch), Some(else_branch)) =
+                    (if_plan.condition, if_plan.then_branch, if_plan.else_branch)
+                else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                push_eval_ops(source, ops, condition);
+                ops.push(BytecodeOp::EvalIfBranches {
+                    then_branch,
+                    else_branch,
+                });
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Prefix => {
+                let prefix = source
+                    .resolve_prefix_plan(plan.prefix_plan_id(expr.expr_id().source()))
+                    .expect("bytecode prefix plan should resolve");
+                let (Some(operator), Some(operand)) = (prefix.operator, prefix.expr) else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                push_eval_ops(source, ops, operand);
+                ops.push(BytecodeOp::ApplyPrefix(operator));
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Binary => {
+                let binary = source
+                    .resolve_binary_plan(plan.binary_plan_id(expr.expr_id().source()))
+                    .expect("bytecode binary plan should resolve");
+                let (Some(lhs), Some(rhs), Some(operator)) =
+                    (binary.lhs, binary.rhs, binary.operator)
+                else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                push_eval_ops(source, ops, lhs);
+                ops.push(BytecodeOp::EvalBinary { operator, rhs });
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Fail => {
+                let fail = source
+                    .resolve_fail_plan(plan.fail_plan_id(expr.expr_id().source()))
+                    .expect("bytecode fail plan should resolve");
+                let Some(message) = fail.message else {
+                    ops.push(BytecodeOp::EvalPlan(expr));
+                    return;
+                };
+                push_eval_ops(source, ops, message);
+                ops.push(BytecodeOp::RaiseUserFail {
+                    fail_source: source.span_for_range(fail.handle.to_range()),
+                });
+            }
+            ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
+                ops.push(BytecodeOp::EvalPlan(expr));
+            }
+            ExprExecKind::Expr => ops.push(BytecodeOp::EvalBody(expr)),
         }
     }
 
@@ -4687,14 +4789,14 @@ fn compile_bytecode_body(block: &BlockBody) -> BytecodeBody {
     for step in block.steps.iter() {
         match step {
             BlockStep::Let { pattern, expr } => {
-                ops.push(compile_eval_op(*expr));
+                push_eval_ops(source, &mut ops, *expr);
                 ops.push(BytecodeOp::BindLet(pattern.clone()));
             }
             BlockStep::FnDecl(function) => {
                 ops.push(BytecodeOp::BindFnDecl(function.clone()));
             }
             BlockStep::Expr(expr) => {
-                ops.push(compile_eval_op(*expr));
+                push_eval_ops(source, &mut ops, *expr);
                 ops.push(BytecodeOp::SetLast);
             }
         }
