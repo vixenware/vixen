@@ -1,9 +1,10 @@
 use super::*;
 use crate::program::{
-    AccessPlan, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan, CallCalleePlanKind, CallPlan,
-    ClosurePlan, ControlPlan, DirectCallCalleePlan, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
-    InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan, NameRefPlan, ParenPlan,
-    PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, StructLiteralPlan, TuplePlan, WherePlan,
+    AccessPlan, AccessPlanKind, ArrayPlan, BinaryPlan, BuilderPlan, CallCalleePlan,
+    CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlan, DirectCallCalleePlan, ExprExecKind,
+    FalliblePlan, FieldPlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan,
+    NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlan, ReadyPlanKind,
+    StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -738,17 +739,23 @@ fn eval_access_plan(
     access: &AccessPlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    match access {
-        AccessPlan::Paren(paren) => {
-            let paren = state.program.resolve_paren_plan(*paren)?;
+    match access.kind() {
+        AccessPlanKind::Paren => {
+            let paren = state
+                .program
+                .resolve_paren_plan(access.paren_plan_id(state.current_source()))?;
             eval_paren_plan(state, node_id, parent_id, paren, env)
         }
-        AccessPlan::Call(call) => {
-            let call = state.program.resolve_call_plan(*call)?;
+        AccessPlanKind::Call => {
+            let call = state
+                .program
+                .resolve_call_plan(access.call_plan_id(state.current_source()))?;
             eval_call_plan(state, call, env)
         }
-        AccessPlan::Field(field) => {
-            let field = state.program.resolve_field_plan(*field)?;
+        AccessPlanKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(access.field_plan_id(state.current_source()))?;
             eval_field_plan(state, field, env)
         }
     }
@@ -1164,21 +1171,29 @@ fn eval_ready_plan(
     ready: &ReadyPlan,
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
-    match ready {
-        ReadyPlan::Literal(literal) => {
-            let literal = state.program.resolve_literal_plan(*literal)?;
+    match ready.kind() {
+        ReadyPlanKind::Literal => {
+            let literal = state
+                .program
+                .resolve_literal_plan(ready.literal_plan_id(state.current_source()))?;
             eval_literal_plan(state, literal)
         }
-        ReadyPlan::PathLiteral(path_literal) => {
-            let path_literal = state.program.resolve_path_literal_plan(*path_literal)?;
+        ReadyPlanKind::PathLiteral => {
+            let path_literal = state
+                .program
+                .resolve_path_literal_plan(ready.path_literal_plan_id(state.current_source()))?;
             eval_path_literal_plan(state, path_literal)
         }
-        ReadyPlan::Closure(closure) => {
-            let closure = state.program.resolve_closure_plan(*closure)?;
+        ReadyPlanKind::Closure => {
+            let closure = state
+                .program
+                .resolve_closure_plan(ready.closure_plan_id(state.current_source()))?;
             eval_closure_plan(state, closure, env)
         }
-        ReadyPlan::NameRef(name_ref) => {
-            let name_ref = state.program.resolve_name_ref_plan(*name_ref)?;
+        ReadyPlanKind::NameRef => {
+            let name_ref = state
+                .program
+                .resolve_name_ref_plan(ready.name_ref_plan_id(state.current_source()))?;
             eval_name_ref_plan(state, name_ref, env)
         }
     }

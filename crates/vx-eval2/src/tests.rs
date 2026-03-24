@@ -26,11 +26,11 @@ use crate::{
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
-        AccessPlan, ArrayPlan, BinaryPlan, BlockStep, BuilderPlan, CallCallee, CallCalleePlanKind,
-        ClosurePlan, CompiledProgram, ControlPlan, DirectCallCalleePlan, ExprExecKind, ExprKind,
-        FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan, LiteralPlan, MapPlan, MatchPlan,
-        ParenPlan, PrefixPlan, RangePlan, ReadyPlan, ResolvedNameRef, StructLiteralPlan, TuplePlan,
-        WherePlan,
+        AccessPlanKind, ArrayPlan, BinaryPlan, BlockStep, BuilderPlan, CallCallee,
+        CallCalleePlanKind, ClosurePlan, CompiledProgram, ControlPlan, DirectCallCalleePlan,
+        ExprExecKind, ExprKind, FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan,
+        LiteralPlan, MapPlan, MatchPlan, ParenPlan, PrefixPlan, RangePlan, ReadyPlanKind,
+        ResolvedNameRef, StructLiteralPlan, TuplePlan, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -952,14 +952,12 @@ fn compiled_program_caches_string_literal_exec_plan() {
         .resolve_expr_plan(literal_expr)
         .expect("resolve cached literal plan");
     assert_eq!(plan.kind(), ExprExecKind::Ready);
-    let ReadyPlan::Literal(literal) = program
+    let ready = program
         .resolve_ready_plan(plan.ready_plan_id(literal_expr.source()))
-        .expect("resolve cached ready payload")
-    else {
-        panic!("expected cached ready literal payload, got {plan:?}");
-    };
+        .expect("resolve cached ready payload");
+    assert_eq!(ready.kind(), ReadyPlanKind::Literal);
     let LiteralPlan::String { value, .. } = program
-        .resolve_literal_plan(*literal)
+        .resolve_literal_plan(ready.literal_plan_id(literal_expr.source()))
         .expect("resolve cached literal payload")
     else {
         panic!("expected cached literal payload, got {plan:?}");
@@ -991,14 +989,12 @@ fn compiled_program_caches_resolved_name_ref_exec_plan() {
         .resolve_expr_plan(name_expr)
         .expect("resolve cached name ref plan");
     assert_eq!(plan.kind(), ExprExecKind::Ready);
-    let ReadyPlan::NameRef(name_ref) = program
+    let ready = program
         .resolve_ready_plan(plan.ready_plan_id(name_expr.source()))
-        .expect("resolve cached ready name ref payload")
-    else {
-        panic!("expected cached ready name ref payload, got {plan:?}");
-    };
+        .expect("resolve cached ready name ref payload");
+    assert_eq!(ready.kind(), ReadyPlanKind::NameRef);
     let name_ref = program
-        .resolve_name_ref_plan(*name_ref)
+        .resolve_name_ref_plan(ready.name_ref_plan_id(name_expr.source()))
         .expect("resolve cached name ref payload");
     assert!(matches!(
         name_ref.resolved,
@@ -1030,14 +1026,12 @@ fn compiled_program_caches_resolved_call_exec_plan() {
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let AccessPlan::Call(call) = program
+    let access = program
         .resolve_access_plan(plan.access_plan_id(call_expr.source()))
-        .expect("resolve cached access payload")
-    else {
-        panic!("expected cached call access payload, got {plan:?}");
-    };
+        .expect("resolve cached access payload");
+    assert_eq!(access.kind(), AccessPlanKind::Call);
     let call = program
-        .resolve_call_plan(*call)
+        .resolve_call_plan(access.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1080,14 +1074,12 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
         .resolve_expr_plan(call_expr)
         .expect("resolve cached call plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let AccessPlan::Call(call) = program
+    let access = program
         .resolve_access_plan(plan.access_plan_id(call_expr.source()))
-        .expect("resolve cached access payload")
-    else {
-        panic!("expected cached call access payload, got {plan:?}");
-    };
+        .expect("resolve cached access payload");
+    assert_eq!(access.kind(), AccessPlanKind::Call);
     let call = program
-        .resolve_call_plan(*call)
+        .resolve_call_plan(access.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
     let callee = call
         .callee
@@ -1812,14 +1804,12 @@ fn compiled_program_caches_paren_exec_plan() {
         .resolve_expr_plan(paren_expr)
         .expect("resolve cached paren plan");
     assert_eq!(plan.kind(), ExprExecKind::Access);
-    let AccessPlan::Paren(paren) = program
+    let access = program
         .resolve_access_plan(plan.access_plan_id(paren_expr.source()))
-        .expect("resolve cached access payload")
-    else {
-        panic!("expected cached paren access payload, got {plan:?}");
-    };
+        .expect("resolve cached access payload");
+    assert_eq!(access.kind(), AccessPlanKind::Paren);
     let ParenPlan { expr, .. } = program
-        .resolve_paren_plan(*paren)
+        .resolve_paren_plan(access.paren_plan_id(paren_expr.source()))
         .expect("resolve cached paren payload");
     assert!(expr.is_some());
 }
@@ -1847,36 +1837,30 @@ fn compiled_program_caches_closure_exec_plan() {
         .expect("resolve cached closure plan");
     let closure = match plan.kind() {
         ExprExecKind::Ready => {
-            let ReadyPlan::Closure(closure) = program
+            let ready = program
                 .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
-                .expect("resolve cached ready closure payload")
-            else {
-                panic!("expected cached ready closure payload, got {plan:?}");
-            };
-            *closure
+                .expect("resolve cached ready closure payload");
+            assert_eq!(ready.kind(), ReadyPlanKind::Closure);
+            ready.closure_plan_id(closure_expr.source())
         }
         ExprExecKind::Access => {
-            let AccessPlan::Paren(paren) = program
+            let access = program
                 .resolve_access_plan(plan.access_plan_id(closure_expr.source()))
-                .expect("resolve cached access payload")
-            else {
-                panic!("expected cached paren access payload, got {plan:?}");
-            };
+                .expect("resolve cached access payload");
+            assert_eq!(access.kind(), AccessPlanKind::Paren);
             let ParenPlan { expr, .. } = program
-                .resolve_paren_plan(*paren)
+                .resolve_paren_plan(access.paren_plan_id(closure_expr.source()))
                 .expect("resolve cached paren payload");
             closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
             let plan = program
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
             assert_eq!(plan.kind(), ExprExecKind::Ready);
-            let ReadyPlan::Closure(closure) = program
+            let ready = program
                 .resolve_ready_plan(plan.ready_plan_id(closure_expr.source()))
-                .expect("resolve cached inner ready closure payload")
-            else {
-                panic!("expected cached inner ready closure payload, got {plan:?}");
-            };
-            *closure
+                .expect("resolve cached inner ready closure payload");
+            assert_eq!(ready.kind(), ReadyPlanKind::Closure);
+            ready.closure_plan_id(closure_expr.source())
         }
         _ => panic!("expected cached closure exec plan, got {plan:?}"),
     };

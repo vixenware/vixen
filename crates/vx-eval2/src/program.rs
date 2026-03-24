@@ -709,12 +709,60 @@ impl ExprExecPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadyPlanKind {
+    Literal,
+    PathLiteral,
+    Closure,
+    NameRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReadyPlan {
-    Literal(LiteralPlanId),
-    PathLiteral(PathLiteralPlanId),
-    Closure(ClosurePlanId),
-    NameRef(NameRefPlanId),
+pub(crate) struct ReadyPlan {
+    kind: ReadyPlanKind,
+    payload: u32,
+}
+
+impl ReadyPlan {
+    fn new(kind: ReadyPlanKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn kind(&self) -> ReadyPlanKind {
+        self.kind
+    }
+
+    pub(crate) fn literal_plan_id(&self, source: SourceId) -> LiteralPlanId {
+        debug_assert_eq!(self.kind, ReadyPlanKind::Literal);
+        LiteralPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn path_literal_plan_id(&self, source: SourceId) -> PathLiteralPlanId {
+        debug_assert_eq!(self.kind, ReadyPlanKind::PathLiteral);
+        PathLiteralPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn closure_plan_id(&self, source: SourceId) -> ClosurePlanId {
+        debug_assert_eq!(self.kind, ReadyPlanKind::Closure);
+        ClosurePlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn name_ref_plan_id(&self, source: SourceId) -> NameRefPlanId {
+        debug_assert_eq!(self.kind, ReadyPlanKind::NameRef);
+        NameRefPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,11 +786,51 @@ pub(crate) enum ControlPlan {
     Binary(BinaryPlanId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessPlanKind {
+    Paren,
+    Call,
+    Field,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AccessPlan {
-    Paren(ParenPlanId),
-    Call(CallPlanId),
-    Field(FieldPlanId),
+pub(crate) struct AccessPlan {
+    kind: AccessPlanKind,
+    payload: u32,
+}
+
+impl AccessPlan {
+    fn new(kind: AccessPlanKind, payload: u32) -> Self {
+        Self { kind, payload }
+    }
+
+    pub(crate) fn kind(&self) -> AccessPlanKind {
+        self.kind
+    }
+
+    pub(crate) fn paren_plan_id(&self, source: SourceId) -> ParenPlanId {
+        debug_assert_eq!(self.kind, AccessPlanKind::Paren);
+        ParenPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn call_plan_id(&self, source: SourceId) -> CallPlanId {
+        debug_assert_eq!(self.kind, AccessPlanKind::Call);
+        CallPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
+
+    pub(crate) fn field_plan_id(&self, source: SourceId) -> FieldPlanId {
+        debug_assert_eq!(self.kind, AccessPlanKind::Field);
+        FieldPlanId {
+            source: source.0,
+            index: self.payload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2886,7 +2974,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Ready,
                 EvalExprKind::Literal,
-                plans.push_ready(source, ReadyPlan::Literal(plan)).index,
+                plans
+                    .push_ready(source, ReadyPlan::new(ReadyPlanKind::Literal, plan.index))
+                    .index,
             )
         }
         ExprKind::PathLiteral(path_literal) => {
@@ -2894,7 +2984,12 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Ready,
                 EvalExprKind::Literal,
-                plans.push_ready(source, ReadyPlan::PathLiteral(plan)).index,
+                plans
+                    .push_ready(
+                        source,
+                        ReadyPlan::new(ReadyPlanKind::PathLiteral, plan.index),
+                    )
+                    .index,
             )
         }
         ExprKind::Paren(paren) => {
@@ -2902,7 +2997,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Access,
                 EvalExprKind::Paren,
-                plans.push_access(source, AccessPlan::Paren(plan)).index,
+                plans
+                    .push_access(source, AccessPlan::new(AccessPlanKind::Paren, plan.index))
+                    .index,
             )
         }
         ExprKind::Closure(closure) => {
@@ -2910,7 +3007,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Ready,
                 EvalExprKind::Closure,
-                plans.push_ready(source, ReadyPlan::Closure(plan)).index,
+                plans
+                    .push_ready(source, ReadyPlan::new(ReadyPlanKind::Closure, plan.index))
+                    .index,
             )
         }
         ExprKind::NameRef(name_ref) => {
@@ -2918,7 +3017,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Ready,
                 EvalExprKind::NameRef,
-                plans.push_ready(source, ReadyPlan::NameRef(plan)).index,
+                plans
+                    .push_ready(source, ReadyPlan::new(ReadyPlanKind::NameRef, plan.index))
+                    .index,
             )
         }
         ExprKind::Call(call) => {
@@ -2927,7 +3028,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Access,
                 EvalExprKind::Call,
-                plans.push_access(source, AccessPlan::Call(plan)).index,
+                plans
+                    .push_access(source, AccessPlan::new(AccessPlanKind::Call, plan.index))
+                    .index,
             )
         }
         ExprKind::Array(array) => {
@@ -3048,7 +3151,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::new(
                 ExprExecKind::Access,
                 EvalExprKind::Field,
-                plans.push_access(source, AccessPlan::Field(plan)).index,
+                plans
+                    .push_access(source, AccessPlan::new(AccessPlanKind::Field, plan.index))
+                    .index,
             )
         }
         ExprKind::Unsupported { .. } => ExprExecPlan::expr(),
