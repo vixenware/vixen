@@ -1,6 +1,6 @@
 use super::*;
 use crate::program::{
-    CallCalleePlan, CallPlan, FieldPlan, LiteralPlan, NameRefPlan, PathLiteralPlan,
+    CallCalleePlan, CallPlan, FieldPlan, LiteralPlan, NameRefPlan, PathLiteralPlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -916,7 +916,7 @@ fn eval_prepared_body_step(
         ExprExecPlan::Fallible(fallible) => eval_fallible(state, &fallible, env),
         ExprExecPlan::If(if_expr) => eval_if(state, &if_expr, env),
         ExprExecPlan::Match(match_expr) => eval_match(state, body.root_expr_id, &match_expr, env),
-        ExprExecPlan::Where(where_expr) => eval_where(state, &where_expr, env),
+        ExprExecPlan::Where(where_expr) => eval_where_plan(state, where_expr, env),
         ExprExecPlan::Prefix(prefix) => eval_prefix(state, &prefix, env),
         ExprExecPlan::Binary(binary) => eval_binary(state, &binary, env),
         ExprExecPlan::InterpolatedString(interpolated) => {
@@ -3110,6 +3110,69 @@ pub(super) fn eval_where(
         WhereState {
             call: WhereCallPlan {
                 call_source: state.span_for_node(call_expr),
+                callee: callee_value,
+                type_args: Arc::clone(&call_expr.type_args),
+                positional_args: Arc::clone(&call_expr.positional_args),
+            },
+            pending_keyword_name: None,
+            keyword_bindings,
+            remaining_keyword_bindings,
+            env: env.clone(),
+        },
+    )
+}
+
+fn eval_where_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    where_expr: &WherePlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let node_id = state
+        .stack
+        .last()
+        .copied()
+        .expect("where expression should have an active trace node");
+    let parent_id = state.stack.iter().rev().nth(1).copied();
+    let call_expr = where_expr.call.as_ref().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            "where expression currently requires a compiled call plan",
+        )
+    })?;
+    let callee = call_expr
+        .callee
+        .as_ref()
+        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
+    let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "where call callee must resolve immediately for now",
+        ));
+    };
+    let mut keyword_bindings = Vec::new();
+    let mut remaining_keyword_bindings = Vec::new();
+    for binding in where_expr.keyword_bindings.iter() {
+        let name = binding.name.clone();
+        match binding.expr {
+            Some(expr) => remaining_keyword_bindings.push((name, expr)),
+            None => {
+                let Some(value) = env.get(name.as_ref()) else {
+                    return Err(EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("where binding {name} is not available in scope"),
+                    ));
+                };
+                keyword_bindings.push((name, value.clone()));
+            }
+        }
+    }
+    continue_where(
+        state,
+        node_id,
+        parent_id,
+        WhereState {
+            call: WhereCallPlan {
+                call_source: state.program.span_for_handle(call_expr.handle),
                 callee: callee_value,
                 type_args: Arc::clone(&call_expr.type_args),
                 positional_args: Arc::clone(&call_expr.positional_args),

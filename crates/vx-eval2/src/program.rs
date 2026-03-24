@@ -335,7 +335,7 @@ pub(crate) enum ExprExecPlan {
     Fallible(FallibleExpr),
     If(IfExpr),
     Match(MatchExpr),
-    Where(WhereExpr),
+    Where(WherePlan),
     Prefix(PrefixExpr),
     Binary(BinaryExpr),
     InterpolatedString(InterpolatedStringExpr),
@@ -417,6 +417,13 @@ pub(crate) struct FieldPlan {
     pub(crate) receiver: Option<ExprId>,
     pub(crate) field_name: Option<Arc<str>>,
     pub(crate) static_member: Option<StaticMemberPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WherePlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) call: Option<CallPlan>,
+    pub(crate) keyword_bindings: Arc<[KeywordBinding]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1534,7 +1541,7 @@ fn compile_expr_plan(expr: &Expr) -> ExprExecPlan {
         ExprKind::Fallible(fallible) => ExprExecPlan::Fallible(fallible.clone()),
         ExprKind::If(if_expr) => ExprExecPlan::If(if_expr.clone()),
         ExprKind::Match(match_expr) => ExprExecPlan::Match(match_expr.clone()),
-        ExprKind::Where(where_expr) => ExprExecPlan::Where(where_expr.clone()),
+        ExprKind::Where(where_expr) => ExprExecPlan::Where(compile_where_plan(where_expr)),
         ExprKind::Prefix(prefix) => ExprExecPlan::Prefix(prefix.clone()),
         ExprKind::Binary(binary) => ExprExecPlan::Binary(binary.clone()),
         ExprKind::InterpolatedString(interpolated) => {
@@ -1664,6 +1671,14 @@ fn compile_field_plan(field: &FieldExpr) -> FieldPlan {
         receiver: field.receiver,
         field_name: field.field_name.clone(),
         static_member: field.static_member.clone(),
+    }
+}
+
+fn compile_where_plan(where_expr: &WhereExpr) -> WherePlan {
+    WherePlan {
+        handle: where_expr.handle,
+        call: where_expr.call.as_ref().map(compile_call_plan),
+        keyword_bindings: Arc::clone(&where_expr.keyword_bindings),
     }
 }
 

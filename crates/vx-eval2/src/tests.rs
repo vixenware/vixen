@@ -27,7 +27,7 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         BlockStep, CallCallee, CallCalleePlan, CompiledProgram, ExprExecPlan, ExprKind,
-        LiteralPlan, ResolvedNameRef,
+        LiteralPlan, ResolvedNameRef, WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1235,6 +1235,47 @@ fn compiled_program_lowers_where_expr_to_compiled_call_plan() {
         Some(CallCallee::ResolvedFunction { .. })
     ));
     assert_eq!(call.positional_args.len(), 0);
+}
+
+#[test]
+fn compiled_program_caches_where_exec_plan() {
+    let program = CompiledProgram::new(
+        "cached-where-plan",
+        "fn helper() { 1 }\nfn build() { helper() where { value: \"serde\", needle: \"ser\" } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(where_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain where expression");
+    };
+    let plan = program
+        .resolve_expr_plan(where_expr)
+        .expect("resolve cached where plan");
+    let ExprExecPlan::Where(WherePlan {
+        call,
+        keyword_bindings,
+        ..
+    }) = plan.as_ref()
+    else {
+        panic!("expected cached where exec plan, got {plan:?}");
+    };
+    let call = call
+        .as_ref()
+        .expect("cached where plan should contain call");
+    assert!(matches!(
+        call.callee,
+        Some(CallCalleePlan::ResolvedFunction { .. })
+    ));
+    assert_eq!(keyword_bindings.len(), 2);
 }
 
 #[test]
