@@ -27,8 +27,9 @@ use crate::{
     eval_source_entry_with_args_with_source_id_with_sink,
     program::{
         ArrayPlan, BinaryPlan, BlockStep, CallCallee, CallCalleePlan, CompiledProgram,
-        ExprExecPlan, ExprKind, FalliblePlan, IfPlan, LiteralPlan, MapPlan, PrefixPlan, RangePlan,
-        ResolvedNameRef, TuplePlan, WherePlan,
+        ExprExecPlan, ExprKind, FailPlan, FalliblePlan, IfPlan, InterpolatedStringPlan,
+        LiteralPlan, MapPlan, PrefixPlan, RangePlan, ResolvedNameRef, StructLiteralPlan, TuplePlan,
+        WherePlan,
     },
     resolution_to_outcome, value_to_envelope,
 };
@@ -1546,6 +1547,102 @@ fn compiled_program_caches_map_exec_plan() {
         .resolve_map_plan(*map)
         .expect("resolve cached map payload");
     assert_eq!(entries.len(), 2);
+}
+
+#[test]
+fn compiled_program_caches_fail_exec_plan() {
+    let program = CompiledProgram::new("cached-fail-plan", "fn build() { fail(\"boom\") }");
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(fail_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain fail expression");
+    };
+    let plan = program
+        .resolve_expr_plan(fail_expr)
+        .expect("resolve cached fail plan");
+    let ExprExecPlan::Fail(fail) = plan.as_ref() else {
+        panic!("expected cached fail exec plan, got {plan:?}");
+    };
+    let FailPlan { message, .. } = program
+        .resolve_fail_plan(*fail)
+        .expect("resolve cached fail payload");
+    assert!(message.is_some());
+}
+
+#[test]
+fn compiled_program_caches_interpolated_string_exec_plan() {
+    let program = CompiledProgram::new(
+        "cached-interpolated-string-plan",
+        "fn build() { `hello {1}` }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(string_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain interpolated string expression");
+    };
+    let plan = program
+        .resolve_expr_plan(string_expr)
+        .expect("resolve cached interpolated string plan");
+    let ExprExecPlan::InterpolatedString(string) = plan.as_ref() else {
+        panic!("expected cached interpolated string exec plan, got {plan:?}");
+    };
+    let InterpolatedStringPlan { parts, .. } = program
+        .resolve_interpolated_string_plan(*string)
+        .expect("resolve cached interpolated string payload");
+    assert_eq!(parts.len(), 2);
+}
+
+#[test]
+fn compiled_program_caches_struct_literal_exec_plan() {
+    let program = CompiledProgram::new(
+        "cached-struct-literal-plan",
+        "struct Box { value: U64 }\nfn build() { Box { value: 1 } }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(struct_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain struct literal expression");
+    };
+    let plan = program
+        .resolve_expr_plan(struct_expr)
+        .expect("resolve cached struct literal plan");
+    let ExprExecPlan::StructLiteral(struct_literal) = plan.as_ref() else {
+        panic!("expected cached struct literal exec plan, got {plan:?}");
+    };
+    let StructLiteralPlan {
+        type_name, parts, ..
+    } = program
+        .resolve_struct_literal_plan(*struct_literal)
+        .expect("resolve cached struct literal payload");
+    assert_eq!(type_name.as_deref(), Some("Box"));
+    assert_eq!(parts.len(), 1);
 }
 
 #[test]

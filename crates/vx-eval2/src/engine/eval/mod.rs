@@ -1,7 +1,8 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan, LiteralPlan,
-    MapPlan, NameRefPlan, PathLiteralPlan, PrefixPlan, RangePlan, TuplePlan, WherePlan,
+    ArrayPlan, BinaryPlan, CallCalleePlan, CallPlan, FalliblePlan, FieldPlan, IfPlan,
+    InterpolatedStringPlan, LiteralPlan, MapPlan, NameRefPlan, PathLiteralPlan, PrefixPlan,
+    RangePlan, StructLiteralPlan, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -939,7 +940,10 @@ fn eval_prepared_body_step(
             let map = state.program.resolve_map_plan(*map)?;
             eval_map_plan(state, map, env)
         }
-        ExprExecPlan::Fail(fail) => eval_fail(state, &fail, env),
+        ExprExecPlan::Fail(fail) => {
+            let fail = state.program.resolve_fail_plan(*fail)?;
+            eval_fail_plan(state, fail, env)
+        }
         ExprExecPlan::Fallible(fallible) => {
             let fallible = state.program.resolve_fallible_plan(*fallible)?;
             eval_fallible_plan(state, fallible, env)
@@ -962,10 +966,14 @@ fn eval_prepared_body_step(
             eval_binary_plan(state, binary, env)
         }
         ExprExecPlan::InterpolatedString(interpolated) => {
-            eval_interpolated_string(state, &interpolated, env)
+            let interpolated = state
+                .program
+                .resolve_interpolated_string_plan(*interpolated)?;
+            eval_interpolated_string_plan(state, interpolated, env)
         }
         ExprExecPlan::StructLiteral(struct_literal) => {
-            eval_struct_literal(state, &struct_literal, env)
+            let struct_literal = state.program.resolve_struct_literal_plan(*struct_literal)?;
+            eval_struct_literal_plan(state, struct_literal, env)
         }
     }
 }
@@ -2374,17 +2382,47 @@ pub(super) fn eval_struct_literal(
     struct_literal: &StructLiteralExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let type_name = struct_literal_type_name(state, struct_literal)?;
+    eval_struct_literal_inner(
+        state,
+        struct_literal.handle,
+        struct_literal.type_name.clone(),
+        &struct_literal.parts,
+        env,
+    )
+}
+
+fn eval_struct_literal_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    struct_literal: &StructLiteralPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_struct_literal_inner(
+        state,
+        struct_literal.handle,
+        struct_literal.type_name.clone(),
+        &struct_literal.parts,
+        env,
+    )
+}
+
+fn eval_struct_literal_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    type_name: Option<Arc<str>>,
+    parts: &[crate::program::StructLiteralPart],
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let type_name = struct_literal_type_name(type_name)?;
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("struct literal should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let struct_source = state.span_for_node(struct_literal);
+    let struct_source = state.program.span_for_handle(handle);
     let mut immediate_fields = Vec::new();
     let mut remaining_parts = Vec::new();
-    for field in struct_literal.parts.iter() {
+    for field in parts.iter() {
         match field {
             crate::program::StructLiteralPart::Field {
                 name,
@@ -2458,13 +2496,8 @@ pub(super) fn eval_struct_literal(
     )
 }
 
-fn struct_literal_type_name(
-    _state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    struct_literal: &StructLiteralExpr,
-) -> Result<Arc<str>, EvalError> {
-    struct_literal
-        .type_name
-        .clone()
+fn struct_literal_type_name(type_name: Option<Arc<str>>) -> Result<Arc<str>, EvalError> {
+    type_name
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct literal has no type name"))
 }
 
@@ -2672,15 +2705,31 @@ pub(super) fn eval_interpolated_string(
     interpolated: &InterpolatedStringExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_interpolated_string_inner(state, interpolated.handle, &interpolated.parts, env)
+}
+
+fn eval_interpolated_string_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    interpolated: &InterpolatedStringPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_interpolated_string_inner(state, interpolated.handle, &interpolated.parts, env)
+}
+
+fn eval_interpolated_string_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    handle: ProgramNodeHandle,
+    parts: &[StringPart],
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
         .copied()
         .expect("interpolated string should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    let string_source = state.span_for_node(interpolated);
-    let parts = interpolated
-        .parts
+    let string_source = state.program.span_for_handle(handle);
+    let parts = parts
         .iter()
         .map(|part| match part {
             StringPart::Text(text) => Ok(InterpolatedPart::Text(text.clone())),
@@ -2916,6 +2965,22 @@ pub(super) fn eval_fail(
     fail: &FailExpr,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    eval_fail_inner(state, fail.message, env)
+}
+
+fn eval_fail_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    fail: &crate::program::FailPlan,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    eval_fail_inner(state, fail.message, env)
+}
+
+fn eval_fail_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    message: Option<ExprId>,
+    env: &mut EvalEnv,
+) -> Result<EvalStep, EvalError> {
     let node_id = state
         .stack
         .last()
@@ -2925,7 +2990,7 @@ pub(super) fn eval_fail(
     let failure = match eval_dependent_expr_id(
         state,
         node_id,
-        state.expr_id_for(fail.message.ok_or_else(|| {
+        state.expr_id_for(message.ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
         })?)?,
         env,

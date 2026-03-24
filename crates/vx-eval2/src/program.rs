@@ -347,6 +347,42 @@ impl MapPlanId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FailPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl FailPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct InterpolatedStringPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl InterpolatedStringPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct StructLiteralPlanId {
+    source: u32,
+    index: u32,
+}
+
+impl StructLiteralPlanId {
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompiledParameter {
     pub(crate) label: Arc<str>,
@@ -499,15 +535,15 @@ pub(crate) enum ExprExecPlan {
     Tuple(TuplePlanId),
     Range(RangePlanId),
     Map(MapPlanId),
-    Fail(FailExpr),
+    Fail(FailPlanId),
     Fallible(FalliblePlanId),
     If(IfPlanId),
     Match(MatchExpr),
     Where(WherePlanId),
     Prefix(PrefixPlanId),
     Binary(BinaryPlanId),
-    InterpolatedString(InterpolatedStringExpr),
-    StructLiteral(StructLiteralExpr),
+    InterpolatedString(InterpolatedStringPlanId),
+    StructLiteral(StructLiteralPlanId),
     Field(FieldPlanId),
 }
 
@@ -647,6 +683,25 @@ pub(crate) struct RangePlan {
 pub(crate) struct MapPlan {
     pub(crate) handle: ProgramNodeHandle,
     pub(crate) entries: Arc<[(ExprId, ExprId)]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) message: Option<ExprId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InterpolatedStringPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) parts: Arc<[StringPart]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StructLiteralPlan {
+    pub(crate) handle: ProgramNodeHandle,
+    pub(crate) type_name: Option<Arc<str>>,
+    pub(crate) parts: Arc<[StructLiteralPart]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +1004,9 @@ struct ExprPlanTables {
     tuple_plans: Vec<TuplePlan>,
     range_plans: Vec<RangePlan>,
     map_plans: Vec<MapPlan>,
+    fail_plans: Vec<FailPlan>,
+    interpolated_string_plans: Vec<InterpolatedStringPlan>,
+    struct_literal_plans: Vec<StructLiteralPlan>,
 }
 
 struct CompiledProgramSource {
@@ -973,6 +1031,9 @@ struct CompiledProgramSource {
     tuple_plans: Vec<TuplePlan>,
     range_plans: Vec<RangePlan>,
     map_plans: Vec<MapPlan>,
+    fail_plans: Vec<FailPlan>,
+    interpolated_string_plans: Vec<InterpolatedStringPlan>,
+    struct_literal_plans: Vec<StructLiteralPlan>,
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
@@ -1181,6 +1242,25 @@ impl CompiledProgram {
 
     pub(crate) fn resolve_map_plan(&self, id: MapPlanId) -> Result<&MapPlan, EvalError> {
         self.source(id.source())?.resolve_map_plan(id)
+    }
+
+    pub(crate) fn resolve_fail_plan(&self, id: FailPlanId) -> Result<&FailPlan, EvalError> {
+        self.source(id.source())?.resolve_fail_plan(id)
+    }
+
+    pub(crate) fn resolve_interpolated_string_plan(
+        &self,
+        id: InterpolatedStringPlanId,
+    ) -> Result<&InterpolatedStringPlan, EvalError> {
+        self.source(id.source())?
+            .resolve_interpolated_string_plan(id)
+    }
+
+    pub(crate) fn resolve_struct_literal_plan(
+        &self,
+        id: StructLiteralPlanId,
+    ) -> Result<&StructLiteralPlan, EvalError> {
+        self.source(id.source())?.resolve_struct_literal_plan(id)
     }
 
     pub(crate) fn resolve_expr(&self, key: impl IntoExprLookupId) -> Result<&Expr, EvalError> {
@@ -1535,6 +1615,9 @@ impl CompiledProgramSource {
         let tuple_plans = Vec::new();
         let range_plans = Vec::new();
         let map_plans = Vec::new();
+        let fail_plans = Vec::new();
+        let interpolated_string_plans = Vec::new();
+        let struct_literal_plans = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -1602,6 +1685,9 @@ impl CompiledProgramSource {
             tuple_plans,
             range_plans,
             map_plans,
+            fail_plans,
+            interpolated_string_plans,
+            struct_literal_plans,
             expr_ids,
             block_bodies,
             type_nodes,
@@ -1955,6 +2041,46 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_fail_plan(&self, id: FailPlanId) -> Result<&FailPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.fail_plans.get(id.index as usize).ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                format!("fail plan {:?} was not found", id),
+            )
+        })
+    }
+
+    fn resolve_interpolated_string_plan(
+        &self,
+        id: InterpolatedStringPlanId,
+    ) -> Result<&InterpolatedStringPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.interpolated_string_plans
+            .get(id.index as usize)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("interpolated string plan {:?} was not found", id),
+                )
+            })
+    }
+
+    fn resolve_struct_literal_plan(
+        &self,
+        id: StructLiteralPlanId,
+    ) -> Result<&StructLiteralPlan, EvalError> {
+        self.ensure_parsed()?;
+        self.struct_literal_plans
+            .get(id.index as usize)
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("struct literal plan {:?} was not found", id),
+                )
+            })
+    }
+
     fn resolve_block_body(&self, id: BlockBodyId) -> Result<&BlockBody, EvalError> {
         self.ensure_parsed()?;
         self.block_bodies.get(id.index as usize).ok_or_else(|| {
@@ -1990,6 +2116,9 @@ impl CompiledProgramSource {
         self.tuple_plans = plans.tuple_plans;
         self.range_plans = plans.range_plans;
         self.map_plans = plans.map_plans;
+        self.fail_plans = plans.fail_plans;
+        self.interpolated_string_plans = plans.interpolated_string_plans;
+        self.struct_literal_plans = plans.struct_literal_plans;
     }
 
     #[cfg(test)]
@@ -2159,6 +2288,41 @@ impl ExprPlanTables {
         self.map_plans.push(plan);
         id
     }
+
+    fn push_fail(&mut self, source: SourceId, plan: FailPlan) -> FailPlanId {
+        let id = FailPlanId {
+            source: source.0,
+            index: self.fail_plans.len() as u32,
+        };
+        self.fail_plans.push(plan);
+        id
+    }
+
+    fn push_interpolated_string(
+        &mut self,
+        source: SourceId,
+        plan: InterpolatedStringPlan,
+    ) -> InterpolatedStringPlanId {
+        let id = InterpolatedStringPlanId {
+            source: source.0,
+            index: self.interpolated_string_plans.len() as u32,
+        };
+        self.interpolated_string_plans.push(plan);
+        id
+    }
+
+    fn push_struct_literal(
+        &mut self,
+        source: SourceId,
+        plan: StructLiteralPlan,
+    ) -> StructLiteralPlanId {
+        let id = StructLiteralPlanId {
+            source: source.0,
+            index: self.struct_literal_plans.len() as u32,
+        };
+        self.struct_literal_plans.push(plan);
+        id
+    }
 }
 
 fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
@@ -2189,7 +2353,9 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
             ExprExecPlan::Range(plans.push_range(source, compile_range_plan(range)))
         }
         ExprKind::Map(map) => ExprExecPlan::Map(plans.push_map(source, compile_map_plan(map))),
-        ExprKind::Fail(fail) => ExprExecPlan::Fail(fail.clone()),
+        ExprKind::Fail(fail) => {
+            ExprExecPlan::Fail(plans.push_fail(source, compile_fail_plan(fail)))
+        }
         ExprKind::Fallible(fallible) => {
             ExprExecPlan::Fallible(plans.push_fallible(source, compile_fallible_plan(fallible)))
         }
@@ -2204,12 +2370,12 @@ fn compile_expr_plan(expr: &Expr, plans: &mut ExprPlanTables) -> ExprExecPlan {
         ExprKind::Binary(binary) => {
             ExprExecPlan::Binary(plans.push_binary(source, compile_binary_plan(binary)))
         }
-        ExprKind::InterpolatedString(interpolated) => {
-            ExprExecPlan::InterpolatedString(interpolated.clone())
-        }
-        ExprKind::StructLiteral(struct_literal) => {
-            ExprExecPlan::StructLiteral(struct_literal.clone())
-        }
+        ExprKind::InterpolatedString(interpolated) => ExprExecPlan::InterpolatedString(
+            plans.push_interpolated_string(source, compile_interpolated_string_plan(interpolated)),
+        ),
+        ExprKind::StructLiteral(struct_literal) => ExprExecPlan::StructLiteral(
+            plans.push_struct_literal(source, compile_struct_literal_plan(struct_literal)),
+        ),
         ExprKind::Field(field) => {
             ExprExecPlan::Field(plans.push_field(source, compile_field_plan(field)))
         }
@@ -2354,6 +2520,30 @@ fn compile_map_plan(map: &MapExpr) -> MapPlan {
     MapPlan {
         handle: map.handle,
         entries: Arc::clone(&map.entries),
+    }
+}
+
+fn compile_fail_plan(fail: &FailExpr) -> FailPlan {
+    FailPlan {
+        handle: fail.handle,
+        message: fail.message,
+    }
+}
+
+fn compile_interpolated_string_plan(
+    interpolated: &InterpolatedStringExpr,
+) -> InterpolatedStringPlan {
+    InterpolatedStringPlan {
+        handle: interpolated.handle,
+        parts: Arc::clone(&interpolated.parts),
+    }
+}
+
+fn compile_struct_literal_plan(struct_literal: &StructLiteralExpr) -> StructLiteralPlan {
+    StructLiteralPlan {
+        handle: struct_literal.handle,
+        type_name: struct_literal.type_name.clone(),
+        parts: Arc::clone(&struct_literal.parts),
     }
 }
 
