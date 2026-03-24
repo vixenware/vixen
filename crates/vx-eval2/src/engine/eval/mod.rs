@@ -40,9 +40,12 @@ impl PreparedBodyRef {
         program: &CompiledProgram,
         body: ExprBodyRef,
     ) -> Result<Self, EvalError> {
-        Ok(Self::from_resolved_body_ref(
-            program.resolve_expr_body_ref(body)?,
-        ))
+        let body = if body.plan().kind() == ExprExecKind::Expr {
+            program.resolve_expr_body_ref(body)?
+        } else {
+            body
+        };
+        Ok(Self::from_resolved_body_ref(body))
     }
 
     fn from_resolved_body_ref(body: ExprBodyRef) -> Self {
@@ -3495,17 +3498,18 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::EvalPlan(body_ref) => {
                 bytecode.pc += 1;
+                let body_source = body_ref.expr_id().source();
                 let plan = body_ref.plan();
                 let step = if state.queue_child_work && plan.kind() != ExprExecKind::Ready {
-                    state.with_source(source, |state| {
+                    state.with_source(body_source, |state| {
                         eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
                     })?
                 } else {
                     let child_id = state.alloc_node_id();
                     let kind = plan.trace_kind();
-                    let child_source = expr_plan_source(state.program, source, plan)?;
+                    let child_source = expr_plan_source(state.program, body_source, plan)?;
                     state.emit_current_dependency(child_id, Some(child_source.clone()));
-                    state.with_source(source, |state| {
+                    state.with_source(body_source, |state| {
                         eval_node_with_kind(state, child_id, kind, child_source, |state| {
                             eval_bytecode_plan(
                                 state,
