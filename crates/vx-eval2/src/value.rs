@@ -6,7 +6,7 @@ use im::OrdMap;
 
 use crate::{
     Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
-    program::{CompiledParameter, ExprId},
+    program::{CompiledParameter, ExprBodyRef},
 };
 
 /// A successful runtime value: payload plus orthogonal metadata.
@@ -311,7 +311,7 @@ pub struct FunctionRef {
     pub(crate) name: Arc<str>,
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
-    pub(crate) body: Option<ExprId>,
+    pub(crate) body: Option<ExprBodyRef>,
     pub(crate) captures: Arc<[(Arc<str>, Value)]>,
     pub(crate) self_name: Option<Arc<str>>,
 }
@@ -322,7 +322,7 @@ impl FunctionRef {
         name: Arc<str>,
         parameters: Arc<[CompiledParameter]>,
         has_keyword_parameters: bool,
-        body: Option<ExprId>,
+        body: Option<ExprBodyRef>,
         captures: Arc<[(Arc<str>, Value)]>,
         self_name: Option<Arc<str>>,
     ) -> Self {

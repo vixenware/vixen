@@ -8,7 +8,7 @@ use crate::{CrossingPolicy, EvalErrorKind, EvalWorkId, PendingRef, ReuseClass, S
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EvalNodeId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EvalExprKind {
     Block,
     Literal,

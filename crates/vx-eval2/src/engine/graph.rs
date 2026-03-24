@@ -275,7 +275,7 @@ impl From<&FunctionRef> for KeyedResolverIndexKey {
             name: value.name.clone(),
             parameters: value.parameters.clone(),
             has_keyword_parameters: value.has_keyword_parameters,
-            body: value.body,
+            body: value.body.map(crate::program::ExprBodyRef::expr_id),
             self_name: value.self_name.clone(),
         }
     }

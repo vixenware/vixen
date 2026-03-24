@@ -31,10 +31,21 @@ impl PreparedBodyRef {
         program: &CompiledProgram,
         expr_id: ExprId,
     ) -> Result<Self, EvalError> {
-        Ok(Self::from_body_ref(program.resolve_expr_body_ref(expr_id)?))
+        Ok(Self::from_resolved_body_ref(
+            program.resolve_expr_body_ref(expr_id)?,
+        ))
     }
 
-    pub(super) fn from_body_ref(body: ExprBodyRef) -> Self {
+    pub(super) fn from_body_ref(
+        program: &CompiledProgram,
+        body: ExprBodyRef,
+    ) -> Result<Self, EvalError> {
+        Ok(Self::from_resolved_body_ref(
+            program.resolve_expr_body_ref(body)?,
+        ))
+    }
+
+    fn from_resolved_body_ref(body: ExprBodyRef) -> Self {
         Self {
             root_expr_id: body.expr_id(),
             plan: body.plan(),
@@ -339,11 +350,15 @@ fn collect_adapter_parameters_from_block_step(
 ) -> Result<(), EvalError> {
     match step {
         BlockStep::Let { expr, .. } | BlockStep::Expr(expr) => {
-            collect_adapter_parameters(program, program.resolve_expr(*expr)?, names_by_index)?;
+            collect_adapter_parameters(program, program.resolve_expr_id(*expr)?, names_by_index)?;
         }
         BlockStep::FnDecl(function) => {
             if let Some(body) = function.compiled.body {
-                collect_adapter_parameters(program, program.resolve_expr(body)?, names_by_index)?;
+                collect_adapter_parameters(
+                    program,
+                    program.resolve_expr_id(body)?,
+                    names_by_index,
+                )?;
             }
         }
     }
@@ -385,7 +400,7 @@ fn function_adapter_value_for_arg(
         Arc::from("<adapter>"),
         parameters,
         false,
-        Some(arg_id),
+        Some(arg),
         captures_from_scope(env),
         None,
     );
@@ -419,7 +434,7 @@ fn eval_closure_body(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
     parameters: Arc<[CompiledParameter]>,
-    body: Option<ExprId>,
+    body: Option<ExprBodyRef>,
     env: &EvalEnv,
 ) -> Result<Value, EvalError> {
     let body = body
@@ -467,7 +482,7 @@ pub(super) fn prepare_entry(
     })?;
     let env = bind_arguments(state, &function.parameters, args, None)?;
     Ok(PreparedEntry {
-        body: PreparedBodyRef::from_expr_id(state.program, body)?,
+        body: PreparedBodyRef::from_body_ref(state.program, body)?,
         env,
     })
 }
@@ -507,7 +522,7 @@ pub(super) fn prepare_function_call(
     }
     bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
     Ok(Some(PreparedEntry {
-        body: PreparedBodyRef::from_expr_id(state.program, body)?,
+        body: PreparedBodyRef::from_body_ref(state.program, body)?,
         env,
     }))
 }
@@ -752,7 +767,7 @@ fn eval_closure_plan(
         state,
         closure.handle,
         Arc::clone(&closure.parameters),
-        closure.body.map(ExprBodyRef::expr_id),
+        closure.body,
         env,
     )
 }
@@ -921,7 +936,7 @@ pub(super) fn eval_child_body_ref(
     body: ExprBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let prepared = PreparedBodyRef::from_body_ref(body);
+    let prepared = PreparedBodyRef::from_body_ref(state.program, body)?;
     if !state.queue_child_work {
         let child_id = state.alloc_node_id();
         state.emit_current_dependency(
@@ -3232,7 +3247,7 @@ pub(super) fn continue_block_body(
         match step {
             BlockStep::Let { pattern, expr } => {
                 match state.with_source(source, |state| {
-                    eval_dependent_expr_id(state, node_id, *expr, &mut scope)
+                    eval_dependent_body_ref(state, node_id, *expr, &mut scope)
                 })? {
                     EvalStep::Ready(value) => {
                         bind_let_pattern(&mut scope, pattern, value)?;
@@ -3262,7 +3277,7 @@ pub(super) fn continue_block_body(
                 env_mut(&mut scope).insert(name, value);
             }
             BlockStep::Expr(expr) => match state.with_source(source, |state| {
-                eval_dependent_expr_id(state, node_id, *expr, &mut scope)
+                eval_dependent_body_ref(state, node_id, *expr, &mut scope)
             })? {
                 EvalStep::Ready(value) => last = value,
                 EvalStep::Suspended(suspension) => {
@@ -3741,7 +3756,12 @@ pub(super) fn queue_child_body_ref(
     body: ExprBodyRef,
     env: &EvalEnv,
 ) -> EvalNodeId {
-    queue_child_expr_body(state, PreparedBodyRef::from_body_ref(body), env)
+    queue_child_expr_body(
+        state,
+        PreparedBodyRef::from_body_ref(state.program, body)
+            .expect("queued child body ref should resolve to an execution body"),
+        env,
+    )
 }
 
 fn queue_child_expr_body(

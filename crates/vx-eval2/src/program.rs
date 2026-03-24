@@ -456,7 +456,7 @@ pub(crate) struct CompiledFunction {
     pub(crate) definition: ProgramNodeHandle,
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
-    pub(crate) body: Option<ExprId>,
+    pub(crate) body: Option<ExprBodyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,7 +582,7 @@ pub(crate) enum ExprKind {
     Unsupported { kind: SyntaxKind },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ExprExecKind {
     Expr,
     Block,
@@ -592,7 +592,7 @@ pub(crate) enum ExprExecKind {
     Control,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExprExecPlan {
     kind: ExprExecKind,
     trace_kind: EvalExprKind,
@@ -600,7 +600,7 @@ pub(crate) struct ExprExecPlan {
     payload: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExprBodyRef {
     source: u32,
     index: u32,
@@ -884,6 +884,11 @@ impl ExprBodyRef {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn source(self) -> SourceId {
+        SourceId(self.source)
+    }
+
     pub(crate) fn plan(self) -> ExprExecPlan {
         self.plan
     }
@@ -894,6 +899,12 @@ impl ExprBodyRef {
             index: self.index,
             plan,
         }
+    }
+}
+
+impl From<ExprBodyRef> for ExprId {
+    fn from(value: ExprBodyRef) -> Self {
+        value.expr_id()
     }
 }
 
@@ -1261,9 +1272,12 @@ pub(crate) struct BlockBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlockStep {
-    Let { pattern: LetPattern, expr: ExprId },
+    Let {
+        pattern: LetPattern,
+        expr: ExprBodyRef,
+    },
     FnDecl(FunctionStmt),
-    Expr(ExprId),
+    Expr(ExprBodyRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1730,16 +1744,25 @@ impl CompiledProgram {
         key.into_expr_id(self)
     }
 
-    pub(crate) fn resolve_expr_id(&self, id: ExprId) -> Result<&Expr, EvalError> {
+    pub(crate) fn resolve_expr_id(&self, id: impl Into<ExprId>) -> Result<&Expr, EvalError> {
+        let id = id.into();
         self.source(id.source())?.resolve_expr(id)
     }
 
     #[cfg(test)]
-    pub(crate) fn resolve_expr_plan(&self, id: ExprId) -> Result<ExprExecPlan, EvalError> {
+    pub(crate) fn resolve_expr_plan(
+        &self,
+        id: impl Into<ExprId>,
+    ) -> Result<ExprExecPlan, EvalError> {
+        let id = id.into();
         self.source(id.source())?.resolve_expr_plan(id)
     }
 
-    pub(crate) fn resolve_expr_body_ref(&self, id: ExprId) -> Result<ExprBodyRef, EvalError> {
+    pub(crate) fn resolve_expr_body_ref(
+        &self,
+        id: impl Into<ExprId>,
+    ) -> Result<ExprBodyRef, EvalError> {
+        let id = id.into();
         self.source(id.source())?.resolve_expr_body_ref(id)
     }
 
@@ -2914,6 +2937,35 @@ impl CompiledProgramSource {
                     .expect("child body ref should resolve to a cached plan"),
             )
         };
+        let resolve_function = |function: &mut CompiledFunction, expr_plans: &[ExprExecPlan]| {
+            function.body = function.body.map(|body| resolve(body, expr_plans));
+        };
+
+        for function in self.functions_by_name.values_mut() {
+            resolve_function(function, &self.expr_plans);
+        }
+        for (_name, function) in self.functions_by_definition.values_mut() {
+            resolve_function(function, &self.expr_plans);
+        }
+        for body in &mut self.block_bodies {
+            body.steps = Arc::from(
+                body.steps
+                    .iter()
+                    .cloned()
+                    .map(|step| match step {
+                        BlockStep::Let { pattern, expr } => BlockStep::Let {
+                            pattern,
+                            expr: resolve(expr, &self.expr_plans),
+                        },
+                        BlockStep::FnDecl(mut function) => {
+                            resolve_function(&mut function.compiled, &self.expr_plans);
+                            BlockStep::FnDecl(function)
+                        }
+                        BlockStep::Expr(expr) => BlockStep::Expr(resolve(expr, &self.expr_plans)),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
 
         for plan in &mut self.call_plans {
             plan.positional_args = Arc::from(
@@ -3958,6 +4010,7 @@ fn compile_function_decl(
                 expr_ids
                     .get(&ProgramNodeHandle::for_node(source, body))
                     .copied()
+                    .map(ExprBodyRef::unresolved)
             }),
         },
     ))
@@ -4517,6 +4570,7 @@ fn compile_block_step(
                     )
                 })
                 .transpose()?
+                .map(ExprBodyRef::unresolved)
                 .ok_or_else(|| {
                     EvalError::new(EvalErrorKind::Internal, "let statement has no value")
                 })?,
@@ -4534,11 +4588,11 @@ fn compile_block_step(
                 compiled,
             })
         }
-        ParserStmt::Expr(expr) => BlockStep::Expr(require_expr_id(
+        ParserStmt::Expr(expr) => BlockStep::Expr(ExprBodyRef::unresolved(require_expr_id(
             expr_ids,
             ProgramNodeHandle::for_node(source, expr),
             "expression statement",
-        )?),
+        )?)),
         other => {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,

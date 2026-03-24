@@ -1786,9 +1786,7 @@ fn compiled_program_caches_closure_exec_plan() {
             let ParenPlan { expr, .. } = program
                 .resolve_paren_plan(plan.paren_plan_id(closure_expr.source()))
                 .expect("resolve cached paren payload");
-            closure_expr = expr
-                .expect("paren-wrapped closure should have an inner expr")
-                .expr_id();
+            closure_expr = expr.expect("paren-wrapped closure should have an inner expr");
             let plan = program
                 .resolve_expr_plan(closure_expr)
                 .expect("resolve cached inner closure plan");
