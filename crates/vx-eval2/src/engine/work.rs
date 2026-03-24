@@ -1,4 +1,5 @@
 use super::*;
+use crate::program::{CallPlan, MatchPlan, WherePlan};
 use std::cell::RefCell;
 
 #[derive(Debug, Clone)]
@@ -958,9 +959,18 @@ pub(super) struct ScheduledResume {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScheduledExpr {
-    pub(super) body: PreparedBodyRef,
+    pub(super) root_expr_id: ExprId,
+    pub(super) kind: ScheduledExprKind,
     pub(super) env: EvalEnv,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScheduledExprKind {
+    Prepared(PreparedBodyRef),
+    Call(CallPlan),
+    Match(MatchPlan),
+    Where(WherePlan),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2340,7 +2350,8 @@ pub(super) fn execute_ready_task(
                 Vec::new()
             };
             let scheduled = ScheduledExpr {
-                body: prepared.body,
+                root_expr_id: prepared.body.root_expr_id(),
+                kind: ScheduledExprKind::Prepared(prepared.body),
                 env: prepared.env,
                 call_stack,
             };
@@ -2373,26 +2384,47 @@ pub(super) fn execute_ready_task(
             EvalCompletedWorkOutcome::Progressed
         }
         ReadyTask::EvaluateExpr(scheduled) => {
-            let step = if scheduled.call_stack.is_empty() {
-                eval_prepared_body_with_node_id(
-                    &mut state,
+            let ScheduledExpr {
+                root_expr_id,
+                kind,
+                env,
+                call_stack,
+            } = scheduled;
+            let run = move |state: &mut EvalState<'_, '_, _, _>| match kind.clone() {
+                ScheduledExprKind::Prepared(body) => eval_prepared_body_with_node_id(
+                    state,
                     record.work.node_id,
                     PreparedEntry {
-                        body: scheduled.body,
-                        env: scheduled.env,
+                        body,
+                        env: env.clone(),
                     },
-                )
+                ),
+                ScheduledExprKind::Call(call) => eval_call_plan_with_node_id(
+                    state,
+                    record.work.node_id,
+                    root_expr_id,
+                    call,
+                    env.clone(),
+                ),
+                ScheduledExprKind::Match(match_plan) => eval_match_plan_with_node_id(
+                    state,
+                    record.work.node_id,
+                    root_expr_id,
+                    match_plan,
+                    env.clone(),
+                ),
+                ScheduledExprKind::Where(where_plan) => eval_where_plan_with_node_id(
+                    state,
+                    record.work.node_id,
+                    root_expr_id,
+                    where_plan,
+                    env.clone(),
+                ),
+            };
+            let step = if call_stack.is_empty() {
+                run(&mut state)
             } else {
-                state.with_call_stack(scheduled.call_stack, |state| {
-                    eval_prepared_body_with_node_id(
-                        state,
-                        record.work.node_id,
-                        PreparedEntry {
-                            body: scheduled.body,
-                            env: scheduled.env,
-                        },
-                    )
-                })
+                state.with_call_stack(call_stack, run)
             };
             invocation = state.work_invocation.clone();
             match step {

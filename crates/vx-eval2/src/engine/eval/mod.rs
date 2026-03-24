@@ -24,9 +24,6 @@ pub(super) struct PreparedBodyRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreparedBodyKind {
     ExprPlan(ExprExecPlan),
-    CallPlan(CallPlan),
-    MatchPlan(MatchPlan),
-    WherePlan(WherePlan),
 }
 
 pub(super) struct PreparedEntry {
@@ -60,27 +57,6 @@ impl PreparedBodyRef {
         Self {
             root_expr_id: body.expr_id(),
             kind: PreparedBodyKind::ExprPlan(body.plan()),
-        }
-    }
-
-    fn from_call_plan(root_expr_id: ExprId, plan: CallPlan) -> Self {
-        Self {
-            root_expr_id,
-            kind: PreparedBodyKind::CallPlan(plan),
-        }
-    }
-
-    fn from_match_plan(root_expr_id: ExprId, plan: MatchPlan) -> Self {
-        Self {
-            root_expr_id,
-            kind: PreparedBodyKind::MatchPlan(plan),
-        }
-    }
-
-    fn from_where_plan(root_expr_id: ExprId, plan: WherePlan) -> Self {
-        Self {
-            root_expr_id,
-            kind: PreparedBodyKind::WherePlan(plan),
         }
     }
 
@@ -825,9 +801,6 @@ pub(super) fn prepared_body_kind(
 ) -> EvalExprKind {
     match body.kind {
         PreparedBodyKind::ExprPlan(plan) => plan.trace_kind(),
-        PreparedBodyKind::CallPlan(_) => EvalExprKind::Call,
-        PreparedBodyKind::MatchPlan(_) => EvalExprKind::Match,
-        PreparedBodyKind::WherePlan(_) => EvalExprKind::Where,
     }
 }
 
@@ -883,13 +856,6 @@ fn eval_prepared_body_step(
                 eval_control_plan(state, plan, env)
             }
         },
-        PreparedBodyKind::CallPlan(plan) => start_call_plan(state, node_id, parent_id, &plan, env),
-        PreparedBodyKind::MatchPlan(plan) => {
-            start_match_plan(state, node_id, parent_id, &plan, env)
-        }
-        PreparedBodyKind::WherePlan(plan) => {
-            start_where_plan(state, node_id, parent_id, &plan, env)
-        }
     }
 }
 
@@ -906,6 +872,54 @@ pub(super) fn eval_prepared_body_with_node_id(
     state.with_source(root_expr_id.source(), |state| {
         eval_node_with_kind(state, node_id, kind, source, |state| {
             eval_prepared_body_step(state, node_id, parent_id, body, &mut env)
+        })
+    })
+}
+
+pub(super) fn eval_call_plan_with_node_id(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    root_expr_id: ExprId,
+    call: CallPlan,
+    mut env: EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let source = state.program.span_for_expr_id(root_expr_id)?;
+    let parent_id = state.current_parent();
+    state.with_source(root_expr_id.source(), |state| {
+        eval_node_with_kind(state, node_id, EvalExprKind::Call, source, |state| {
+            start_call_plan(state, node_id, parent_id, &call, &mut env)
+        })
+    })
+}
+
+pub(super) fn eval_match_plan_with_node_id(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    root_expr_id: ExprId,
+    match_plan: MatchPlan,
+    mut env: EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let source = state.program.span_for_expr_id(root_expr_id)?;
+    let parent_id = state.current_parent();
+    state.with_source(root_expr_id.source(), |state| {
+        eval_node_with_kind(state, node_id, EvalExprKind::Match, source, |state| {
+            start_match_plan(state, node_id, parent_id, &match_plan, &mut env)
+        })
+    })
+}
+
+pub(super) fn eval_where_plan_with_node_id(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    root_expr_id: ExprId,
+    where_plan: WherePlan,
+    mut env: EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    let source = state.program.span_for_expr_id(root_expr_id)?;
+    let parent_id = state.current_parent();
+    state.with_source(root_expr_id.source(), |state| {
+        eval_node_with_kind(state, node_id, EvalExprKind::Where, source, |state| {
+            start_where_plan(state, node_id, parent_id, &where_plan, &mut env)
         })
     })
 }
@@ -943,6 +957,144 @@ pub(super) fn eval_dependent_prepared_entry(
         eval_child_prepared_entry(state, prepared)
     } else {
         state.with_active_node(node_id, |state| eval_child_prepared_entry(state, prepared))
+    }
+}
+
+pub(super) fn eval_child_call_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    call: CallPlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(
+            child_id,
+            Some(state.program.span_for_expr_id(body.expr_id())?),
+        );
+        return eval_call_plan_with_node_id(state, child_id, body.expr_id(), call, env.clone());
+    }
+    let child_id = queue_child_call_plan(state, body, call, env);
+    let resume_node = state
+        .current_parent()
+        .expect("child call expression should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
+pub(super) fn eval_dependent_call_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    body: ExprBodyRef,
+    call: CallPlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() == Some(node_id) {
+        eval_child_call_plan(state, body, call, env)
+    } else {
+        state.with_active_node(node_id, |state| {
+            eval_child_call_plan(state, body, call, env)
+        })
+    }
+}
+
+pub(super) fn eval_child_match_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    match_plan: MatchPlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(
+            child_id,
+            Some(state.program.span_for_expr_id(body.expr_id())?),
+        );
+        return eval_match_plan_with_node_id(
+            state,
+            child_id,
+            body.expr_id(),
+            match_plan,
+            env.clone(),
+        );
+    }
+    let child_id = queue_child_match_plan(state, body, match_plan, env);
+    let resume_node = state
+        .current_parent()
+        .expect("child match expression should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
+pub(super) fn eval_dependent_match_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    body: ExprBodyRef,
+    match_plan: MatchPlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() == Some(node_id) {
+        eval_child_match_plan(state, body, match_plan, env)
+    } else {
+        state.with_active_node(node_id, |state| {
+            eval_child_match_plan(state, body, match_plan, env)
+        })
+    }
+}
+
+pub(super) fn eval_child_where_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    where_plan: WherePlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if !state.queue_child_work {
+        let child_id = state.alloc_node_id();
+        state.emit_current_dependency(
+            child_id,
+            Some(state.program.span_for_expr_id(body.expr_id())?),
+        );
+        return eval_where_plan_with_node_id(
+            state,
+            child_id,
+            body.expr_id(),
+            where_plan,
+            env.clone(),
+        );
+    }
+    let child_id = queue_child_where_plan(state, body, where_plan, env);
+    let resume_node = state
+        .current_parent()
+        .expect("child where expression should have an active parent node");
+    Ok(wait_on_child_dependency(
+        state,
+        resume_node,
+        child_id,
+        Vec::new(),
+    ))
+}
+
+pub(super) fn eval_dependent_where_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    body: ExprBodyRef,
+    where_plan: WherePlan,
+    env: &EvalEnv,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() == Some(node_id) {
+        eval_child_where_plan(state, body, where_plan, env)
+    } else {
+        state.with_active_node(node_id, |state| {
+            eval_child_where_plan(state, body, where_plan, env)
+        })
     }
 }
 
@@ -3614,22 +3766,9 @@ pub(super) fn continue_bytecode_body(
             BytecodeOp::EvalCall { body, call } => {
                 bytecode.pc += 1;
                 let body_source = body.expr_id().source();
-                let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_call_plan(body.expr_id(), call.clone()),
-                    env: bytecode.scope.clone(),
-                };
-                let step = if state.queue_child_work {
-                    state.with_source(body_source, |state| {
-                        eval_dependent_prepared_entry(state, node_id, prepared)
-                    })?
-                } else {
-                    let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_handle(call.handle);
-                    state.emit_current_dependency(child_id, Some(child_source.clone()));
-                    state.with_source(body_source, |state| {
-                        eval_prepared_body_with_node_id(state, child_id, prepared)
-                    })?
-                };
+                let step = state.with_source(body_source, |state| {
+                    eval_dependent_call_plan(state, node_id, *body, call.clone(), &bytecode.scope)
+                })?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
@@ -3647,22 +3786,15 @@ pub(super) fn continue_bytecode_body(
             BytecodeOp::EvalMatch { body, match_plan } => {
                 bytecode.pc += 1;
                 let body_source = body.expr_id().source();
-                let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_match_plan(body.expr_id(), match_plan.clone()),
-                    env: bytecode.scope.clone(),
-                };
-                let step = if state.queue_child_work {
-                    state.with_source(body_source, |state| {
-                        eval_dependent_prepared_entry(state, node_id, prepared)
-                    })?
-                } else {
-                    let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_handle(match_plan.handle);
-                    state.emit_current_dependency(child_id, Some(child_source.clone()));
-                    state.with_source(body_source, |state| {
-                        eval_prepared_body_with_node_id(state, child_id, prepared)
-                    })?
-                };
+                let step = state.with_source(body_source, |state| {
+                    eval_dependent_match_plan(
+                        state,
+                        node_id,
+                        *body,
+                        match_plan.clone(),
+                        &bytecode.scope,
+                    )
+                })?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
@@ -3680,22 +3812,15 @@ pub(super) fn continue_bytecode_body(
             BytecodeOp::EvalWhere { body, where_plan } => {
                 bytecode.pc += 1;
                 let body_source = body.expr_id().source();
-                let prepared = PreparedEntry {
-                    body: PreparedBodyRef::from_where_plan(body.expr_id(), where_plan.clone()),
-                    env: bytecode.scope.clone(),
-                };
-                let step = if state.queue_child_work {
-                    state.with_source(body_source, |state| {
-                        eval_dependent_prepared_entry(state, node_id, prepared)
-                    })?
-                } else {
-                    let child_id = state.alloc_node_id();
-                    let child_source = state.program.span_for_handle(where_plan.handle);
-                    state.emit_current_dependency(child_id, Some(child_source.clone()));
-                    state.with_source(body_source, |state| {
-                        eval_prepared_body_with_node_id(state, child_id, prepared)
-                    })?
-                };
+                let step = state.with_source(body_source, |state| {
+                    eval_dependent_where_plan(
+                        state,
+                        node_id,
+                        *body,
+                        where_plan.clone(),
+                        &bytecode.scope,
+                    )
+                })?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
@@ -4408,7 +4533,8 @@ fn queue_child_expr_body(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        body,
+        root_expr_id: body.root_expr_id(),
+        kind: ScheduledExprKind::Prepared(body),
         env: env.clone(),
         call_stack: if state.track_calls {
             state.call_stack.clone()
@@ -4454,8 +4580,159 @@ pub(super) fn queue_child_prepared_entry(
         source: Some(resolved_source),
     });
     let scheduled = ScheduledExpr {
-        body: prepared.body,
+        root_expr_id: prepared.body.root_expr_id(),
+        kind: ScheduledExprKind::Prepared(prepared.body),
         env: prepared.env,
+        call_stack: if state.track_calls {
+            state.call_stack.clone()
+        } else {
+            Vec::new()
+        },
+    };
+    state
+        .scheduler
+        .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(scheduled),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+        state.branch_context.clone(),
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    child_id
+}
+
+pub(super) fn queue_child_call_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    call: CallPlan,
+    env: &EvalEnv,
+) -> EvalNodeId {
+    let child_id = state.alloc_node_id();
+    let resolved_source = state
+        .program
+        .span_for_expr_id(body.expr_id())
+        .expect("queued child call should resolve to a source span");
+    state.emit_current_dependency(child_id, Some(resolved_source.clone()));
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: EvalExprKind::Call,
+        },
+        source: Some(resolved_source),
+    });
+    let scheduled = ScheduledExpr {
+        root_expr_id: body.expr_id(),
+        kind: ScheduledExprKind::Call(call),
+        env: env.clone(),
+        call_stack: if state.track_calls {
+            state.call_stack.clone()
+        } else {
+            Vec::new()
+        },
+    };
+    state
+        .scheduler
+        .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(scheduled),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+        state.branch_context.clone(),
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    child_id
+}
+
+pub(super) fn queue_child_match_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    match_plan: MatchPlan,
+    env: &EvalEnv,
+) -> EvalNodeId {
+    let child_id = state.alloc_node_id();
+    let resolved_source = state
+        .program
+        .span_for_expr_id(body.expr_id())
+        .expect("queued child match should resolve to a source span");
+    state.emit_current_dependency(child_id, Some(resolved_source.clone()));
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: EvalExprKind::Match,
+        },
+        source: Some(resolved_source),
+    });
+    let scheduled = ScheduledExpr {
+        root_expr_id: body.expr_id(),
+        kind: ScheduledExprKind::Match(match_plan),
+        env: env.clone(),
+        call_stack: if state.track_calls {
+            state.call_stack.clone()
+        } else {
+            Vec::new()
+        },
+    };
+    state
+        .scheduler
+        .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
+    let work = state.scheduler.enqueue_ready_task(
+        ReadyTask::EvaluateExpr(scheduled),
+        EvalWorkKind::EvaluateExpr,
+        child_id,
+        None,
+        state.branch_context.clone(),
+    );
+    state.scheduler.record_node_state(
+        child_id,
+        EvalNodeState::Runnable {
+            work: work.id,
+            pending: None,
+        },
+    );
+    child_id
+}
+
+pub(super) fn queue_child_where_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    body: ExprBodyRef,
+    where_plan: WherePlan,
+    env: &EvalEnv,
+) -> EvalNodeId {
+    let child_id = state.alloc_node_id();
+    let resolved_source = state
+        .program
+        .span_for_expr_id(body.expr_id())
+        .expect("queued child where should resolve to a source span");
+    state.emit_current_dependency(child_id, Some(resolved_source.clone()));
+    state.scheduler.record_node(EvalNodeRecord {
+        node_id: child_id,
+        parent_id: state.current_parent(),
+        kind: EvalNodeKind::Expr {
+            kind: EvalExprKind::Where,
+        },
+        source: Some(resolved_source),
+    });
+    let scheduled = ScheduledExpr {
+        root_expr_id: body.expr_id(),
+        kind: ScheduledExprKind::Where(where_plan),
+        env: env.clone(),
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {
