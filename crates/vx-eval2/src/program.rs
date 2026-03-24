@@ -1851,10 +1851,6 @@ impl CompiledProgram {
         Ok(self.span_for_expr(self.resolve_expr_id(id)?))
     }
 
-    pub(crate) fn span_for_token_ref(&self, token: &Token) -> SourceSpan {
-        self.span_for_handle(token.handle())
-    }
-
     pub(crate) fn types(&self) -> &TypeCollection {
         &self.types
     }

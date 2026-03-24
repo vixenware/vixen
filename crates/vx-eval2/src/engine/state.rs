@@ -568,10 +568,6 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         self.program.span_for_handle(node.handle())
     }
 
-    pub(super) fn span_for_token(&self, token: &Token) -> SourceSpan {
-        self.program.span_for_token_ref(token)
-    }
-
     pub(super) fn expr_id(&self, expr: &Expr) -> ExprId {
         self.program
             .expr_id(expr.handle())
