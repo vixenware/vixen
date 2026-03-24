@@ -3480,6 +3480,45 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
+            BytecodeOp::EvalCall(body_ref) => {
+                bytecode.pc += 1;
+                let body_source = body_ref.expr_id().source();
+                let step = if state.queue_child_work {
+                    state.with_source(body_source, |state| {
+                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
+                    })?
+                } else {
+                    let child_id = state.alloc_node_id();
+                    let child_source =
+                        expr_plan_source(state.program, body_source, body_ref.plan())?;
+                    state.emit_current_dependency(child_id, Some(child_source.clone()));
+                    state.with_source(body_source, |state| {
+                        let call = state
+                            .program
+                            .resolve_call_plan(body_ref.plan().call_plan_id(body_source))?;
+                        eval_node_with_kind(
+                            state,
+                            child_id,
+                            EvalExprKind::Call,
+                            child_source,
+                            |state| eval_call_plan(state, call, &mut bytecode.scope),
+                        )
+                    })?
+                };
+                match step {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::Bytecode {
+                                node_id,
+                                parent_id,
+                                bytecode,
+                            },
+                        ));
+                    }
+                }
+            }
             BytecodeOp::EvalBody(body_ref) => {
                 bytecode.pc += 1;
                 match state.with_source(source, |state| {

@@ -1300,6 +1300,7 @@ pub(crate) struct BytecodeBody {
 pub(crate) enum BytecodeOp {
     EvalReady(ExprExecPlan),
     EvalBytecodeBody(BytecodeBodyId),
+    EvalCall(ExprBodyRef),
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
     EvalIfBranches {
@@ -4704,6 +4705,9 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     return;
                 };
                 push_eval_ops(source, ops, inner);
+            }
+            ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
+                ops.push(BytecodeOp::EvalCall(expr));
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
                 let field = source
