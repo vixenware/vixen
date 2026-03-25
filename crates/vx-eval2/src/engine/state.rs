@@ -105,6 +105,7 @@ pub(super) struct BytecodeState {
     pub(super) pc: usize,
     pub(super) acc: Option<Value>,
     pub(super) temp: Option<Value>,
+    pub(super) pending: Option<BytecodePendingState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,20 @@ pub(super) struct PlannedCallState {
     pub(super) args: Vec<Value>,
     pub(super) next_arg_index: usize,
     pub(super) queued_arg_nodes: Vec<EvalNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BytecodePendingState {
+    Call {
+        call: PlannedCallState,
+        pending: PlannedCallResumeKind,
+    },
+    Match {
+        match_state: MatchState,
+    },
+    Where {
+        where_state: WhereState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

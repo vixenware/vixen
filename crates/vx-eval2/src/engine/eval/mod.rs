@@ -854,6 +854,7 @@ fn eval_prepared_body_step(
                     pc: 0,
                     acc: None,
                     temp: None,
+                    pending: None,
                 },
             )
         }
@@ -878,6 +879,7 @@ fn eval_prepared_body_step(
                     pc: 0,
                     acc: None,
                     temp: None,
+                    pending: None,
                 }
             }),
             ExprExecKind::Ready => eval_ready_plan(state, plan, env).map(EvalStep::Ready),
@@ -3461,9 +3463,410 @@ pub(super) fn continue_bytecode_body(
         }
     }
 
+    fn suspend_bytecode(
+        suspension: EvalSuspension,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: BytecodeState,
+    ) -> EvalStep {
+        extend_suspension(
+            suspension,
+            ContinuationFrame::Bytecode {
+                node_id,
+                parent_id,
+                bytecode,
+            },
+        )
+    }
+
+    fn continue_bytecode_match_arms(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        match_expr: &MatchPlan,
+        scrutinee: Value,
+        env: EvalEnv,
+    ) -> Result<EvalStep, EvalError> {
+        for arm in match_expr.arms.iter() {
+            let mut arm_env = env.clone();
+            if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
+                return eval_dependent_body_ref(state, node_id, arm.body, &mut arm_env);
+            }
+        }
+        Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "match expression had no matching arm",
+        ))
+    }
+
+    fn continue_bytecode_match(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut match_state: MatchState,
+        resumed_scrutinee: Option<Value>,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_match(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    match_state,
+                    resumed_scrutinee,
+                )
+            });
+        }
+        let scrutinee = if let Some(scrutinee) = resumed_scrutinee {
+            scrutinee
+        } else {
+            let scrutinee_expr = match_state.match_plan.scrutinee.ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
+            })?;
+            match eval_dependent_body_ref(state, node_id, scrutinee_expr, &mut match_state.env)? {
+                EvalStep::Ready(value) => value,
+                EvalStep::Suspended(suspension) => {
+                    bytecode.pending = Some(BytecodePendingState::Match { match_state });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
+            }
+        };
+        continue_bytecode_match_arms(
+            state,
+            node_id,
+            parent_id,
+            &match_state.match_plan,
+            scrutinee,
+            match_state.env,
+        )
+    }
+
+    fn init_bytecode_where_state(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        where_expr: &WherePlan,
+        env: &EvalEnv,
+    ) -> Result<WhereState, EvalError> {
+        let call_expr = where_expr.call.as_ref().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "where expression currently requires a compiled call plan",
+            )
+        })?;
+        let callee = call_expr.callee.as_ref().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
+        })?;
+        let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                "where call callee must resolve immediately for now",
+            ));
+        };
+        let mut keyword_bindings = Vec::new();
+        let mut remaining_keyword_bindings = Vec::new();
+        for binding in where_expr.keyword_bindings.iter() {
+            let name = binding.name.clone();
+            match binding.expr {
+                Some(expr) => remaining_keyword_bindings.push((name, expr)),
+                None => {
+                    let Some(value) = env.get(name.as_ref()) else {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("where binding {name} is not available in scope"),
+                        ));
+                    };
+                    keyword_bindings.push((name, value.clone()));
+                }
+            }
+        }
+        Ok(WhereState {
+            call: WhereCallPlan {
+                call_source: state.program.span_for_handle(call_expr.handle),
+                callee: callee_value,
+                type_args: Arc::clone(&call_expr.type_args),
+                positional_args: Arc::clone(&call_expr.positional_args),
+            },
+            pending_keyword_name: None,
+            keyword_bindings,
+            remaining_keyword_bindings,
+            env: env.clone(),
+        })
+    }
+
+    fn continue_bytecode_planned_call(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut call: PlannedCallState,
+        resumed: Option<PlannedCallResumeKind>,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_planned_call(state, node_id, parent_id, bytecode, call, resumed)
+            });
+        }
+        if let Some(resumed) = resumed {
+            match resumed {
+                PlannedCallResumeKind::Callee => {
+                    call.callee = Some(bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode call resumed without a callee value",
+                        )
+                    })?);
+                }
+                PlannedCallResumeKind::Arg => {
+                    call.args.push(bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode call resumed without an argument value",
+                        )
+                    })?);
+                }
+                PlannedCallResumeKind::JoinArgs => {
+                    let _ = bytecode.acc.take();
+                    let queued_arg_nodes = call.queued_arg_nodes.clone();
+                    let mut args = Vec::with_capacity(queued_arg_nodes.len());
+                    for child_node in &queued_arg_nodes {
+                        match state.scheduler.node_state(*child_node) {
+                            Some(EvalNodeState::Ready(value)) => args.push(value.clone()),
+                            Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                            _ => {
+                                bytecode.pending = Some(BytecodePendingState::Call {
+                                    call,
+                                    pending: PlannedCallResumeKind::JoinArgs,
+                                });
+                                return Ok(wait_on_child_dependency(
+                                    state,
+                                    node_id,
+                                    *child_node,
+                                    Vec::new(),
+                                ));
+                            }
+                        }
+                    }
+                    call.args = args;
+                    call.next_arg_index = call.positional_args.len();
+                    call.queued_arg_nodes.clear();
+                }
+            }
+        }
+
+        if call.callee.is_none() {
+            let callee = call.callee_plan.as_ref().ok_or_else(|| {
+                EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
+            })?;
+            if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, &call.env)?
+            {
+                if state.queue_child_work
+                    && !call.positional_args.is_empty()
+                    && call.args.is_empty()
+                {
+                    call.callee = Some(callee_value);
+                    call.next_arg_index = call.positional_args.len();
+                    let queued_arg_nodes = call
+                        .positional_args
+                        .iter()
+                        .map(|arg| queue_child_body_ref(state, *arg, &call.env))
+                        .collect::<Vec<_>>();
+                    let first_child = queued_arg_nodes[0];
+                    call.queued_arg_nodes = queued_arg_nodes;
+                    bytecode.pending = Some(BytecodePendingState::Call {
+                        call,
+                        pending: PlannedCallResumeKind::JoinArgs,
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        first_child,
+                        Vec::new(),
+                    ));
+                }
+                call.callee = Some(callee_value);
+            } else {
+                match eval_call_callee_plan(state, callee, &mut call.env)? {
+                    EvalStep::Ready(value) => call.callee = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        bytecode.pending = Some(BytecodePendingState::Call {
+                            call,
+                            pending: PlannedCallResumeKind::Callee,
+                        });
+                        return Ok(EvalStep::Suspended(suspension));
+                    }
+                }
+            }
+        }
+
+        while let Some(arg_handle) = call.positional_args.get(call.next_arg_index).copied() {
+            call.next_arg_index += 1;
+            let arg_index = call.args.len();
+            let callee = call
+                .callee
+                .as_ref()
+                .expect("planned call should have a callee before evaluating arguments");
+            let adapter =
+                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
+            let arg_step = match adapter {
+                Some(value) => EvalStep::Ready(value),
+                None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
+            };
+            match arg_step {
+                EvalStep::Ready(value) => call.args.push(value),
+                EvalStep::Suspended(suspension) => {
+                    bytecode.pending = Some(BytecodePendingState::Call {
+                        call,
+                        pending: PlannedCallResumeKind::Arg,
+                    });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
+            }
+        }
+
+        debug_assert!(call.queued_arg_nodes.is_empty());
+        dispatch_call(
+            state,
+            node_id,
+            parent_id,
+            call.call_source,
+            Arc::clone(&call.type_args),
+            call.callee
+                .expect("planned call should have a callee before dispatch"),
+            call.args,
+        )
+    }
+
+    fn continue_bytecode_where(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut where_state: WhereState,
+        resumed_keyword_value: Option<Value>,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_where(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    where_state,
+                    resumed_keyword_value,
+                )
+            });
+        }
+        if let Some(value) = resumed_keyword_value {
+            let pending_keyword_name =
+                where_state.pending_keyword_name.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "where continuation is missing its pending keyword binding name",
+                    )
+                })?;
+            where_state
+                .keyword_bindings
+                .push((pending_keyword_name, value));
+        }
+
+        let mut remaining = where_state.remaining_keyword_bindings.into_iter();
+        while let Some((name, expr)) = remaining.next() {
+            match eval_dependent_body_ref(state, node_id, expr, &mut where_state.env)? {
+                EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
+                EvalStep::Suspended(suspension) => {
+                    where_state.pending_keyword_name = Some(name);
+                    where_state.remaining_keyword_bindings = remaining.collect();
+                    bytecode.pending = Some(BytecodePendingState::Where { where_state });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
+            }
+        }
+
+        let WhereCallPlan {
+            call_source,
+            callee,
+            type_args,
+            positional_args,
+        } = where_state.call;
+        continue_bytecode_planned_call(
+            state,
+            node_id,
+            parent_id,
+            bytecode,
+            PlannedCallState {
+                call_source,
+                callee_plan: None,
+                type_args,
+                positional_args,
+                env: where_state.env,
+                callee: Some(apply_where_keyword_bindings(
+                    callee,
+                    where_state.keyword_bindings,
+                )),
+                args: Vec::new(),
+                next_arg_index: 0,
+                queued_arg_nodes: Vec::new(),
+            },
+            None,
+        )
+    }
+
     let ops = Arc::clone(&state.program.resolve_bytecode_body(bytecode.body)?.ops);
     let source = bytecode.body.source();
     while bytecode.pc < ops.len() {
+        if let Some(pending) = bytecode.pending.take() {
+            let step = match pending {
+                BytecodePendingState::Call { call, pending } => continue_bytecode_planned_call(
+                    state,
+                    node_id,
+                    parent_id,
+                    &mut bytecode,
+                    call,
+                    Some(pending),
+                )?,
+                BytecodePendingState::Match { match_state } => {
+                    let scrutinee = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode match resumed without a scrutinee value",
+                        )
+                    })?;
+                    continue_bytecode_match(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        match_state,
+                        Some(scrutinee),
+                    )?
+                }
+                BytecodePendingState::Where { where_state } => {
+                    let keyword_value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode where resumed without a keyword binding value",
+                        )
+                    })?;
+                    continue_bytecode_where(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        where_state,
+                        Some(keyword_value),
+                    )?
+                }
+            };
+            match step {
+                EvalStep::Ready(value) => bytecode.acc = Some(value),
+                EvalStep::Suspended(suspension) => {
+                    return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                }
+            }
+            continue;
+        }
+
         match &ops[bytecode.pc] {
             BytecodeOp::EvalReady(ready) => {
                 bytecode.pc += 1;
@@ -3523,88 +3926,81 @@ pub(super) fn continue_bytecode_body(
                     pc: 0,
                     acc: None,
                     temp: None,
+                    pending: None,
                 };
                 match state.with_source(body.source(), |state| {
                     continue_bytecode_body(state, node_id, parent_id, nested)
                 })? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
             BytecodeOp::StartCall(call) => {
                 bytecode.pc += 1;
-                let step = continue_planned_call(
+                let scope = bytecode.scope.clone();
+                let step = continue_bytecode_planned_call(
                     state,
                     node_id,
                     parent_id,
+                    &mut bytecode,
                     PlannedCallState {
                         call_source: state.program.span_for_handle(call.handle),
                         callee_plan: call.callee.clone(),
                         type_args: Arc::clone(&call.type_args),
                         positional_args: Arc::clone(&call.positional_args),
-                        env: bytecode.scope.clone(),
+                        env: scope,
                         callee: None,
                         args: Vec::new(),
                         next_arg_index: 0,
                         queued_arg_nodes: Vec::new(),
                     },
+                    None,
                 )?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
             BytecodeOp::StartMatch(match_plan) => {
                 bytecode.pc += 1;
-                let mut env = bytecode.scope.clone();
-                let step = start_match_plan(state, node_id, parent_id, match_plan, &mut env)?;
+                let scope = bytecode.scope.clone();
+                let step = continue_bytecode_match(
+                    state,
+                    node_id,
+                    parent_id,
+                    &mut bytecode,
+                    MatchState {
+                        match_plan: match_plan.clone(),
+                        env: scope,
+                    },
+                    None,
+                )?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
             BytecodeOp::StartWhere(where_plan) => {
                 bytecode.pc += 1;
-                let mut env = bytecode.scope.clone();
-                let step = start_where_plan(state, node_id, parent_id, where_plan, &mut env)?;
+                let where_state = init_bytecode_where_state(state, where_plan, &bytecode.scope)?;
+                let step = continue_bytecode_where(
+                    state,
+                    node_id,
+                    parent_id,
+                    &mut bytecode,
+                    where_state,
+                    None,
+                )?;
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
@@ -3615,14 +4011,7 @@ pub(super) fn continue_bytecode_body(
                 })? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
@@ -3654,14 +4043,7 @@ pub(super) fn continue_bytecode_body(
                 match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
@@ -3692,14 +4074,7 @@ pub(super) fn continue_bytecode_body(
                 })? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
@@ -3748,14 +4123,7 @@ pub(super) fn continue_bytecode_body(
                         bytecode.pc += 1;
                     }
                     EvalStep::Suspended(suspension) => {
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::Bytecode {
-                                node_id,
-                                parent_id,
-                                bytecode,
-                            },
-                        ));
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
                     }
                 }
             }
