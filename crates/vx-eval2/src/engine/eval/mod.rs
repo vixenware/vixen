@@ -162,18 +162,23 @@ fn init_bytecode_locals_from_parent(
 
 fn bytecode_scope_snapshot(
     program: &CompiledProgram,
-    bytecode: &BytecodeState,
-) -> Result<EvalEnv, EvalError> {
+    bytecode: &mut BytecodeState,
+) -> Result<Arc<EvalEnv>, EvalError> {
     if !bytecode.locals_dirty {
-        return Ok(bytecode.scope.clone());
+        return Ok(Arc::clone(&bytecode.scope));
     }
-    let mut scope = bytecode.scope.clone();
+    if let Some(scope) = &bytecode.scope_snapshot {
+        return Ok(Arc::clone(scope));
+    }
+    let mut scope = bytecode.scope.as_ref().clone();
     let body = program.resolve_bytecode_body(bytecode.body)?;
     for (slot, local) in body.local_slots.iter().enumerate() {
         if let Some(Some(value)) = bytecode.locals.get(slot) {
             env_mut(&mut scope).insert(local.name.to_string(), value.clone());
         }
     }
+    let scope = Arc::new(scope);
+    bytecode.scope_snapshot = Some(Arc::clone(&scope));
     Ok(scope)
 }
 
@@ -201,8 +206,10 @@ fn bind_bytecode_name(
     if let Some(&slot) = body.slot_lookup.get(name) {
         bytecode.locals[slot as usize] = Some(value);
         bytecode.locals_dirty = true;
+        bytecode.scope_snapshot = None;
     } else {
-        env_mut(&mut bytecode.scope).insert(name.to_string(), value);
+        env_mut(Arc::make_mut(&mut bytecode.scope)).insert(name.to_string(), value);
+        bytecode.scope_snapshot = None;
     }
     Ok(())
 }
@@ -256,14 +263,14 @@ fn bind_let_pattern_in_bytecode(
 fn prepared_entry_from_bytecode(
     program: &CompiledProgram,
     body: ExprBodyRef,
-    parent: &BytecodeState,
+    parent: &mut BytecodeState,
 ) -> Result<PreparedEntry, EvalError> {
     let body = PreparedBodyRef::from_body_ref(program, body)?;
     let bytecode_body = program.resolve_bytecode_body(body.body)?;
     Ok(PreparedEntry {
         body,
         locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
-        env: Arc::new(bytecode_scope_snapshot(program, parent)?),
+        env: bytecode_scope_snapshot(program, parent)?,
     })
 }
 
@@ -1047,7 +1054,8 @@ fn eval_prepared_body_step(
         node_id,
         parent_id,
         BytecodeState {
-            scope: env.as_ref().clone(),
+            scope: env,
+            scope_snapshot: None,
             locals,
             locals_dirty: false,
             last: Value::unit(),
@@ -1160,7 +1168,7 @@ fn eval_dependent_bytecode_body_ref(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     body: ExprBodyRef,
-    bytecode: &BytecodeState,
+    bytecode: &mut BytecodeState,
 ) -> Result<EvalStep, EvalError> {
     let prepared = prepared_entry_from_bytecode(state.program, body, bytecode)?;
     eval_dependent_prepared_entry(state, node_id, prepared)
@@ -1279,7 +1287,7 @@ fn eval_ready_plan(
 fn eval_ready_plan_in_bytecode(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     ready: ExprExecPlan,
-    bytecode: &BytecodeState,
+    bytecode: &mut BytecodeState,
 ) -> Result<Value, EvalError> {
     match ready.ready_kind() {
         ReadyPlanKind::Literal => {
@@ -1299,7 +1307,7 @@ fn eval_ready_plan_in_bytecode(
                 .program
                 .resolve_closure_plan(ready.closure_plan_id(state.current_source()))?;
             let scope = bytecode_scope_snapshot(state.program, bytecode)?;
-            eval_closure_plan(state, closure, &scope)
+            eval_closure_plan(state, closure, scope.as_ref())
         }
         ReadyPlanKind::NameRef => {
             let name_ref = state
@@ -1312,7 +1320,7 @@ fn eval_ready_plan_in_bytecode(
                 return Ok(value);
             }
             let scope = bytecode_scope_snapshot(state.program, bytecode)?;
-            eval_name_ref_plan(state, name_ref, &scope)
+            eval_name_ref_plan(state, name_ref, scope.as_ref())
         }
     }
 }
@@ -1616,7 +1624,9 @@ fn eval_bytecode_call_callee_plan(
             let field = state
                 .program
                 .resolve_field_plan(callee.field_plan_id(source))?;
-            let mut scope = bytecode_scope_snapshot(state.program, bytecode)?;
+            let mut scope = bytecode_scope_snapshot(state.program, bytecode)?
+                .as_ref()
+                .clone();
             eval_field_plan(state, field, &mut scope)
         }
         CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
@@ -2427,7 +2437,7 @@ pub(super) fn continue_bytecode_body(
         parent_id: Option<EvalNodeId>,
         source: SourceId,
         ready: ExprExecPlan,
-        bytecode: &BytecodeState,
+        bytecode: &mut BytecodeState,
     ) -> Result<Value, EvalError> {
         let ready_source = ready_plan_source(state.program, source, ready)?;
         state.emit(
@@ -2542,7 +2552,7 @@ pub(super) fn continue_bytecode_body(
             parent_id,
             &match_state.match_plan,
             scrutinee,
-            &bytecode_scope_snapshot(state.program, bytecode)?,
+            bytecode_scope_snapshot(state.program, bytecode)?.as_ref(),
         )
     }
 
@@ -2719,6 +2729,12 @@ pub(super) fn continue_bytecode_body(
             }
         }
 
+        let bytecode_scope = if bytecode.locals_dirty {
+            bytecode_scope_snapshot(state.program, bytecode)?
+        } else {
+            Arc::clone(&bytecode.scope)
+        };
+        let scope = bytecode_scope.as_ref();
         while let Some(arg_handle) = call.positional_args.get(call.next_arg_index).copied() {
             call.next_arg_index += 1;
             let arg_index = call.args.len();
@@ -2726,9 +2742,8 @@ pub(super) fn continue_bytecode_body(
                 .callee
                 .as_ref()
                 .expect("planned call should have a callee before evaluating arguments");
-            let scope = bytecode_scope_snapshot(state.program, bytecode)?;
             let adapter =
-                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &scope)?;
+                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, scope)?;
             let arg_step = match adapter {
                 Some(value) => EvalStep::Ready(value),
                 None => eval_dependent_bytecode_body_ref(state, node_id, arg_handle, bytecode)?,
@@ -4077,7 +4092,12 @@ pub(super) fn continue_bytecode_body(
                 bytecode.pc += 1;
                 bytecode.acc = Some(state.with_source(source, |state| {
                     eval_inline_ready_bytecode_plan(
-                        state, node_id, parent_id, source, *ready, &bytecode,
+                        state,
+                        node_id,
+                        parent_id,
+                        source,
+                        *ready,
+                        &mut bytecode,
                     )
                 })?);
             }
@@ -4145,7 +4165,8 @@ pub(super) fn continue_bytecode_body(
                 bytecode.pc += 1;
                 let bytecode_body = state.program.resolve_bytecode_body(*body)?;
                 let nested = BytecodeState {
-                    scope: bytecode_scope_snapshot(state.program, &bytecode)?,
+                    scope: bytecode_scope_snapshot(state.program, &mut bytecode)?,
+                    scope_snapshot: None,
                     locals: init_bytecode_locals_from_parent(
                         state.program,
                         bytecode_body,
@@ -4299,8 +4320,8 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::StartWhere(where_plan) => {
                 bytecode.pc += 1;
-                let scope = bytecode_scope_snapshot(state.program, &bytecode)?;
-                let where_state = init_bytecode_where_state(state, where_plan, &scope)?;
+                let scope = bytecode_scope_snapshot(state.program, &mut bytecode)?;
+                let where_state = init_bytecode_where_state(state, where_plan, scope.as_ref())?;
                 let step = continue_bytecode_where(
                     state,
                     node_id,
@@ -4344,7 +4365,7 @@ pub(super) fn continue_bytecode_body(
                     *else_branch
                 };
                 match state.with_source(branch.expr_id().source(), |state| {
-                    eval_dependent_bytecode_body_ref(state, node_id, branch, &bytecode)
+                    eval_dependent_bytecode_body_ref(state, node_id, branch, &mut bytecode)
                 })? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
@@ -4389,7 +4410,7 @@ pub(super) fn continue_bytecode_body(
 
                 bytecode.temp = Some(lhs);
                 match state.with_source(rhs.expr_id().source(), |state| {
-                    eval_dependent_bytecode_body_ref(state, node_id, *rhs, &bytecode)
+                    eval_dependent_bytecode_body_ref(state, node_id, *rhs, &mut bytecode)
                 })? {
                     EvalStep::Ready(rhs) => {
                         let lhs = bytecode.temp.take().expect("binary lhs should be staged");
@@ -4463,15 +4484,17 @@ pub(super) fn continue_bytecode_body(
                 function,
                 local_slot,
             } => {
-                let scope = bytecode_scope_snapshot(state.program, &bytecode)?;
+                let scope = bytecode_scope_snapshot(state.program, &mut bytecode)?;
                 let (name, _name_source, value) = state.with_source(source, |state| {
-                    bind_named_function_decl(state, function, &scope)
+                    bind_named_function_decl(state, function, scope.as_ref())
                 })?;
                 if let Some(slot) = local_slot {
                     bytecode.locals[*slot as usize] = Some(value);
                     bytecode.locals_dirty = true;
+                    bytecode.scope_snapshot = None;
                 } else {
-                    env_mut(&mut bytecode.scope).insert(name, value.clone());
+                    env_mut(Arc::make_mut(&mut bytecode.scope)).insert(name, value.clone());
+                    bytecode.scope_snapshot = None;
                 }
                 bytecode.pc += 1;
             }
