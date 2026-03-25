@@ -164,6 +164,9 @@ fn bytecode_scope_snapshot(
     program: &CompiledProgram,
     bytecode: &BytecodeState,
 ) -> Result<EvalEnv, EvalError> {
+    if !bytecode.locals_dirty {
+        return Ok(bytecode.scope.clone());
+    }
     let mut scope = bytecode.scope.clone();
     let body = program.resolve_bytecode_body(bytecode.body)?;
     for (slot, local) in body.local_slots.iter().enumerate() {
@@ -197,6 +200,7 @@ fn bind_bytecode_name(
     let body = program.resolve_bytecode_body(bytecode.body)?;
     if let Some(&slot) = body.slot_lookup.get(name) {
         bytecode.locals[slot as usize] = Some(value);
+        bytecode.locals_dirty = true;
     } else {
         env_mut(&mut bytecode.scope).insert(name.to_string(), value);
     }
@@ -1045,6 +1049,7 @@ fn eval_prepared_body_step(
         BytecodeState {
             scope: env.as_ref().clone(),
             locals,
+            locals_dirty: false,
             last: Value::unit(),
             body: body.body,
             pc: 0,
@@ -4146,6 +4151,7 @@ pub(super) fn continue_bytecode_body(
                         bytecode_body,
                         &bytecode,
                     )?,
+                    locals_dirty: false,
                     last: Value::unit(),
                     body: *body,
                     pc: 0,
@@ -4463,6 +4469,7 @@ pub(super) fn continue_bytecode_body(
                 })?;
                 if let Some(slot) = local_slot {
                     bytecode.locals[*slot as usize] = Some(value);
+                    bytecode.locals_dirty = true;
                 } else {
                     env_mut(&mut bytecode.scope).insert(name, value.clone());
                 }
