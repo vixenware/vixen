@@ -113,6 +113,19 @@ pub(super) struct PlannedCallState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodePlannedCallState {
+    pub(super) plan_source: SourceId,
+    pub(super) call_source: SourceSpan,
+    pub(super) callee_plan: Option<CallCalleePlan>,
+    pub(super) type_args: Arc<[Ty]>,
+    pub(super) positional_args: Arc<[ExprBodyRef]>,
+    pub(super) callee: Option<Value>,
+    pub(super) args: Vec<Value>,
+    pub(super) next_arg_index: usize,
+    pub(super) queued_arg_nodes: Vec<EvalNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BytecodePendingState {
     Array {
         array: BytecodeArrayState,
@@ -139,11 +152,11 @@ pub(super) enum BytecodePendingState {
         inclusive_end: bool,
     },
     Map {
-        map: MapState,
+        map: BytecodeMapState,
         pending: MapResumeKind,
     },
     Struct {
-        struct_state: StructState,
+        struct_state: BytecodeStructState,
     },
     StructJoin {
         type_name: Arc<str>,
@@ -163,14 +176,14 @@ pub(super) enum BytecodePendingState {
         fallible_source: SourceSpan,
     },
     Call {
-        call: PlannedCallState,
+        call: BytecodePlannedCallState,
         pending: PlannedCallResumeKind,
     },
     Match {
-        match_state: MatchState,
+        match_state: BytecodeMatchState,
     },
     Where {
-        where_state: WhereState,
+        where_state: BytecodeWhereState,
     },
 }
 
@@ -198,6 +211,24 @@ pub(super) struct BytecodeRangeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeMapState {
+    pub(super) entries: Vec<(Value, Value)>,
+    pub(super) key: Option<Value>,
+    pub(super) value_expr: Option<ExprBodyRef>,
+    pub(super) remaining_entries: Vec<(ExprBodyRef, ExprBodyRef)>,
+    pub(super) map_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeStructState {
+    pub(super) type_name: Arc<str>,
+    pub(super) fields: Vec<(Arc<str>, Value)>,
+    pub(super) pending_part: Option<StructLiteralPart>,
+    pub(super) remaining_parts: Vec<StructLiteralPart>,
+    pub(super) struct_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BytecodeInterpolatedStringState {
     pub(super) segments: Vec<String>,
     pub(super) remaining_parts: Vec<InterpolatedPart>,
@@ -216,9 +247,8 @@ pub(super) enum RangeResumeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MatchState {
+pub(super) struct BytecodeMatchState {
     pub(super) match_plan: MatchPlan,
-    pub(super) env: EvalEnv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,30 +280,18 @@ pub(super) struct WhereState {
     pub(super) env: EvalEnv,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeWhereState {
+    pub(super) call: WhereCallPlan,
+    pub(super) pending_keyword_name: Option<Arc<str>>,
+    pub(super) keyword_bindings: Vec<(Arc<str>, Value)>,
+    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprBodyRef)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MapResumeKind {
     Key,
     Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MapState {
-    pub(super) entries: Vec<(Value, Value)>,
-    pub(super) key: Option<Value>,
-    pub(super) value_expr: Option<ExprBodyRef>,
-    pub(super) remaining_entries: Vec<(ExprBodyRef, ExprBodyRef)>,
-    pub(super) env: EvalEnv,
-    pub(super) map_source: SourceSpan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StructState {
-    pub(super) type_name: Arc<str>,
-    pub(super) fields: Vec<(Arc<str>, Value)>,
-    pub(super) pending_part: Option<StructLiteralPart>,
-    pub(super) remaining_parts: Vec<StructLiteralPart>,
-    pub(super) env: EvalEnv,
-    pub(super) struct_source: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,12 +384,6 @@ pub(super) enum ContinuationFrame {
         items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
     },
-    Map {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        map: MapState,
-        pending: MapResumeKind,
-    },
     RestoreBranchContext {
         branch_context: EvalBranchContext,
     },
@@ -379,11 +391,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         search: SearchAssumptionState,
-    },
-    Struct {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        struct_state: StructState,
     },
     StructJoin {
         node_id: EvalNodeId,

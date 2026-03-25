@@ -2,8 +2,8 @@ use super::*;
 use crate::program::{
     ArrayPlan, ArrayPlanItem, BytecodeBody, BytecodeOp, CallCalleePlan, CallCalleePlanKind,
     ClosurePlan, DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FieldPlan,
-    InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
-    MatchPlan, NameRefPlan, PathLiteralPlan, RangePlan, ReadyPlanKind, StructLiteralPlan,
+    InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapPlan, MatchPlan,
+    NameRefPlan, PathLiteralPlan, RangePlan, ReadyPlanKind, StructLiteralPlan,
     StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
@@ -2078,97 +2078,6 @@ fn continue_planned_call(
     )
 }
 
-fn eval_struct_literal_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    type_name: Option<Arc<str>>,
-    parts: &[StructLiteralPlanPart],
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let type_name = struct_literal_type_name(type_name)?;
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("struct literal should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let struct_source = state.program.span_for_handle(handle);
-    let mut immediate_fields = Vec::new();
-    let mut remaining_parts = Vec::new();
-    for field in parts.iter() {
-        match field {
-            StructLiteralPlanPart::Field {
-                name,
-                expr: Some(expr),
-            } => {
-                remaining_parts.push(StructLiteralPart::Field {
-                    name: name.clone(),
-                    expr: *expr,
-                });
-            }
-            StructLiteralPlanPart::Spread(expr) => {
-                remaining_parts.push(StructLiteralPart::Spread(*expr));
-            }
-            StructLiteralPlanPart::Field { name, expr: None } => {
-                let Some(value) = env.get(name.as_ref()) else {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("struct field {name} has no value"),
-                    ));
-                };
-                set_struct_field(&mut immediate_fields, name.clone(), value.clone());
-            }
-        }
-    }
-    let joinable_fields = remaining_parts
-        .iter()
-        .map(|part| match part {
-            StructLiteralPart::Field { name, expr } => Some((name.clone(), *expr)),
-            StructLiteralPart::Spread(_) => None,
-        })
-        .collect::<Option<Vec<_>>>();
-    if state.queue_child_work
-        && immediate_fields.is_empty()
-        && let Some(joinable_fields) = joinable_fields
-        && !joinable_fields.is_empty()
-    {
-        let field_names = joinable_fields
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let child_nodes = joinable_fields
-            .iter()
-            .map(|(_, expr)| queue_child_body_ref(state, *expr, env))
-            .collect::<Vec<_>>();
-        return Ok(wait_on_child_dependency(
-            state,
-            node_id,
-            child_nodes[0],
-            vec![ContinuationFrame::StructJoin {
-                node_id,
-                parent_id,
-                type_name,
-                field_names,
-                child_nodes,
-                struct_source,
-            }],
-        ));
-    }
-    continue_struct_fields(
-        state,
-        node_id,
-        parent_id,
-        StructState {
-            type_name,
-            fields: immediate_fields,
-            pending_part: None,
-            remaining_parts,
-            env: env.clone(),
-            struct_source,
-        },
-    )
-}
-
 fn struct_literal_type_name(type_name: Option<Arc<str>>) -> Result<Arc<str>, EvalError> {
     type_name
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct literal has no type name"))
@@ -2187,36 +2096,6 @@ fn append_array_item(items: &mut Vec<Value>, value: Value, spread: bool) -> Resu
         items.push(value);
     }
     Ok(())
-}
-
-fn eval_map_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    entries: &[MapEntryPlan],
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("map should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    continue_map_entries(
-        state,
-        node_id,
-        parent_id,
-        MapState {
-            entries: Vec::new(),
-            key: None,
-            value_expr: None,
-            remaining_entries: entries
-                .iter()
-                .map(|entry| (entry.key, entry.value))
-                .collect(),
-            env: env.clone(),
-            map_source: state.program.span_for_handle(handle),
-        },
-    )
 }
 
 fn fallible_some(value: Value, source: SourceSpan) -> Value {
@@ -2583,10 +2462,10 @@ pub(super) fn continue_bytecode_body(
         _parent_id: Option<EvalNodeId>,
         match_expr: &MatchPlan,
         scrutinee: Value,
-        env: EvalEnv,
+        scope: &EvalEnv,
     ) -> Result<EvalStep, EvalError> {
         for arm in match_expr.arms.iter() {
-            let mut arm_env = env.clone();
+            let mut arm_env = scope.clone();
             if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
                 return eval_dependent_body_ref(state, node_id, arm.body, &mut arm_env);
             }
@@ -2602,7 +2481,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        match_state: MatchState,
+        match_state: BytecodeMatchState,
         resumed_scrutinee: Option<Value>,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -2637,7 +2516,7 @@ pub(super) fn continue_bytecode_body(
             parent_id,
             &match_state.match_plan,
             scrutinee,
-            match_state.env,
+            &bytecode.scope,
         )
     }
 
@@ -2645,7 +2524,7 @@ pub(super) fn continue_bytecode_body(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
         where_expr: &WherePlan,
         env: &EvalEnv,
-    ) -> Result<WhereState, EvalError> {
+    ) -> Result<BytecodeWhereState, EvalError> {
         let call_expr = where_expr.call.as_ref().ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::Internal,
@@ -2680,7 +2559,7 @@ pub(super) fn continue_bytecode_body(
                 }
             }
         }
-        Ok(WhereState {
+        Ok(BytecodeWhereState {
             call: WhereCallPlan {
                 call_source: state.program.span_for_handle(call_expr.handle),
                 callee: callee_value,
@@ -2690,7 +2569,6 @@ pub(super) fn continue_bytecode_body(
             pending_keyword_name: None,
             keyword_bindings,
             remaining_keyword_bindings,
-            env: env.clone(),
         })
     }
 
@@ -2699,7 +2577,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut call: PlannedCallState,
+        mut call: BytecodePlannedCallState,
         resumed: Option<PlannedCallResumeKind>,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -2759,7 +2637,7 @@ pub(super) fn continue_bytecode_body(
                 EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
             })?;
             if let Some(callee_value) =
-                immediate_call_callee_plan_value(state, call.plan_source, callee, &call.env)?
+                immediate_call_callee_plan_value(state, call.plan_source, callee, &bytecode.scope)?
             {
                 if state.queue_child_work
                     && !call.positional_args.is_empty()
@@ -2819,8 +2697,13 @@ pub(super) fn continue_bytecode_body(
                 .callee
                 .as_ref()
                 .expect("planned call should have a callee before evaluating arguments");
-            let adapter =
-                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
+            let adapter = function_adapter_value_for_arg(
+                state,
+                callee,
+                arg_index,
+                arg_handle,
+                &bytecode.scope,
+            )?;
             let arg_step = match adapter {
                 Some(value) => EvalStep::Ready(value),
                 None => eval_dependent_bytecode_body_ref(state, node_id, arg_handle, bytecode)?,
@@ -2855,7 +2738,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut where_state: WhereState,
+        mut where_state: BytecodeWhereState,
         resumed_keyword_value: Option<Value>,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -2907,13 +2790,12 @@ pub(super) fn continue_bytecode_body(
             node_id,
             parent_id,
             bytecode,
-            PlannedCallState {
+            BytecodePlannedCallState {
                 plan_source: state.current_source,
                 call_source,
                 callee_plan: None,
                 type_args,
                 positional_args,
-                env: where_state.env,
                 callee: Some(apply_where_keyword_bindings(
                     callee,
                     where_state.keyword_bindings,
@@ -3441,29 +3323,23 @@ pub(super) fn continue_bytecode_body(
                 start_bytecode_map(state, node_id, parent_id, bytecode, map)
             });
         }
-        match eval_map_inner(state, map.handle, &map.entries, &mut bytecode.scope)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode map suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Map { map, pending, .. } => {
-                        BytecodePendingState::Map { map, pending }
-                    }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode map frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
-            }
-        }
+        continue_bytecode_map_entries(
+            state,
+            node_id,
+            parent_id,
+            bytecode,
+            BytecodeMapState {
+                entries: Vec::new(),
+                key: None,
+                value_expr: None,
+                remaining_entries: map
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.key, entry.value))
+                    .collect(),
+                map_source: state.program.span_for_handle(map.handle),
+            },
+        )
     }
 
     fn continue_bytecode_map(
@@ -3471,7 +3347,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut map: MapState,
+        mut map: BytecodeMapState,
         pending: MapResumeKind,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
@@ -3503,29 +3379,62 @@ pub(super) fn continue_bytecode_body(
                 map.entries.push((key, resumed_value));
             }
         }
-        match continue_map_entries(state, node_id, parent_id, map)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode map resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Map { map, pending, .. } => {
-                        BytecodePendingState::Map { map, pending }
+        continue_bytecode_map_entries(state, node_id, parent_id, bytecode, map)
+    }
+
+    fn continue_bytecode_map_entries(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut map: BytecodeMapState,
+    ) -> Result<EvalStep, EvalError> {
+        let mut remaining = map.remaining_entries.into_iter();
+        loop {
+            if map.key.is_none() {
+                let Some((key_handle, value_handle)) = remaining.next() else {
+                    break;
+                };
+                map.value_expr = Some(value_handle);
+                match eval_dependent_bytecode_body_ref(state, node_id, key_handle, bytecode)? {
+                    EvalStep::Ready(key) => map.key = Some(key),
+                    EvalStep::Suspended(suspension) => {
+                        map.remaining_entries = remaining.collect();
+                        bytecode.pending = Some(BytecodePendingState::Map {
+                            map,
+                            pending: MapResumeKind::Key,
+                        });
+                        return Ok(EvalStep::Suspended(suspension));
                     }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode map resume frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+                }
             }
+            let key = map
+                .key
+                .take()
+                .expect("map value evaluation should retain the current key");
+            let value_handle = map
+                .value_expr
+                .take()
+                .expect("map value evaluation should retain the current value expr");
+            let value =
+                match eval_dependent_bytecode_body_ref(state, node_id, value_handle, bytecode)? {
+                    EvalStep::Ready(value) => value,
+                    EvalStep::Suspended(suspension) => {
+                        map.key = Some(key);
+                        map.value_expr = Some(value_handle);
+                        map.remaining_entries = remaining.collect();
+                        bytecode.pending = Some(BytecodePendingState::Map {
+                            map,
+                            pending: MapResumeKind::Value,
+                        });
+                        return Ok(EvalStep::Suspended(suspension));
+                    }
+                };
+            map.entries.push((key, value));
         }
+        let provenance = Provenance::literal(map.map_source);
+        let meta = aggregate_map_entries_meta(provenance, map.entries.iter());
+        Ok(EvalStep::Ready(Value::map(map.entries).with_meta(meta)))
     }
 
     fn start_bytecode_interpolated_string(
@@ -3724,47 +3633,85 @@ pub(super) fn continue_bytecode_body(
                 start_bytecode_struct(state, node_id, parent_id, bytecode, struct_literal)
             });
         }
-        match eval_struct_literal_inner(
-            state,
-            struct_literal.handle,
-            struct_literal.type_name.clone(),
-            &struct_literal.parts,
-            &mut bytecode.scope,
-        )? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode struct suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Struct { struct_state, .. } => {
-                        BytecodePendingState::Struct { struct_state }
-                    }
-                    ContinuationFrame::StructJoin {
-                        type_name,
-                        field_names,
-                        child_nodes,
-                        struct_source,
-                        ..
-                    } => BytecodePendingState::StructJoin {
-                        type_name,
-                        field_names,
-                        child_nodes,
-                        struct_source,
-                    },
-                    other => {
+        let type_name = struct_literal_type_name(struct_literal.type_name.clone())?;
+        let struct_source = state.program.span_for_handle(struct_literal.handle);
+        let mut immediate_fields = Vec::new();
+        let mut remaining_parts = Vec::new();
+        for field in struct_literal.parts.iter() {
+            match field {
+                StructLiteralPlanPart::Field {
+                    name,
+                    expr: Some(expr),
+                } => {
+                    remaining_parts.push(StructLiteralPart::Field {
+                        name: name.clone(),
+                        expr: *expr,
+                    });
+                }
+                StructLiteralPlanPart::Spread(expr) => {
+                    remaining_parts.push(StructLiteralPart::Spread(*expr));
+                }
+                StructLiteralPlanPart::Field { name, expr: None } => {
+                    let Some(value) = bytecode.scope.get(name.as_ref()) else {
                         return Err(EvalError::new(
                             EvalErrorKind::Internal,
-                            format!("unexpected bytecode struct frame: {other:?}"),
+                            format!("struct field {name} has no value"),
                         ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+                    };
+                    set_struct_field(&mut immediate_fields, name.clone(), value.clone());
+                }
             }
         }
+        let joinable_fields = remaining_parts
+            .iter()
+            .map(|part| match part {
+                StructLiteralPart::Field { name, expr } => Some((name.clone(), *expr)),
+                StructLiteralPart::Spread(_) => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if state.queue_child_work
+            && immediate_fields.is_empty()
+            && let Some(joinable_fields) = joinable_fields
+            && !joinable_fields.is_empty()
+        {
+            let field_names = joinable_fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            let child_nodes = joinable_fields
+                .iter()
+                .map(|(_, expr)| {
+                    prepared_entry_from_bytecode(state.program, *expr, bytecode)
+                        .map(|prepared| queue_child_prepared_entry(state, prepared))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_nodes[0],
+                vec![ContinuationFrame::StructJoin {
+                    node_id,
+                    parent_id,
+                    type_name,
+                    field_names,
+                    child_nodes,
+                    struct_source,
+                }],
+            ));
+        }
+        continue_bytecode_struct_fields(
+            state,
+            node_id,
+            parent_id,
+            bytecode,
+            BytecodeStructState {
+                type_name,
+                fields: immediate_fields,
+                pending_part: None,
+                remaining_parts,
+                struct_source,
+            },
+        )
     }
 
     fn continue_bytecode_struct(
@@ -3772,7 +3719,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut struct_state: StructState,
+        mut struct_state: BytecodeStructState,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -3799,29 +3746,51 @@ pub(super) fn continue_bytecode_body(
             part,
             resumed_value,
         )?;
-        match continue_struct_fields(state, node_id, parent_id, struct_state)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode struct resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Struct { struct_state, .. } => {
-                        BytecodePendingState::Struct { struct_state }
-                    }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode struct resume frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+        continue_bytecode_struct_fields(state, node_id, parent_id, bytecode, struct_state)
+    }
+
+    fn continue_bytecode_struct_fields(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut struct_state: BytecodeStructState,
+    ) -> Result<EvalStep, EvalError> {
+        let mut remaining = struct_state.remaining_parts.into_iter();
+        loop {
+            let Some(part) = struct_state
+                .pending_part
+                .take()
+                .or_else(|| remaining.next())
+            else {
+                break;
+            };
+            let expr_handle = match &part {
+                StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
+            };
+            match eval_dependent_bytecode_body_ref(state, node_id, expr_handle, bytecode)? {
+                EvalStep::Ready(value) => apply_struct_literal_part(
+                    &struct_state.type_name,
+                    &mut struct_state.fields,
+                    part,
+                    value,
+                )?,
+                EvalStep::Suspended(suspension) => {
+                    struct_state.pending_part = Some(part);
+                    struct_state.remaining_parts = remaining.collect();
+                    bytecode.pending = Some(BytecodePendingState::Struct { struct_state });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
             }
         }
+        let provenance = Provenance::literal(struct_state.struct_source);
+        let meta = aggregate_child_meta(
+            provenance,
+            struct_state.fields.iter().map(|(_, value)| value),
+        );
+        Ok(EvalStep::Ready(
+            Value::structure(struct_state.type_name, struct_state.fields).with_meta(meta),
+        ))
     }
 
     fn continue_bytecode_struct_join(
@@ -4245,19 +4214,17 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::StartCall(call) => {
                 bytecode.pc += 1;
-                let scope = bytecode.scope.clone();
                 let step = continue_bytecode_planned_call(
                     state,
                     node_id,
                     parent_id,
                     &mut bytecode,
-                    PlannedCallState {
+                    BytecodePlannedCallState {
                         plan_source: call.handle.source(),
                         call_source: state.program.span_for_handle(call.handle),
                         callee_plan: call.callee.clone(),
                         type_args: Arc::clone(&call.type_args),
                         positional_args: Arc::clone(&call.positional_args),
-                        env: scope,
                         callee: None,
                         args: Vec::new(),
                         next_arg_index: 0,
@@ -4291,15 +4258,13 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::StartMatch(match_plan) => {
                 bytecode.pc += 1;
-                let scope = bytecode.scope.clone();
                 let step = continue_bytecode_match(
                     state,
                     node_id,
                     parent_id,
                     &mut bytecode,
-                    MatchState {
+                    BytecodeMatchState {
                         match_plan: match_plan.clone(),
-                        env: scope,
                     },
                     None,
                 )?;
@@ -4903,116 +4868,6 @@ pub(super) fn wait_on_child_dependency(
         frames,
         call_stack: state.call_stack.clone(),
     })
-}
-
-pub(super) fn continue_map_entries(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut map: MapState,
-) -> Result<EvalStep, EvalError> {
-    let mut remaining = map.remaining_entries.into_iter();
-    loop {
-        if map.key.is_none() {
-            let Some((key_handle, value_handle)) = remaining.next() else {
-                break;
-            };
-            map.value_expr = Some(value_handle);
-            match eval_dependent_body_ref(state, node_id, key_handle, &mut map.env)? {
-                EvalStep::Ready(key) => map.key = Some(key),
-                EvalStep::Suspended(suspension) => {
-                    map.remaining_entries = remaining.collect();
-                    return Ok(extend_suspension(
-                        suspension,
-                        ContinuationFrame::Map {
-                            node_id,
-                            parent_id,
-                            map,
-                            pending: MapResumeKind::Key,
-                        },
-                    ));
-                }
-            }
-        }
-        let key = map
-            .key
-            .take()
-            .expect("map value evaluation should retain the current key");
-        let value_handle = map
-            .value_expr
-            .take()
-            .expect("map value evaluation should retain the current value expr");
-        let value = match eval_dependent_body_ref(state, node_id, value_handle, &mut map.env)? {
-            EvalStep::Ready(value) => value,
-            EvalStep::Suspended(suspension) => {
-                map.key = Some(key);
-                map.value_expr = Some(value_handle);
-                map.remaining_entries = remaining.collect();
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Map {
-                        node_id,
-                        parent_id,
-                        map,
-                        pending: MapResumeKind::Value,
-                    },
-                ));
-            }
-        };
-        map.entries.push((key, value));
-    }
-    let provenance = Provenance::literal(map.map_source);
-    let meta = aggregate_map_entries_meta(provenance, map.entries.iter());
-    Ok(EvalStep::Ready(Value::map(map.entries).with_meta(meta)))
-}
-
-pub(super) fn continue_struct_fields(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut struct_state: StructState,
-) -> Result<EvalStep, EvalError> {
-    let mut remaining = struct_state.remaining_parts.into_iter();
-    loop {
-        let Some(part) = struct_state
-            .pending_part
-            .take()
-            .or_else(|| remaining.next())
-        else {
-            break;
-        };
-        let expr_handle = match &part {
-            StructLiteralPart::Field { expr, .. } | StructLiteralPart::Spread(expr) => *expr,
-        };
-        match eval_dependent_body_ref(state, node_id, expr_handle, &mut struct_state.env)? {
-            EvalStep::Ready(value) => apply_struct_literal_part(
-                &struct_state.type_name,
-                &mut struct_state.fields,
-                part,
-                value,
-            )?,
-            EvalStep::Suspended(suspension) => {
-                struct_state.pending_part = Some(part);
-                struct_state.remaining_parts = remaining.collect();
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Struct {
-                        node_id,
-                        parent_id,
-                        struct_state,
-                    },
-                ));
-            }
-        }
-    }
-    let provenance = Provenance::literal(struct_state.struct_source);
-    let meta = aggregate_child_meta(
-        provenance,
-        struct_state.fields.iter().map(|(_, value)| value),
-    );
-    Ok(EvalStep::Ready(
-        Value::structure(struct_state.type_name, struct_state.fields).with_meta(meta),
-    ))
 }
 
 fn set_struct_field(fields: &mut Vec<(Arc<str>, Value)>, name: Arc<str>, value: Value) {

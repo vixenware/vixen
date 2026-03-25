@@ -367,33 +367,6 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::Map {
-            node_id,
-            parent_id,
-            mut map,
-            pending,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    match pending {
-                        MapResumeKind::Key => {
-                            map.key = Some(value);
-                        }
-                        MapResumeKind::Value => {
-                            let key = map
-                                .key
-                                .take()
-                                .expect("map value resume should retain the current key");
-                            map.value_expr = None;
-                            map.entries.push((key, value));
-                        }
-                    }
-                    continue_map_entries(state, node_id, parent_id, map)
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
         ContinuationFrame::RestoreBranchContext { branch_context } => {
             state.branch_context = branch_context;
             Ok(ResumeOutcome::Continue(input))
@@ -479,31 +452,6 @@ pub(in crate::engine) fn resume_frame(
                         .keyword_bindings
                         .push((pending_keyword_name, value));
                     continue_where(state, node_id, parent_id, where_state)
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::Struct {
-            node_id,
-            parent_id,
-            mut struct_state,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    let part = struct_state
-                        .pending_part
-                        .take()
-                        .expect("struct resume should retain the current literal part");
-                    if let Err(error) = apply_struct_literal_part(
-                        &struct_state.type_name,
-                        &mut struct_state.fields,
-                        part,
-                        value,
-                    ) {
-                        return Ok(ResumeOutcome::Continue(Err(error)));
-                    }
-                    continue_struct_fields(state, node_id, parent_id, struct_state)
                 }
                 Err(error) => Err(error),
             };
