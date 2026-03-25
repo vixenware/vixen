@@ -1,12 +1,12 @@
 //! Tiny parser-backed evaluator for early spec fixtures.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use im::{OrdMap, Vector};
+use im::OrdMap;
 use vx_parser::SyntaxKind;
 use vx_resolve::SourceId;
 use vx_types::Ty;

@@ -625,16 +625,16 @@ pub struct EvalSessionCheckpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EvalNodeTable<T: Clone> {
-    dense: Vector<Option<T>>,
-    sparse: OrdMap<EvalNodeId, T>,
+    dense: Vec<Option<T>>,
+    sparse: HashMap<EvalNodeId, T>,
     len: usize,
 }
 
 impl<T: Clone> Default for EvalNodeTable<T> {
     fn default() -> Self {
         Self {
-            dense: Vector::new(),
-            sparse: OrdMap::new(),
+            dense: Vec::new(),
+            sparse: HashMap::new(),
             len: 0,
         }
     }
@@ -647,7 +647,7 @@ impl<T: Clone> EvalNodeTable<T> {
 
     fn ensure_dense_len(&mut self, len: usize) {
         while self.dense.len() < len {
-            self.dense.push_back(None);
+            self.dense.push(None);
         }
     }
 
@@ -743,13 +743,13 @@ pub(super) struct EvalSchedulerBase {
     pub(super) node_states: EvalNodeTable<EvalNodeState>,
     pub(super) node_records: EvalNodeTable<EvalNodeRecord>,
     pub(super) keyed_nodes: EvalNodeTable<KeyedNodeMemo>,
-    pub(super) keyed_lookup_index: OrdMap<KeyedLookupIndexKey, Vector<EvalNodeId>>,
-    pub(super) dependency_edges: Vector<EvalDependencyEdge>,
+    pub(super) keyed_lookup_index: BTreeMap<KeyedLookupIndexKey, Vec<EvalNodeId>>,
+    pub(super) dependency_edges: Vec<EvalDependencyEdge>,
     pub(super) pending_resumes: EvalNodeTable<Vec<EvalSuspension>>,
     pub(super) pending_kinds: EvalNodeTable<PendingKind>,
     pub(super) retained_exprs: EvalNodeTable<RetainedExprTask>,
-    pub(super) learned_no_goods: Vector<LearnedNoGood>,
-    pub(super) learned_search_no_goods: Vector<LearnedSearchNoGood>,
+    pub(super) learned_no_goods: Vec<LearnedNoGood>,
+    pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
 }
 
 impl Default for EvalSchedulerBase {
@@ -761,13 +761,13 @@ impl Default for EvalSchedulerBase {
             node_states: EvalNodeTable::default(),
             node_records: EvalNodeTable::default(),
             keyed_nodes: EvalNodeTable::default(),
-            keyed_lookup_index: OrdMap::new(),
-            dependency_edges: Vector::new(),
+            keyed_lookup_index: BTreeMap::new(),
+            dependency_edges: Vec::new(),
             pending_resumes: EvalNodeTable::default(),
             pending_kinds: EvalNodeTable::default(),
             retained_exprs: EvalNodeTable::default(),
-            learned_no_goods: Vector::new(),
-            learned_search_no_goods: Vector::new(),
+            learned_no_goods: Vec::new(),
+            learned_search_no_goods: Vec::new(),
         }
     }
 }
@@ -778,7 +778,7 @@ impl EvalSchedulerBase {
         resolver: &FunctionRef,
         key: &Value,
         branch_context: &EvalBranchContext,
-    ) -> Option<&Vector<EvalNodeId>> {
+    ) -> Option<&Vec<EvalNodeId>> {
         let lookup_key = KeyedLookupIndexKey::new(resolver, key, branch_context);
         self.keyed_lookup_index.get(&lookup_key)
     }
@@ -788,10 +788,10 @@ impl EvalSchedulerBase {
         let previous = self.keyed_nodes.insert(memo.node_id, memo.clone());
         if previous.is_none() {
             if let Some(bucket) = self.keyed_lookup_index.get_mut(&lookup_key) {
-                bucket.push_back(memo.node_id);
+                bucket.push(memo.node_id);
             } else {
-                let mut bucket = Vector::new();
-                bucket.push_back(memo.node_id);
+                let mut bucket = Vec::new();
+                bucket.push(memo.node_id);
                 self.keyed_lookup_index.insert(lookup_key, bucket);
             }
         }

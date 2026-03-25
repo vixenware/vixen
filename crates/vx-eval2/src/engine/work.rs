@@ -217,7 +217,7 @@ fn learned_search_no_good_in_iter<'a>(
 }
 
 fn dependent_nodes_in_edges(
-    dependency_edges: &Vector<EvalDependencyEdge>,
+    dependency_edges: &[EvalDependencyEdge],
     dependency: EvalNodeId,
 ) -> Vec<EvalNodeId> {
     dependency_edges
@@ -1142,7 +1142,7 @@ impl EvalScheduler {
     pub(super) fn record_dependency(&mut self, parent: EvalNodeId, child: EvalNodeId) {
         self.base_mut()
             .dependency_edges
-            .push_back(EvalDependencyEdge { parent, child });
+            .push(EvalDependencyEdge { parent, child });
     }
 
     pub(super) fn queued_work(&self) -> Vec<EvalQueuedWork> {
@@ -1441,7 +1441,7 @@ impl EvalScheduler {
                 return Ok(());
             }
         }
-        learned_search_no_goods.push_back(learned);
+        learned_search_no_goods.push(learned);
         Ok(())
     }
 
@@ -1471,7 +1471,7 @@ impl EvalScheduler {
                 }
             }
         }
-        learned_no_goods.push_back(learned);
+        learned_no_goods.push(learned);
         Ok(())
     }
 
