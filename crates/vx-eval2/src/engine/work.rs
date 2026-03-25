@@ -960,7 +960,7 @@ pub(super) struct ScheduledResume {
 pub(super) struct ScheduledExpr {
     pub(super) root_expr_id: ExprId,
     pub(super) kind: ScheduledExprKind,
-    pub(super) env: EvalEnv,
+    pub(super) env: Arc<EvalEnv>,
     pub(super) locals: Vec<Option<Value>>,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
@@ -2395,7 +2395,7 @@ pub(super) fn execute_ready_task(
                     record.work.node_id,
                     PreparedEntry {
                         body,
-                        env: env.clone(),
+                        env: Arc::clone(&env),
                         locals: locals.clone(),
                     },
                 ),

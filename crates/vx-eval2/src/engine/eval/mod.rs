@@ -23,7 +23,7 @@ pub(super) struct PreparedBodyRef {
 
 pub(super) struct PreparedEntry {
     pub(super) body: PreparedBodyRef,
-    pub(super) env: EvalEnv,
+    pub(super) env: Arc<EvalEnv>,
     pub(super) locals: Vec<Option<Value>>,
 }
 
@@ -98,7 +98,7 @@ fn prepared_entry_from_scope(
     Ok(PreparedEntry {
         body,
         locals: init_bytecode_locals_from_scope(bytecode_body, &env),
-        env,
+        env: Arc::new(env),
     })
 }
 
@@ -134,7 +134,7 @@ fn prepared_entry_from_bytecode(
     Ok(PreparedEntry {
         body,
         locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
-        env: parent.scope.clone(),
+        env: Arc::new(parent.scope.clone()),
     })
 }
 
@@ -573,7 +573,11 @@ pub(super) fn prepare_entry(
         args,
         None,
     )?;
-    Ok(PreparedEntry { body, env, locals })
+    Ok(PreparedEntry {
+        body,
+        env: Arc::new(env),
+        locals,
+    })
 }
 
 pub(super) fn prepare_function_call(
@@ -626,7 +630,11 @@ pub(super) fn prepare_function_call(
         args,
         parent_id,
     )?;
-    Ok(Some(PreparedEntry { body, env, locals }))
+    Ok(Some(PreparedEntry {
+        body,
+        env: Arc::new(env),
+        locals,
+    }))
 }
 
 pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
@@ -870,7 +878,9 @@ fn eval_prepared_body_step(
     }
 
     let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
-    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, &env, &locals)? {
+    if let Some(result) =
+        try_eval_small_prepared_bytecode(state, bytecode_body, env.as_ref(), &locals)?
+    {
         return Ok(result);
     }
     continue_bytecode_body(
@@ -878,7 +888,7 @@ fn eval_prepared_body_step(
         node_id,
         parent_id,
         BytecodeState {
-            scope: env,
+            scope: env.as_ref().clone(),
             locals,
             last: Value::unit(),
             body: body.body,
@@ -4559,7 +4569,7 @@ fn queue_child_expr_body(
     let scheduled = ScheduledExpr {
         root_expr_id: body.root_expr_id(),
         kind: ScheduledExprKind::Prepared(body),
-        env: env.clone(),
+        env: Arc::new(env.clone()),
         locals,
         call_stack: if state.track_calls {
             state.call_stack.clone()
