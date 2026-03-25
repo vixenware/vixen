@@ -102,6 +102,42 @@ fn prepared_entry_from_scope(
     })
 }
 
+fn init_bytecode_locals_from_parent(
+    program: &CompiledProgram,
+    body: &BytecodeBody,
+    parent: &BytecodeState,
+) -> Result<Vec<Option<Value>>, EvalError> {
+    let parent_body = program.resolve_bytecode_body(parent.body)?;
+    let mut locals = empty_bytecode_locals(body);
+    for (slot, local) in body.local_slots.iter().enumerate() {
+        if !local.prefill_from_scope {
+            continue;
+        }
+        if let Some(&parent_slot) = parent_body.slot_lookup.get(local.name.as_ref())
+            && let Some(Some(value)) = parent.locals.get(parent_slot as usize)
+        {
+            locals[slot] = Some(value.clone());
+            continue;
+        }
+        locals[slot] = parent.scope.get(local.name.as_ref()).cloned();
+    }
+    Ok(locals)
+}
+
+fn prepared_entry_from_bytecode(
+    program: &CompiledProgram,
+    body: ExprBodyRef,
+    parent: &BytecodeState,
+) -> Result<PreparedEntry, EvalError> {
+    let body = PreparedBodyRef::from_body_ref(program, body)?;
+    let bytecode_body = program.resolve_bytecode_body(body.body)?;
+    Ok(PreparedEntry {
+        body,
+        locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
+        env: parent.scope.clone(),
+    })
+}
+
 pub(super) fn function_ref_from_compiled(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     name: Arc<str>,
@@ -950,6 +986,16 @@ pub(super) fn eval_dependent_body_ref(
     }
 }
 
+fn eval_dependent_bytecode_body_ref(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    body: ExprBodyRef,
+    bytecode: &BytecodeState,
+) -> Result<EvalStep, EvalError> {
+    let prepared = prepared_entry_from_bytecode(state.program, body, bytecode)?;
+    eval_dependent_prepared_entry(state, node_id, prepared)
+}
+
 fn eval_literal_plan(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     literal: &LiteralPlan,
@@ -1310,6 +1356,33 @@ fn eval_call_callee_plan(
                 .program
                 .resolve_field_plan(callee.field_plan_id(source))?;
             eval_field_plan(state, field, env)
+        }
+        CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "direct call callee should resolve immediately",
+        )),
+    }
+}
+
+fn eval_bytecode_call_callee_plan(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    source: SourceId,
+    callee: &CallCalleePlan,
+    bytecode: &mut BytecodeState,
+) -> Result<EvalStep, EvalError> {
+    if let Some(value) = immediate_call_callee_plan_value(state, source, callee, &bytecode.scope)? {
+        return Ok(EvalStep::Ready(value));
+    }
+    match callee.kind() {
+        CallCalleePlanKind::Expr => {
+            eval_dependent_bytecode_body_ref(state, node_id, callee.expr_body(), bytecode)
+        }
+        CallCalleePlanKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(callee.field_plan_id(source))?;
+            eval_field_plan(state, field, &mut bytecode.scope)
         }
         CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
             EvalErrorKind::Internal,
@@ -2791,7 +2864,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut match_state: MatchState,
+        match_state: MatchState,
         resumed_scrutinee: Option<Value>,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -2812,7 +2885,7 @@ pub(super) fn continue_bytecode_body(
             let scrutinee_expr = match_state.match_plan.scrutinee.ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
             })?;
-            match eval_dependent_body_ref(state, node_id, scrutinee_expr, &mut match_state.env)? {
+            match eval_dependent_bytecode_body_ref(state, node_id, scrutinee_expr, bytecode)? {
                 EvalStep::Ready(value) => value,
                 EvalStep::Suspended(suspension) => {
                     bytecode.pending = Some(BytecodePendingState::Match { match_state });
@@ -2959,7 +3032,13 @@ pub(super) fn continue_bytecode_body(
                     let queued_arg_nodes = call
                         .positional_args
                         .iter()
-                        .map(|arg| queue_child_body_ref(state, *arg, &call.env))
+                        .map(|arg| {
+                            queue_child_prepared_entry(
+                                state,
+                                prepared_entry_from_bytecode(state.program, *arg, bytecode)
+                                    .expect("bytecode call arg should resolve to a prepared entry"),
+                            )
+                        })
                         .collect::<Vec<_>>();
                     let first_child = queued_arg_nodes[0];
                     call.queued_arg_nodes = queued_arg_nodes;
@@ -2976,7 +3055,13 @@ pub(super) fn continue_bytecode_body(
                 }
                 call.callee = Some(callee_value);
             } else {
-                match eval_call_callee_plan(state, call.plan_source, callee, &mut call.env)? {
+                match eval_bytecode_call_callee_plan(
+                    state,
+                    node_id,
+                    call.plan_source,
+                    callee,
+                    bytecode,
+                )? {
                     EvalStep::Ready(value) => call.callee = Some(value),
                     EvalStep::Suspended(suspension) => {
                         bytecode.pending = Some(BytecodePendingState::Call {
@@ -3000,7 +3085,7 @@ pub(super) fn continue_bytecode_body(
                 function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
             let arg_step = match adapter {
                 Some(value) => EvalStep::Ready(value),
-                None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
+                None => eval_dependent_bytecode_body_ref(state, node_id, arg_handle, bytecode)?,
             };
             match arg_step {
                 EvalStep::Ready(value) => call.args.push(value),
@@ -3062,7 +3147,7 @@ pub(super) fn continue_bytecode_body(
 
         let mut remaining = where_state.remaining_keyword_bindings.into_iter();
         while let Some((name, expr)) = remaining.next() {
-            match eval_dependent_body_ref(state, node_id, expr, &mut where_state.env)? {
+            match eval_dependent_bytecode_body_ref(state, node_id, expr, bytecode)? {
                 EvalStep::Ready(value) => where_state.keyword_bindings.push((name, value)),
                 EvalStep::Suspended(suspension) => {
                     where_state.pending_keyword_name = Some(name);
@@ -4212,7 +4297,11 @@ pub(super) fn continue_bytecode_body(
                 let bytecode_body = state.program.resolve_bytecode_body(*body)?;
                 let nested = BytecodeState {
                     scope: bytecode.scope.clone(),
-                    locals: init_bytecode_locals_from_scope(bytecode_body, &bytecode.scope),
+                    locals: init_bytecode_locals_from_parent(
+                        state.program,
+                        bytecode_body,
+                        &bytecode,
+                    )?,
                     last: Value::unit(),
                     body: *body,
                     pc: 0,
@@ -4408,7 +4497,7 @@ pub(super) fn continue_bytecode_body(
                     *else_branch
                 };
                 match state.with_source(branch.expr_id().source(), |state| {
-                    eval_dependent_body_ref(state, node_id, branch, &mut bytecode.scope)
+                    eval_dependent_bytecode_body_ref(state, node_id, branch, &bytecode)
                 })? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
@@ -4453,7 +4542,7 @@ pub(super) fn continue_bytecode_body(
 
                 bytecode.temp = Some(lhs);
                 match state.with_source(rhs.expr_id().source(), |state| {
-                    eval_dependent_body_ref(state, node_id, *rhs, &mut bytecode.scope)
+                    eval_dependent_bytecode_body_ref(state, node_id, *rhs, &bytecode)
                 })? {
                     EvalStep::Ready(rhs) => {
                         let lhs = bytecode.temp.take().expect("binary lhs should be staged");
