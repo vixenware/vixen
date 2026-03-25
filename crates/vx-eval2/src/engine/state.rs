@@ -1,5 +1,6 @@
 use super::*;
 use crate::program::CallCalleePlan;
+use std::sync::Arc;
 
 pub(super) struct EvalState<'source, 'scheduler, Runtime, Sink> {
     pub(super) program: &'source CompiledProgram,
@@ -22,8 +23,19 @@ pub(super) struct EvalSuspension {
     pub(super) resume_node: EvalNodeId,
     pub(super) pending: PendingRef,
     pub(super) branch_context: EvalBranchContext,
-    pub(super) frames: Vec<ContinuationFrame>,
-    pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
+    pub(super) continuation: EvalSuspensionContinuation,
+    pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EvalSuspensionContinuation {
+    Frames(Arc<[ContinuationFrame]>),
+    Bytecode {
+        prefix: Arc<[ContinuationFrame]>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: BytecodeState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,7 +600,7 @@ pub(super) fn record_ready_step(
 ) {
     state
         .scheduler
-        .record_node_state(node_id, EvalNodeState::Ready(value.clone()));
+        .record_node_state(node_id, EvalNodeState::Ready(Arc::new(value.clone())));
     state.emit(
         node_id,
         parent_id,
@@ -650,17 +662,13 @@ pub(super) fn wrap_suspended(
         resume_node,
         pending,
         branch_context,
-        frames: vec![frame],
-        call_stack: state.call_stack.clone(),
+        continuation: continuation_from_frames(vec![frame]),
+        call_stack: Arc::from(state.call_stack.clone()),
     })
 }
 
-pub(super) fn extend_suspension(
-    mut suspension: EvalSuspension,
-    frame: ContinuationFrame,
-) -> EvalStep {
-    suspension.frames.push(frame);
-    EvalStep::Suspended(suspension)
+pub(super) fn extend_suspension(suspension: EvalSuspension, frame: ContinuationFrame) -> EvalStep {
+    EvalStep::Suspended(append_suspension_frame(suspension, frame))
 }
 
 pub(super) fn conclude_resumed_node(
@@ -691,4 +699,87 @@ pub(super) fn empty_env() -> EvalEnv {
 
 pub(super) fn env_mut(env: &mut EvalEnv) -> &mut OrdMap<String, Value> {
     env
+}
+
+pub(super) fn continuation_from_frames(
+    mut frames: Vec<ContinuationFrame>,
+) -> EvalSuspensionContinuation {
+    match frames.pop() {
+        Some(ContinuationFrame::Bytecode {
+            node_id,
+            parent_id,
+            bytecode,
+        }) => EvalSuspensionContinuation::Bytecode {
+            prefix: Arc::from(frames),
+            node_id,
+            parent_id,
+            bytecode,
+        },
+        Some(last) => {
+            frames.push(last);
+            EvalSuspensionContinuation::Frames(Arc::from(frames))
+        }
+        None => EvalSuspensionContinuation::Frames(Arc::from([])),
+    }
+}
+
+pub(super) fn continuation_frames_vec(
+    continuation: &EvalSuspensionContinuation,
+) -> Vec<ContinuationFrame> {
+    match continuation {
+        EvalSuspensionContinuation::Frames(frames) => frames.as_ref().to_vec(),
+        EvalSuspensionContinuation::Bytecode {
+            prefix,
+            node_id,
+            parent_id,
+            bytecode,
+        } => {
+            let mut frames = prefix.as_ref().to_vec();
+            frames.push(ContinuationFrame::Bytecode {
+                node_id: *node_id,
+                parent_id: *parent_id,
+                bytecode: bytecode.clone(),
+            });
+            frames
+        }
+    }
+}
+
+pub(super) fn append_suspension_frame(
+    mut suspension: EvalSuspension,
+    frame: ContinuationFrame,
+) -> EvalSuspension {
+    let mut frames = continuation_frames_vec(&suspension.continuation);
+    frames.push(frame);
+    suspension.continuation = continuation_from_frames(frames);
+    suspension
+}
+
+pub(super) fn append_suspension_frames(
+    mut suspension: EvalSuspension,
+    frames: &[ContinuationFrame],
+) -> EvalSuspension {
+    if frames.is_empty() {
+        return suspension;
+    }
+    let mut all_frames = continuation_frames_vec(&suspension.continuation);
+    all_frames.extend(frames.iter().cloned());
+    suspension.continuation = continuation_from_frames(all_frames);
+    suspension
+}
+
+pub(super) fn append_suspension_bytecode(
+    mut suspension: EvalSuspension,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    bytecode: BytecodeState,
+) -> EvalSuspension {
+    let mut frames = continuation_frames_vec(&suspension.continuation);
+    frames.push(ContinuationFrame::Bytecode {
+        node_id,
+        parent_id,
+        bytecode,
+    });
+    suspension.continuation = continuation_from_frames(frames);
+    suspension
 }

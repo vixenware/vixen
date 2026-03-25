@@ -704,7 +704,7 @@ pub(in crate::engine) fn collect_stream_join_items(
                         StreamPendingKind::SourceCall | StreamPendingKind::Map => {
                             expand_stream_join_items_from_value(
                                 state,
-                                value.clone(),
+                                value.as_ref().clone(),
                                 remaining_stages,
                                 "Stream stages can only resume bodyful mapped streams",
                             )?
@@ -3333,9 +3333,10 @@ pub(in crate::engine) fn continue_keyed_builtin(
         let prepared = prepare_keyed_call(state, keyed_node_id)?;
         return match eval_dependent_prepared_entry(state, keyed_node_id, prepared) {
             Ok(EvalStep::Ready(value)) => {
-                state
-                    .scheduler
-                    .record_node_state(keyed_node_id, EvalNodeState::Ready(value.clone()));
+                state.scheduler.record_node_state(
+                    keyed_node_id,
+                    EvalNodeState::Ready(Arc::new(value.clone())),
+                );
                 let _ = state.scheduler.finalize_keyed_completion(keyed_node_id)?;
                 Ok(EvalStep::Ready(value))
             }
@@ -3349,8 +3350,8 @@ pub(in crate::engine) fn continue_keyed_builtin(
                     resume_node: node_id,
                     pending,
                     branch_context: state.branch_context.clone(),
-                    frames: Vec::new(),
-                    call_stack: state.call_stack.clone(),
+                    continuation: continuation_from_frames(Vec::new()),
+                    call_stack: Arc::from(state.call_stack.clone()),
                 }))
             }
             Err(error) => {

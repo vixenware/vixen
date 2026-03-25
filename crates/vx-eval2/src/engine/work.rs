@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(super) struct EvalScheduler {
@@ -767,7 +768,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
 
     fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>> {
         match self.node_state_local(node_id)? {
-            EvalNodeState::Ready(value) => Some(Ok(value.clone())),
+            EvalNodeState::Ready(value) => Some(Ok(value.as_ref().clone())),
             EvalNodeState::Poison(error) => Some(Err(error.clone())),
             _ => None,
         }
@@ -953,7 +954,16 @@ pub(super) enum ParallelWorkerMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScheduledResume {
     pub(super) suspension: EvalSuspension,
-    pub(super) result: Result<Value, EvalError>,
+    pub(super) result: Result<Arc<Value>, EvalError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScheduledBytecodeResume {
+    pub(super) node_id: EvalNodeId,
+    pub(super) parent_id: Option<EvalNodeId>,
+    pub(super) bytecode: BytecodeState,
+    pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
+    pub(super) result: Result<Arc<Value>, EvalError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -961,9 +971,9 @@ pub(super) struct ScheduledExpr {
     pub(super) root_expr_id: ExprId,
     pub(super) kind: ScheduledExprKind,
     pub(super) env: Arc<EvalEnv>,
-    pub(super) locals: Vec<Option<Value>>,
+    pub(super) locals: Arc<[Option<Value>]>,
     pub(super) locals_overlay_needed: bool,
-    pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
+    pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -977,6 +987,7 @@ pub(super) enum ReadyTask {
     EvaluateExpr(ScheduledExpr),
     EvaluateKeyed(EvalNodeId),
     Resume(ScheduledResume),
+    ResumeBytecode(ScheduledBytecodeResume),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1680,7 +1691,7 @@ impl EvalScheduler {
 
     pub(super) fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>> {
         match self.node_state(node_id)? {
-            EvalNodeState::Ready(value) => Some(Ok(value.clone())),
+            EvalNodeState::Ready(value) => Some(Ok(value.as_ref().clone())),
             EvalNodeState::Poison(error) => Some(Err(error.clone())),
             _ => None,
         }
@@ -1799,18 +1810,34 @@ impl EvalScheduler {
         };
         self.base_mut().pending_kinds.remove(&pending_id);
         let node_id = EvalNodeId(pending.node_id);
-        match &result {
-            Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(value.clone())),
+        let shared_result = result.map(Arc::new);
+        match &shared_result {
+            Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(Arc::clone(value))),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
         for suspension in suspensions {
             let resume_node = suspension.resume_node;
             let branch_context = suspension.branch_context.clone();
-            let work = self.enqueue_ready_task(
-                ReadyTask::Resume(ScheduledResume {
-                    suspension,
-                    result: result.clone(),
+            let task = match &suspension.continuation {
+                EvalSuspensionContinuation::Bytecode {
+                    prefix,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                } if prefix.is_empty() => ReadyTask::ResumeBytecode(ScheduledBytecodeResume {
+                    node_id: *node_id,
+                    parent_id: *parent_id,
+                    bytecode: bytecode.clone(),
+                    call_stack: Arc::clone(&suspension.call_stack),
+                    result: shared_result.clone(),
                 }),
+                _ => ReadyTask::Resume(ScheduledResume {
+                    suspension,
+                    result: shared_result.clone(),
+                }),
+            };
+            let work = self.enqueue_ready_task(
+                task,
                 EvalWorkKind::ResumePending,
                 resume_node,
                 Some(pending.clone()),
@@ -2353,7 +2380,7 @@ pub(super) fn execute_ready_task(
                 env: prepared.env,
                 locals: prepared.locals,
                 locals_overlay_needed: prepared.locals_overlay_needed,
-                call_stack,
+                call_stack: Arc::from(call_stack),
             };
             state.scheduler.remember_expr_task(
                 node_id,
@@ -2399,7 +2426,7 @@ pub(super) fn execute_ready_task(
                     PreparedEntry {
                         body,
                         env: Arc::clone(&env),
-                        locals: locals.clone(),
+                        locals: Arc::clone(&locals),
                         locals_overlay_needed,
                     },
                 ),
@@ -2407,7 +2434,7 @@ pub(super) fn execute_ready_task(
             let step = if call_stack.is_empty() {
                 run(&mut state)
             } else {
-                state.with_call_stack(call_stack, run)
+                state.with_call_stack(call_stack.as_ref().to_vec(), run)
             };
             invocation = state.work_invocation.clone();
             match step {
@@ -2538,7 +2565,62 @@ pub(super) fn execute_ready_task(
             }
         }
         ReadyTask::Resume(ready) => {
-            let step = resume_suspension(&mut state, ready.suspension, ready.result);
+            let step = resume_suspension(
+                &mut state,
+                ready.suspension,
+                ready.result.map(|value| value.as_ref().clone()),
+            );
+            invocation = state.work_invocation.clone();
+            match step {
+                Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
+                Ok(EvalStep::Suspended(suspension)) => {
+                    let pending = suspension.pending.clone();
+                    state.scheduler.register_suspension(suspension);
+                    match state.scheduler.pending_kind(&pending) {
+                        Some(PendingKind::External) => {
+                            state.scheduler.record_node_state(
+                                ENTRY_WORK_NODE_ID,
+                                EvalNodeState::Pending(pending.clone()),
+                            );
+                            EvalCompletedWorkOutcome::Pending(pending)
+                        }
+                        Some(PendingKind::ChildDependency { dependency }) => {
+                            state.scheduler.record_node_state(
+                                record.work.node_id,
+                                EvalNodeState::BlockedOnNode { dependency },
+                            );
+                            EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                        }
+                        None => {
+                            return Err(EvalError::new(
+                                EvalErrorKind::Internal,
+                                format!("pending node {} has no registered kind", pending.node_id),
+                            ));
+                        }
+                    }
+                }
+                Err(error) => EvalCompletedWorkOutcome::Poison(error),
+            }
+        }
+        ReadyTask::ResumeBytecode(ready) => {
+            let run = move |state: &mut EvalState<'_, '_, _, _>| match resume_bytecode_tail(
+                state,
+                ready.node_id,
+                ready.parent_id,
+                ready.bytecode,
+                ready.result.map(|value| value.as_ref().clone()),
+            )? {
+                ResumeOutcome::Continue(next) => match next {
+                    Ok(value) => Ok(EvalStep::Ready(value)),
+                    Err(error) => Err(error),
+                },
+                ResumeOutcome::Suspended(suspension) => Ok(EvalStep::Suspended(suspension)),
+            };
+            let step = if ready.call_stack.is_empty() {
+                run(&mut state)
+            } else {
+                state.with_call_stack(ready.call_stack.as_ref().to_vec(), run)
+            };
             invocation = state.work_invocation.clone();
             match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),

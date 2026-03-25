@@ -1054,8 +1054,10 @@ fn commit_completion(
             } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
                 Ok(CommitCompletionResult::progressed())
             } else {
-                scheduler
-                    .record_node_state(ENTRY_WORK_NODE_ID, EvalNodeState::Ready(value.clone()));
+                scheduler.record_node_state(
+                    ENTRY_WORK_NODE_ID,
+                    EvalNodeState::Ready(Arc::new(value.clone())),
+                );
                 *completed = Some(Ok(value.clone()));
                 Ok(CommitCompletionResult {
                     step: EvalSessionStep::Ready(value),

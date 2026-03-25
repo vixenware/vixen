@@ -2,6 +2,7 @@ use super::*;
 use crate::value::compare_value_reps;
 use std::cmp::Ordering;
 use std::mem;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub enum RuntimeSlotPrepare {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalNodeState {
-    Ready(Value),
+    Ready(Arc<Value>),
     Runnable {
         work: EvalWorkId,
         pending: Option<PendingRef>,

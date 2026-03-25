@@ -202,7 +202,7 @@ fn keyed_ready_resolved_crates<'a>(snapshot: &'a crate::EvalGraphSnapshot) -> Ve
                 let ValueRep::Struct(struct_value) = &value.rep else {
                     return None;
                 };
-                (struct_value.type_name.as_ref() == "ResolvedCrate").then_some(value)
+                (struct_value.type_name.as_ref() == "ResolvedCrate").then_some(value.as_ref())
             }
             _ => None,
         })
@@ -10629,15 +10629,15 @@ fn session_can_resume_pending_runtime_call() {
     assert!(session.pending_nodes().is_empty());
     assert_eq!(
         session.node_state(EvalNodeId(0)),
-        Some(&EvalNodeState::Ready(Value::string("windows")))
+        Some(&EvalNodeState::Ready(Arc::new(Value::string("windows"))))
     );
     assert_eq!(
         session.node_state(EvalNodeId(1)),
-        Some(&EvalNodeState::Ready(Value::string("windows")))
+        Some(&EvalNodeState::Ready(Arc::new(Value::string("windows"))))
     );
     assert_eq!(
         session.node_state(EvalNodeId(pending.node_id)),
-        Some(&EvalNodeState::Ready(Value::string("windows")))
+        Some(&EvalNodeState::Ready(Arc::new(Value::string("windows"))))
     );
     assert!(
         session
@@ -13348,7 +13348,7 @@ fn resolving_pending_node_requeues_resume_work_record() {
     assert_eq!(runnable[0].pending.as_ref(), Some(&pending));
     assert_eq!(
         session.node_state(EvalNodeId(pending.node_id)),
-        Some(&EvalNodeState::Ready(Value::string("windows"))),
+        Some(&EvalNodeState::Ready(Arc::new(Value::string("windows")))),
     );
 
     let second = session.run().expect("second session run");

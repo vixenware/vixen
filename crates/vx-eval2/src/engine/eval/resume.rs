@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(in crate::engine) fn resume_suspension(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
@@ -9,76 +10,121 @@ pub(in crate::engine) fn resume_suspension(
         resume_node,
         pending: _,
         branch_context: _,
-        frames,
+        continuation,
         call_stack,
     } = suspension;
     if call_stack.is_empty() {
-        let mut current = result;
-        let parent_id = state
-            .scheduler
-            .node_record(resume_node)
-            .and_then(|record| record.parent_id);
-        let mut index = 0;
-        while index < frames.len() {
-            match resume_frame(state, frames[index].clone(), current)? {
-                ResumeOutcome::Continue(next) => current = next,
-                ResumeOutcome::Suspended(mut new_suspension) => {
-                    new_suspension
-                        .frames
-                        .extend(frames[index + 1..].iter().cloned());
-                    return Ok(EvalStep::Suspended(new_suspension));
-                }
-            }
-            index += 1;
-        }
-        if !matches!(
-            state.scheduler.node_state(resume_node),
-            Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
-        ) {
-            match &current {
-                Ok(value) => record_ready_step(state, resume_node, parent_id, value),
-                Err(error) => record_poison_step(state, resume_node, parent_id, error),
-            }
-        }
-        match current {
-            Ok(value) => Ok(EvalStep::Ready(value)),
-            Err(error) => Err(error),
-        }
+        resume_suspension_inner(state, resume_node, continuation, result)
     } else {
-        state.with_call_stack(call_stack, |state| {
-            let mut current = result;
-            let parent_id = state
-                .scheduler
-                .node_record(resume_node)
-                .and_then(|record| record.parent_id);
-            let mut index = 0;
-            while index < frames.len() {
-                match resume_frame(state, frames[index].clone(), current)? {
-                    ResumeOutcome::Continue(next) => current = next,
-                    ResumeOutcome::Suspended(mut new_suspension) => {
-                        new_suspension
-                            .frames
-                            .extend(frames[index + 1..].iter().cloned());
-                        return Ok(EvalStep::Suspended(new_suspension));
-                    }
-                }
-                index += 1;
-            }
-            if !matches!(
-                state.scheduler.node_state(resume_node),
-                Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
-            ) {
-                match &current {
-                    Ok(value) => record_ready_step(state, resume_node, parent_id, value),
-                    Err(error) => record_poison_step(state, resume_node, parent_id, error),
-                }
-            }
-            match current {
-                Ok(value) => Ok(EvalStep::Ready(value)),
-                Err(error) => Err(error),
-            }
+        state.with_call_stack(call_stack.as_ref().to_vec(), |state| {
+            resume_suspension_inner(state, resume_node, continuation, result)
         })
     }
+}
+
+fn resume_suspension_inner(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    resume_node: EvalNodeId,
+    continuation: EvalSuspensionContinuation,
+    result: Result<Value, EvalError>,
+) -> Result<EvalStep, EvalError> {
+    match continuation {
+        EvalSuspensionContinuation::Frames(frames) => {
+            resume_frame_sequence(state, resume_node, frames.as_ref(), None, result)
+        }
+        EvalSuspensionContinuation::Bytecode {
+            prefix,
+            node_id,
+            parent_id,
+            bytecode,
+        } => resume_frame_sequence(
+            state,
+            resume_node,
+            prefix.as_ref(),
+            Some((node_id, parent_id, bytecode)),
+            result,
+        ),
+    }
+}
+
+fn resume_frame_sequence(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    resume_node: EvalNodeId,
+    frames: &[ContinuationFrame],
+    bytecode_tail: Option<(EvalNodeId, Option<EvalNodeId>, BytecodeState)>,
+    result: Result<Value, EvalError>,
+) -> Result<EvalStep, EvalError> {
+    let mut current = result;
+    let resume_parent_id = state
+        .scheduler
+        .node_record(resume_node)
+        .and_then(|record| record.parent_id);
+    let mut index = 0;
+    while index < frames.len() {
+        match resume_frame(state, frames[index].clone(), current)? {
+            ResumeOutcome::Continue(next) => current = next,
+            ResumeOutcome::Suspended(new_suspension) => {
+                let mut suspended = append_suspension_frames(new_suspension, &frames[index + 1..]);
+                if let Some((node_id, parent_id, bytecode)) = bytecode_tail.clone() {
+                    suspended = append_suspension_bytecode(suspended, node_id, parent_id, bytecode);
+                }
+                return Ok(EvalStep::Suspended(suspended));
+            }
+        }
+        index += 1;
+    }
+    if let Some((node_id, parent_id, bytecode)) = bytecode_tail {
+        match resume_bytecode_tail(state, node_id, parent_id, bytecode, current)? {
+            ResumeOutcome::Continue(next) => current = next,
+            ResumeOutcome::Suspended(new_suspension) => {
+                return Ok(EvalStep::Suspended(new_suspension));
+            }
+        }
+    }
+    if !matches!(
+        state.scheduler.node_state(resume_node),
+        Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_))
+    ) {
+        match &current {
+            Ok(value) => record_ready_step(state, resume_node, resume_parent_id, value),
+            Err(error) => record_poison_step(state, resume_node, resume_parent_id, error),
+        }
+    }
+    match current {
+        Ok(value) => Ok(EvalStep::Ready(value)),
+        Err(error) => Err(error),
+    }
+}
+
+pub(in crate::engine) fn resume_bytecode_tail(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut bytecode: BytecodeState,
+    input: Result<Value, EvalError>,
+) -> Result<ResumeOutcome, EvalError> {
+    let result = match input {
+        Ok(value) => {
+            bytecode.acc = Some(value);
+            continue_bytecode_body(state, node_id, parent_id, bytecode)
+        }
+        Err(error) => match bytecode.pending.take() {
+            Some(BytecodePendingState::Fallible { fallible_source }) => continue_bytecode_fallible(
+                state,
+                node_id,
+                &mut bytecode,
+                fallible_source,
+                None,
+                Some(Err(error)),
+            ),
+            Some(pending) => {
+                bytecode.pending = Some(pending);
+                Err(error)
+            }
+            None => Err(error),
+        },
+    };
+    Ok(conclude_resumed_node(state, node_id, parent_id, result))
 }
 
 pub(in crate::engine) fn resume_frame(
@@ -152,33 +198,8 @@ pub(in crate::engine) fn resume_frame(
         ContinuationFrame::Bytecode {
             node_id,
             parent_id,
-            mut bytecode,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    bytecode.acc = Some(value);
-                    continue_bytecode_body(state, node_id, parent_id, bytecode)
-                }
-                Err(error) => match bytecode.pending.take() {
-                    Some(BytecodePendingState::Fallible { fallible_source }) => {
-                        continue_bytecode_fallible(
-                            state,
-                            node_id,
-                            &mut bytecode,
-                            fallible_source,
-                            None,
-                            Some(Err(error)),
-                        )
-                    }
-                    Some(pending) => {
-                        bytecode.pending = Some(pending);
-                        Err(error)
-                    }
-                    None => Err(error),
-                },
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
+            bytecode,
+        } => resume_bytecode_tail(state, node_id, parent_id, bytecode, input),
         ContinuationFrame::StreamToArrayJoin {
             node_id,
             parent_id,
@@ -200,13 +221,15 @@ pub(in crate::engine) fn resume_frame(
                             resume_node: node_id,
                             pending,
                             branch_context: state.branch_context.clone(),
-                            frames: vec![ContinuationFrame::StreamToArrayJoin {
-                                node_id,
-                                parent_id,
-                                items: items.clone(),
-                                stream_provenance: stream_provenance.clone(),
-                            }],
-                            call_stack: state.call_stack.clone(),
+                            continuation: continuation_from_frames(vec![
+                                ContinuationFrame::StreamToArrayJoin {
+                                    node_id,
+                                    parent_id,
+                                    items: items.clone(),
+                                    stream_provenance: stream_provenance.clone(),
+                                },
+                            ]),
+                            call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
                     Err(error) => Err(error),
@@ -234,13 +257,15 @@ pub(in crate::engine) fn resume_frame(
                             resume_node: node_id,
                             pending,
                             branch_context: state.branch_context.clone(),
-                            frames: vec![ContinuationFrame::StreamMergeJoin {
-                                node_id,
-                                parent_id,
-                                items: items.clone(),
-                                stream_provenance: stream_provenance.clone(),
-                            }],
-                            call_stack: state.call_stack.clone(),
+                            continuation: continuation_from_frames(vec![
+                                ContinuationFrame::StreamMergeJoin {
+                                    node_id,
+                                    parent_id,
+                                    items: items.clone(),
+                                    stream_provenance: stream_provenance.clone(),
+                                },
+                            ]),
+                            call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
                     Err(error) => Err(error),
@@ -268,13 +293,15 @@ pub(in crate::engine) fn resume_frame(
                             resume_node: node_id,
                             pending,
                             branch_context: state.branch_context.clone(),
-                            frames: vec![ContinuationFrame::StreamForEachJoin {
-                                node_id,
-                                parent_id,
-                                items: items.clone(),
-                                stream_provenance: stream_provenance.clone(),
-                            }],
-                            call_stack: state.call_stack.clone(),
+                            continuation: continuation_from_frames(vec![
+                                ContinuationFrame::StreamForEachJoin {
+                                    node_id,
+                                    parent_id,
+                                    items: items.clone(),
+                                    stream_provenance: stream_provenance.clone(),
+                                },
+                            ]),
+                            call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
                     Err(error) => Err(error),
@@ -303,13 +330,15 @@ pub(in crate::engine) fn resume_frame(
                             resume_node: node_id,
                             pending,
                             branch_context: state.branch_context.clone(),
-                            frames: vec![ContinuationFrame::StreamToMapJoin {
-                                node_id,
-                                parent_id,
-                                items: items.clone(),
-                                stream_provenance: stream_provenance.clone(),
-                            }],
-                            call_stack: state.call_stack.clone(),
+                            continuation: continuation_from_frames(vec![
+                                ContinuationFrame::StreamToMapJoin {
+                                    node_id,
+                                    parent_id,
+                                    items: items.clone(),
+                                    stream_provenance: stream_provenance.clone(),
+                                },
+                            ]),
+                            call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
                     Err(error) => Err(error),
@@ -399,7 +428,7 @@ pub(in crate::engine) fn resume_frame(
                     for (name, child_node) in field_names.iter().zip(child_nodes.iter()) {
                         match state.scheduler.node_state(*child_node) {
                             Some(EvalNodeState::Ready(value)) => {
-                                fields.push((name.clone(), value.clone()))
+                                fields.push((name.clone(), value.as_ref().clone()))
                             }
                             Some(EvalNodeState::Poison(error)) => {
                                 return Ok(ResumeOutcome::Continue(Err(error.clone())));
@@ -411,15 +440,17 @@ pub(in crate::engine) fn resume_frame(
                                     resume_node: node_id,
                                     pending,
                                     branch_context: state.branch_context.clone(),
-                                    frames: vec![ContinuationFrame::StructJoin {
-                                        node_id,
-                                        parent_id,
-                                        type_name,
-                                        field_names: field_names.clone(),
-                                        child_nodes: child_nodes.clone(),
-                                        struct_source: struct_source.clone(),
-                                    }],
-                                    call_stack: state.call_stack.clone(),
+                                    continuation: continuation_from_frames(vec![
+                                        ContinuationFrame::StructJoin {
+                                            node_id,
+                                            parent_id,
+                                            type_name,
+                                            field_names: field_names.clone(),
+                                            child_nodes: child_nodes.clone(),
+                                            struct_source: struct_source.clone(),
+                                        },
+                                    ]),
+                                    call_stack: Arc::from(state.call_stack.clone()),
                                 }));
                             }
                         }

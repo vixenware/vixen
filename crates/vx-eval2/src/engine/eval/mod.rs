@@ -27,7 +27,7 @@ pub(super) struct PreparedBodyRef {
 pub(super) struct PreparedEntry {
     pub(super) body: PreparedBodyRef,
     pub(super) env: Arc<EvalEnv>,
-    pub(super) locals: Vec<Option<Value>>,
+    pub(super) locals: Arc<[Option<Value>]>,
     pub(super) locals_overlay_needed: bool,
 }
 
@@ -134,7 +134,7 @@ fn prepared_entry_from_scope(
     let bytecode_body = program.resolve_bytecode_body(body.body)?;
     Ok(PreparedEntry {
         body,
-        locals: init_bytecode_locals_from_scope(bytecode_body, &env),
+        locals: Arc::from(init_bytecode_locals_from_scope(bytecode_body, &env)),
         env: Arc::new(env),
         locals_overlay_needed: false,
     })
@@ -285,7 +285,11 @@ fn prepared_entry_from_bytecode(
     let bytecode_body = program.resolve_bytecode_body(body.body)?;
     Ok(PreparedEntry {
         body,
-        locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
+        locals: Arc::from(init_bytecode_locals_from_parent(
+            program,
+            bytecode_body,
+            parent,
+        )?),
         env: bytecode_scope_snapshot(program, parent)?,
         locals_overlay_needed: false,
     })
@@ -729,7 +733,7 @@ pub(super) fn prepare_entry(
     Ok(PreparedEntry {
         body,
         env: Arc::new(env),
-        locals,
+        locals: Arc::from(locals),
         locals_overlay_needed,
     })
 }
@@ -808,7 +812,7 @@ pub(super) fn prepare_function_call(
     Ok(Some(PreparedEntry {
         body,
         env: Arc::new(env),
-        locals,
+        locals: Arc::from(locals),
         locals_overlay_needed,
     }))
 }
@@ -1022,6 +1026,34 @@ pub(super) fn prepared_body_kind(
     body.kind
 }
 
+fn bytecode_body_is_trivial_inline(body: &BytecodeBody) -> bool {
+    matches!(
+        body.ops.as_ref(),
+        [
+            BytecodeOp::EvalReady(_),
+            BytecodeOp::SetLast,
+            BytecodeOp::ReturnLast,
+        ] | [
+            BytecodeOp::LoadLocal { .. },
+            BytecodeOp::SetLast,
+            BytecodeOp::ReturnLast,
+        ] | [
+            BytecodeOp::EvalStaticMember { .. },
+            BytecodeOp::SetLast,
+            BytecodeOp::ReturnLast,
+        ]
+    )
+}
+
+fn prepared_body_is_trivial_inline(
+    program: &CompiledProgram,
+    body: &PreparedBodyRef,
+) -> Result<bool, EvalError> {
+    Ok(bytecode_body_is_trivial_inline(
+        program.resolve_bytecode_body(body.body)?,
+    ))
+}
+
 fn eval_prepared_body_step(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -1083,12 +1115,14 @@ fn eval_prepared_body_step(
     let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
     let fast_scope;
     let scope = if locals_overlay_needed {
-        fast_scope = overlay_bytecode_scope(bytecode_body, env.as_ref(), &locals);
+        fast_scope = overlay_bytecode_scope(bytecode_body, env.as_ref(), locals.as_ref());
         &fast_scope
     } else {
         env.as_ref()
     };
-    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, scope, &locals)? {
+    if let Some(result) =
+        try_eval_small_prepared_bytecode(state, bytecode_body, scope, locals.as_ref())?
+    {
         return Ok(result);
     }
     continue_bytecode_body(
@@ -1098,7 +1132,7 @@ fn eval_prepared_body_step(
         BytecodeState {
             scope: env,
             scope_snapshot: None,
-            locals,
+            locals: locals.as_ref().to_vec(),
             locals_dirty: locals_overlay_needed,
             last: Value::unit(),
             body: body.body,
@@ -1131,7 +1165,7 @@ pub(super) fn eval_child_prepared_entry(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     prepared: PreparedEntry,
 ) -> Result<EvalStep, EvalError> {
-    if !state.queue_child_work {
+    if !state.queue_child_work || prepared_body_is_trivial_inline(state.program, &prepared.body)? {
         let child_id = state.alloc_node_id();
         let source = state
             .program
@@ -1169,7 +1203,7 @@ pub(super) fn eval_child_body_ref(
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let prepared = PreparedBodyRef::from_body_ref(state.program, body)?;
-    if !state.queue_child_work {
+    if !state.queue_child_work || prepared_body_is_trivial_inline(state.program, &prepared)? {
         let child_id = state.alloc_node_id();
         state.emit_current_dependency(
             child_id,
@@ -2530,14 +2564,9 @@ pub(super) fn continue_bytecode_body(
         parent_id: Option<EvalNodeId>,
         bytecode: BytecodeState,
     ) -> EvalStep {
-        extend_suspension(
-            suspension,
-            ContinuationFrame::Bytecode {
-                node_id,
-                parent_id,
-                bytecode,
-            },
-        )
+        EvalStep::Suspended(append_suspension_bytecode(
+            suspension, node_id, parent_id, bytecode,
+        ))
     }
 
     fn continue_bytecode_match_arms(
@@ -2693,7 +2722,7 @@ pub(super) fn continue_bytecode_body(
                     let mut args = Vec::with_capacity(queued_arg_nodes.len());
                     for child_node in &queued_arg_nodes {
                         match state.scheduler.node_state(*child_node) {
-                            Some(EvalNodeState::Ready(value)) => args.push(value.clone()),
+                            Some(EvalNodeState::Ready(value)) => args.push(value.as_ref().clone()),
                             Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                             _ => {
                                 bytecode.pending = Some(BytecodePendingState::Call {
@@ -3033,7 +3062,7 @@ pub(super) fn continue_bytecode_body(
             };
             match state.scheduler.node_state(child_node_id) {
                 Some(EvalNodeState::Ready(value)) => {
-                    append_array_item(&mut items, value.clone(), spread)?
+                    append_array_item(&mut items, value.as_ref().clone(), spread)?
                 }
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
@@ -3157,7 +3186,7 @@ pub(super) fn continue_bytecode_body(
         let mut items = Vec::with_capacity(child_nodes.len());
         for child_node in &child_nodes {
             match state.scheduler.node_state(*child_node) {
-                Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                Some(EvalNodeState::Ready(value)) => items.push(value.as_ref().clone()),
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
                     bytecode.pending = Some(BytecodePendingState::TupleJoin {
@@ -3355,7 +3384,7 @@ pub(super) fn continue_bytecode_body(
         let _ = bytecode.acc.take();
         let start = match start_child {
             Some(child_node) => match state.scheduler.node_state(child_node) {
-                Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                Some(EvalNodeState::Ready(value)) => Some(value.as_ref().clone()),
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
                     bytecode.pending = Some(BytecodePendingState::RangeJoin {
@@ -3376,7 +3405,7 @@ pub(super) fn continue_bytecode_body(
         };
         let end = match end_child {
             Some(child_node) => match state.scheduler.node_state(child_node) {
-                Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                Some(EvalNodeState::Ready(value)) => Some(value.as_ref().clone()),
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
                     bytecode.pending = Some(BytecodePendingState::RangeJoin {
@@ -3687,7 +3716,7 @@ pub(super) fn continue_bytecode_body(
                     expr_index += 1;
                     match state.scheduler.node_state(child_node) {
                         Some(EvalNodeState::Ready(value)) => {
-                            segments.push(interpolation_segment_text(value)?);
+                            segments.push(interpolation_segment_text(value.as_ref())?);
                         }
                         Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                         _ => {
@@ -3899,7 +3928,9 @@ pub(super) fn continue_bytecode_body(
         let mut fields = Vec::with_capacity(child_nodes.len());
         for (name, child_node) in field_names.iter().zip(child_nodes.iter()) {
             match state.scheduler.node_state(*child_node) {
-                Some(EvalNodeState::Ready(value)) => fields.push((name.clone(), value.clone())),
+                Some(EvalNodeState::Ready(value)) => {
+                    fields.push((name.clone(), value.as_ref().clone()))
+                }
                 Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
                 _ => {
                     bytecode.pending = Some(BytecodePendingState::StructJoin {
@@ -4824,12 +4855,12 @@ fn queue_child_expr_body(
         root_expr_id: body.root_expr_id(),
         kind: ScheduledExprKind::Prepared(body),
         env: Arc::new(env.clone()),
-        locals,
+        locals: Arc::from(locals),
         locals_overlay_needed: false,
         call_stack: if state.track_calls {
-            state.call_stack.clone()
+            Arc::from(state.call_stack.clone())
         } else {
-            Vec::new()
+            Arc::from([])
         },
     };
     state
@@ -4876,9 +4907,9 @@ pub(super) fn queue_child_prepared_entry(
         locals: prepared.locals,
         locals_overlay_needed: prepared.locals_overlay_needed,
         call_stack: if state.track_calls {
-            state.call_stack.clone()
+            Arc::from(state.call_stack.clone())
         } else {
-            Vec::new()
+            Arc::from([])
         },
     };
     state
@@ -4912,8 +4943,8 @@ pub(super) fn wait_on_child_dependency(
         resume_node,
         pending,
         branch_context: state.branch_context.clone(),
-        frames,
-        call_stack: state.call_stack.clone(),
+        continuation: continuation_from_frames(frames),
+        call_stack: Arc::from(state.call_stack.clone()),
     })
 }
 
