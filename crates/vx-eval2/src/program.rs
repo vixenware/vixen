@@ -19,7 +19,7 @@ use vx_types::Ty;
 
 use crate::{
     ByteOffset, ColumnIndex, EvalError, EvalErrorKind, EvalExprKind, LineIndex, SourcePoint,
-    SourceSpan,
+    SourceSpan, value::FunctionBytecodeEntry,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,6 +484,7 @@ pub(crate) struct CompiledFunction {
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
     pub(crate) body: Option<ExprBodyRef>,
+    pub(crate) bytecode_entry: Option<FunctionBytecodeEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2127,7 +2128,28 @@ impl CompiledProgram {
         for source in self.sources.values_mut() {
             source.rebuild_expr_plans();
         }
+        let function_entries = self.collect_function_entries();
+        for source in self.sources.values_mut() {
+            source.refresh_function_bytecode_refs(&function_entries);
+        }
+        for source in self.sources.values_mut() {
+            source.rebuild_expr_plans();
+        }
         self
+    }
+
+    fn collect_function_entries(&self) -> BTreeMap<(u32, ProgramNodeHandle), CompiledFunction> {
+        self.sources
+            .values()
+            .flat_map(|source| {
+                source
+                    .functions_by_definition
+                    .values()
+                    .map(|(_name, function)| {
+                        ((function.source.0, function.definition), function.clone())
+                    })
+            })
+            .collect()
     }
 
     fn collect_execution_ref_rewrites(
@@ -3012,6 +3034,7 @@ impl CompiledProgramSource {
         self.match_plans = plans.match_plans;
         self.resolve_plan_child_body_refs();
         self.rebuild_bytecode_bodies();
+        self.rebuild_function_bytecode_entries();
     }
 
     fn resolve_plan_child_body_refs(&mut self) {
@@ -3205,6 +3228,133 @@ impl CompiledProgramSource {
                     })
                     .collect::<Vec<_>>(),
             );
+        }
+    }
+
+    fn rebuild_function_bytecode_entries(&mut self) {
+        let build_entry = |function: &CompiledFunction, source: &CompiledProgramSource| {
+            let Some(body) = function.body else {
+                return None;
+            };
+            let bytecode = source
+                .resolve_expr_bytecode_body(body.expr_id())
+                .expect("compiled function body should resolve bytecode")
+                .expect("bodyful compiled function should lower to bytecode");
+            let bytecode_body = source
+                .resolve_bytecode_body(bytecode)
+                .expect("compiled function bytecode body should resolve");
+            let parameter_slots = Arc::from(
+                function
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        bytecode_body
+                            .slot_lookup
+                            .get(parameter.label.as_ref())
+                            .copied()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let scope_prefill_slots = Arc::from(
+                bytecode_body
+                    .local_slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, local)| local.prefill_from_scope)
+                    .map(|(slot, local)| (local.name.clone(), slot as u32))
+                    .collect::<Vec<_>>(),
+            );
+            Some(FunctionBytecodeEntry {
+                body: bytecode,
+                local_count: bytecode_body.local_count,
+                parameter_slots,
+                scope_prefill_slots,
+            })
+        };
+        let name_entries = self
+            .functions_by_name
+            .values()
+            .map(|function| build_entry(function, self))
+            .collect::<Vec<_>>();
+        for (function, entry) in self.functions_by_name.values_mut().zip(name_entries) {
+            function.bytecode_entry = entry;
+        }
+
+        let definition_entries = self
+            .functions_by_definition
+            .values()
+            .map(|(_name, function)| build_entry(function, self))
+            .collect::<Vec<_>>();
+        for ((_, function), entry) in self
+            .functions_by_definition
+            .values_mut()
+            .zip(definition_entries)
+        {
+            function.bytecode_entry = entry;
+        }
+
+        let block_steps = self
+            .block_bodies
+            .iter()
+            .map(|body| {
+                Arc::from(
+                    body.steps
+                        .iter()
+                        .cloned()
+                        .map(|step| match step {
+                            BlockStep::FnDecl(mut function) => {
+                                function.compiled.bytecode_entry =
+                                    build_entry(&function.compiled, self);
+                                BlockStep::FnDecl(function)
+                            }
+                            other => other,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (body, steps) in self.block_bodies.iter_mut().zip(block_steps) {
+            body.steps = steps;
+        }
+    }
+
+    fn refresh_function_bytecode_refs(
+        &mut self,
+        functions: &BTreeMap<(u32, ProgramNodeHandle), CompiledFunction>,
+    ) {
+        let refresh_compiled = |function: &mut CompiledFunction| {
+            if let Some(updated) = functions.get(&(function.source.0, function.definition)) {
+                *function = updated.clone();
+            }
+        };
+        let refresh_name_ref = |name_ref: &mut NameRefExpr| {
+            if let Some(ResolvedNameRef::Function { function, .. }) = &mut name_ref.resolved {
+                refresh_compiled(function);
+            }
+        };
+        let refresh_call_callee = |callee: &mut CallCallee| match callee {
+            CallCallee::NameRef(name_ref) => refresh_name_ref(name_ref),
+            CallCallee::ResolvedFunction { function, .. } => refresh_compiled(function),
+            _ => {}
+        };
+
+        for expr in &mut self.exprs {
+            match &mut expr.kind {
+                ExprKind::NameRef(name_ref) => refresh_name_ref(name_ref),
+                ExprKind::Call(call) => {
+                    if let Some(callee) = &mut call.callee {
+                        refresh_call_callee(callee);
+                    }
+                }
+                ExprKind::Where(where_expr) => {
+                    if let Some(call) = &mut where_expr.call
+                        && let Some(callee) = &mut call.callee
+                    {
+                        refresh_call_callee(callee);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -4126,6 +4276,7 @@ fn compile_function_decl(
                     .copied()
                     .map(ExprBodyRef::unresolved)
             }),
+            bytecode_entry: None,
         },
     ))
 }

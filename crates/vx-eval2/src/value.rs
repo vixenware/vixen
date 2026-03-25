@@ -6,7 +6,7 @@ use im::OrdMap;
 
 use crate::{
     Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
-    program::{CompiledParameter, ExprBodyRef},
+    program::{BytecodeBodyId, CompiledParameter, ExprBodyRef},
 };
 
 pub type FunctionCaptures = OrdMap<String, Value>;
@@ -25,6 +25,14 @@ where
         captures.insert(name.into(), value);
     }
     Arc::new(captures)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionBytecodeEntry {
+    pub body: BytecodeBodyId,
+    pub local_count: usize,
+    pub parameter_slots: Arc<[Option<u32>]>,
+    pub scope_prefill_slots: Arc<[(Arc<str>, u32)]>,
 }
 
 /// A successful runtime value: payload plus orthogonal metadata.
@@ -178,6 +186,12 @@ pub(crate) fn compare_value_reps(lhs: &ValueRep, rhs: &ValueRep) -> Ordering {
             .then_with(|| lhs.name.cmp(&rhs.name))
             .then_with(|| lhs.has_keyword_parameters.cmp(&rhs.has_keyword_parameters))
             .then_with(|| lhs.body.cmp(&rhs.body))
+            .then_with(|| {
+                compare_function_bytecode_entry(
+                    lhs.bytecode_entry.as_ref(),
+                    rhs.bytecode_entry.as_ref(),
+                )
+            })
             .then_with(|| lhs.self_name.cmp(&rhs.self_name))
             .then_with(|| compare_compiled_parameters(&lhs.parameters, &rhs.parameters))
             .then_with(|| compare_function_captures(&lhs.captures, &rhs.captures)),
@@ -248,6 +262,49 @@ fn compare_function_captures(lhs: &FunctionCaptures, rhs: &FunctionCaptures) -> 
         let value_order = compare_values(lhs_value, rhs_value);
         if value_order != Ordering::Equal {
             return value_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_function_bytecode_entry(
+    lhs: Option<&FunctionBytecodeEntry>,
+    rhs: Option<&FunctionBytecodeEntry>,
+) -> Ordering {
+    match (lhs, rhs) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(lhs), Some(rhs)) => lhs
+            .body
+            .cmp(&rhs.body)
+            .then_with(|| lhs.local_count.cmp(&rhs.local_count))
+            .then_with(|| compare_optional_u32_slices(&lhs.parameter_slots, &rhs.parameter_slots))
+            .then_with(|| {
+                compare_named_slot_slices(&lhs.scope_prefill_slots, &rhs.scope_prefill_slots)
+            }),
+    }
+}
+
+fn compare_optional_u32_slices(lhs: &[Option<u32>], rhs: &[Option<u32>]) -> Ordering {
+    for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+        let order = lhs.cmp(rhs);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_named_slot_slices(lhs: &[(Arc<str>, u32)], rhs: &[(Arc<str>, u32)]) -> Ordering {
+    for ((lhs_name, lhs_slot), (rhs_name, rhs_slot)) in lhs.iter().zip(rhs.iter()) {
+        let name_order = lhs_name.cmp(rhs_name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+        let slot_order = lhs_slot.cmp(rhs_slot);
+        if slot_order != Ordering::Equal {
+            return slot_order;
         }
     }
     lhs.len().cmp(&rhs.len())
@@ -344,6 +401,8 @@ pub struct FunctionRef {
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
     pub(crate) body: Option<ExprBodyRef>,
+    pub(crate) bytecode_entry: Option<FunctionBytecodeEntry>,
+    pub(crate) entry_locals: Option<Arc<[Option<Value>]>>,
     pub(crate) captures: Arc<FunctionCaptures>,
     pub(crate) self_name: Option<Arc<str>>,
 }
@@ -355,15 +414,21 @@ impl FunctionRef {
         parameters: Arc<[CompiledParameter]>,
         has_keyword_parameters: bool,
         body: Option<ExprBodyRef>,
+        bytecode_entry: Option<FunctionBytecodeEntry>,
         captures: Arc<FunctionCaptures>,
         self_name: Option<Arc<str>>,
     ) -> Self {
+        let entry_locals = bytecode_entry
+            .as_ref()
+            .map(|entry| Arc::from(prefilled_entry_locals(entry, &captures)));
         Self {
             source_id,
             name,
             parameters,
             has_keyword_parameters,
             body,
+            bytecode_entry,
+            entry_locals,
             captures,
             self_name,
         }
@@ -376,4 +441,17 @@ impl FunctionRef {
     pub fn captures(&self) -> &FunctionCaptures {
         &self.captures
     }
+}
+
+fn prefilled_entry_locals(
+    entry: &FunctionBytecodeEntry,
+    captures: &FunctionCaptures,
+) -> Vec<Option<Value>> {
+    let mut locals = vec![None; entry.local_count];
+    for (name, slot) in entry.scope_prefill_slots.iter() {
+        if let Some(value) = captures.get(name.as_ref()) {
+            locals[*slot as usize] = Some(value.clone());
+        }
+    }
+    locals
 }

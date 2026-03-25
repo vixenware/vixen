@@ -7,7 +7,9 @@ use crate::program::{
     StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
-use crate::value::{FunctionCaptures, empty_function_captures, function_captures};
+use crate::value::{
+    FunctionBytecodeEntry, FunctionCaptures, empty_function_captures, function_captures,
+};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -90,6 +92,39 @@ fn init_bytecode_locals_from_scope(body: &BytecodeBody, scope: &EvalEnv) -> Vec<
     locals
 }
 
+fn bytecode_entry_for_body(
+    program: &CompiledProgram,
+    parameters: &[CompiledParameter],
+    body: Option<ExprBodyRef>,
+) -> Result<Option<FunctionBytecodeEntry>, EvalError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let prepared = PreparedBodyRef::from_body_ref(program, body)?;
+    let bytecode = program.resolve_bytecode_body(prepared.body)?;
+    let parameter_slots = Arc::from(
+        parameters
+            .iter()
+            .map(|parameter| bytecode.slot_lookup.get(parameter.label.as_ref()).copied())
+            .collect::<Vec<_>>(),
+    );
+    let scope_prefill_slots = Arc::from(
+        bytecode
+            .local_slots
+            .iter()
+            .enumerate()
+            .filter(|(_, local)| local.prefill_from_scope)
+            .map(|(slot, local)| (local.name.clone(), slot as u32))
+            .collect::<Vec<_>>(),
+    );
+    Ok(Some(FunctionBytecodeEntry {
+        body: prepared.body,
+        local_count: bytecode.local_count,
+        parameter_slots,
+        scope_prefill_slots,
+    }))
+}
+
 fn prepared_entry_from_scope(
     program: &CompiledProgram,
     body: PreparedBodyRef,
@@ -152,6 +187,7 @@ pub(super) fn function_ref_from_compiled(
         function.parameters,
         function.has_keyword_parameters,
         function.body,
+        function.bytecode_entry,
         captures,
         self_name,
     )
@@ -472,12 +508,14 @@ fn function_adapter_value_for_arg(
     let Some(parameters) = compile_adapter_parameters(state.program, expr, expr.handle())? else {
         return Ok(None);
     };
+    let bytecode_entry = bytecode_entry_for_body(state.program, &parameters, Some(arg))?;
     let function = FunctionRef::new(
         state.program.source_id(arg_id.source()),
         Arc::from("<adapter>"),
         parameters,
         false,
         Some(arg),
+        bytecode_entry,
         captures_from_scope(env),
         None,
     );
@@ -517,12 +555,14 @@ fn eval_closure_body(
     let body = body
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "closure expression has no body"))?;
     let closure_source = state.program.span_for_handle(handle);
+    let bytecode_entry = bytecode_entry_for_body(state.program, &parameters, Some(body))?;
     let function = FunctionRef::new(
         state.program.source_id(state.current_source()),
         Arc::from("<closure>"),
         parameters,
         false,
         Some(body),
+        bytecode_entry,
         captures_from_scope(env),
         None,
     );
@@ -564,7 +604,7 @@ pub(super) fn prepare_entry(
     bind_arguments_into_env(
         state,
         &mut env,
-        Some((bytecode_body, &mut locals)),
+        Some((Some(bytecode_body), &mut locals, None)),
         &function.parameters,
         args,
         None,
@@ -606,22 +646,40 @@ pub(super) fn prepare_function_call(
         ));
     }
     let body = PreparedBodyRef::from_body_ref(state.program, body)?;
-    let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
-    let mut env = empty_env();
-    let mut locals = empty_bytecode_locals(bytecode_body);
-    for (name, value) in function.captures() {
-        env_mut(&mut env).insert(name.to_string(), value.clone());
-        set_bytecode_local(bytecode_body, &mut locals, name.as_ref(), value);
-    }
+    let bytecode_entry = function.bytecode_entry.as_ref().ok_or_else(|| {
+        EvalError::new(
+            EvalErrorKind::Internal,
+            format!(
+                "bodyful function {} is missing bytecode entry metadata",
+                function.name
+            ),
+        )
+    })?;
+    let mut env = (*function.captures).clone();
+    let mut locals = function
+        .entry_locals
+        .as_ref()
+        .map(|locals| locals.as_ref().to_vec())
+        .unwrap_or_else(|| vec![None; bytecode_entry.local_count]);
     if let Some(self_name) = &function.self_name {
         let self_value = Value::function(function.clone());
         env_mut(&mut env).insert(self_name.to_string(), self_value.clone());
-        set_bytecode_local(bytecode_body, &mut locals, self_name.as_ref(), &self_value);
+        if let Some((_, slot)) = bytecode_entry
+            .scope_prefill_slots
+            .iter()
+            .find(|(name, _)| name == self_name)
+        {
+            locals[*slot as usize] = Some(self_value);
+        }
     }
     bind_arguments_into_env(
         state,
         &mut env,
-        Some((bytecode_body, &mut locals)),
+        Some((
+            None,
+            &mut locals,
+            Some(bytecode_entry.parameter_slots.as_ref()),
+        )),
         &function.parameters,
         args,
         parent_id,
@@ -720,12 +778,16 @@ pub(super) fn prepare_keyed_call(
 pub(super) fn bind_arguments_into_env(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     env: &mut EvalEnv,
-    mut bytecode_locals: Option<(&BytecodeBody, &mut [Option<Value>])>,
+    mut bytecode_locals: Option<(
+        Option<&BytecodeBody>,
+        &mut [Option<Value>],
+        Option<&[Option<u32>]>,
+    )>,
     parameters: &[CompiledParameter],
     args: &[Value],
     parent_id: Option<EvalNodeId>,
 ) -> Result<(), EvalError> {
-    for (parameter, arg) in parameters.iter().zip(args.iter()) {
+    for (index, (parameter, arg)) in parameters.iter().zip(args.iter()).enumerate() {
         let label = parameter.label.to_string();
         let name_source = state.program.span_for_handle(parameter.name);
         let node_id = state.alloc_node_id();
@@ -750,8 +812,16 @@ pub(super) fn bind_arguments_into_env(
             RuntimeInputKind::Argument,
             label.clone(),
         ));
-        if let Some((body, locals)) = bytecode_locals.as_mut() {
-            set_bytecode_local(body, locals, label.as_str(), &bound);
+        if let Some((body, locals, parameter_slots)) = bytecode_locals.as_mut() {
+            if let Some(slot) = parameter_slots
+                .as_ref()
+                .and_then(|slots| slots.get(index))
+                .and_then(|slot| *slot)
+            {
+                locals[slot as usize] = Some(bound.clone());
+            } else if let Some(body) = body {
+                set_bytecode_local(body, locals, label.as_str(), &bound);
+            }
         }
         env_mut(env).insert(label, bound);
     }
@@ -1199,6 +1269,7 @@ fn eval_name_ref_plan(
             Arc::from([]),
             false,
             None,
+            None,
             captures,
             Some(name.clone()),
         ))
@@ -1230,6 +1301,7 @@ fn immediate_call_callee_plan_value(
                 Arc::clone(&name),
                 Arc::from([]),
                 false,
+                None,
                 None,
                 empty_function_captures(),
                 Some(name),
@@ -1308,6 +1380,7 @@ fn immediate_direct_call_callee_plan_value(
                     Arc::from([]),
                     false,
                     None,
+                    None,
                     captures,
                     Some(plan.display_name.clone()),
                 ))
@@ -1336,6 +1409,7 @@ fn immediate_direct_call_callee_plan_value(
                     plan.full_name.clone(),
                     Arc::from([]),
                     false,
+                    None,
                     None,
                     empty_function_captures(),
                     None,
@@ -1427,6 +1501,7 @@ fn resolved_name_ref_value(
                 Arc::from([]),
                 false,
                 None,
+                None,
                 captures,
                 Some(display_name.clone()),
             ))
@@ -1461,6 +1536,7 @@ fn static_member_value_from_source(
         static_member.full_name.clone(),
         Arc::from([]),
         false,
+        None,
         None,
         empty_function_captures(),
         None,
@@ -1609,6 +1685,7 @@ fn bound_method_value(
         Arc::from([]),
         false,
         None,
+        None,
         function_captures([("self", receiver)]),
         None,
     );
@@ -1671,6 +1748,7 @@ fn enum_constructor_or_value(
         name.clone(),
         Arc::from([]),
         false,
+        None,
         None,
         captures,
         None,
@@ -1994,6 +2072,7 @@ fn fallible_function_value(function: &FunctionRef, source: SourceSpan) -> Value 
         function.parameters.clone(),
         function.has_keyword_parameters,
         None,
+        None,
         Arc::new(captures),
         function.self_name.clone(),
     );
@@ -2084,6 +2163,7 @@ fn apply_where_keyword_bindings(callee: Value, keyword_bindings: Vec<(Arc<str>, 
         Arc::clone(&function.parameters),
         false,
         function.body,
+        function.bytecode_entry.clone(),
         Arc::new(captures),
         function.self_name.clone(),
     ))
