@@ -641,13 +641,13 @@ impl<T: Clone> Default for EvalNodeTable<T> {
 }
 
 impl<T: Clone> EvalNodeTable<T> {
-    fn is_dense(node_id: EvalNodeId) -> bool {
+    pub(super) fn is_dense(node_id: EvalNodeId) -> bool {
         (node_id.0 >> 63) == 0
     }
 
-    fn ensure_dense_len(&mut self, len: usize) {
-        while self.dense.len() < len {
-            self.dense.push(None);
+    pub(super) fn ensure_dense_len(&mut self, len: usize) {
+        if self.dense.len() < len {
+            self.dense.resize_with(len, || None);
         }
     }
 
@@ -745,8 +745,7 @@ pub(super) struct EvalSchedulerBase {
     pub(super) keyed_nodes: EvalNodeTable<KeyedNodeMemo>,
     pub(super) keyed_lookup_index: BTreeMap<KeyedLookupIndexKey, Vec<EvalNodeId>>,
     pub(super) dependency_edges: Vec<EvalDependencyEdge>,
-    pub(super) pending_resumes: EvalNodeTable<Vec<EvalSuspension>>,
-    pub(super) pending_kinds: EvalNodeTable<PendingKind>,
+    pub(super) pending_entries: EvalNodeTable<PendingEntry>,
     pub(super) retained_exprs: EvalNodeTable<RetainedExprTask>,
     pub(super) learned_no_goods: Vec<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
@@ -763,8 +762,7 @@ impl Default for EvalSchedulerBase {
             keyed_nodes: EvalNodeTable::default(),
             keyed_lookup_index: BTreeMap::new(),
             dependency_edges: Vec::new(),
-            pending_resumes: EvalNodeTable::default(),
-            pending_kinds: EvalNodeTable::default(),
+            pending_entries: EvalNodeTable::default(),
             retained_exprs: EvalNodeTable::default(),
             learned_no_goods: Vec::new(),
             learned_search_no_goods: Vec::new(),
@@ -892,8 +890,7 @@ pub(super) struct RecordedSchedulerDelta {
     pub(super) node_states: Vec<(EvalNodeId, EvalNodeState)>,
     pub(super) dependency_edges: Vec<EvalDependencyEdge>,
     pub(super) queued: Vec<ReadyTaskRecord>,
-    pub(super) pending_resumes: Vec<(EvalNodeId, Vec<EvalSuspension>)>,
-    pub(super) pending_kinds: Vec<(EvalNodeId, PendingKind)>,
+    pub(super) pending_entries: Vec<(EvalNodeId, PendingEntry)>,
     pub(super) retained_exprs: Vec<(EvalNodeId, RetainedExprTask)>,
     pub(super) learned_no_goods: Vec<LearnedNoGood>,
     pub(super) learned_search_no_goods: Vec<LearnedSearchNoGood>,
