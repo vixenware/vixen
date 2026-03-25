@@ -18,16 +18,8 @@ pub(in crate::engine) use resume::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreparedBodyRef {
     root_expr_id: ExprId,
-    kind: PreparedBodyKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PreparedBodyKind {
-    ExprPlan(ExprExecPlan),
-    Bytecode {
-        kind: EvalExprKind,
-        body: BytecodeBodyId,
-    },
+    kind: EvalExprKind,
+    body: BytecodeBodyId,
 }
 
 pub(super) struct PreparedEntry {
@@ -59,17 +51,18 @@ impl PreparedBodyRef {
         program: &CompiledProgram,
         body: ExprBodyRef,
     ) -> Result<Self, EvalError> {
-        let kind = if let Some(bytecode) = program.resolve_expr_bytecode_body(body.expr_id())? {
-            PreparedBodyKind::Bytecode {
-                kind: body.plan().trace_kind(),
-                body: bytecode,
-            }
-        } else {
-            PreparedBodyKind::ExprPlan(body.plan())
-        };
+        let bytecode = program
+            .resolve_expr_bytecode_body(body.expr_id())?
+            .ok_or_else(|| {
+                EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("prepared body {:?} has no bytecode body", body.expr_id()),
+                )
+            })?;
         Ok(Self {
             root_expr_id: body.expr_id(),
-            kind,
+            kind: body.plan().trace_kind(),
+            body: bytecode,
         })
     }
 
@@ -812,10 +805,7 @@ pub(super) fn prepared_body_kind(
     _program: &CompiledProgram,
     body: &PreparedBodyRef,
 ) -> EvalExprKind {
-    match body.kind {
-        PreparedBodyKind::ExprPlan(plan) => plan.trace_kind(),
-        PreparedBodyKind::Bytecode { kind, .. } => kind,
-    }
+    body.kind
 }
 
 fn eval_prepared_body_step(
@@ -825,6 +815,57 @@ fn eval_prepared_body_step(
     body: PreparedBodyRef,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
+    fn try_eval_small_prepared_bytecode(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        bytecode_body: &crate::program::BytecodeBody,
+        scope: &EvalEnv,
+    ) -> Result<Option<EvalStep>, EvalError> {
+        match bytecode_body.ops.as_ref() {
+            [
+                BytecodeOp::EvalReady(ready),
+                BytecodeOp::SetLast,
+                BytecodeOp::ReturnLast,
+            ] => Ok(Some(EvalStep::Ready(eval_ready_plan(
+                state, *ready, scope,
+            )?))),
+            [
+                BytecodeOp::LoadLocal { slot, .. },
+                BytecodeOp::SetLast,
+                BytecodeOp::ReturnLast,
+            ] => {
+                let local = bytecode_body
+                    .local_slots
+                    .get(*slot as usize)
+                    .ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("bytecode local slot {slot} is out of range"),
+                        )
+                    })?;
+                let value = scope.get(local.name.as_ref()).cloned().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        format!("bytecode local slot {} is not initialized", local.name),
+                    )
+                })?;
+                Ok(Some(EvalStep::Ready(value)))
+            }
+            [
+                BytecodeOp::EvalStaticMember {
+                    field_source,
+                    static_member,
+                },
+                BytecodeOp::SetLast,
+                BytecodeOp::ReturnLast,
+            ] => Ok(Some(EvalStep::Ready(static_member_value_from_source(
+                state,
+                field_source.clone(),
+                static_member,
+            )?))),
+            _ => Ok(None),
+        }
+    }
+
     fn init_bytecode_locals(
         body: &crate::program::BytecodeBody,
         scope: &EvalEnv,
@@ -838,59 +879,26 @@ fn eval_prepared_body_step(
         locals
     }
 
-    match body.kind {
-        PreparedBodyKind::Bytecode { body, .. } => {
-            let scope = std::mem::take(env);
-            let bytecode_body = state.program.resolve_bytecode_body(body)?;
-            continue_bytecode_body(
-                state,
-                node_id,
-                parent_id,
-                BytecodeState {
-                    scope: scope.clone(),
-                    locals: init_bytecode_locals(bytecode_body, &scope),
-                    last: Value::unit(),
-                    body,
-                    pc: 0,
-                    acc: None,
-                    temp: None,
-                    pending: None,
-                },
-            )
-        }
-        PreparedBodyKind::ExprPlan(plan) => match plan.kind() {
-            ExprExecKind::Expr => {
-                let expr = state.program.resolve_expr_id(body.root_expr_id)?;
-                let _ = (node_id, parent_id, env);
-                Err(EvalError::new(
-                    EvalErrorKind::Internal,
-                    format!("unsupported expression: {:?}", expr.kind()),
-                ))
-            }
-            ExprExecKind::Block => continue_bytecode_body(state, node_id, parent_id, {
-                let body_id = plan.block_body_id(body.root_expr_id.source()).into();
-                let scope = std::mem::take(env);
-                let bytecode_body = state.program.resolve_bytecode_body(body_id)?;
-                BytecodeState {
-                    scope: scope.clone(),
-                    locals: init_bytecode_locals(bytecode_body, &scope),
-                    last: Value::unit(),
-                    body: body_id,
-                    pc: 0,
-                    acc: None,
-                    temp: None,
-                    pending: None,
-                }
-            }),
-            ExprExecKind::Ready => eval_ready_plan(state, plan, env).map(EvalStep::Ready),
-            ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, plan, env),
-            ExprExecKind::Builder => eval_builder_plan(state, plan, env),
-            ExprExecKind::Control => {
-                let _ = (node_id, parent_id);
-                eval_control_plan(state, plan, env)
-            }
-        },
+    let scope = std::mem::take(env);
+    let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
+    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, &scope)? {
+        return Ok(result);
     }
+    continue_bytecode_body(
+        state,
+        node_id,
+        parent_id,
+        BytecodeState {
+            scope: scope.clone(),
+            locals: init_bytecode_locals(bytecode_body, &scope),
+            last: Value::unit(),
+            body: body.body,
+            pc: 0,
+            acc: None,
+            temp: None,
+            pending: None,
+        },
+    )
 }
 
 pub(super) fn eval_prepared_body_with_node_id(
