@@ -881,13 +881,29 @@ pub(super) fn eval_call_plan_with_node_id(
     node_id: EvalNodeId,
     root_expr_id: ExprId,
     call: CallPlan,
-    mut env: EvalEnv,
+    env: EvalEnv,
 ) -> Result<EvalStep, EvalError> {
     let source = state.program.span_for_expr_id(root_expr_id)?;
     let parent_id = state.current_parent();
     state.with_source(root_expr_id.source(), |state| {
         eval_node_with_kind(state, node_id, EvalExprKind::Call, source, |state| {
-            start_call_plan(state, node_id, parent_id, &call, &mut env)
+            continue_planned_call(
+                state,
+                node_id,
+                parent_id,
+                PlannedCallState {
+                    source_id: root_expr_id.source(),
+                    call_source: state.program.span_for_handle(call.handle),
+                    callee_plan: call.callee,
+                    type_args: Arc::clone(&call.type_args),
+                    positional_args: Arc::clone(&call.positional_args),
+                    env,
+                    callee: None,
+                    args: Vec::new(),
+                    next_arg_index: 0,
+                    queued_arg_nodes: Vec::new(),
+                },
+            )
         })
     })
 }
@@ -2202,55 +2218,15 @@ fn newtype_constructor_name(function: &FunctionRef) -> Option<Arc<str>> {
     (marker.1.rep == ValueRep::Bool(true)).then(|| function.name.clone())
 }
 
-pub(super) fn continue_call(
+fn dispatch_call(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    mut call: CallState,
+    call_source: SourceSpan,
+    type_args: Arc<[Ty]>,
+    callee: Value,
+    mut args: Vec<Value>,
 ) -> Result<EvalStep, EvalError> {
-    if state.current_parent() != Some(node_id) {
-        return state.with_active_node(node_id, |state| {
-            continue_call(state, node_id, parent_id, call)
-        });
-    }
-    while let Some(arg_handle) = call.remaining_args.get(call.next_arg_index).copied() {
-        call.next_arg_index += 1;
-        let arg_index = call.args.len();
-        let callee = call
-            .callee
-            .as_ref()
-            .expect("call should have a callee before evaluating arguments");
-        let adapter =
-            function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
-        let arg_step = match adapter {
-            Some(value) => EvalStep::Ready(value),
-            None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
-        };
-        match arg_step {
-            EvalStep::Ready(value) => call.args.push(value),
-            EvalStep::Suspended(suspension) => {
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Call {
-                        node_id,
-                        parent_id,
-                        call,
-                        pending: CallResumeKind::Arg,
-                    },
-                ));
-            }
-        }
-    }
-    let CallState {
-        call_source,
-        type_args,
-        callee,
-        mut args,
-        queued_arg_nodes,
-        ..
-    } = call;
-    debug_assert!(queued_arg_nodes.is_empty());
-    let callee = callee.expect("call should have a callee before dispatch");
     let ValueRep::Function(function) = &callee.rep else {
         return Err(EvalError::new(
             EvalErrorKind::TypeError,
@@ -2259,20 +2235,14 @@ pub(super) fn continue_call(
     };
     if let Some(target) = fallible_target_function(function) {
         let fallible_source = call_source.clone();
-        return match continue_call(
+        return match dispatch_call(
             state,
             node_id,
             parent_id,
-            CallState {
-                call_source,
-                type_args,
-                env: empty_env(),
-                callee: Some(Value::function(target)),
-                args,
-                remaining_args: Arc::from([]),
-                next_arg_index: 0,
-                queued_arg_nodes: Vec::new(),
-            },
+            call_source,
+            type_args,
+            Value::function(target),
+            args,
         ) {
             Ok(EvalStep::Ready(value)) => {
                 Ok(EvalStep::Ready(fallible_some(value, fallible_source)))
@@ -2493,6 +2463,164 @@ pub(super) fn continue_call(
             ))
         }
     }
+}
+
+fn continue_planned_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut call: PlannedCallState,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() != Some(node_id) {
+        return state.with_active_node(node_id, |state| {
+            continue_planned_call(state, node_id, parent_id, call)
+        });
+    }
+    if call.callee.is_none() {
+        let callee = call
+            .callee_plan
+            .map(|callee| state.program.resolve_call_callee_plan(callee))
+            .transpose()?;
+        let callee = callee.as_ref().ok_or_else(|| {
+            EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
+        })?;
+        if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, &call.env)? {
+            if state.queue_child_work && !call.positional_args.is_empty() && call.args.is_empty() {
+                call.callee = Some(callee_value);
+                call.next_arg_index = call.positional_args.len();
+                call.queued_arg_nodes = call
+                    .positional_args
+                    .iter()
+                    .map(|arg| queue_child_body_ref(state, *arg, &call.env))
+                    .collect::<Vec<_>>();
+                return Ok(wait_on_child_dependency(
+                    state,
+                    node_id,
+                    call.queued_arg_nodes[0],
+                    vec![ContinuationFrame::PlannedCall {
+                        node_id,
+                        parent_id,
+                        call,
+                        pending: PlannedCallResumeKind::JoinArgs,
+                    }],
+                ));
+            }
+            call.callee = Some(callee_value);
+        } else {
+            let callee_value = match eval_call_callee_plan(state, callee, &mut call.env)? {
+                EvalStep::Ready(value) => value,
+                EvalStep::Suspended(suspension) => {
+                    return Ok(extend_suspension(
+                        suspension,
+                        ContinuationFrame::PlannedCall {
+                            node_id,
+                            parent_id,
+                            call,
+                            pending: PlannedCallResumeKind::Callee,
+                        },
+                    ));
+                }
+            };
+            call.callee = Some(callee_value);
+        }
+    }
+    while let Some(arg_handle) = call.positional_args.get(call.next_arg_index).copied() {
+        call.next_arg_index += 1;
+        let arg_index = call.args.len();
+        let callee = call
+            .callee
+            .as_ref()
+            .expect("planned call should have a callee before evaluating arguments");
+        let adapter =
+            function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
+        let arg_step = match adapter {
+            Some(value) => EvalStep::Ready(value),
+            None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
+        };
+        match arg_step {
+            EvalStep::Ready(value) => call.args.push(value),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::PlannedCall {
+                        node_id,
+                        parent_id,
+                        call,
+                        pending: PlannedCallResumeKind::Arg,
+                    },
+                ));
+            }
+        }
+    }
+    debug_assert!(call.queued_arg_nodes.is_empty());
+    dispatch_call(
+        state,
+        node_id,
+        parent_id,
+        call.call_source,
+        Arc::clone(&call.type_args),
+        call.callee
+            .expect("planned call should have a callee before dispatch"),
+        call.args,
+    )
+}
+
+pub(super) fn continue_call(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    parent_id: Option<EvalNodeId>,
+    mut call: CallState,
+) -> Result<EvalStep, EvalError> {
+    if state.current_parent() != Some(node_id) {
+        return state.with_active_node(node_id, |state| {
+            continue_call(state, node_id, parent_id, call)
+        });
+    }
+    while let Some(arg_handle) = call.remaining_args.get(call.next_arg_index).copied() {
+        call.next_arg_index += 1;
+        let arg_index = call.args.len();
+        let callee = call
+            .callee
+            .as_ref()
+            .expect("call should have a callee before evaluating arguments");
+        let adapter =
+            function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
+        let arg_step = match adapter {
+            Some(value) => EvalStep::Ready(value),
+            None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
+        };
+        match arg_step {
+            EvalStep::Ready(value) => call.args.push(value),
+            EvalStep::Suspended(suspension) => {
+                return Ok(extend_suspension(
+                    suspension,
+                    ContinuationFrame::Call {
+                        node_id,
+                        parent_id,
+                        call,
+                        pending: CallResumeKind::Arg,
+                    },
+                ));
+            }
+        }
+    }
+    let CallState {
+        call_source,
+        type_args,
+        callee,
+        queued_arg_nodes,
+        ..
+    } = call;
+    debug_assert!(queued_arg_nodes.is_empty());
+    dispatch_call(
+        state,
+        node_id,
+        parent_id,
+        call_source,
+        type_args,
+        callee.expect("call should have a callee before dispatch"),
+        call.args,
+    )
 }
 
 fn eval_struct_literal_plan(

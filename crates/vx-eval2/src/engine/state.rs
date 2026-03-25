@@ -1,4 +1,5 @@
 use super::*;
+use crate::program::CallCalleePlanId;
 
 pub(super) struct EvalState<'source, 'scheduler, Runtime, Sink> {
     pub(super) program: &'source CompiledProgram,
@@ -121,6 +122,27 @@ pub(super) struct CallState {
     pub(super) callee: Option<Value>,
     pub(super) args: Vec<Value>,
     pub(super) remaining_args: Arc<[ExprBodyRef]>,
+    pub(super) next_arg_index: usize,
+    pub(super) queued_arg_nodes: Vec<EvalNodeId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlannedCallResumeKind {
+    Callee,
+    Arg,
+    JoinArgs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PlannedCallState {
+    pub(super) source_id: SourceId,
+    pub(super) call_source: SourceSpan,
+    pub(super) callee_plan: Option<CallCalleePlanId>,
+    pub(super) type_args: Arc<[Ty]>,
+    pub(super) positional_args: Arc<[ExprBodyRef]>,
+    pub(super) env: EvalEnv,
+    pub(super) callee: Option<Value>,
+    pub(super) args: Vec<Value>,
     pub(super) next_arg_index: usize,
     pub(super) queued_arg_nodes: Vec<EvalNodeId>,
 }
@@ -304,6 +326,12 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         call: CallState,
         pending: CallResumeKind,
+    },
+    PlannedCall {
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        call: PlannedCallState,
+        pending: PlannedCallResumeKind,
     },
     Bytecode {
         node_id: EvalNodeId,
