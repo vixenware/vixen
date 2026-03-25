@@ -31,6 +31,7 @@ pub(crate) struct LocalEvalRuntime {
 pub(crate) struct CargoSketchRuntime {
     root_dir: PathBuf,
     progress: Option<EvalProgressReporter>,
+    http_cache_dir: PathBuf,
 }
 
 const INTERNAL_MERGED_TREE_TYPE_NAME: &str = "__Eval2MergedTree";
@@ -59,6 +60,7 @@ pub(crate) fn build_eval_runtime_with_progress(
             Ok(EvalCliRuntime::CargoSketch(CargoSketchRuntime {
                 root_dir: cwd,
                 progress,
+                http_cache_dir: eval_cache_root().join("http"),
             }))
         }
         other => bail!(
@@ -447,7 +449,7 @@ impl CargoSketchRuntime {
             reporter.begin_runtime_call(progress_label, Some(progress_detail), source)
         });
         let contents = local.or_else(|| {
-            block_on_runtime(vx_http::get_text(url.as_ref()))
+            block_on_runtime(vx_http::get_text_cached(&self.http_cache_dir, url.as_ref()))
                 .map_err(|error| {
                     EvalError::new(
                         EvalErrorKind::UserFail,
@@ -513,19 +515,22 @@ impl CargoSketchRuntime {
             )
         });
         let transfer_started = Instant::now();
-        let bytes = block_on_runtime(vx_http::get_bytes(url.as_ref()))
-            .map_err(|error| {
-                EvalError::new(
-                    EvalErrorKind::UserFail,
-                    format!("acquire() failed for {url}: {error}"),
-                )
-            })?
-            .map_err(|error| {
-                EvalError::new(
-                    EvalErrorKind::UserFail,
-                    format!("acquire() failed for {url}: {error}"),
-                )
-            })?;
+        let bytes = block_on_runtime(vx_http::get_bytes_cached(
+            &self.http_cache_dir,
+            url.as_ref(),
+        ))
+        .map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("acquire() failed for {url}: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            EvalError::new(
+                EvalErrorKind::UserFail,
+                format!("acquire() failed for {url}: {error}"),
+            )
+        })?;
         if let Some(progress) = progress.as_ref() {
             progress.report_phase("transfer", transfer_started.elapsed());
         }
@@ -870,7 +875,7 @@ fn capture_string(callee: &FunctionRef, name: &str) -> Result<Arc<str>, EvalErro
     let Some((_, value)) = callee
         .captures()
         .iter()
-        .find(|(capture, _)| capture.as_ref() == name)
+        .find(|(capture, _)| capture.as_str() == name)
     else {
         return Err(EvalError::new(
             EvalErrorKind::TypeError,
@@ -893,7 +898,7 @@ fn capture_optional_string(
     let Some((_, value)) = callee
         .captures()
         .iter()
-        .find(|(capture, _)| capture.as_ref() == name)
+        .find(|(capture, _)| capture.as_str() == name)
     else {
         return Ok(None);
     };

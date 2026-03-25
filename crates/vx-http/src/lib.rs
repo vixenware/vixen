@@ -37,8 +37,8 @@ pub enum HttpError {
     #[error("invalid UTF-8 in response body")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
 
-    #[error("HTTP {status}")]
-    Status { status: StatusCode },
+    #[error("HTTP {status}{detail}")]
+    Status { status: StatusCode, detail: String },
 
     #[error("too many redirects")]
     TooManyRedirects,
@@ -141,6 +141,12 @@ pub async fn get_bytes(url: &str) -> Result<Vec<u8>, HttpError> {
     get_bytes_network(url).await
 }
 
+/// GET request and collect the full response body as bytes, caching into the
+/// provided directory.
+pub async fn get_bytes_cached(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpError> {
+    cache_get_bytes(cache_dir, url).await
+}
+
 /// Fetch bytes from network (no caching).
 async fn get_bytes_network(url: &str) -> Result<Vec<u8>, HttpError> {
     use http_body_util::BodyExt;
@@ -149,7 +155,7 @@ async fn get_bytes_network(url: &str) -> Result<Vec<u8>, HttpError> {
     let status = response.status();
 
     if !status.is_success() {
-        return Err(HttpError::Status { status });
+        return Err(http_status_error(response).await?);
     }
 
     let body = response.into_body().collect().await?.to_bytes();
@@ -165,6 +171,14 @@ pub async fn get_text(url: &str) -> Result<String, HttpError> {
     Ok(text)
 }
 
+/// GET request and collect the response as a UTF-8 string, caching into the
+/// provided directory.
+pub async fn get_text_cached(cache_dir: &Path, url: &str) -> Result<String, HttpError> {
+    let bytes = get_bytes_cached(cache_dir, url).await?;
+    let text = String::from_utf8(bytes)?;
+    Ok(text)
+}
+
 // =============================================================================
 // Disk cache
 // =============================================================================
@@ -173,6 +187,68 @@ pub async fn get_text(url: &str) -> Result<String, HttpError> {
 fn cache_data_path(cache_dir: &Path, url: &str) -> PathBuf {
     let hash = blake3::hash(url.as_bytes());
     cache_dir.join(format!("{}.data", hash.to_hex()))
+}
+
+async fn http_status_error(response: Response<Incoming>) -> Result<HttpError, HttpError> {
+    use http_body_util::BodyExt;
+
+    const BODY_SNIPPET_LIMIT: usize = 512;
+
+    let status = response.status();
+    let headers = response.headers();
+    let retry_after = header_value(headers, hyper::header::RETRY_AFTER);
+    let content_type = header_value(headers, hyper::header::CONTENT_TYPE);
+    let rate_limit_remaining = header_value_text(headers, "x-ratelimit-remaining");
+    let rate_limit_reset = header_value_text(headers, "x-ratelimit-reset");
+    let body = response.into_body().collect().await?.to_bytes();
+
+    let mut detail_parts = Vec::new();
+    if let Some(retry_after) = retry_after {
+        detail_parts.push(format!("retry-after={retry_after}"));
+    }
+    if let Some(rate_limit_remaining) = rate_limit_remaining {
+        detail_parts.push(format!("x-ratelimit-remaining={rate_limit_remaining}"));
+    }
+    if let Some(rate_limit_reset) = rate_limit_reset {
+        detail_parts.push(format!("x-ratelimit-reset={rate_limit_reset}"));
+    }
+    if let Some(content_type) = content_type {
+        detail_parts.push(format!("content-type={content_type}"));
+    }
+    if !body.is_empty() {
+        let snippet = String::from_utf8_lossy(&body[..body.len().min(BODY_SNIPPET_LIMIT)])
+            .trim()
+            .replace('\n', "\\n");
+        if !snippet.is_empty() {
+            let truncated = body.len() > BODY_SNIPPET_LIMIT;
+            detail_parts.push(if truncated {
+                format!("body={snippet}...")
+            } else {
+                format!("body={snippet}")
+            });
+        }
+    }
+
+    let detail = if detail_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", detail_parts.join(", "))
+    };
+    Ok(HttpError::Status { status, detail })
+}
+
+fn header_value(headers: &hyper::HeaderMap, name: hyper::header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn header_value_text(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// Try to serve from cache, falling back to network and atomic write.
