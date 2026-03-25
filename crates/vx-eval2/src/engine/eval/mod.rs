@@ -3200,6 +3200,44 @@ pub(super) fn continue_bytecode_body(
                 start_bytecode_array(state, node_id, parent_id, bytecode, array)
             });
         }
+        if state.queue_child_work {
+            let mut child_nodes = Vec::new();
+            for item in array.items.iter() {
+                match item {
+                    ArrayPlanItem::Expr(body) => {
+                        child_nodes.push(ArrayJoinItem::Expr(queue_child_prepared_entry(
+                            state,
+                            prepared_entry_from_bytecode(state.program, *body, bytecode)?,
+                        )))
+                    }
+                    ArrayPlanItem::Spread(body) => {
+                        child_nodes.push(ArrayJoinItem::Spread(queue_child_prepared_entry(
+                            state,
+                            prepared_entry_from_bytecode(state.program, *body, bytecode)?,
+                        )))
+                    }
+                }
+            }
+            if child_nodes.is_empty() {
+                let provenance = Provenance::literal(state.program.span_for_handle(array.handle));
+                return Ok(EvalStep::Ready(Value::array(Vec::new()).with_meta(
+                    ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
+                )));
+            }
+            let first_child = match child_nodes[0] {
+                ArrayJoinItem::Expr(child_id) | ArrayJoinItem::Spread(child_id) => child_id,
+            };
+            bytecode.pending = Some(BytecodePendingState::ArrayJoin {
+                child_nodes: child_nodes.clone(),
+                array_source: state.program.span_for_handle(array.handle),
+            });
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                first_child,
+                Vec::new(),
+            ));
+        }
         match eval_array_inner(state, array.handle, &array.items, &mut bytecode.scope)? {
             EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
             EvalStep::Suspended(mut suspension) => {
@@ -3318,6 +3356,32 @@ pub(super) fn continue_bytecode_body(
                 start_bytecode_tuple(state, node_id, parent_id, bytecode, tuple)
             });
         }
+        if state.queue_child_work {
+            let child_nodes = tuple
+                .items
+                .iter()
+                .map(|item| {
+                    prepared_entry_from_bytecode(state.program, *item, bytecode)
+                        .map(|prepared| queue_child_prepared_entry(state, prepared))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if child_nodes.is_empty() {
+                let provenance = Provenance::literal(state.program.span_for_handle(tuple.handle));
+                return Ok(EvalStep::Ready(Value::tuple(Vec::new()).with_meta(
+                    ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
+                )));
+            }
+            bytecode.pending = Some(BytecodePendingState::TupleJoin {
+                child_nodes: child_nodes.clone(),
+                tuple_source: state.program.span_for_handle(tuple.handle),
+            });
+            return Ok(wait_on_child_dependency(
+                state,
+                node_id,
+                child_nodes[0],
+                Vec::new(),
+            ));
+        }
         match eval_tuple_inner(state, tuple.handle, &tuple.items, &mut bytecode.scope)? {
             EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
             EvalStep::Suspended(mut suspension) => {
@@ -3429,6 +3493,38 @@ pub(super) fn continue_bytecode_body(
             return state.with_active_node(node_id, |state| {
                 start_bytecode_range(state, node_id, parent_id, bytecode, range)
             });
+        }
+        if state.queue_child_work {
+            let start_child = range
+                .start
+                .map(|body| prepared_entry_from_bytecode(state.program, body, bytecode))
+                .transpose()?
+                .map(|prepared| queue_child_prepared_entry(state, prepared));
+            let end_child = range
+                .end
+                .map(|body| prepared_entry_from_bytecode(state.program, body, bytecode))
+                .transpose()?
+                .map(|prepared| queue_child_prepared_entry(state, prepared));
+            if let Some(child_id) = start_child.or(end_child) {
+                bytecode.pending = Some(BytecodePendingState::RangeJoin {
+                    start_child,
+                    end_child,
+                    range_source: state.program.span_for_handle(range.handle),
+                    inclusive_end: range.inclusive_end,
+                });
+                return Ok(wait_on_child_dependency(
+                    state,
+                    node_id,
+                    child_id,
+                    Vec::new(),
+                ));
+            }
+            return Ok(EvalStep::Ready(ready_range_value(
+                None,
+                None,
+                range.inclusive_end,
+                state.program.span_for_handle(range.handle),
+            )));
         }
         match eval_range_inner(
             state,
@@ -3715,6 +3811,44 @@ pub(super) fn continue_bytecode_body(
                     interpolated,
                 )
             });
+        }
+        if state.queue_child_work {
+            let parts = interpolated
+                .parts
+                .iter()
+                .cloned()
+                .map(|part| match part {
+                    InterpolatedStringPlanPart::Text(text) => InterpolatedPart::Text(text),
+                    InterpolatedStringPlanPart::Interpolation(body) => InterpolatedPart::Expr(body),
+                })
+                .collect::<Vec<_>>();
+            let mut expr_nodes = Vec::new();
+            for part in &parts {
+                let InterpolatedPart::Expr(body) = part else {
+                    continue;
+                };
+                expr_nodes.push(queue_child_prepared_entry(
+                    state,
+                    prepared_entry_from_bytecode(state.program, *body, bytecode)?,
+                ));
+            }
+            if let Some(child_id) = expr_nodes.first().copied() {
+                bytecode.pending = Some(BytecodePendingState::InterpolatedStringJoin {
+                    parts: parts.clone(),
+                    expr_nodes: expr_nodes.clone(),
+                    string_source: state.program.span_for_handle(interpolated.handle),
+                });
+                return Ok(wait_on_child_dependency(
+                    state,
+                    node_id,
+                    child_id,
+                    Vec::new(),
+                ));
+            }
+            return Ok(EvalStep::Ready(ready_interpolated_string_value(
+                Vec::new(),
+                state.program.span_for_handle(interpolated.handle),
+            )));
         }
         match eval_interpolated_string_inner(
             state,
