@@ -230,6 +230,12 @@ struct EvalPreparedScheduler<'a> {
     base: &'a EvalPreparedSnapshot,
     allocator: EvalPreparedIdAllocator,
     delta: RecordedSchedulerDelta,
+    node_record_index: HashMap<EvalNodeId, usize>,
+    node_state_index: HashMap<EvalNodeId, usize>,
+    pending_kind_index: HashMap<EvalNodeId, usize>,
+    keyed_node_index: HashMap<EvalNodeId, usize>,
+    pending_resume_index: HashMap<EvalNodeId, usize>,
+    retained_expr_index: HashMap<EvalNodeId, usize>,
     queued: Vec<ReadyTaskRecord>,
     completed_invalidated: bool,
     reads: RefCell<EvalSnapshotReadSet>,
@@ -241,6 +247,12 @@ impl<'a> EvalPreparedScheduler<'a> {
             base,
             allocator: EvalPreparedIdAllocator::from_base(base),
             delta: RecordedSchedulerDelta::default(),
+            node_record_index: HashMap::new(),
+            node_state_index: HashMap::new(),
+            pending_kind_index: HashMap::new(),
+            keyed_node_index: HashMap::new(),
+            pending_resume_index: HashMap::new(),
+            retained_expr_index: HashMap::new(),
             queued: Vec::new(),
             completed_invalidated: false,
             reads: RefCell::new(EvalSnapshotReadSet::default()),
@@ -357,8 +369,8 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn node_record_local(&self, node_id: EvalNodeId) -> Option<&EvalNodeRecord> {
-        if let Some(record) = self.delta.node_records.get(&node_id) {
-            Some(record)
+        if let Some(index) = self.node_record_index.get(&node_id).copied() {
+            Some(&self.delta.node_records[index].1)
         } else {
             let record = self.base.node_record(node_id);
             self.record_node_record_read(node_id, record.cloned());
@@ -367,8 +379,8 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn node_state_local(&self, node_id: EvalNodeId) -> Option<&EvalNodeState> {
-        if let Some(state) = self.delta.node_states.get(&node_id) {
-            Some(state)
+        if let Some(index) = self.node_state_index.get(&node_id).copied() {
+            Some(&self.delta.node_states[index].1)
         } else {
             let state = self.base.node_state(node_id);
             self.record_node_state_read(node_id, state.cloned());
@@ -377,8 +389,8 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn pending_kind_local(&self, pending_id: EvalNodeId) -> Option<PendingKind> {
-        if let Some(kind) = self.delta.pending_kinds.get(&pending_id).copied() {
-            Some(kind)
+        if let Some(index) = self.pending_kind_index.get(&pending_id).copied() {
+            Some(self.delta.pending_kinds[index].1)
         } else {
             let kind = self.base.base.pending_kinds.get(&pending_id).copied();
             self.record_pending_kind_read(pending_id, kind);
@@ -387,8 +399,8 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn keyed_node_local(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
-        if let Some(memo) = self.delta.keyed_nodes.get(&node_id) {
-            Some(memo)
+        if let Some(index) = self.keyed_node_index.get(&node_id).copied() {
+            Some(&self.delta.keyed_nodes[index].1)
         } else {
             let memo = self.base.base.keyed_nodes.get(&node_id);
             self.record_keyed_node_read(node_id, memo.cloned());
@@ -397,17 +409,20 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn keyed_node_mut(&mut self, node_id: EvalNodeId) -> Option<&mut KeyedNodeMemo> {
-        if !self.delta.keyed_nodes.contains_key(&node_id) {
+        if !self.keyed_node_index.contains_key(&node_id) {
             let base = self.base.base.keyed_nodes.get(&node_id)?;
             self.record_keyed_node_read(node_id, Some(base.clone()));
-            self.delta.keyed_nodes.insert(node_id, base.clone());
+            let index = self.delta.keyed_nodes.len();
+            self.delta.keyed_nodes.push((node_id, base.clone()));
+            self.keyed_node_index.insert(node_id, index);
         }
-        self.delta.keyed_nodes.get_mut(&node_id)
+        let index = self.keyed_node_index.get(&node_id).copied()?;
+        Some(&mut self.delta.keyed_nodes[index].1)
     }
 
     fn retained_expr_local(&self, node_id: EvalNodeId) -> Option<&RetainedExprTask> {
-        if let Some(retained) = self.delta.retained_exprs.get(&node_id) {
-            Some(retained)
+        if let Some(index) = self.retained_expr_index.get(&node_id).copied() {
+            Some(&self.delta.retained_exprs[index].1)
         } else {
             let retained = self.base.base.retained_exprs.get(&node_id);
             self.record_retained_expr_read(node_id, retained.cloned());
@@ -430,7 +445,7 @@ impl<'a> EvalPreparedScheduler<'a> {
         key: &Value,
         branch_context: &EvalBranchContext,
     ) -> Result<Option<EvalNodeId>, EvalError> {
-        for memo in self.delta.keyed_nodes.values() {
+        for (_, memo) in &self.delta.keyed_nodes {
             if memo.resolver == *resolver && memo.branch_context == *branch_context {
                 if values_equal(&memo.key.rep, &key.rep)? {
                     return Ok(Some(memo.node_id));
@@ -443,7 +458,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             .keyed_lookup_candidates(resolver, key, branch_context)
             .and_then(|candidates| {
                 candidates.iter().copied().find(|node_id| {
-                    if self.delta.keyed_nodes.contains_key(node_id) {
+                    if self.keyed_node_index.contains_key(node_id) {
                         return false;
                     }
                     let Some(memo) = self.base.base.keyed_nodes.get(node_id) else {
@@ -621,20 +636,30 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
     fn record_node(&mut self, record: EvalNodeRecord) {
         let node_id = record.node_id;
         if self.node_record_local(node_id).is_none() {
-            self.delta.node_records.insert(node_id, record);
+            let index = self.delta.node_records.len();
+            self.delta.node_records.push((node_id, record));
+            self.node_record_index.insert(node_id, index);
         }
     }
 
     fn record_node_state(&mut self, node_id: EvalNodeId, state: EvalNodeState) {
-        self.delta.node_states.insert(node_id, state);
+        if let Some(index) = self.node_state_index.get(&node_id).copied() {
+            self.delta.node_states[index].1 = state;
+        } else {
+            let index = self.delta.node_states.len();
+            self.delta.node_states.push((node_id, state));
+            self.node_state_index.insert(node_id, index);
+        }
     }
 
     fn alloc_pending(&mut self, description: Arc<str>) -> PendingRef {
         let pending_id = self.alloc_node_id();
         let pending = PendingRef::new(pending_id.0, description.clone());
+        let index = self.delta.pending_kinds.len();
         self.delta
             .pending_kinds
-            .insert(pending_id, PendingKind::External);
+            .push((pending_id, PendingKind::External));
+        self.pending_kind_index.insert(pending_id, index);
         self.record_node(EvalNodeRecord {
             node_id: pending_id,
             parent_id: None,
@@ -646,9 +671,15 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
 
     fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
-        self.delta
-            .pending_kinds
-            .insert(dependency, PendingKind::ChildDependency { dependency });
+        if let Some(index) = self.pending_kind_index.get(&dependency).copied() {
+            self.delta.pending_kinds[index].1 = PendingKind::ChildDependency { dependency };
+        } else {
+            let index = self.delta.pending_kinds.len();
+            self.delta
+                .pending_kinds
+                .push((dependency, PendingKind::ChildDependency { dependency }));
+            self.pending_kind_index.insert(dependency, index);
+        }
         pending
     }
 
@@ -657,11 +688,16 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
     }
 
     fn register_suspension(&mut self, suspension: EvalSuspension) {
-        self.delta
-            .pending_resumes
-            .entry(EvalNodeId(suspension.pending.node_id))
-            .or_default()
-            .push(suspension);
+        let pending_id = EvalNodeId(suspension.pending.node_id);
+        if let Some(index) = self.pending_resume_index.get(&pending_id).copied() {
+            self.delta.pending_resumes[index].1.push(suspension);
+        } else {
+            let index = self.delta.pending_resumes.len();
+            self.delta
+                .pending_resumes
+                .push((pending_id, vec![suspension]));
+            self.pending_resume_index.insert(pending_id, index);
+        }
     }
 
     fn remember_expr_task(
@@ -671,13 +707,15 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         branch_context: EvalBranchContext,
     ) {
         if self.retained_expr_local(node_id).is_none() {
-            self.delta.retained_exprs.insert(
+            let index = self.delta.retained_exprs.len();
+            self.delta.retained_exprs.push((
                 node_id,
                 RetainedExprTask {
                     scheduled,
                     branch_context,
                 },
-            );
+            ));
+            self.retained_expr_index.insert(node_id, index);
         }
     }
 
@@ -728,7 +766,8 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             },
             source: Some(source),
         });
-        self.delta.keyed_nodes.insert(
+        let index = self.delta.keyed_nodes.len();
+        self.delta.keyed_nodes.push((
             node_id,
             KeyedNodeMemo {
                 node_id,
@@ -741,7 +780,8 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
                 evaluated_revision: None,
                 last_update: EvalKeyedNodeUpdateReason::Created,
             },
-        );
+        ));
+        self.keyed_node_index.insert(node_id, index);
         self.enqueue_keyed_work(node_id)?;
         Ok(node_id)
     }
