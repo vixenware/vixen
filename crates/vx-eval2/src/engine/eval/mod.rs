@@ -3812,11 +3812,970 @@ pub(super) fn continue_bytecode_body(
         )
     }
 
+    fn start_bytecode_array(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        array: &ArrayPlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_array(state, node_id, parent_id, bytecode, array)
+            });
+        }
+        match eval_array_inner(state, array.handle, &array.items, &mut bytecode.scope)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode array suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Array { array, .. } => BytecodePendingState::Array { array },
+                    ContinuationFrame::ArrayJoin {
+                        child_nodes,
+                        array_source,
+                        ..
+                    } => BytecodePendingState::ArrayJoin {
+                        child_nodes,
+                        array_source,
+                    },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode array frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_array(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut array: ArrayState,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_array(state, node_id, parent_id, bytecode, array, resumed_value)
+            });
+        }
+        append_array_item(&mut array.items, resumed_value, array.spread)?;
+        match continue_array_items(state, node_id, parent_id, array)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode array resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Array { array, .. } => BytecodePendingState::Array { array },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode array resume frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_array_join(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        bytecode: &mut BytecodeState,
+        child_nodes: Vec<ArrayJoinItem>,
+        array_source: SourceSpan,
+    ) -> Result<EvalStep, EvalError> {
+        let _ = bytecode.acc.take();
+        let mut items = Vec::new();
+        for child_node in &child_nodes {
+            let (child_node_id, spread) = match child_node {
+                ArrayJoinItem::Expr(child_node_id) => (*child_node_id, false),
+                ArrayJoinItem::Spread(child_node_id) => (*child_node_id, true),
+            };
+            match state.scheduler.node_state(child_node_id) {
+                Some(EvalNodeState::Ready(value)) => {
+                    append_array_item(&mut items, value.clone(), spread)?
+                }
+                Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                _ => {
+                    bytecode.pending = Some(BytecodePendingState::ArrayJoin {
+                        child_nodes: child_nodes.clone(),
+                        array_source: array_source.clone(),
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        child_node_id,
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+        let provenance = Provenance::literal(array_source);
+        let meta = aggregate_child_meta(provenance, items.iter());
+        Ok(EvalStep::Ready(Value::array(items).with_meta(meta)))
+    }
+
+    fn start_bytecode_tuple(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        tuple: &TuplePlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_tuple(state, node_id, parent_id, bytecode, tuple)
+            });
+        }
+        match eval_tuple_inner(state, tuple.handle, &tuple.items, &mut bytecode.scope)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode tuple suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Tuple { tuple, .. } => BytecodePendingState::Tuple { tuple },
+                    ContinuationFrame::TupleJoin {
+                        child_nodes,
+                        tuple_source,
+                        ..
+                    } => BytecodePendingState::TupleJoin {
+                        child_nodes,
+                        tuple_source,
+                    },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode tuple frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_tuple(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut tuple: TupleState,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_tuple(state, node_id, parent_id, bytecode, tuple, resumed_value)
+            });
+        }
+        tuple.items.push(resumed_value);
+        match continue_tuple_items(state, node_id, parent_id, tuple)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode tuple resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Tuple { tuple, .. } => BytecodePendingState::Tuple { tuple },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode tuple resume frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_tuple_join(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        bytecode: &mut BytecodeState,
+        child_nodes: Vec<EvalNodeId>,
+        tuple_source: SourceSpan,
+    ) -> Result<EvalStep, EvalError> {
+        let _ = bytecode.acc.take();
+        let mut items = Vec::with_capacity(child_nodes.len());
+        for child_node in &child_nodes {
+            match state.scheduler.node_state(*child_node) {
+                Some(EvalNodeState::Ready(value)) => items.push(value.clone()),
+                Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                _ => {
+                    bytecode.pending = Some(BytecodePendingState::TupleJoin {
+                        child_nodes: child_nodes.clone(),
+                        tuple_source: tuple_source.clone(),
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        *child_node,
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+        let provenance = Provenance::literal(tuple_source);
+        let meta = aggregate_child_meta(provenance, items.iter());
+        Ok(EvalStep::Ready(Value::tuple(items).with_meta(meta)))
+    }
+
+    fn start_bytecode_range(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        range: &RangePlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_range(state, node_id, parent_id, bytecode, range)
+            });
+        }
+        match eval_range_inner(
+            state,
+            range.handle,
+            range.start,
+            range.end,
+            range.inclusive_end,
+            &mut bytecode.scope,
+        )? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode range suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Range { range, pending, .. } => {
+                        BytecodePendingState::Range { range, pending }
+                    }
+                    ContinuationFrame::RangeJoin {
+                        start_child,
+                        end_child,
+                        range_source,
+                        inclusive_end,
+                        ..
+                    } => BytecodePendingState::RangeJoin {
+                        start_child,
+                        end_child,
+                        range_source,
+                        inclusive_end,
+                    },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode range frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_range(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        range: RangeState,
+        pending: RangeResumeKind,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_range(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    range,
+                    pending,
+                    resumed_value,
+                )
+            });
+        }
+        let step = match pending {
+            RangeResumeKind::Start => continue_range_end(
+                state,
+                node_id,
+                parent_id,
+                Some(resumed_value),
+                range.end,
+                range.env,
+                range.range_source,
+                range.inclusive_end,
+            )?,
+            RangeResumeKind::End => EvalStep::Ready(build_range_value(
+                range.start,
+                Some(resumed_value),
+                range.inclusive_end,
+                range.range_source,
+            )?),
+        };
+        match step {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode range resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Range { range, pending, .. } => {
+                        BytecodePendingState::Range { range, pending }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode range resume frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_range_join(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        bytecode: &mut BytecodeState,
+        start_child: Option<EvalNodeId>,
+        end_child: Option<EvalNodeId>,
+        range_source: SourceSpan,
+        inclusive_end: bool,
+    ) -> Result<EvalStep, EvalError> {
+        let _ = bytecode.acc.take();
+        let start = match start_child {
+            Some(child_node) => match state.scheduler.node_state(child_node) {
+                Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                _ => {
+                    bytecode.pending = Some(BytecodePendingState::RangeJoin {
+                        start_child,
+                        end_child,
+                        range_source: range_source.clone(),
+                        inclusive_end,
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        child_node,
+                        Vec::new(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        let end = match end_child {
+            Some(child_node) => match state.scheduler.node_state(child_node) {
+                Some(EvalNodeState::Ready(value)) => Some(value.clone()),
+                Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                _ => {
+                    bytecode.pending = Some(BytecodePendingState::RangeJoin {
+                        start_child,
+                        end_child,
+                        range_source: range_source.clone(),
+                        inclusive_end,
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        child_node,
+                        Vec::new(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        Ok(EvalStep::Ready(build_range_value(
+            start,
+            end,
+            inclusive_end,
+            range_source,
+        )?))
+    }
+
+    fn start_bytecode_map(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        map: &MapPlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_map(state, node_id, parent_id, bytecode, map)
+            });
+        }
+        match eval_map_inner(state, map.handle, &map.entries, &mut bytecode.scope)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode map suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Map { map, pending, .. } => {
+                        BytecodePendingState::Map { map, pending }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode map frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_map(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut map: MapState,
+        pending: MapResumeKind,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_map(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    map,
+                    pending,
+                    resumed_value,
+                )
+            });
+        }
+        match pending {
+            MapResumeKind::Key => {
+                map.key = Some(resumed_value);
+            }
+            MapResumeKind::Value => {
+                let key = map.key.take().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode map value resume is missing the current key",
+                    )
+                })?;
+                map.value_expr = None;
+                map.entries.push((key, resumed_value));
+            }
+        }
+        match continue_map_entries(state, node_id, parent_id, map)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode map resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Map { map, pending, .. } => {
+                        BytecodePendingState::Map { map, pending }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode map resume frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn start_bytecode_interpolated_string(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        interpolated: &InterpolatedStringPlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_interpolated_string(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    interpolated,
+                )
+            });
+        }
+        match eval_interpolated_string_inner(
+            state,
+            interpolated.handle,
+            &interpolated.parts,
+            &mut bytecode.scope,
+        )? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode interpolated string suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::InterpolatedString { string, .. } => {
+                        BytecodePendingState::InterpolatedString { string }
+                    }
+                    ContinuationFrame::InterpolatedStringJoin {
+                        parts,
+                        expr_nodes,
+                        string_source,
+                        ..
+                    } => BytecodePendingState::InterpolatedStringJoin {
+                        parts,
+                        expr_nodes,
+                        string_source,
+                    },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode interpolated string frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_interpolated_string(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut string: InterpolatedStringState,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_interpolated_string(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    string,
+                    resumed_value,
+                )
+            });
+        }
+        string
+            .segments
+            .push(interpolation_segment_text(&resumed_value)?);
+        match continue_interpolated_string_parts(state, node_id, parent_id, string)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode interpolated string resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::InterpolatedString { string, .. } => {
+                        BytecodePendingState::InterpolatedString { string }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!(
+                                "unexpected bytecode interpolated string resume frame: {other:?}"
+                            ),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_interpolated_string_join(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        bytecode: &mut BytecodeState,
+        parts: Vec<InterpolatedPart>,
+        expr_nodes: Vec<EvalNodeId>,
+        string_source: SourceSpan,
+    ) -> Result<EvalStep, EvalError> {
+        let _ = bytecode.acc.take();
+        let mut segments = Vec::with_capacity(parts.len());
+        let mut expr_index = 0usize;
+        for part in &parts {
+            match part {
+                InterpolatedPart::Text(text) => segments.push(text.to_string()),
+                InterpolatedPart::Expr(_) => {
+                    let child_node = *expr_nodes
+                        .get(expr_index)
+                        .expect("interpolated string expr node count should match parts");
+                    expr_index += 1;
+                    match state.scheduler.node_state(child_node) {
+                        Some(EvalNodeState::Ready(value)) => {
+                            segments.push(interpolation_segment_text(value)?);
+                        }
+                        Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                        _ => {
+                            bytecode.pending = Some(BytecodePendingState::InterpolatedStringJoin {
+                                parts: parts.clone(),
+                                expr_nodes: expr_nodes.clone(),
+                                string_source: string_source.clone(),
+                            });
+                            return Ok(wait_on_child_dependency(
+                                state,
+                                node_id,
+                                child_node,
+                                Vec::new(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(EvalStep::Ready(ready_interpolated_string_value(
+            segments,
+            string_source,
+        )))
+    }
+
+    fn start_bytecode_struct(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        struct_literal: &StructLiteralPlan,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                start_bytecode_struct(state, node_id, parent_id, bytecode, struct_literal)
+            });
+        }
+        match eval_struct_literal_inner(
+            state,
+            struct_literal.handle,
+            struct_literal.type_name.clone(),
+            &struct_literal.parts,
+            &mut bytecode.scope,
+        )? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode struct suspension is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Struct { struct_state, .. } => {
+                        BytecodePendingState::Struct { struct_state }
+                    }
+                    ContinuationFrame::StructJoin {
+                        type_name,
+                        field_names,
+                        child_nodes,
+                        struct_source,
+                        ..
+                    } => BytecodePendingState::StructJoin {
+                        type_name,
+                        field_names,
+                        child_nodes,
+                        struct_source,
+                    },
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode struct frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_struct(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut struct_state: StructState,
+        resumed_value: Value,
+    ) -> Result<EvalStep, EvalError> {
+        if state.current_parent() != Some(node_id) {
+            return state.with_active_node(node_id, |state| {
+                continue_bytecode_struct(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    struct_state,
+                    resumed_value,
+                )
+            });
+        }
+        let part = struct_state.pending_part.take().ok_or_else(|| {
+            EvalError::new(
+                EvalErrorKind::Internal,
+                "bytecode struct resume is missing the current literal part",
+            )
+        })?;
+        apply_struct_literal_part(
+            &struct_state.type_name,
+            &mut struct_state.fields,
+            part,
+            resumed_value,
+        )?;
+        match continue_struct_fields(state, node_id, parent_id, struct_state)? {
+            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
+            EvalStep::Suspended(mut suspension) => {
+                let frame = suspension.frames.pop().ok_or_else(|| {
+                    EvalError::new(
+                        EvalErrorKind::Internal,
+                        "bytecode struct resume is missing its builder frame",
+                    )
+                })?;
+                bytecode.pending = Some(match frame {
+                    ContinuationFrame::Struct { struct_state, .. } => {
+                        BytecodePendingState::Struct { struct_state }
+                    }
+                    other => {
+                        return Err(EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("unexpected bytecode struct resume frame: {other:?}"),
+                        ));
+                    }
+                });
+                Ok(EvalStep::Suspended(suspension))
+            }
+        }
+    }
+
+    fn continue_bytecode_struct_join(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        bytecode: &mut BytecodeState,
+        type_name: Arc<str>,
+        field_names: Vec<Arc<str>>,
+        child_nodes: Vec<EvalNodeId>,
+        struct_source: SourceSpan,
+    ) -> Result<EvalStep, EvalError> {
+        let _ = bytecode.acc.take();
+        let mut fields = Vec::with_capacity(child_nodes.len());
+        for (name, child_node) in field_names.iter().zip(child_nodes.iter()) {
+            match state.scheduler.node_state(*child_node) {
+                Some(EvalNodeState::Ready(value)) => fields.push((name.clone(), value.clone())),
+                Some(EvalNodeState::Poison(error)) => return Err(error.clone()),
+                _ => {
+                    bytecode.pending = Some(BytecodePendingState::StructJoin {
+                        type_name: type_name.clone(),
+                        field_names: field_names.clone(),
+                        child_nodes: child_nodes.clone(),
+                        struct_source: struct_source.clone(),
+                    });
+                    return Ok(wait_on_child_dependency(
+                        state,
+                        node_id,
+                        *child_node,
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+        let provenance = Provenance::literal(struct_source);
+        let meta = aggregate_child_meta(provenance, fields.iter().map(|(_, value)| value));
+        Ok(EvalStep::Ready(
+            Value::structure(type_name, fields).with_meta(meta),
+        ))
+    }
+
     let ops = Arc::clone(&state.program.resolve_bytecode_body(bytecode.body)?.ops);
     let source = bytecode.body.source();
     while bytecode.pc < ops.len() {
         if let Some(pending) = bytecode.pending.take() {
             let step = match pending {
+                BytecodePendingState::Array { array } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode array resumed without an item value",
+                        )
+                    })?;
+                    continue_bytecode_array(state, node_id, parent_id, &mut bytecode, array, value)?
+                }
+                BytecodePendingState::ArrayJoin {
+                    child_nodes,
+                    array_source,
+                } => continue_bytecode_array_join(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    child_nodes,
+                    array_source,
+                )?,
+                BytecodePendingState::Tuple { tuple } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode tuple resumed without an item value",
+                        )
+                    })?;
+                    continue_bytecode_tuple(state, node_id, parent_id, &mut bytecode, tuple, value)?
+                }
+                BytecodePendingState::TupleJoin {
+                    child_nodes,
+                    tuple_source,
+                } => continue_bytecode_tuple_join(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    child_nodes,
+                    tuple_source,
+                )?,
+                BytecodePendingState::Range { range, pending } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode range resumed without a bound value",
+                        )
+                    })?;
+                    continue_bytecode_range(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        range,
+                        pending,
+                        value,
+                    )?
+                }
+                BytecodePendingState::RangeJoin {
+                    start_child,
+                    end_child,
+                    range_source,
+                    inclusive_end,
+                } => continue_bytecode_range_join(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    start_child,
+                    end_child,
+                    range_source,
+                    inclusive_end,
+                )?,
+                BytecodePendingState::Map { map, pending } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode map resumed without a key/value result",
+                        )
+                    })?;
+                    continue_bytecode_map(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        map,
+                        pending,
+                        value,
+                    )?
+                }
+                BytecodePendingState::Struct { struct_state } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode struct resumed without a part value",
+                        )
+                    })?;
+                    continue_bytecode_struct(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        struct_state,
+                        value,
+                    )?
+                }
+                BytecodePendingState::StructJoin {
+                    type_name,
+                    field_names,
+                    child_nodes,
+                    struct_source,
+                } => continue_bytecode_struct_join(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    type_name,
+                    field_names,
+                    child_nodes,
+                    struct_source,
+                )?,
+                BytecodePendingState::InterpolatedString { string } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode interpolated string resumed without a segment value",
+                        )
+                    })?;
+                    continue_bytecode_interpolated_string(
+                        state,
+                        node_id,
+                        parent_id,
+                        &mut bytecode,
+                        string,
+                        value,
+                    )?
+                }
+                BytecodePendingState::InterpolatedStringJoin {
+                    parts,
+                    expr_nodes,
+                    string_source,
+                } => continue_bytecode_interpolated_string_join(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    parts,
+                    expr_nodes,
+                    string_source,
+                )?,
                 BytecodePendingState::Call { call, pending } => continue_bytecode_planned_call(
                     state,
                     node_id,
@@ -3931,6 +4890,72 @@ pub(super) fn continue_bytecode_body(
                 match state.with_source(body.source(), |state| {
                     continue_bytecode_body(state, node_id, parent_id, nested)
                 })? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartArray(array) => {
+                bytecode.pc += 1;
+                match start_bytecode_array(state, node_id, parent_id, &mut bytecode, array)? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartTuple(tuple) => {
+                bytecode.pc += 1;
+                match start_bytecode_tuple(state, node_id, parent_id, &mut bytecode, tuple)? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartRange(range) => {
+                bytecode.pc += 1;
+                match start_bytecode_range(state, node_id, parent_id, &mut bytecode, range)? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartMap(map) => {
+                bytecode.pc += 1;
+                match start_bytecode_map(state, node_id, parent_id, &mut bytecode, map)? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartInterpolatedString(interpolated) => {
+                bytecode.pc += 1;
+                match start_bytecode_interpolated_string(
+                    state,
+                    node_id,
+                    parent_id,
+                    &mut bytecode,
+                    interpolated,
+                )? {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
+            BytecodeOp::StartStructLiteral(struct_literal) => {
+                bytecode.pc += 1;
+                match start_bytecode_struct(
+                    state,
+                    node_id,
+                    parent_id,
+                    &mut bytecode,
+                    struct_literal,
+                )? {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
                         return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));

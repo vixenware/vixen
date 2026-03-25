@@ -1314,6 +1314,12 @@ pub(crate) enum BytecodeOp {
         source: SourceSpan,
     },
     EvalBytecodeBody(BytecodeBodyId),
+    StartArray(ArrayPlan),
+    StartTuple(TuplePlan),
+    StartRange(RangePlan),
+    StartMap(MapPlan),
+    StartInterpolatedString(InterpolatedStringPlan),
+    StartStructLiteral(StructLiteralPlan),
     StartCall(CallPlan),
     StartMatch(MatchPlan),
     StartWhere(WherePlan),
@@ -4867,6 +4873,46 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     fail_source: source.span_for_range(fail.handle.to_range()),
                 });
             }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Array => {
+                let array = source
+                    .resolve_array_plan(plan.array_plan_id(expr.expr_id().source()))
+                    .expect("bytecode array plan should resolve");
+                ops.push(BytecodeOp::StartArray(array.clone()));
+            }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Tuple => {
+                let tuple = source
+                    .resolve_tuple_plan(plan.tuple_plan_id(expr.expr_id().source()))
+                    .expect("bytecode tuple plan should resolve");
+                ops.push(BytecodeOp::StartTuple(tuple.clone()));
+            }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Range => {
+                let range = source
+                    .resolve_range_plan(plan.range_plan_id(expr.expr_id().source()))
+                    .expect("bytecode range plan should resolve");
+                ops.push(BytecodeOp::StartRange(range.clone()));
+            }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Map => {
+                let map = source
+                    .resolve_map_plan(plan.map_plan_id(expr.expr_id().source()))
+                    .expect("bytecode map plan should resolve");
+                ops.push(BytecodeOp::StartMap(map.clone()));
+            }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::InterpolatedString => {
+                let interpolated = source
+                    .resolve_interpolated_string_plan(
+                        plan.interpolated_string_plan_id(expr.expr_id().source()),
+                    )
+                    .expect("bytecode interpolated string plan should resolve");
+                ops.push(BytecodeOp::StartInterpolatedString(interpolated.clone()));
+            }
+            ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::StructLiteral => {
+                let struct_literal = source
+                    .resolve_struct_literal_plan(
+                        plan.struct_literal_plan_id(expr.expr_id().source()),
+                    )
+                    .expect("bytecode struct literal plan should resolve");
+                ops.push(BytecodeOp::StartStructLiteral(struct_literal.clone()));
+            }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
                 ops.push(BytecodeOp::EvalBody(expr));
             }
@@ -4971,6 +5017,44 @@ fn compile_expr_bytecode_body(
                 .resolve_call_plan(body.plan().call_plan_id(expr_id.source()))
                 .expect("expr bytecode call plan should resolve");
             BytecodeOp::StartCall(call.clone())
+        }
+        ExprKind::Array(_) => {
+            let array = source
+                .resolve_array_plan(body.plan().array_plan_id(expr_id.source()))
+                .expect("expr bytecode array plan should resolve");
+            BytecodeOp::StartArray(array.clone())
+        }
+        ExprKind::Tuple(_) => {
+            let tuple = source
+                .resolve_tuple_plan(body.plan().tuple_plan_id(expr_id.source()))
+                .expect("expr bytecode tuple plan should resolve");
+            BytecodeOp::StartTuple(tuple.clone())
+        }
+        ExprKind::Range(_) => {
+            let range = source
+                .resolve_range_plan(body.plan().range_plan_id(expr_id.source()))
+                .expect("expr bytecode range plan should resolve");
+            BytecodeOp::StartRange(range.clone())
+        }
+        ExprKind::Map(_) => {
+            let map = source
+                .resolve_map_plan(body.plan().map_plan_id(expr_id.source()))
+                .expect("expr bytecode map plan should resolve");
+            BytecodeOp::StartMap(map.clone())
+        }
+        ExprKind::InterpolatedString(_) => {
+            let interpolated = source
+                .resolve_interpolated_string_plan(
+                    body.plan().interpolated_string_plan_id(expr_id.source()),
+                )
+                .expect("expr bytecode interpolated string plan should resolve");
+            BytecodeOp::StartInterpolatedString(interpolated.clone())
+        }
+        ExprKind::StructLiteral(_) => {
+            let struct_literal = source
+                .resolve_struct_literal_plan(body.plan().struct_literal_plan_id(expr_id.source()))
+                .expect("expr bytecode struct literal plan should resolve");
+            BytecodeOp::StartStructLiteral(struct_literal.clone())
         }
         ExprKind::Where(_) => {
             let where_plan = source

@@ -130,6 +130,51 @@ pub(super) struct PlannedCallState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BytecodePendingState {
+    Array {
+        array: ArrayState,
+    },
+    ArrayJoin {
+        child_nodes: Vec<ArrayJoinItem>,
+        array_source: SourceSpan,
+    },
+    Tuple {
+        tuple: TupleState,
+    },
+    TupleJoin {
+        child_nodes: Vec<EvalNodeId>,
+        tuple_source: SourceSpan,
+    },
+    Range {
+        range: RangeState,
+        pending: RangeResumeKind,
+    },
+    RangeJoin {
+        start_child: Option<EvalNodeId>,
+        end_child: Option<EvalNodeId>,
+        range_source: SourceSpan,
+        inclusive_end: bool,
+    },
+    Map {
+        map: MapState,
+        pending: MapResumeKind,
+    },
+    Struct {
+        struct_state: StructState,
+    },
+    StructJoin {
+        type_name: Arc<str>,
+        field_names: Vec<Arc<str>>,
+        child_nodes: Vec<EvalNodeId>,
+        struct_source: SourceSpan,
+    },
+    InterpolatedString {
+        string: InterpolatedStringState,
+    },
+    InterpolatedStringJoin {
+        parts: Vec<InterpolatedPart>,
+        expr_nodes: Vec<EvalNodeId>,
+        string_source: SourceSpan,
+    },
     Call {
         call: PlannedCallState,
         pending: PlannedCallResumeKind,
