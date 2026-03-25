@@ -99,20 +99,6 @@ pub(super) enum PlannedCallResumeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PlannedCallState {
-    pub(super) plan_source: SourceId,
-    pub(super) call_source: SourceSpan,
-    pub(super) callee_plan: Option<CallCalleePlan>,
-    pub(super) type_args: Arc<[Ty]>,
-    pub(super) positional_args: Arc<[ExprBodyRef]>,
-    pub(super) env: EvalEnv,
-    pub(super) callee: Option<Value>,
-    pub(super) args: Vec<Value>,
-    pub(super) next_arg_index: usize,
-    pub(super) queued_arg_nodes: Vec<EvalNodeId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BytecodePlannedCallState {
     pub(super) plan_source: SourceId,
     pub(super) call_source: SourceSpan,
@@ -272,15 +258,6 @@ pub(super) struct WhereCallPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct WhereState {
-    pub(super) call: WhereCallPlan,
-    pub(super) pending_keyword_name: Option<Arc<str>>,
-    pub(super) keyword_bindings: Vec<(Arc<str>, Value)>,
-    pub(super) remaining_keyword_bindings: Vec<(Arc<str>, ExprBodyRef)>,
-    pub(super) env: EvalEnv,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BytecodeWhereState {
     pub(super) call: WhereCallPlan,
     pub(super) pending_keyword_name: Option<Arc<str>>,
@@ -348,12 +325,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         slot: SlotState,
-    },
-    PlannedCall {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        call: PlannedCallState,
-        pending: PlannedCallResumeKind,
     },
     Bytecode {
         node_id: EvalNodeId,
@@ -424,11 +395,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         field: FieldState,
-    },
-    Where {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        where_state: WhereState,
     },
 }
 

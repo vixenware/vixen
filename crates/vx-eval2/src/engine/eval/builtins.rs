@@ -1716,22 +1716,14 @@ fn continue_builtin_call_inner(
             let host = Value::external("Host", executor.descriptor.clone()).with_provenance(
                 Provenance::binding(call_source.clone(), "discover".to_string()),
             );
-            continue_planned_call(
+            dispatch_call(
                 state,
                 node_id,
                 parent_id,
-                PlannedCallState {
-                    plan_source: state.current_source,
-                    call_source,
-                    callee_plan: None,
-                    type_args: Arc::from([]),
-                    positional_args: Arc::from([]),
-                    env: empty_env(),
-                    callee: Some(args[1].clone()),
-                    args: vec![host],
-                    next_arg_index: 0,
-                    queued_arg_nodes: Vec::new(),
-                },
+                call_source,
+                Arc::from([]),
+                args[1].clone(),
+                vec![host],
             )
             .map(Some)
         }
@@ -1791,22 +1783,14 @@ fn continue_builtin_call_inner(
             for event in events {
                 state.emit(node_id, parent_id, Some(call_source.clone()), event);
             }
-            continue_planned_call(
+            dispatch_call(
                 state,
                 node_id,
                 parent_id,
-                PlannedCallState {
-                    plan_source: state.current_source,
-                    call_source,
-                    callee_plan: None,
-                    type_args: Arc::from([]),
-                    positional_args: Arc::from([]),
-                    env: empty_env(),
-                    callee: Some(observer.clone()),
-                    args: vec![process, vfs],
-                    next_arg_index: 0,
-                    queued_arg_nodes: Vec::new(),
-                },
+                call_source,
+                Arc::from([]),
+                observer.clone(),
+                vec![process, vfs],
             )
             .map(Some)
         }
