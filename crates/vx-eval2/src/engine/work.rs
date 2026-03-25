@@ -962,6 +962,7 @@ pub(super) struct ScheduledExpr {
     pub(super) kind: ScheduledExprKind,
     pub(super) env: Arc<EvalEnv>,
     pub(super) locals: Vec<Option<Value>>,
+    pub(super) locals_overlay_needed: bool,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
 
@@ -2351,6 +2352,7 @@ pub(super) fn execute_ready_task(
                 kind: ScheduledExprKind::Prepared(prepared.body),
                 env: prepared.env,
                 locals: prepared.locals,
+                locals_overlay_needed: prepared.locals_overlay_needed,
                 call_stack,
             };
             state.scheduler.remember_expr_task(
@@ -2387,6 +2389,7 @@ pub(super) fn execute_ready_task(
                 kind,
                 env,
                 locals,
+                locals_overlay_needed,
                 call_stack,
             } = scheduled;
             let run = move |state: &mut EvalState<'_, '_, _, _>| match kind.clone() {
@@ -2397,6 +2400,7 @@ pub(super) fn execute_ready_task(
                         body,
                         env: Arc::clone(&env),
                         locals: locals.clone(),
+                        locals_overlay_needed,
                     },
                 ),
             };

@@ -1,7 +1,7 @@
 //! Shared compiled source/program state for eval2.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -1630,6 +1630,7 @@ struct ExprPlanTables {
 }
 
 struct CompiledProgramSource {
+    source: SourceId,
     source_id: Arc<str>,
     line_index: ParserLineIndex,
     parse: Parse,
@@ -2424,6 +2425,7 @@ impl CompiledProgramSource {
         };
 
         Self {
+            source,
             source_id,
             line_index,
             parse,
@@ -3379,6 +3381,226 @@ impl CompiledProgramSource {
             };
             self.bytecode_bodies.push(body);
             self.expr_bytecode_bodies[index] = Some(body_id);
+        }
+        self.propagate_bytecode_prefill_slots();
+    }
+
+    fn propagate_bytecode_prefill_slots(&mut self) {
+        fn push_child_body(
+            source: &CompiledProgramSource,
+            children: &mut Vec<BytecodeBodyId>,
+            body: ExprBodyRef,
+        ) {
+            if let Ok(Some(body_id)) = source.resolve_expr_bytecode_body(body.expr_id()) {
+                children.push(body_id);
+            }
+        }
+
+        fn collect_call_children(
+            source: &CompiledProgramSource,
+            children: &mut Vec<BytecodeBodyId>,
+            call: &CallPlan,
+        ) {
+            if let Some(callee) = &call.callee {
+                match callee.kind() {
+                    CallCalleePlanKind::Expr => {
+                        push_child_body(source, children, callee.expr_body());
+                    }
+                    CallCalleePlanKind::Field => {
+                        if let Ok(field) =
+                            source.resolve_field_plan(callee.field_plan_id(source.source))
+                            && let Some(receiver) = field.receiver
+                        {
+                            push_child_body(source, children, receiver);
+                        }
+                    }
+                    CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => {}
+                }
+            }
+            for arg in call.positional_args.iter().copied() {
+                push_child_body(source, children, arg);
+            }
+        }
+
+        fn direct_children_for_op(
+            source: &CompiledProgramSource,
+            op: &BytecodeOp,
+            children: &mut Vec<BytecodeBodyId>,
+        ) {
+            match op {
+                BytecodeOp::EvalReady(ready) => {
+                    if ready.ready_kind() == ReadyPlanKind::Closure
+                        && let Ok(closure) =
+                            source.resolve_closure_plan(ready.closure_plan_id(source.source))
+                        && let Some(body) = closure.body
+                    {
+                        push_child_body(source, children, body);
+                    }
+                }
+                BytecodeOp::EvalBytecodeBody(body_id) => children.push(*body_id),
+                BytecodeOp::StartArray(array) => {
+                    for item in array.items.iter() {
+                        match item {
+                            ArrayPlanItem::Expr(body) | ArrayPlanItem::Spread(body) => {
+                                push_child_body(source, children, *body);
+                            }
+                        }
+                    }
+                }
+                BytecodeOp::StartTuple(tuple) => {
+                    for body in tuple.items.iter().copied() {
+                        push_child_body(source, children, body);
+                    }
+                }
+                BytecodeOp::StartRange(range) => {
+                    if let Some(start) = range.start {
+                        push_child_body(source, children, start);
+                    }
+                    if let Some(end) = range.end {
+                        push_child_body(source, children, end);
+                    }
+                }
+                BytecodeOp::StartMap(map) => {
+                    for entry in map.entries.iter() {
+                        push_child_body(source, children, entry.key);
+                        push_child_body(source, children, entry.value);
+                    }
+                }
+                BytecodeOp::StartInterpolatedString(interpolated) => {
+                    for part in interpolated.parts.iter() {
+                        let InterpolatedStringPlanPart::Interpolation(body) = part else {
+                            continue;
+                        };
+                        push_child_body(source, children, *body);
+                    }
+                }
+                BytecodeOp::StartStructLiteral(struct_literal) => {
+                    for part in struct_literal.parts.iter() {
+                        match part {
+                            StructLiteralPlanPart::Field { expr, .. } => {
+                                if let Some(body) = expr {
+                                    push_child_body(source, children, *body);
+                                }
+                            }
+                            StructLiteralPlanPart::Spread(body) => {
+                                push_child_body(source, children, *body);
+                            }
+                        }
+                    }
+                }
+                BytecodeOp::StartCall(call) => collect_call_children(source, children, call),
+                BytecodeOp::StartFallible(fallible) => {
+                    if let Some(body) = fallible.expr {
+                        push_child_body(source, children, body);
+                    }
+                }
+                BytecodeOp::StartMatch(match_plan) => {
+                    if let Some(body) = match_plan.scrutinee {
+                        push_child_body(source, children, body);
+                    }
+                    for arm in match_plan.arms.iter() {
+                        push_child_body(source, children, arm.body);
+                    }
+                }
+                BytecodeOp::StartWhere(where_plan) => {
+                    if let Some(call) = &where_plan.call {
+                        collect_call_children(source, children, call);
+                    }
+                    for binding in where_plan.keyword_bindings.iter() {
+                        if let Some(body) = binding.expr {
+                            push_child_body(source, children, body);
+                        }
+                    }
+                }
+                BytecodeOp::EvalIfBranches {
+                    then_branch,
+                    else_branch,
+                } => {
+                    push_child_body(source, children, *then_branch);
+                    push_child_body(source, children, *else_branch);
+                }
+                BytecodeOp::EvalBinary { rhs, .. } => push_child_body(source, children, *rhs),
+                BytecodeOp::BindFnDecl { function, .. } => {
+                    if let Some(body) = function.compiled.body {
+                        push_child_body(source, children, body);
+                    }
+                }
+                BytecodeOp::LoadLocal { .. }
+                | BytecodeOp::EvalStaticMember { .. }
+                | BytecodeOp::InternalError { .. }
+                | BytecodeOp::ApplyPrefix(_)
+                | BytecodeOp::ProjectField { .. }
+                | BytecodeOp::RaiseUserFail { .. }
+                | BytecodeOp::BindLet { .. }
+                | BytecodeOp::SetLast
+                | BytecodeOp::ReturnLast => {}
+            }
+        }
+
+        fn transitive_prefill_names(
+            source: &CompiledProgramSource,
+            body_id: BytecodeBodyId,
+            memo: &mut HashMap<BytecodeBodyId, BTreeSet<Arc<str>>>,
+            visiting: &mut HashSet<BytecodeBodyId>,
+        ) -> BTreeSet<Arc<str>> {
+            if let Some(names) = memo.get(&body_id) {
+                return names.clone();
+            }
+            if !visiting.insert(body_id) {
+                return BTreeSet::new();
+            }
+            let body = source
+                .resolve_bytecode_body(body_id)
+                .expect("bytecode body should resolve during propagation");
+            let mut names = body
+                .local_slots
+                .iter()
+                .filter(|slot| slot.prefill_from_scope)
+                .map(|slot| Arc::clone(&slot.name))
+                .collect::<BTreeSet<_>>();
+            let mut children = Vec::new();
+            for op in body.ops.iter() {
+                direct_children_for_op(source, op, &mut children);
+            }
+            for child in children {
+                names.extend(transitive_prefill_names(source, child, memo, visiting));
+            }
+            visiting.remove(&body_id);
+            memo.insert(body_id, names.clone());
+            names
+        }
+
+        let body_ids = (0..self.bytecode_bodies.len())
+            .map(|index| BytecodeBodyId {
+                source: self.source.0,
+                index: index as u32,
+            })
+            .collect::<Vec<_>>();
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+        let propagated = body_ids
+            .iter()
+            .copied()
+            .map(|body_id| transitive_prefill_names(self, body_id, &mut memo, &mut visiting))
+            .collect::<Vec<_>>();
+        for (body, names) in self.bytecode_bodies.iter_mut().zip(propagated) {
+            let mut local_slots = body.local_slots.as_ref().to_vec();
+            let mut slot_lookup = body.slot_lookup.as_ref().clone();
+            for name in names {
+                if let Some(&slot) = slot_lookup.get(name.as_ref()) {
+                    local_slots[slot as usize].prefill_from_scope = true;
+                    continue;
+                }
+                let slot = local_slots.len() as u32;
+                slot_lookup.insert(Arc::clone(&name), slot);
+                local_slots.push(BytecodeLocalSlot {
+                    name,
+                    prefill_from_scope: true,
+                });
+            }
+            body.local_count = local_slots.len();
+            body.local_slots = Arc::from(local_slots);
+            body.slot_lookup = Arc::new(slot_lookup);
         }
     }
 

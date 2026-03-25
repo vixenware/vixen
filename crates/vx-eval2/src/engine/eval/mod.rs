@@ -28,6 +28,7 @@ pub(super) struct PreparedEntry {
     pub(super) body: PreparedBodyRef,
     pub(super) env: Arc<EvalEnv>,
     pub(super) locals: Vec<Option<Value>>,
+    pub(super) locals_overlay_needed: bool,
 }
 
 impl PreparedBodyRef {
@@ -135,6 +136,7 @@ fn prepared_entry_from_scope(
         body,
         locals: init_bytecode_locals_from_scope(bytecode_body, &env),
         env: Arc::new(env),
+        locals_overlay_needed: false,
     })
 }
 
@@ -180,6 +182,20 @@ fn bytecode_scope_snapshot(
     let scope = Arc::new(scope);
     bytecode.scope_snapshot = Some(Arc::clone(&scope));
     Ok(scope)
+}
+
+fn overlay_bytecode_scope(
+    body: &BytecodeBody,
+    scope: &EvalEnv,
+    locals: &[Option<Value>],
+) -> EvalEnv {
+    let mut scope = scope.clone();
+    for (slot, local) in body.local_slots.iter().enumerate() {
+        if let Some(Some(value)) = locals.get(slot) {
+            env_mut(&mut scope).insert(local.name.to_string(), value.clone());
+        }
+    }
+    scope
 }
 
 fn bytecode_scope_value(
@@ -271,6 +287,7 @@ fn prepared_entry_from_bytecode(
         body,
         locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
         env: bytecode_scope_snapshot(program, parent)?,
+        locals_overlay_needed: false,
     })
 }
 
@@ -701,7 +718,7 @@ pub(super) fn prepare_entry(
     let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
     let mut env = empty_env();
     let mut locals = empty_bytecode_locals(bytecode_body);
-    bind_arguments_into_env(
+    let locals_overlay_needed = bind_arguments_into_env(
         state,
         &mut env,
         Some((Some(bytecode_body), &mut locals, None)),
@@ -713,6 +730,7 @@ pub(super) fn prepare_entry(
         body,
         env: Arc::new(env),
         locals,
+        locals_overlay_needed,
     })
 }
 
@@ -761,18 +779,21 @@ pub(super) fn prepare_function_call(
         .as_ref()
         .map(|locals| locals.as_ref().to_vec())
         .unwrap_or_else(|| vec![None; bytecode_entry.local_count]);
+    let mut locals_overlay_needed = false;
     if let Some(self_name) = &function.self_name {
         let self_value = Value::function(function.clone());
-        env_mut(&mut env).insert(self_name.to_string(), self_value.clone());
         if let Some((_, slot)) = bytecode_entry
             .scope_prefill_slots
             .iter()
             .find(|(name, _)| name == self_name)
         {
             locals[*slot as usize] = Some(self_value);
+            locals_overlay_needed = true;
+        } else {
+            env_mut(&mut env).insert(self_name.to_string(), self_value);
         }
     }
-    bind_arguments_into_env(
+    locals_overlay_needed |= bind_arguments_into_env(
         state,
         &mut env,
         Some((
@@ -788,6 +809,7 @@ pub(super) fn prepare_function_call(
         body,
         env: Arc::new(env),
         locals,
+        locals_overlay_needed,
     }))
 }
 
@@ -886,7 +908,8 @@ pub(super) fn bind_arguments_into_env(
     parameters: &[CompiledParameter],
     args: &[Value],
     parent_id: Option<EvalNodeId>,
-) -> Result<(), EvalError> {
+) -> Result<bool, EvalError> {
+    let mut locals_overlay_needed = false;
     for (index, (parameter, arg)) in parameters.iter().zip(args.iter()).enumerate() {
         let label = parameter.label.to_string();
         let name_source = state.program.span_for_handle(parameter.name);
@@ -912,6 +935,7 @@ pub(super) fn bind_arguments_into_env(
             RuntimeInputKind::Argument,
             label.clone(),
         ));
+        let mut wrote_local = false;
         if let Some((body, locals, parameter_slots)) = bytecode_locals.as_mut() {
             if let Some(slot) = parameter_slots
                 .as_ref()
@@ -919,13 +943,21 @@ pub(super) fn bind_arguments_into_env(
                 .and_then(|slot| *slot)
             {
                 locals[slot as usize] = Some(bound.clone());
+                wrote_local = true;
             } else if let Some(body) = body {
-                set_bytecode_local(body, locals, label.as_str(), &bound);
+                if body.slot_lookup.contains_key(label.as_str()) {
+                    set_bytecode_local(body, locals, label.as_str(), &bound);
+                    wrote_local = true;
+                }
             }
         }
-        env_mut(env).insert(label, bound);
+        if !wrote_local {
+            env_mut(env).insert(label, bound);
+        } else {
+            locals_overlay_needed = true;
+        }
     }
-    Ok(())
+    Ok(locals_overlay_needed)
 }
 
 fn eval_node_with_kind<Runtime: RuntimeHooks, Sink: EvalEventSink>(
@@ -996,7 +1028,12 @@ fn eval_prepared_body_step(
     parent_id: Option<EvalNodeId>,
     prepared: PreparedEntry,
 ) -> Result<EvalStep, EvalError> {
-    let PreparedEntry { body, env, locals } = prepared;
+    let PreparedEntry {
+        body,
+        env,
+        locals,
+        locals_overlay_needed,
+    } = prepared;
 
     fn try_eval_small_prepared_bytecode(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
@@ -1044,9 +1081,14 @@ fn eval_prepared_body_step(
     }
 
     let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
-    if let Some(result) =
-        try_eval_small_prepared_bytecode(state, bytecode_body, env.as_ref(), &locals)?
-    {
+    let fast_scope;
+    let scope = if locals_overlay_needed {
+        fast_scope = overlay_bytecode_scope(bytecode_body, env.as_ref(), &locals);
+        &fast_scope
+    } else {
+        env.as_ref()
+    };
+    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, scope, &locals)? {
         return Ok(result);
     }
     continue_bytecode_body(
@@ -1057,7 +1099,7 @@ fn eval_prepared_body_step(
             scope: env,
             scope_snapshot: None,
             locals,
-            locals_dirty: false,
+            locals_dirty: locals_overlay_needed,
             last: Value::unit(),
             body: body.body,
             pc: 0,
@@ -4174,14 +4216,13 @@ pub(super) fn continue_bytecode_body(
             BytecodeOp::EvalBytecodeBody(body) => {
                 bytecode.pc += 1;
                 let bytecode_body = state.program.resolve_bytecode_body(*body)?;
+                let scope = bytecode_scope_snapshot(state.program, &mut bytecode)?;
+                let locals =
+                    init_bytecode_locals_from_parent(state.program, bytecode_body, &bytecode)?;
                 let nested = BytecodeState {
-                    scope: bytecode_scope_snapshot(state.program, &mut bytecode)?,
+                    scope,
                     scope_snapshot: None,
-                    locals: init_bytecode_locals_from_parent(
-                        state.program,
-                        bytecode_body,
-                        &bytecode,
-                    )?,
+                    locals,
                     locals_dirty: false,
                     last: Value::unit(),
                     body: *body,
@@ -4784,6 +4825,7 @@ fn queue_child_expr_body(
         kind: ScheduledExprKind::Prepared(body),
         env: Arc::new(env.clone()),
         locals,
+        locals_overlay_needed: false,
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {
@@ -4832,6 +4874,7 @@ pub(super) fn queue_child_prepared_entry(
         kind: ScheduledExprKind::Prepared(prepared.body),
         env: prepared.env,
         locals: prepared.locals,
+        locals_overlay_needed: prepared.locals_overlay_needed,
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {
