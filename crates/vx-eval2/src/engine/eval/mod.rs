@@ -7,6 +7,7 @@ use crate::program::{
     StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
+use crate::value::{FunctionCaptures, empty_function_captures, function_captures};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -142,7 +143,7 @@ pub(super) fn function_ref_from_compiled(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     name: Arc<str>,
     function: crate::program::CompiledFunction,
-    captures: Arc<[(Arc<str>, Value)]>,
+    captures: Arc<FunctionCaptures>,
     self_name: Option<Arc<str>>,
 ) -> FunctionRef {
     FunctionRef::new(
@@ -156,13 +157,8 @@ pub(super) fn function_ref_from_compiled(
     )
 }
 
-pub(super) fn captures_from_scope(scope: &EvalEnv) -> Arc<[(Arc<str>, Value)]> {
-    Arc::from(
-        scope
-            .iter()
-            .map(|(name, value)| (Arc::<str>::from(name.as_str()), value.clone()))
-            .collect::<Vec<_>>(),
-    )
+pub(super) fn captures_from_scope(scope: &EvalEnv) -> Arc<FunctionCaptures> {
+    Arc::new(scope.clone())
 }
 
 fn dollar_placeholder_index(text: &str) -> Option<usize> {
@@ -1170,7 +1166,7 @@ fn eval_name_ref_plan(
             state,
             resolved_name.clone(),
             function,
-            Arc::from([]),
+            empty_function_captures(),
             Some(resolved_name),
         );
         return Ok(Value::function(function)
@@ -1192,8 +1188,8 @@ fn eval_name_ref_plan(
         .resolve_newtype_constructor(name.rsplit('.').next().unwrap_or(&name))
     {
         let source = state.program.span_for_handle(reference);
-        let captures = Arc::from([(
-            Arc::from("__newtype_ctor"),
+        let captures = function_captures([(
+            "__newtype_ctor",
             Value::bool(true)
                 .with_provenance(Provenance::binding(source.clone(), name.to_string())),
         )]);
@@ -1235,7 +1231,7 @@ fn immediate_call_callee_plan_value(
                 Arc::from([]),
                 false,
                 None,
-                Arc::from([]),
+                empty_function_captures(),
                 Some(name),
             ))))
         }
@@ -1272,7 +1268,7 @@ fn immediate_direct_call_callee_plan_value(
                 state,
                 plan.resolved_name.clone(),
                 plan.function.clone(),
-                Arc::from([]),
+                empty_function_captures(),
                 Some(plan.resolved_name.clone()),
             ))))
         }
@@ -1298,8 +1294,8 @@ fn immediate_direct_call_callee_plan_value(
                     direct.newtype_constructor_index(),
                 )?;
             let span = state.program.span_for_handle(plan.handle);
-            let captures = Arc::from([(
-                Arc::from("__newtype_ctor"),
+            let captures = function_captures([(
+                "__newtype_ctor",
                 Value::bool(true).with_provenance(Provenance::binding(
                     span.clone(),
                     plan.display_name.to_string(),
@@ -1341,7 +1337,7 @@ fn immediate_direct_call_callee_plan_value(
                     Arc::from([]),
                     false,
                     None,
-                    Arc::from([]),
+                    empty_function_captures(),
                     None,
                 ))
                 .with_provenance(Provenance::binding(source, plan.full_name.to_string())),
@@ -1400,7 +1396,7 @@ fn resolved_name_ref_value(
             state,
             resolved_name.clone(),
             function.clone(),
-            Arc::from([]),
+            empty_function_captures(),
             Some(resolved_name.clone()),
         ))
         .with_provenance(Provenance::binding(
@@ -1418,8 +1414,8 @@ fn resolved_name_ref_value(
             newtype_name,
         } => {
             let source = state.program.span_for_handle(handle);
-            let captures = Arc::from([(
-                Arc::from("__newtype_ctor"),
+            let captures = function_captures([(
+                "__newtype_ctor",
                 Value::bool(true).with_provenance(Provenance::binding(
                     source.clone(),
                     display_name.to_string(),
@@ -1466,7 +1462,7 @@ fn static_member_value_from_source(
         Arc::from([]),
         false,
         None,
-        Arc::from([]),
+        empty_function_captures(),
         None,
     ))
     .with_provenance(Provenance::binding(
@@ -1613,7 +1609,7 @@ fn bound_method_value(
         Arc::from([]),
         false,
         None,
-        Arc::from(vec![(Arc::from("self"), receiver)]),
+        function_captures([("self", receiver)]),
         None,
     );
     Value::function(function)
@@ -1638,11 +1634,7 @@ pub(super) fn project_field_or_method_value(
 }
 
 fn bound_method_dispatch_args(function: &FunctionRef, args: &[Value]) -> Vec<Value> {
-    let Some((_, receiver)) = function
-        .captures
-        .iter()
-        .find(|(name, _)| name.as_ref() == "self")
-    else {
+    let Some(receiver) = function.captures.get("self") else {
         return args.to_vec();
     };
 
@@ -1662,10 +1654,10 @@ fn enum_constructor_or_value(
         return Value::structure(name.clone(), Vec::new())
             .with_provenance(Provenance::binding(source, name.to_string()));
     }
-    let captures = Arc::from([
-        (Arc::from("__enum_variant_ctor"), Value::bool(true)),
+    let captures = function_captures([
+        ("__enum_variant_ctor", Value::bool(true)),
         (
-            Arc::from("__enum_variant_fields"),
+            "__enum_variant_fields",
             Value::array(
                 field_names
                     .iter()
@@ -1687,18 +1679,12 @@ fn enum_constructor_or_value(
 }
 
 fn enum_constructor_field_names(function: &FunctionRef) -> Option<Vec<Arc<str>>> {
-    let marker = function
-        .captures
-        .iter()
-        .find(|(name, _)| name.as_ref() == "__enum_variant_ctor")?;
-    if marker.1.rep != ValueRep::Bool(true) {
+    let marker = function.captures.get("__enum_variant_ctor")?;
+    if marker.rep != ValueRep::Bool(true) {
         return None;
     }
-    let fields = function
-        .captures
-        .iter()
-        .find(|(name, _)| name.as_ref() == "__enum_variant_fields")?;
-    let ValueRep::Array(items) = &fields.1.rep else {
+    let fields = function.captures.get("__enum_variant_fields")?;
+    let ValueRep::Array(items) = &fields.rep else {
         return None;
     };
     items
@@ -1711,11 +1697,8 @@ fn enum_constructor_field_names(function: &FunctionRef) -> Option<Vec<Arc<str>>>
 }
 
 fn newtype_constructor_name(function: &FunctionRef) -> Option<Arc<str>> {
-    let marker = function
-        .captures
-        .iter()
-        .find(|(name, _)| name.as_ref() == "__newtype_ctor")?;
-    (marker.1.rep == ValueRep::Bool(true)).then(|| function.name.clone())
+    let marker = function.captures.get("__newtype_ctor")?;
+    (marker.rep == ValueRep::Bool(true)).then(|| function.name.clone())
 }
 
 fn dispatch_call(
@@ -2000,18 +1983,18 @@ fn fallible_none(source: SourceSpan) -> Value {
 }
 
 fn fallible_function_value(function: &FunctionRef, source: SourceSpan) -> Value {
-    let mut captures = function.captures().iter().cloned().collect::<Vec<_>>();
-    captures.push((
-        Arc::from("__fallible_target"),
+    let mut captures = function.captures().clone();
+    captures.insert(
+        "__fallible_target".to_string(),
         Value::function(function.clone()).with_provenance(Provenance::literal(source.clone())),
-    ));
+    );
     let wrapper = FunctionRef::new(
         function.source_id.clone(),
         function.name.clone(),
         function.parameters.clone(),
         function.has_keyword_parameters,
         None,
-        Arc::from(captures),
+        Arc::new(captures),
         function.self_name.clone(),
     );
     Value::function(wrapper).with_provenance(Provenance::literal(source))
@@ -2029,14 +2012,10 @@ fn wrap_fallible_result(result: Result<Value, EvalError>, source: SourceSpan) ->
 }
 
 fn fallible_target_function(function: &FunctionRef) -> Option<FunctionRef> {
-    function
-        .captures()
-        .iter()
-        .find(|(name, _)| name.as_ref() == "__fallible_target")
-        .and_then(|(_, value)| match &value.rep {
-            ValueRep::Function(target) => Some(target.clone()),
-            _ => None,
-        })
+    match &function.captures().get("__fallible_target")?.rep {
+        ValueRep::Function(target) => Some(target.clone()),
+        _ => None,
+    }
 }
 
 fn continue_bytecode_fallible(
@@ -2095,12 +2074,9 @@ fn apply_where_keyword_bindings(callee: Value, keyword_bindings: Vec<(Arc<str>, 
     let ValueRep::Function(function) = &callee.rep else {
         return callee;
     };
-    let mut captures = function.captures.iter().cloned().collect::<Vec<_>>();
+    let mut captures = (*function.captures).clone();
     for (name, value) in keyword_bindings {
-        match captures.iter_mut().find(|(existing, _)| existing == &name) {
-            Some((_, existing_value)) => *existing_value = value,
-            None => captures.push((name, value)),
-        }
+        captures.insert(name.to_string(), value);
     }
     Value::function(FunctionRef::new(
         function.source_id.clone(),
@@ -2108,7 +2084,7 @@ fn apply_where_keyword_bindings(callee: Value, keyword_bindings: Vec<(Arc<str>, 
         Arc::clone(&function.parameters),
         false,
         function.body,
-        Arc::from(captures),
+        Arc::new(captures),
         function.self_name.clone(),
     ))
     .with_meta(callee.meta)

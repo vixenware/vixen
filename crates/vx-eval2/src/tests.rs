@@ -8889,18 +8889,8 @@ fn runtime_hooks_receive_where_keyword_bindings_in_callee_captures() {
                     "acquire() url should evaluate to String",
                 ));
             };
-            let digest = callee
-                .captures()
-                .iter()
-                .find(|(name, _)| name.as_ref() == "digest")
-                .map(|(_, value)| value)
-                .expect("digest capture");
-            let extract = callee
-                .captures()
-                .iter()
-                .find(|(name, _)| name.as_ref() == "extract")
-                .map(|(_, value)| value)
-                .expect("extract capture");
+            let digest = callee.captures().get("digest").expect("digest capture");
+            let extract = callee.captures().get("extract").expect("extract capture");
             Ok(RuntimeCallOutcome::Ready(Value::string(format!(
                 "{url}|{:?}|{:?}",
                 digest.rep, extract.rep
@@ -8959,12 +8949,7 @@ fn where_resumes_pending_keyword_bindings_before_runtime_call() {
                             "acquire() url should evaluate to String",
                         ));
                     };
-                    let digest = callee
-                        .captures()
-                        .iter()
-                        .find(|(name, _)| name.as_ref() == "digest")
-                        .map(|(_, value)| value)
-                        .expect("digest capture");
+                    let digest = callee.captures().get("digest").expect("digest capture");
                     Ok(RuntimeCallOutcome::Ready(Value::string(format!(
                         "{url}|{:?}",
                         digest.rep

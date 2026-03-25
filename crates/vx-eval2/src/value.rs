@@ -2,10 +2,30 @@
 
 use std::{cmp::Ordering, sync::Arc};
 
+use im::OrdMap;
+
 use crate::{
     Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
     program::{CompiledParameter, ExprBodyRef},
 };
+
+pub type FunctionCaptures = OrdMap<String, Value>;
+
+pub fn empty_function_captures() -> Arc<FunctionCaptures> {
+    Arc::new(FunctionCaptures::new())
+}
+
+pub fn function_captures<I, N>(entries: I) -> Arc<FunctionCaptures>
+where
+    I: IntoIterator<Item = (N, Value)>,
+    N: Into<String>,
+{
+    let mut captures = FunctionCaptures::new();
+    for (name, value) in entries {
+        captures.insert(name.into(), value);
+    }
+    Arc::new(captures)
+}
 
 /// A successful runtime value: payload plus orthogonal metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +180,7 @@ pub(crate) fn compare_value_reps(lhs: &ValueRep, rhs: &ValueRep) -> Ordering {
             .then_with(|| lhs.body.cmp(&rhs.body))
             .then_with(|| lhs.self_name.cmp(&rhs.self_name))
             .then_with(|| compare_compiled_parameters(&lhs.parameters, &rhs.parameters))
-            .then_with(|| compare_named_value_slices(&lhs.captures, &rhs.captures)),
+            .then_with(|| compare_function_captures(&lhs.captures, &rhs.captures)),
         _ => Ordering::Equal,
     }
 }
@@ -206,6 +226,20 @@ fn compare_value_pair_slices(lhs: &[(Value, Value)], rhs: &[(Value, Value)]) -> 
 }
 
 fn compare_named_value_slices(lhs: &[(Arc<str>, Value)], rhs: &[(Arc<str>, Value)]) -> Ordering {
+    for ((lhs_name, lhs_value), (rhs_name, rhs_value)) in lhs.iter().zip(rhs.iter()) {
+        let name_order = lhs_name.cmp(rhs_name);
+        if name_order != Ordering::Equal {
+            return name_order;
+        }
+        let value_order = compare_values(lhs_value, rhs_value);
+        if value_order != Ordering::Equal {
+            return value_order;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
+}
+
+fn compare_function_captures(lhs: &FunctionCaptures, rhs: &FunctionCaptures) -> Ordering {
     for ((lhs_name, lhs_value), (rhs_name, rhs_value)) in lhs.iter().zip(rhs.iter()) {
         let name_order = lhs_name.cmp(rhs_name);
         if name_order != Ordering::Equal {
@@ -310,7 +344,7 @@ pub struct FunctionRef {
     pub(crate) parameters: Arc<[CompiledParameter]>,
     pub(crate) has_keyword_parameters: bool,
     pub(crate) body: Option<ExprBodyRef>,
-    pub(crate) captures: Arc<[(Arc<str>, Value)]>,
+    pub(crate) captures: Arc<FunctionCaptures>,
     pub(crate) self_name: Option<Arc<str>>,
 }
 
@@ -321,7 +355,7 @@ impl FunctionRef {
         parameters: Arc<[CompiledParameter]>,
         has_keyword_parameters: bool,
         body: Option<ExprBodyRef>,
-        captures: Arc<[(Arc<str>, Value)]>,
+        captures: Arc<FunctionCaptures>,
         self_name: Option<Arc<str>>,
     ) -> Self {
         Self {
@@ -339,7 +373,7 @@ impl FunctionRef {
         self.name.as_ref()
     }
 
-    pub fn captures(&self) -> &[(Arc<str>, Value)] {
+    pub fn captures(&self) -> &FunctionCaptures {
         &self.captures
     }
 }

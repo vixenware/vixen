@@ -1528,7 +1528,7 @@ fn builtin_capture<'a>(function: &'a FunctionRef, name: &str) -> Option<&'a Valu
     function
         .captures()
         .iter()
-        .find_map(|(capture, value)| (capture.as_ref() == name).then_some(value))
+        .find_map(|(capture, value)| (capture == name).then_some(value))
 }
 
 fn builtin_capture_array(function: &FunctionRef, name: &str) -> Result<Vec<Value>, EvalError> {
