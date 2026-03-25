@@ -1,5 +1,4 @@
 use super::*;
-use crate::program::{CallPlan, MatchPlan, WherePlan};
 use std::cell::RefCell;
 
 #[derive(Debug, Clone)]
@@ -968,9 +967,6 @@ pub(super) struct ScheduledExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ScheduledExprKind {
     Prepared(PreparedBodyRef),
-    Call(CallPlan),
-    Match(MatchPlan),
-    Where(WherePlan),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2385,7 +2381,7 @@ pub(super) fn execute_ready_task(
         }
         ReadyTask::EvaluateExpr(scheduled) => {
             let ScheduledExpr {
-                root_expr_id,
+                root_expr_id: _root_expr_id,
                 kind,
                 env,
                 call_stack,
@@ -2398,27 +2394,6 @@ pub(super) fn execute_ready_task(
                         body,
                         env: env.clone(),
                     },
-                ),
-                ScheduledExprKind::Call(call) => eval_call_plan_with_node_id(
-                    state,
-                    record.work.node_id,
-                    root_expr_id,
-                    call,
-                    env.clone(),
-                ),
-                ScheduledExprKind::Match(match_plan) => eval_match_plan_with_node_id(
-                    state,
-                    record.work.node_id,
-                    root_expr_id,
-                    match_plan,
-                    env.clone(),
-                ),
-                ScheduledExprKind::Where(where_plan) => eval_where_plan_with_node_id(
-                    state,
-                    record.work.node_id,
-                    root_expr_id,
-                    where_plan,
-                    env.clone(),
                 ),
             };
             let step = if call_stack.is_empty() {

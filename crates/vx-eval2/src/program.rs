@@ -1314,18 +1314,9 @@ pub(crate) enum BytecodeOp {
         source: SourceSpan,
     },
     EvalBytecodeBody(BytecodeBodyId),
-    EvalCall {
-        body: ExprBodyRef,
-        call: CallPlan,
-    },
-    EvalMatch {
-        body: ExprBodyRef,
-        match_plan: MatchPlan,
-    },
-    EvalWhere {
-        body: ExprBodyRef,
-        where_plan: WherePlan,
-    },
+    StartCall(CallPlan),
+    StartMatch(MatchPlan),
+    StartWhere(WherePlan),
     EvalBody(ExprBodyRef),
     EvalPlan(ExprBodyRef),
     EvalIfBranches {
@@ -1697,6 +1688,7 @@ struct CompiledProgramSource {
     expr_ids: BTreeMap<ProgramNodeHandle, ExprId>,
     block_bodies: Vec<BlockBody>,
     bytecode_bodies: Vec<BytecodeBody>,
+    expr_bytecode_bodies: Vec<Option<BytecodeBodyId>>,
     type_nodes: BTreeMap<ProgramNodeHandle, IndexedNode>,
     pending_call_type_args: Vec<(ExprId, Arc<[ProgramNodeHandle]>)>,
     parse_error: Option<EvalError>,
@@ -2011,6 +2003,14 @@ impl CompiledProgram {
         id: BytecodeBodyId,
     ) -> Result<&BytecodeBody, EvalError> {
         self.source(id.source())?.resolve_bytecode_body(id)
+    }
+
+    pub(crate) fn resolve_expr_bytecode_body(
+        &self,
+        id: impl Into<ExprId>,
+    ) -> Result<Option<BytecodeBodyId>, EvalError> {
+        let id = id.into();
+        self.source(id.source())?.resolve_expr_bytecode_body(id)
     }
 
     pub(crate) fn span_for_handle(&self, handle: ProgramNodeHandle) -> SourceSpan {
@@ -2364,6 +2364,7 @@ impl CompiledProgramSource {
         let closure_plans = Vec::new();
         let match_plans = Vec::new();
         let bytecode_bodies = Vec::new();
+        let expr_bytecode_bodies = Vec::new();
         let mut expr_ids = BTreeMap::new();
         let mut block_bodies = Vec::new();
         let mut type_nodes = BTreeMap::new();
@@ -2445,6 +2446,7 @@ impl CompiledProgramSource {
             expr_ids,
             block_bodies,
             bytecode_bodies,
+            expr_bytecode_bodies,
             type_nodes,
             pending_call_type_args,
             parse_error,
@@ -2969,6 +2971,15 @@ impl CompiledProgramSource {
         })
     }
 
+    fn resolve_expr_bytecode_body(&self, id: ExprId) -> Result<Option<BytecodeBodyId>, EvalError> {
+        self.ensure_parsed()?;
+        Ok(self
+            .expr_bytecode_bodies
+            .get(id.index as usize)
+            .copied()
+            .flatten())
+    }
+
     fn source_id(&self) -> Arc<str> {
         Arc::clone(&self.source_id)
     }
@@ -3212,6 +3223,22 @@ impl CompiledProgramSource {
             .iter()
             .map(|block| compile_bytecode_body(self, block))
             .collect();
+        self.expr_bytecode_bodies = vec![None; self.exprs.len()];
+        for (index, expr) in self.exprs.iter().enumerate() {
+            let expr_id = ExprId {
+                source: expr.handle().source().0,
+                index: index as u32,
+            };
+            let Some(body) = compile_expr_bytecode_body(self, expr_id, expr) else {
+                continue;
+            };
+            let body_id = BytecodeBodyId {
+                source: expr.handle().source().0,
+                index: self.bytecode_bodies.len() as u32,
+            };
+            self.bytecode_bodies.push(body);
+            self.expr_bytecode_bodies[index] = Some(body_id);
+        }
     }
 
     #[cfg(test)]
@@ -4765,13 +4792,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
-                let call = source
-                    .resolve_call_plan(plan.call_plan_id(expr.expr_id().source()))
-                    .expect("bytecode call plan should resolve");
-                ops.push(BytecodeOp::EvalCall {
-                    body: expr,
-                    call: call.clone(),
-                });
+                ops.push(BytecodeOp::EvalBody(expr));
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
                 let field = source
@@ -4847,22 +4868,10 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 });
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
-                let match_plan = source
-                    .resolve_match_plan(plan.match_plan_id(expr.expr_id().source()))
-                    .expect("bytecode match plan should resolve");
-                ops.push(BytecodeOp::EvalMatch {
-                    body: expr,
-                    match_plan: match_plan.clone(),
-                });
+                ops.push(BytecodeOp::EvalBody(expr));
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
-                let where_plan = source
-                    .resolve_where_plan(plan.where_plan_id(expr.expr_id().source()))
-                    .expect("bytecode where plan should resolve");
-                ops.push(BytecodeOp::EvalWhere {
-                    body: expr,
-                    where_plan: where_plan.clone(),
-                });
+                ops.push(BytecodeOp::EvalBody(expr));
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
                 ops.push(BytecodeOp::EvalPlan(expr));
@@ -4946,6 +4955,42 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
         local_count: local_slots.len(),
         ops: Arc::from(ops),
     }
+}
+
+fn compile_expr_bytecode_body(
+    source: &CompiledProgramSource,
+    expr_id: ExprId,
+    expr: &Expr,
+) -> Option<BytecodeBody> {
+    let body = source
+        .resolve_expr_body_ref(expr_id)
+        .expect("expr bytecode body should resolve cached body ref");
+    let op = match expr.kind() {
+        ExprKind::Call(_) => {
+            let call = source
+                .resolve_call_plan(body.plan().call_plan_id(expr_id.source()))
+                .expect("expr bytecode call plan should resolve");
+            BytecodeOp::StartCall(call.clone())
+        }
+        ExprKind::Where(_) => {
+            let where_plan = source
+                .resolve_where_plan(body.plan().where_plan_id(expr_id.source()))
+                .expect("expr bytecode where plan should resolve");
+            BytecodeOp::StartWhere(where_plan.clone())
+        }
+        ExprKind::Match(_) => {
+            let match_plan = source
+                .resolve_match_plan(body.plan().match_plan_id(expr_id.source()))
+                .expect("expr bytecode match plan should resolve");
+            BytecodeOp::StartMatch(match_plan.clone())
+        }
+        _ => return None,
+    };
+    Some(BytecodeBody {
+        local_slots: Arc::from([]),
+        local_count: 0,
+        ops: Arc::from([op, BytecodeOp::SetLast, BytecodeOp::ReturnLast]),
+    })
 }
 
 fn compile_token(source: SourceId, token: &SyntaxToken) -> Token {

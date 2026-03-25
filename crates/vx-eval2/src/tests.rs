@@ -927,7 +927,7 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet { .. }));
     assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl { .. }));
-    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalCall { .. }));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalBody(_)));
     assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
 }
@@ -1125,13 +1125,29 @@ fn compiled_program_lowers_call_expr_to_bytecode_ops() {
     let ExprKind::Block(block) = expr.kind() else {
         panic!("expected build body to lower to a block expression, got {expr:?}");
     };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(call_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain call expression");
+    };
     let bytecode = program
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
+    let call_body = program
+        .resolve_expr_bytecode_body(call_expr)
+        .expect("resolve lowered call bytecode body")
+        .expect("call expr should lower to its own bytecode body");
+    let call_bytecode = program
+        .resolve_bytecode_body(call_body)
+        .expect("resolve nested call bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalCall { .. }));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
+    assert!(matches!(call_bytecode.ops[0], BytecodeOp::StartCall(_)));
+    assert!(matches!(call_bytecode.ops[1], BytecodeOp::SetLast));
+    assert!(matches!(call_bytecode.ops[2], BytecodeOp::ReturnLast));
 }
 
 #[test]
@@ -1148,13 +1164,29 @@ fn compiled_program_lowers_where_expr_to_bytecode_ops() {
     let ExprKind::Block(block) = expr.kind() else {
         panic!("expected build body to lower to a block expression, got {expr:?}");
     };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(where_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain where expression");
+    };
     let bytecode = program
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
+    let where_body = program
+        .resolve_expr_bytecode_body(where_expr)
+        .expect("resolve lowered where bytecode body")
+        .expect("where expr should lower to its own bytecode body");
+    let where_bytecode = program
+        .resolve_bytecode_body(where_body)
+        .expect("resolve nested where bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalWhere { .. }));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
+    assert!(matches!(where_bytecode.ops[0], BytecodeOp::StartWhere(_)));
+    assert!(matches!(where_bytecode.ops[1], BytecodeOp::SetLast));
+    assert!(matches!(where_bytecode.ops[2], BytecodeOp::ReturnLast));
 }
 
 #[test]
@@ -1171,13 +1203,29 @@ fn compiled_program_lowers_match_expr_to_bytecode_ops() {
     let ExprKind::Block(block) = expr.kind() else {
         panic!("expected build body to lower to a block expression, got {expr:?}");
     };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(match_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain match expression");
+    };
     let bytecode = program
         .resolve_bytecode_body(block.body.into())
         .expect("resolve lowered block bytecode body");
+    let match_body = program
+        .resolve_expr_bytecode_body(match_expr)
+        .expect("resolve lowered match bytecode body")
+        .expect("match expr should lower to its own bytecode body");
+    let match_bytecode = program
+        .resolve_bytecode_body(match_body)
+        .expect("resolve nested match bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalMatch { .. }));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
+    assert!(matches!(match_bytecode.ops[0], BytecodeOp::StartMatch(_)));
+    assert!(matches!(match_bytecode.ops[1], BytecodeOp::SetLast));
+    assert!(matches!(match_bytecode.ops[2], BytecodeOp::ReturnLast));
 }
 
 #[test]
