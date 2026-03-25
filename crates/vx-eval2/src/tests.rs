@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
@@ -10393,6 +10393,38 @@ impl RuntimeHooks for ParallelObserveRuntime {
     }
 }
 
+struct ParallelThreadObserveRuntime {
+    thread_ids: Arc<Mutex<HashSet<String>>>,
+}
+
+impl RuntimeHooks for ParallelThreadObserveRuntime {
+    fn call(
+        &self,
+        place: &str,
+        callee: &FunctionRef,
+        _args: &[Value],
+        source: &SourceSpan,
+    ) -> Result<RuntimeCallOutcome, EvalError> {
+        let callee = callee.name.as_ref();
+        match (place, callee) {
+            ("win", "host_os") => {
+                self.thread_ids
+                    .lock()
+                    .expect("thread id set lock")
+                    .insert(format!("{:?}", thread::current().id()));
+                thread::sleep(Duration::from_millis(20));
+                Ok(RuntimeCallOutcome::Ready(
+                    Value::string("windows")
+                        .with_provenance(Provenance::host_probe(source.clone(), place, "host_os"))
+                        .with_reuse(ReuseClass::Observed)
+                        .with_crossing(CrossingPolicy::ByValue),
+                ))
+            }
+            _ => Ok(RuntimeCallOutcome::Unsupported),
+        }
+    }
+}
+
 struct StaggeredRuntime;
 
 impl RuntimeHooks for StaggeredRuntime {
@@ -13146,6 +13178,37 @@ fn run_parallel_can_drive_multiple_frontier_waves_to_completion() {
     );
     assert!(session.active_wave().is_none());
     assert!(session.buffered_work().is_empty());
+}
+
+#[test]
+fn run_parallel_reuses_worker_threads_across_multiple_waves() {
+    let thread_ids = Arc::new(Mutex::new(HashSet::new()));
+    let runtime = ParallelThreadObserveRuntime {
+        thread_ids: thread_ids.clone(),
+    };
+    let mut session = EvalSession::new(
+        "fn build() { [[host_os(), host_os()], [host_os(), host_os()], [host_os(), host_os()]] }",
+        "parallel-worker-reuse",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let resolution = session
+        .run_parallel(2)
+        .expect("parallel run should succeed");
+    let Resolution::Ready(value) = resolution else {
+        panic!("expected ready resolution, got {resolution:?}");
+    };
+    let ValueRep::Array(rows) = value.rep else {
+        panic!("expected outer array value");
+    };
+    assert_eq!(rows.len(), 3);
+    assert!(
+        thread_ids.lock().expect("thread id set lock").len() <= 2,
+        "parallel driver should reuse a fixed worker pool across waves",
+    );
 }
 
 #[test]

@@ -18,6 +18,11 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     call_profiling: bool,
 }
 
+enum ParallelWorkerCommand<'runtime, Runtime: RuntimeHooks> {
+    Execute(EvalPreparedWork<'runtime, Runtime>),
+    Shutdown,
+}
+
 impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     pub fn new(
         source: impl Into<String>,
@@ -160,24 +165,59 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
 
         thread::scope(|scope| -> Result<Resolution, EvalError> {
+            let (completion_tx, completion_rx) = mpsc::channel::<ParallelWorkerMessage>();
+            let mut worker_commands = Vec::with_capacity(max_workers);
+            for _ in 0..max_workers {
+                let (command_tx, command_rx) =
+                    mpsc::sync_channel::<ParallelWorkerCommand<'runtime, Runtime>>(1);
+                let completion_tx = completion_tx.clone();
+                scope.spawn(move || {
+                    while let Ok(command) = command_rx.recv() {
+                        let message = match command {
+                            ParallelWorkerCommand::Execute(prepared) => {
+                                match catch_unwind(AssertUnwindSafe(|| prepared.execute())) {
+                                    Ok(completion) => ParallelWorkerMessage::Completion(completion),
+                                    Err(payload) => ParallelWorkerMessage::Panic(payload),
+                                }
+                            }
+                            ParallelWorkerCommand::Shutdown => break,
+                        };
+                        if completion_tx.send(message).is_err() {
+                            break;
+                        }
+                    }
+                });
+                worker_commands.push(command_tx);
+            }
+            drop(completion_tx);
+
             loop {
                 let wave_checkpoint = self.checkpoint();
                 let prepared = self.lease_parallel_wave(max_workers)?;
                 if prepared.is_empty() {
+                    for command_tx in worker_commands.drain(..) {
+                        let _ = command_tx.send(ParallelWorkerCommand::Shutdown);
+                    }
                     return Ok(resolution_without_ready_work(
                         &self.scheduler,
                         &self.completed,
                     ));
                 }
                 match catch_unwind(AssertUnwindSafe(|| {
-                    self.execute_parallel_wave(scope, prepared)
+                    self.execute_parallel_wave(&worker_commands, &completion_rx, prepared)
                 })) {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
+                        for command_tx in worker_commands.drain(..) {
+                            let _ = command_tx.send(ParallelWorkerCommand::Shutdown);
+                        }
                         self.restore(wave_checkpoint);
                         return Err(error);
                     }
                     Err(payload) => {
+                        for command_tx in worker_commands.drain(..) {
+                            let _ = command_tx.send(ParallelWorkerCommand::Shutdown);
+                        }
                         self.restore(wave_checkpoint);
                         resume_unwind(payload);
                     }
@@ -600,28 +640,18 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         Ok(prepared)
     }
 
-    fn execute_parallel_wave<'scope>(
+    fn execute_parallel_wave(
         &mut self,
-        scope: &'scope thread::Scope<'scope, '_>,
+        worker_commands: &[mpsc::SyncSender<ParallelWorkerCommand<'runtime, Runtime>>],
+        completion_rx: &mpsc::Receiver<ParallelWorkerMessage>,
         prepared: Vec<EvalPreparedWork<'runtime, Runtime>>,
-    ) -> Result<(), EvalError>
-    where
-        'runtime: 'scope,
-    {
+    ) -> Result<(), EvalError> {
         let expected = prepared.len();
-        let (completion_tx, completion_rx) = mpsc::channel::<ParallelWorkerMessage>();
-
-        for prepared in prepared {
-            let completion_tx = completion_tx.clone();
-            scope.spawn(move || {
-                let message = match catch_unwind(AssertUnwindSafe(|| prepared.execute())) {
-                    Ok(completion) => ParallelWorkerMessage::Completion(completion),
-                    Err(payload) => ParallelWorkerMessage::Panic(payload),
-                };
-                let _ = completion_tx.send(message);
-            });
+        for (command_tx, prepared) in worker_commands.iter().zip(prepared) {
+            command_tx
+                .send(ParallelWorkerCommand::Execute(prepared))
+                .expect("parallel eval worker command channel closed unexpectedly");
         }
-        drop(completion_tx);
 
         let mut completions = Vec::with_capacity(expected);
         let mut first_error = None;
