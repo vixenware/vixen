@@ -18,6 +18,17 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     call_profiling: bool,
 }
 
+struct EvalParallelWaveCheckpoint {
+    ready_queue: VecDeque<EvalWorkId>,
+    ready_tasks: BTreeMap<EvalWorkId, ReadyTaskRecord>,
+    in_flight_tasks: BTreeMap<EvalWorkId, InFlightTaskRecord>,
+    buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
+    active_wave: Option<EvalWaveId>,
+    next_wave_id: u64,
+    next_lease_namespace: u64,
+    next_lease_sequence: u64,
+}
+
 enum ParallelWorkerCommand<'runtime, Runtime: RuntimeHooks> {
     Execute(EvalPreparedWork<'runtime, Runtime>),
     Shutdown,
@@ -192,7 +203,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             drop(completion_tx);
 
             loop {
-                let wave_checkpoint = self.checkpoint();
+                let wave_checkpoint = self.parallel_wave_checkpoint();
                 let prepared = self.lease_parallel_wave(max_workers)?;
                 if prepared.is_empty() {
                     for command_tx in worker_commands.drain(..) {
@@ -211,14 +222,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                         for command_tx in worker_commands.drain(..) {
                             let _ = command_tx.send(ParallelWorkerCommand::Shutdown);
                         }
-                        self.restore(wave_checkpoint);
+                        self.restore_parallel_wave_checkpoint(wave_checkpoint);
                         return Err(error);
                     }
                     Err(payload) => {
                         for command_tx in worker_commands.drain(..) {
                             let _ = command_tx.send(ParallelWorkerCommand::Shutdown);
                         }
-                        self.restore(wave_checkpoint);
+                        self.restore_parallel_wave_checkpoint(wave_checkpoint);
                         resume_unwind(payload);
                     }
                 }
@@ -566,6 +577,30 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completed_work_len: self.completed_work.len(),
             completed: self.completed.clone(),
         }
+    }
+
+    fn parallel_wave_checkpoint(&self) -> EvalParallelWaveCheckpoint {
+        EvalParallelWaveCheckpoint {
+            ready_queue: self.scheduler.ready_queue.clone(),
+            ready_tasks: self.scheduler.ready_tasks.clone(),
+            in_flight_tasks: self.scheduler.in_flight_tasks.clone(),
+            buffered_completions: self.scheduler.buffered_completions.clone(),
+            active_wave: self.scheduler.active_wave,
+            next_wave_id: self.scheduler.next_wave_id,
+            next_lease_namespace: self.scheduler.next_lease_namespace,
+            next_lease_sequence: self.scheduler.next_lease_sequence,
+        }
+    }
+
+    fn restore_parallel_wave_checkpoint(&mut self, checkpoint: EvalParallelWaveCheckpoint) {
+        self.scheduler.ready_queue = checkpoint.ready_queue;
+        self.scheduler.ready_tasks = checkpoint.ready_tasks;
+        self.scheduler.in_flight_tasks = checkpoint.in_flight_tasks;
+        self.scheduler.buffered_completions = checkpoint.buffered_completions;
+        self.scheduler.active_wave = checkpoint.active_wave;
+        self.scheduler.next_wave_id = checkpoint.next_wave_id;
+        self.scheduler.next_lease_namespace = checkpoint.next_lease_namespace;
+        self.scheduler.next_lease_sequence = checkpoint.next_lease_sequence;
     }
 
     pub fn restore(&mut self, checkpoint: EvalSessionCheckpoint) {
