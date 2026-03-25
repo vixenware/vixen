@@ -160,6 +160,95 @@ fn init_bytecode_locals_from_parent(
     Ok(locals)
 }
 
+fn bytecode_scope_snapshot(
+    program: &CompiledProgram,
+    bytecode: &BytecodeState,
+) -> Result<EvalEnv, EvalError> {
+    let mut scope = bytecode.scope.clone();
+    let body = program.resolve_bytecode_body(bytecode.body)?;
+    for (slot, local) in body.local_slots.iter().enumerate() {
+        if let Some(Some(value)) = bytecode.locals.get(slot) {
+            env_mut(&mut scope).insert(local.name.to_string(), value.clone());
+        }
+    }
+    Ok(scope)
+}
+
+fn bytecode_scope_value(
+    program: &CompiledProgram,
+    bytecode: &BytecodeState,
+    name: &str,
+) -> Result<Option<Value>, EvalError> {
+    let body = program.resolve_bytecode_body(bytecode.body)?;
+    if let Some(&slot) = body.slot_lookup.get(name)
+        && let Some(Some(value)) = bytecode.locals.get(slot as usize)
+    {
+        return Ok(Some(value.clone()));
+    }
+    Ok(bytecode.scope.get(name).cloned())
+}
+
+fn bind_bytecode_name(
+    program: &CompiledProgram,
+    bytecode: &mut BytecodeState,
+    name: &str,
+    value: Value,
+) -> Result<(), EvalError> {
+    let body = program.resolve_bytecode_body(bytecode.body)?;
+    if let Some(&slot) = body.slot_lookup.get(name) {
+        bytecode.locals[slot as usize] = Some(value);
+    } else {
+        env_mut(&mut bytecode.scope).insert(name.to_string(), value);
+    }
+    Ok(())
+}
+
+fn bind_let_pattern_in_bytecode(
+    program: &CompiledProgram,
+    bytecode: &mut BytecodeState,
+    pattern: &LetPattern,
+    value: Value,
+) -> Result<(), EvalError> {
+    match pattern {
+        LetPattern::Binding { name, source } => bind_bytecode_name(
+            program,
+            bytecode,
+            name.as_str(),
+            value.with_provenance(Provenance::binding(source.clone(), name.clone())),
+        ),
+        LetPattern::Wildcard => Ok(()),
+        LetPattern::Unit => match value.rep {
+            ValueRep::Unit => Ok(()),
+            _ => Err(EvalError::new(
+                EvalErrorKind::TypeError,
+                "unit pattern requires unit value",
+            )),
+        },
+        LetPattern::Tuple(patterns) => {
+            let ValueRep::Tuple(items) = value.rep else {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    "tuple pattern requires tuple value",
+                ));
+            };
+            if patterns.len() != items.len() {
+                return Err(EvalError::new(
+                    EvalErrorKind::TypeError,
+                    format!(
+                        "tuple pattern expects {} element(s), got {}",
+                        patterns.len(),
+                        items.len()
+                    ),
+                ));
+            }
+            for (pattern, item) in patterns.iter().zip(items.iter().cloned()) {
+                bind_let_pattern_in_bytecode(program, bytecode, pattern, item)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn prepared_entry_from_bytecode(
     program: &CompiledProgram,
     body: ExprBodyRef,
@@ -170,7 +259,7 @@ fn prepared_entry_from_bytecode(
     Ok(PreparedEntry {
         body,
         locals: init_bytecode_locals_from_parent(program, bytecode_body, parent)?,
-        env: Arc::new(parent.scope.clone()),
+        env: Arc::new(bytecode_scope_snapshot(program, parent)?),
     })
 }
 
@@ -1182,6 +1271,47 @@ fn eval_ready_plan(
     }
 }
 
+fn eval_ready_plan_in_bytecode(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    ready: ExprExecPlan,
+    bytecode: &BytecodeState,
+) -> Result<Value, EvalError> {
+    match ready.ready_kind() {
+        ReadyPlanKind::Literal => {
+            let literal = state
+                .program
+                .resolve_literal_plan(ready.literal_plan_id(state.current_source()))?;
+            eval_literal_plan(state, literal)
+        }
+        ReadyPlanKind::PathLiteral => {
+            let path_literal = state
+                .program
+                .resolve_path_literal_plan(ready.path_literal_plan_id(state.current_source()))?;
+            eval_path_literal_plan(state, path_literal)
+        }
+        ReadyPlanKind::Closure => {
+            let closure = state
+                .program
+                .resolve_closure_plan(ready.closure_plan_id(state.current_source()))?;
+            let scope = bytecode_scope_snapshot(state.program, bytecode)?;
+            eval_closure_plan(state, closure, &scope)
+        }
+        ReadyPlanKind::NameRef => {
+            let name_ref = state
+                .program
+                .resolve_name_ref_plan(ready.name_ref_plan_id(state.current_source()))?;
+            if name_ref.resolved.is_none()
+                && let Some(value) =
+                    bytecode_scope_value(state.program, bytecode, name_ref.name.as_ref())?
+            {
+                return Ok(value);
+            }
+            let scope = bytecode_scope_snapshot(state.program, bytecode)?;
+            eval_name_ref_plan(state, name_ref, &scope)
+        }
+    }
+}
+
 fn ready_plan_source(
     program: &CompiledProgram,
     source: SourceId,
@@ -1323,6 +1453,48 @@ fn immediate_call_callee_plan_value(
     }
 }
 
+fn immediate_bytecode_call_callee_plan_value(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source: SourceId,
+    callee: &CallCalleePlan,
+    bytecode: &BytecodeState,
+) -> Result<Option<Value>, EvalError> {
+    match callee.kind() {
+        CallCalleePlanKind::NameRef => {
+            let name_ref = state
+                .program
+                .resolve_name_ref_plan(callee.name_ref_plan_id(source))?;
+            let name: Arc<str> = Arc::clone(&name_ref.name);
+            if let Some(value) = bytecode_scope_value(state.program, bytecode, name.as_ref())? {
+                return Ok(Some(value));
+            }
+            Ok(Some(Value::function(FunctionRef::new(
+                state.program.source_id(source),
+                Arc::clone(&name),
+                Arc::from([]),
+                false,
+                None,
+                None,
+                empty_function_captures(),
+                Some(name),
+            ))))
+        }
+        CallCalleePlanKind::Direct => {
+            let direct = state
+                .program
+                .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(source))?;
+            immediate_direct_call_callee_plan_value(state, source, direct)
+        }
+        CallCalleePlanKind::Field => {
+            let field = state
+                .program
+                .resolve_field_plan(callee.field_plan_id(source))?;
+            static_namespace_member_plan_value(state, field)
+        }
+        CallCalleePlanKind::Expr => Ok(None),
+    }
+}
+
 fn immediate_direct_call_callee_plan_value(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     source: SourceId,
@@ -1427,7 +1599,8 @@ fn eval_bytecode_call_callee_plan(
     callee: &CallCalleePlan,
     bytecode: &mut BytecodeState,
 ) -> Result<EvalStep, EvalError> {
-    if let Some(value) = immediate_call_callee_plan_value(state, source, callee, &bytecode.scope)? {
+    if let Some(value) = immediate_bytecode_call_callee_plan_value(state, source, callee, bytecode)?
+    {
         return Ok(EvalStep::Ready(value));
     }
     match callee.kind() {
@@ -1438,7 +1611,8 @@ fn eval_bytecode_call_callee_plan(
             let field = state
                 .program
                 .resolve_field_plan(callee.field_plan_id(source))?;
-            eval_field_plan(state, field, &mut bytecode.scope)
+            let mut scope = bytecode_scope_snapshot(state.program, bytecode)?;
+            eval_field_plan(state, field, &mut scope)
         }
         CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
             EvalErrorKind::Internal,
@@ -2114,7 +2288,7 @@ fn continue_bytecode_fallible(
             "fallible expression has no operand",
         ));
     };
-    match eval_dependent_body_ref(state, node_id, expr, &mut bytecode.scope) {
+    match eval_dependent_bytecode_body_ref(state, node_id, expr, bytecode) {
         Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), fallible_source)),
         Ok(EvalStep::Suspended(suspension)) => {
             bytecode.pending = Some(BytecodePendingState::Fallible { fallible_source });
@@ -2248,7 +2422,7 @@ pub(super) fn continue_bytecode_body(
         parent_id: Option<EvalNodeId>,
         source: SourceId,
         ready: ExprExecPlan,
-        env: &EvalEnv,
+        bytecode: &BytecodeState,
     ) -> Result<Value, EvalError> {
         let ready_source = ready_plan_source(state.program, source, ready)?;
         state.emit(
@@ -2259,7 +2433,7 @@ pub(super) fn continue_bytecode_body(
                 kind: ready.trace_kind(),
             },
         );
-        match eval_ready_plan(state, ready, env) {
+        match eval_ready_plan_in_bytecode(state, ready, bytecode) {
             Ok(value) => {
                 state.emit(
                     node_id,
@@ -2363,7 +2537,7 @@ pub(super) fn continue_bytecode_body(
             parent_id,
             &match_state.match_plan,
             scrutinee,
-            &bytecode.scope,
+            &bytecode_scope_snapshot(state.program, bytecode)?,
         )
     }
 
@@ -2483,9 +2657,12 @@ pub(super) fn continue_bytecode_body(
             let callee = call.callee_plan.as_ref().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
             })?;
-            if let Some(callee_value) =
-                immediate_call_callee_plan_value(state, call.plan_source, callee, &bytecode.scope)?
-            {
+            if let Some(callee_value) = immediate_bytecode_call_callee_plan_value(
+                state,
+                call.plan_source,
+                callee,
+                bytecode,
+            )? {
                 if state.queue_child_work
                     && !call.positional_args.is_empty()
                     && call.args.is_empty()
@@ -2544,13 +2721,9 @@ pub(super) fn continue_bytecode_body(
                 .callee
                 .as_ref()
                 .expect("planned call should have a callee before evaluating arguments");
-            let adapter = function_adapter_value_for_arg(
-                state,
-                callee,
-                arg_index,
-                arg_handle,
-                &bytecode.scope,
-            )?;
+            let scope = bytecode_scope_snapshot(state.program, bytecode)?;
+            let adapter =
+                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &scope)?;
             let arg_step = match adapter {
                 Some(value) => EvalStep::Ready(value),
                 None => eval_dependent_bytecode_body_ref(state, node_id, arg_handle, bytecode)?,
@@ -3499,13 +3672,14 @@ pub(super) fn continue_bytecode_body(
                     remaining_parts.push(StructLiteralPart::Spread(*expr));
                 }
                 StructLiteralPlanPart::Field { name, expr: None } => {
-                    let Some(value) = bytecode.scope.get(name.as_ref()) else {
+                    let Some(value) = bytecode_scope_value(state.program, bytecode, name.as_ref())?
+                    else {
                         return Err(EvalError::new(
                             EvalErrorKind::Internal,
                             format!("struct field {name} has no value"),
                         ));
                     };
-                    set_struct_field(&mut immediate_fields, name.clone(), value.clone());
+                    set_struct_field(&mut immediate_fields, name.clone(), value);
                 }
             }
         }
@@ -3898,12 +4072,7 @@ pub(super) fn continue_bytecode_body(
                 bytecode.pc += 1;
                 bytecode.acc = Some(state.with_source(source, |state| {
                     eval_inline_ready_bytecode_plan(
-                        state,
-                        node_id,
-                        parent_id,
-                        source,
-                        *ready,
-                        &bytecode.scope,
+                        state, node_id, parent_id, source, *ready, &bytecode,
                     )
                 })?);
             }
@@ -3971,7 +4140,7 @@ pub(super) fn continue_bytecode_body(
                 bytecode.pc += 1;
                 let bytecode_body = state.program.resolve_bytecode_body(*body)?;
                 let nested = BytecodeState {
-                    scope: bytecode.scope.clone(),
+                    scope: bytecode_scope_snapshot(state.program, &bytecode)?,
                     locals: init_bytecode_locals_from_parent(
                         state.program,
                         bytecode_body,
@@ -4124,7 +4293,8 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::StartWhere(where_plan) => {
                 bytecode.pc += 1;
-                let where_state = init_bytecode_where_state(state, where_plan, &bytecode.scope)?;
+                let scope = bytecode_scope_snapshot(state.program, &bytecode)?;
+                let where_state = init_bytecode_where_state(state, where_plan, &scope)?;
                 let step = continue_bytecode_where(
                     state,
                     node_id,
@@ -4272,7 +4442,7 @@ pub(super) fn continue_bytecode_body(
             }
             BytecodeOp::BindLet {
                 pattern,
-                local_bindings,
+                local_bindings: _,
             } => {
                 let value = bytecode.acc.take().ok_or_else(|| {
                     EvalError::new(
@@ -4280,28 +4450,21 @@ pub(super) fn continue_bytecode_body(
                         "bytecode let binding has no pending value",
                     )
                 })?;
-                bind_let_pattern(&mut bytecode.scope, pattern, value)?;
-                for (name, slot) in local_bindings.iter() {
-                    let value = bytecode.scope.get(name.as_ref()).cloned().ok_or_else(|| {
-                        EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("bytecode let binding {name} was not written to scope"),
-                        )
-                    })?;
-                    bytecode.locals[*slot as usize] = Some(value);
-                }
+                bind_let_pattern_in_bytecode(state.program, &mut bytecode, pattern, value)?;
                 bytecode.pc += 1;
             }
             BytecodeOp::BindFnDecl {
                 function,
                 local_slot,
             } => {
+                let scope = bytecode_scope_snapshot(state.program, &bytecode)?;
                 let (name, _name_source, value) = state.with_source(source, |state| {
-                    bind_named_function_decl(state, function, &bytecode.scope)
+                    bind_named_function_decl(state, function, &scope)
                 })?;
-                env_mut(&mut bytecode.scope).insert(name, value.clone());
                 if let Some(slot) = local_slot {
                     bytecode.locals[*slot as usize] = Some(value);
+                } else {
+                    env_mut(&mut bytecode.scope).insert(name, value.clone());
                 }
                 bytecode.pc += 1;
             }
@@ -4415,52 +4578,6 @@ fn decode_string_literal(text: &str) -> Result<String, EvalError> {
         }
     }
     Ok(decoded)
-}
-
-pub(super) fn bind_let_pattern(
-    scope: &mut EvalEnv,
-    pattern: &LetPattern,
-    value: Value,
-) -> Result<(), EvalError> {
-    match pattern {
-        LetPattern::Binding { name, source } => {
-            env_mut(scope).insert(
-                name.clone(),
-                value.with_provenance(Provenance::binding(source.clone(), name.clone())),
-            );
-            Ok(())
-        }
-        LetPattern::Wildcard => Ok(()),
-        LetPattern::Unit => match value.rep {
-            ValueRep::Unit => Ok(()),
-            _ => Err(EvalError::new(
-                EvalErrorKind::TypeError,
-                "unit pattern requires unit value",
-            )),
-        },
-        LetPattern::Tuple(patterns) => {
-            let ValueRep::Tuple(items) = value.rep else {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    "tuple pattern requires tuple value",
-                ));
-            };
-            if patterns.len() != items.len() {
-                return Err(EvalError::new(
-                    EvalErrorKind::TypeError,
-                    format!(
-                        "tuple pattern expects {} element(s), got {}",
-                        patterns.len(),
-                        items.len()
-                    ),
-                ));
-            }
-            for (pattern, item) in patterns.iter().zip(items.iter().cloned()) {
-                bind_let_pattern(scope, pattern, item)?;
-            }
-            Ok(())
-        }
-    }
 }
 
 pub(super) fn match_pattern(
