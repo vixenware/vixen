@@ -1,11 +1,10 @@
 use super::*;
 use crate::program::{
-    AccessPlanKind, ArrayPlan, ArrayPlanItem, BinaryPlan, BuilderPlanKind, BytecodeOp,
-    CallCalleePlan, CallCalleePlanKind, CallPlan, ClosurePlan, ControlPlanKind,
-    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FalliblePlan, FieldPlan, IfPlan,
+    ArrayPlan, ArrayPlanItem, BytecodeOp, CallCalleePlan, CallCalleePlanKind, ClosurePlan,
+    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FieldPlan,
     InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
-    MatchPlan, NameRefPlan, ParenPlan, PathLiteralPlan, PrefixPlan, RangePlan, ReadyPlanKind,
-    StructLiteralPlan, StructLiteralPlanPart, TuplePlan, WherePlan,
+    MatchPlan, NameRefPlan, PathLiteralPlan, RangePlan, ReadyPlanKind, StructLiteralPlan,
+    StructLiteralPlanPart, TuplePlan, WherePlan,
 };
 use crate::value::compare_value_reps;
 
@@ -28,13 +27,6 @@ pub(super) struct PreparedEntry {
 }
 
 impl PreparedBodyRef {
-    pub(super) fn from_expr_id(
-        program: &CompiledProgram,
-        expr_id: ExprId,
-    ) -> Result<Self, EvalError> {
-        Self::from_resolved_body_ref(program, program.resolve_expr_body_ref(expr_id)?)
-    }
-
     pub(super) fn from_body_ref(
         program: &CompiledProgram,
         body: ExprBodyRef,
@@ -714,64 +706,6 @@ fn eval_node_with_kind<Runtime: RuntimeHooks, Sink: EvalEventSink>(
     result
 }
 
-fn eval_paren_expr(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    inner: Option<ExprBodyRef>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    match inner {
-        Some(inner) => match eval_child_body_ref(state, inner, env)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::FinishNode { node_id, parent_id },
-            )),
-        },
-        None => Ok(EvalStep::Ready(Value::unit())),
-    }
-}
-
-fn eval_paren_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    paren: &ParenPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_paren_expr(state, node_id, parent_id, paren.expr, env)
-}
-
-fn eval_access_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    access: ExprExecPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    match access.access_kind() {
-        AccessPlanKind::Paren => {
-            let paren = state
-                .program
-                .resolve_paren_plan(access.paren_plan_id(state.current_source()))?;
-            eval_paren_plan(state, node_id, parent_id, paren, env)
-        }
-        AccessPlanKind::Call => {
-            let call = state
-                .program
-                .resolve_call_plan(access.call_plan_id(state.current_source()))?;
-            eval_call_plan(state, call, env)
-        }
-        AccessPlanKind::Field => {
-            let field = state
-                .program
-                .resolve_field_plan(access.field_plan_id(state.current_source()))?;
-            eval_field_plan(state, field, env)
-        }
-    }
-}
-
 fn eval_closure_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     closure: &ClosurePlan,
@@ -784,21 +718,6 @@ fn eval_closure_plan(
         closure.body,
         env,
     )
-}
-
-pub(super) fn eval_expr_with_node_id(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    expr: &Expr,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let body = PreparedBodyRef::from_expr_id(state.program, state.expr_id(expr))?;
-    let kind = prepared_body_kind(state.program, &body);
-    let source = state.span_for_node(expr);
-    let parent_id = state.current_parent();
-    eval_node_with_kind(state, node_id, kind, source, |state| {
-        eval_prepared_body_step(state, node_id, parent_id, body, env)
-    })
 }
 
 pub(super) fn prepared_body_kind(
@@ -952,28 +871,6 @@ pub(super) fn eval_dependent_prepared_entry(
     } else {
         state.with_active_node(node_id, |state| eval_child_prepared_entry(state, prepared))
     }
-}
-
-pub(super) fn eval_child_expr(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: &Expr,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    if !state.queue_child_work {
-        let child_id = state.alloc_node_id();
-        state.emit_current_dependency(child_id, Some(state.span_for_node(expr)));
-        return eval_expr_with_node_id(state, child_id, expr, env);
-    }
-    let child_id = queue_child_expr(state, expr, env);
-    let resume_node = state
-        .current_parent()
-        .expect("child expression should have an active parent node");
-    Ok(wait_on_child_dependency(
-        state,
-        resume_node,
-        child_id,
-        Vec::new(),
-    ))
 }
 
 pub(super) fn eval_child_body_ref(
@@ -1165,102 +1062,6 @@ fn ready_plan_source(
     }
 }
 
-fn eval_builder_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    builder: ExprExecPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    match builder.builder_kind() {
-        BuilderPlanKind::Array => {
-            let array = state
-                .program
-                .resolve_array_plan(builder.array_plan_id(state.current_source()))?;
-            eval_array_plan(state, array, env)
-        }
-        BuilderPlanKind::Tuple => {
-            let tuple = state
-                .program
-                .resolve_tuple_plan(builder.tuple_plan_id(state.current_source()))?;
-            eval_tuple_plan(state, tuple, env)
-        }
-        BuilderPlanKind::Range => {
-            let range = state
-                .program
-                .resolve_range_plan(builder.range_plan_id(state.current_source()))?;
-            eval_range_plan(state, range, env)
-        }
-        BuilderPlanKind::Map => {
-            let map = state
-                .program
-                .resolve_map_plan(builder.map_plan_id(state.current_source()))?;
-            eval_map_plan(state, map, env)
-        }
-        BuilderPlanKind::InterpolatedString => {
-            let interpolated = state.program.resolve_interpolated_string_plan(
-                builder.interpolated_string_plan_id(state.current_source()),
-            )?;
-            eval_interpolated_string_plan(state, interpolated, env)
-        }
-        BuilderPlanKind::StructLiteral => {
-            let struct_literal = state.program.resolve_struct_literal_plan(
-                builder.struct_literal_plan_id(state.current_source()),
-            )?;
-            eval_struct_literal_plan(state, struct_literal, env)
-        }
-    }
-}
-
-fn eval_control_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    control: ExprExecPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    match control.control_kind() {
-        ControlPlanKind::Fail => {
-            let fail = state
-                .program
-                .resolve_fail_plan(control.fail_plan_id(state.current_source()))?;
-            eval_fail_plan(state, fail, env)
-        }
-        ControlPlanKind::Fallible => {
-            let fallible = state
-                .program
-                .resolve_fallible_plan(control.fallible_plan_id(state.current_source()))?;
-            eval_fallible_plan(state, fallible, env)
-        }
-        ControlPlanKind::If => {
-            let if_expr = state
-                .program
-                .resolve_if_plan(control.if_plan_id(state.current_source()))?;
-            eval_if_plan(state, if_expr, env)
-        }
-        ControlPlanKind::Match => {
-            let match_expr = state
-                .program
-                .resolve_match_plan(control.match_plan_id(state.current_source()))?;
-            eval_match_plan(state, match_expr, env)
-        }
-        ControlPlanKind::Where => {
-            let where_expr = state
-                .program
-                .resolve_where_plan(control.where_plan_id(state.current_source()))?;
-            eval_where_plan(state, where_expr, env)
-        }
-        ControlPlanKind::Prefix => {
-            let prefix = state
-                .program
-                .resolve_prefix_plan(control.prefix_plan_id(state.current_source()))?;
-            eval_prefix_plan(state, prefix, env)
-        }
-        ControlPlanKind::Binary => {
-            let binary = state
-                .program
-                .resolve_binary_plan(control.binary_plan_id(state.current_source()))?;
-            eval_binary_plan(state, binary, env)
-        }
-    }
-}
-
 fn eval_name_ref_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     name_ref: &NameRefPlan,
@@ -1324,36 +1125,6 @@ fn eval_name_ref_plan(
         EvalErrorKind::Internal,
         format!("name {name} is not bound in this scope"),
     ))
-}
-
-fn eval_call_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    call: &CallPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("call expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    continue_planned_call(
-        state,
-        node_id,
-        parent_id,
-        PlannedCallState {
-            plan_source: call.handle.source(),
-            call_source: state.program.span_for_handle(call.handle),
-            callee_plan: call.callee.clone(),
-            type_args: Arc::clone(&call.type_args),
-            positional_args: Arc::clone(&call.positional_args),
-            env: env.clone(),
-            callee: None,
-            args: Vec::new(),
-            next_arg_index: 0,
-            queued_arg_nodes: Vec::new(),
-        },
-    )
 }
 
 fn immediate_call_callee_plan_value(
@@ -2203,20 +1974,6 @@ fn continue_planned_call(
     )
 }
 
-fn eval_struct_literal_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    struct_literal: &StructLiteralPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_struct_literal_inner(
-        state,
-        struct_literal.handle,
-        struct_literal.type_name.clone(),
-        &struct_literal.parts,
-        env,
-    )
-}
-
 fn eval_struct_literal_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
@@ -2313,14 +2070,6 @@ fn struct_literal_type_name(type_name: Option<Arc<str>>) -> Result<Arc<str>, Eva
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct literal has no type name"))
 }
 
-fn eval_array_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    array: &ArrayPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_array_inner(state, array.handle, &array.items, env)
-}
-
 fn eval_array_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
@@ -2402,14 +2151,6 @@ fn append_array_item(items: &mut Vec<Value>, value: Value, spread: bool) -> Resu
     Ok(())
 }
 
-fn eval_tuple_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    tuple: &TuplePlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_tuple_inner(state, tuple.handle, &tuple.items, env)
-}
-
 fn eval_tuple_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
@@ -2457,14 +2198,6 @@ fn eval_tuple_inner(
             tuple_source: state.program.span_for_handle(handle),
         },
     )
-}
-
-fn eval_interpolated_string_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    interpolated: &InterpolatedStringPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_interpolated_string_inner(state, interpolated.handle, &interpolated.parts, env)
 }
 
 fn eval_interpolated_string_inner(
@@ -2527,21 +2260,6 @@ fn eval_interpolated_string_inner(
             env: env.clone(),
             string_source,
         },
-    )
-}
-
-fn eval_range_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    range: &RangePlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_range_inner(
-        state,
-        range.handle,
-        range.start,
-        range.end,
-        range.inclusive_end,
-        env,
     )
 }
 
@@ -2629,14 +2347,6 @@ fn eval_range_inner(
     }
 }
 
-fn eval_map_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    map: &MapPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_map_inner(state, map.handle, &map.entries, env)
-}
-
 fn eval_map_inner(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     handle: ProgramNodeHandle,
@@ -2665,44 +2375,6 @@ fn eval_map_inner(
             map_source: state.program.span_for_handle(handle),
         },
     )
-}
-
-fn eval_fail_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    fail: &crate::program::FailPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_fail_inner(state, fail.message, env)
-}
-
-fn eval_fail_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    message: Option<ExprBodyRef>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("fail expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let failure = match eval_dependent_body_ref(
-        state,
-        node_id,
-        message.ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "fail expression has no message")
-        })?,
-        env,
-    )? {
-        EvalStep::Ready(value) => value,
-        EvalStep::Suspended(suspension) => {
-            return Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::FailMessage { node_id, parent_id },
-            ));
-        }
-    };
-    Err(user_fail_error(failure))
 }
 
 fn fallible_some(value: Value, source: SourceSpan) -> Value {
@@ -2759,47 +2431,6 @@ fn fallible_target_function(function: &FunctionRef) -> Option<FunctionRef> {
         })
 }
 
-fn eval_fallible_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    fallible: &FalliblePlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_fallible_inner(state, fallible.handle, fallible.expr, env)
-}
-
-fn eval_fallible_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    expr: Option<ExprBodyRef>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("fallible expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let source = state.program.span_for_handle(handle);
-    let Some(expr) = expr else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "fallible expression has no operand",
-        ));
-    };
-    match eval_dependent_body_ref(state, node_id, expr, env) {
-        Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), source)),
-        Ok(EvalStep::Suspended(suspension)) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::Fallible {
-                node_id,
-                parent_id,
-                fallible_source: source,
-            },
-        )),
-        Err(error) => Ok(wrap_fallible_result(Err(error), source)),
-    }
-}
-
 fn continue_bytecode_fallible(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
@@ -2850,219 +2481,6 @@ pub(super) fn user_fail_error(value: Value) -> EvalError {
         )
         .with_detail(value),
     }
-}
-
-fn eval_if_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    if_expr: &IfPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_if_inner(
-        state,
-        if_expr.condition,
-        if_expr.then_branch,
-        if_expr.else_branch,
-        env,
-    )
-}
-
-fn eval_if_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    condition: Option<ExprBodyRef>,
-    then_branch: Option<ExprBodyRef>,
-    else_branch: Option<ExprBodyRef>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("if expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let if_state = IfState {
-        then_branch: then_branch
-            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?,
-        else_branch: else_branch
-            .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "if branch is missing"))?,
-        env: env.clone(),
-    };
-    let condition = match eval_dependent_body_ref(
-        state,
-        node_id,
-        condition.ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "if expression has no condition")
-        })?,
-        env,
-    )? {
-        EvalStep::Ready(value) => value,
-        EvalStep::Suspended(suspension) => {
-            return Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::If {
-                    node_id,
-                    parent_id,
-                    if_state,
-                },
-            ));
-        }
-    };
-    continue_if(state, node_id, parent_id, if_state, condition)
-}
-
-fn eval_match_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    match_plan: &MatchPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("match expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    start_match_plan(state, node_id, parent_id, match_plan, env)
-}
-
-fn start_match_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    match_expr: &MatchPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let scrutinee = match eval_dependent_body_ref(
-        state,
-        node_id,
-        match_expr.scrutinee.ok_or_else(|| {
-            EvalError::new(EvalErrorKind::Internal, "match expression has no scrutinee")
-        })?,
-        env,
-    )? {
-        EvalStep::Ready(value) => value,
-        EvalStep::Suspended(suspension) => {
-            return Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::Match {
-                    node_id,
-                    parent_id,
-                    match_state: MatchState {
-                        match_plan: match_expr.clone(),
-                        env: env.clone(),
-                    },
-                },
-            ));
-        }
-    };
-    continue_match_arms(
-        state,
-        node_id,
-        parent_id,
-        match_expr,
-        scrutinee,
-        env.clone(),
-    )
-}
-
-pub(super) fn continue_match_arms(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    match_expr: &MatchPlan,
-    scrutinee: Value,
-    env: EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let arms = &match_expr.arms;
-    for arm in arms.iter() {
-        let mut arm_env = env.clone();
-        if match_pattern(state, &mut arm_env, &arm.pattern, scrutinee.clone())? {
-            return match eval_dependent_body_ref(state, node_id, arm.body, &mut arm_env)? {
-                EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-                EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::FinishNode { node_id, parent_id },
-                )),
-            };
-        }
-    }
-    Err(EvalError::new(
-        EvalErrorKind::Internal,
-        "match expression had no matching arm",
-    ))
-}
-
-fn eval_where_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    where_expr: &WherePlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("where expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    start_where_plan(state, node_id, parent_id, where_expr, env)
-}
-
-fn start_where_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    where_expr: &WherePlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let call_expr = where_expr.call.as_ref().ok_or_else(|| {
-        EvalError::new(
-            EvalErrorKind::Internal,
-            "where expression currently requires a compiled call plan",
-        )
-    })?;
-    let callee = call_expr
-        .callee
-        .as_ref()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let Some(callee_value) =
-        immediate_call_callee_plan_value(state, call_expr.handle.source(), callee, env)?
-    else {
-        return Err(EvalError::new(
-            EvalErrorKind::Internal,
-            "where call callee must resolve immediately for now",
-        ));
-    };
-    let mut keyword_bindings = Vec::new();
-    let mut remaining_keyword_bindings = Vec::new();
-    for binding in where_expr.keyword_bindings.iter() {
-        let name = binding.name.clone();
-        match binding.expr {
-            Some(expr) => remaining_keyword_bindings.push((name, expr)),
-            None => {
-                let Some(value) = env.get(name.as_ref()) else {
-                    return Err(EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("where binding {name} is not available in scope"),
-                    ));
-                };
-                keyword_bindings.push((name, value.clone()));
-            }
-        }
-    }
-    continue_where(
-        state,
-        node_id,
-        parent_id,
-        WhereState {
-            call: WhereCallPlan {
-                call_source: state.program.span_for_handle(call_expr.handle),
-                callee: callee_value,
-                type_args: Arc::clone(&call_expr.type_args),
-                positional_args: Arc::clone(&call_expr.positional_args),
-            },
-            pending_keyword_name: None,
-            keyword_bindings,
-            remaining_keyword_bindings,
-            env: env.clone(),
-        },
-    )
 }
 
 pub(super) fn continue_where(
@@ -3248,94 +2666,6 @@ pub(super) fn project_field_expr_value(
     })?;
     let field_source = state.program.span_for_handle(field.handle);
     project_field_or_method_value(state, receiver, field_name.clone(), field_source)
-}
-
-fn eval_binary_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    binary: &BinaryPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_binary_inner(state, binary.lhs, binary.rhs, binary.operator, env)
-}
-
-fn eval_binary_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    lhs: Option<ExprBodyRef>,
-    rhs: Option<ExprBodyRef>,
-    operator: Option<SyntaxKind>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("binary expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let lhs =
-        lhs.ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no lhs"))?;
-    let rhs =
-        rhs.ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no rhs"))?;
-    let operator = binary_operator_kind(operator)?;
-    let mut binary = BinaryState {
-        operator,
-        rhs,
-        env: env.clone(),
-        lhs: None,
-    };
-    match eval_child_body_ref(state, lhs, env)? {
-        EvalStep::Ready(lhs) => {
-            binary.lhs = Some(lhs);
-            continue_binary(state, node_id, parent_id, binary)
-        }
-        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::Binary {
-                node_id,
-                parent_id,
-                binary,
-                pending: BinaryResumeKind::Lhs,
-            },
-        )),
-    }
-}
-
-fn eval_prefix_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    prefix: &PrefixPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    eval_prefix_inner(state, prefix.operator, prefix.expr, env)
-}
-
-fn eval_prefix_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    operator: Option<SyntaxKind>,
-    expr: Option<ExprBodyRef>,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("prefix expression should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let operand = expr.ok_or_else(|| {
-        EvalError::new(EvalErrorKind::Internal, "prefix expression has no operand")
-    })?;
-    let operator = operator.ok_or_else(|| {
-        EvalError::new(EvalErrorKind::Internal, "prefix expression has no operator")
-    })?;
-    match eval_child_body_ref(state, operand, env)? {
-        EvalStep::Ready(value) => apply_prefix_operator(operator, value).map(EvalStep::Ready),
-        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::Prefix {
-                node_id,
-                parent_id,
-                prefix: PrefixState { operator },
-            },
-        )),
-    }
 }
 
 pub(super) fn continue_bytecode_body(
@@ -5032,16 +4362,10 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
-            BytecodeOp::EvalBody(body_ref) => {
+            BytecodeOp::InternalError { source, message } => {
                 bytecode.pc += 1;
-                match state.with_source(source, |state| {
-                    eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
-                })? {
-                    EvalStep::Ready(value) => bytecode.acc = Some(value),
-                    EvalStep::Suspended(suspension) => {
-                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
-                    }
-                }
+                let _ = source;
+                return Err(EvalError::new(EvalErrorKind::Internal, message.clone()));
             }
             BytecodeOp::EvalIfBranches {
                 then_branch,
@@ -5620,24 +4944,6 @@ fn match_struct_pattern_fields(
     Ok(true)
 }
 
-pub(super) fn queue_child_expr(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: &Expr,
-    env: &EvalEnv,
-) -> EvalNodeId {
-    queue_child_expr_id(state, state.expr_id(expr), env)
-}
-
-pub(super) fn queue_child_expr_id(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: ExprId,
-    env: &EvalEnv,
-) -> EvalNodeId {
-    let body = PreparedBodyRef::from_expr_id(state.program, expr)
-        .expect("queued child expression handle should resolve to an execution body");
-    queue_child_expr_body(state, body, env)
-}
-
 pub(super) fn queue_child_body_ref(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     body: ExprBodyRef,
@@ -5938,74 +5244,6 @@ pub(super) fn project_struct_field(
             )
         })?;
     Ok(value.project(ProjectionStep::Field(field_name.to_string())))
-}
-
-fn binary_operator_kind(operator: Option<SyntaxKind>) -> Result<SyntaxKind, EvalError> {
-    operator
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "binary expression has no operator"))
-}
-
-pub(super) fn continue_binary(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut binary: BinaryState,
-) -> Result<EvalStep, EvalError> {
-    let lhs = binary.lhs.clone().ok_or_else(|| {
-        EvalError::new(
-            EvalErrorKind::Internal,
-            "binary state is missing its left-hand side value",
-        )
-    })?;
-    if let Some(short_circuit) = short_circuit_binary(&lhs, binary.operator)? {
-        return Ok(EvalStep::Ready(short_circuit));
-    }
-
-    match eval_dependent_body_ref(state, node_id, binary.rhs, &mut binary.env)? {
-        EvalStep::Ready(rhs) => {
-            apply_binary_operator(lhs, binary.operator, rhs).map(EvalStep::Ready)
-        }
-        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::Binary {
-                node_id,
-                parent_id,
-                binary,
-                pending: BinaryResumeKind::Rhs,
-            },
-        )),
-    }
-}
-
-pub(super) fn continue_if(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut if_state: IfState,
-    condition: Value,
-) -> Result<EvalStep, EvalError> {
-    let ValueRep::Bool(value) = condition.rep else {
-        return Err(EvalError::new(
-            EvalErrorKind::TypeError,
-            "if condition must evaluate to Bool",
-        ));
-    };
-    match eval_dependent_expr_id(
-        state,
-        node_id,
-        if value {
-            if_state.then_branch.expr_id()
-        } else {
-            if_state.else_branch.expr_id()
-        },
-        &mut if_state.env,
-    )? {
-        EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-        EvalStep::Suspended(suspension) => Ok(extend_suspension(
-            suspension,
-            ContinuationFrame::FinishNode { node_id, parent_id },
-        )),
-    }
 }
 
 pub(super) fn apply_binary_operator(

@@ -87,16 +87,6 @@ pub(in crate::engine) fn resume_frame(
     input: Result<Value, EvalError>,
 ) -> Result<ResumeOutcome, EvalError> {
     match frame {
-        ContinuationFrame::FinishNode { node_id, parent_id } => Ok(match input {
-            Ok(value) => {
-                record_ready_step(state, node_id, parent_id, &value);
-                ResumeOutcome::Continue(Ok(value))
-            }
-            Err(error) => {
-                record_poison_step(state, node_id, parent_id, &error);
-                ResumeOutcome::Continue(Err(error))
-            }
-        }),
         ContinuationFrame::Fallible {
             node_id,
             parent_id,
@@ -698,13 +688,6 @@ pub(in crate::engine) fn resume_frame(
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }
-        ContinuationFrame::FailMessage { node_id, parent_id } => {
-            let result = match input {
-                Ok(value) => Err(user_fail_error(value)),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
         ContinuationFrame::RestoreBranchContext { branch_context } => {
             state.branch_context = branch_context;
             Ok(ResumeOutcome::Continue(input))
@@ -772,35 +755,6 @@ pub(in crate::engine) fn resume_frame(
                 Err(error) => Ok(ResumeOutcome::Continue(Err(error))),
             }
         }
-        ContinuationFrame::If {
-            node_id,
-            parent_id,
-            if_state,
-        } => {
-            let result = match input {
-                Ok(condition) => continue_if(state, node_id, parent_id, if_state, condition),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::Match {
-            node_id,
-            parent_id,
-            match_state,
-        } => {
-            let result = match input {
-                Ok(scrutinee) => continue_match_arms(
-                    state,
-                    node_id,
-                    parent_id,
-                    &match_state.match_plan,
-                    scrutinee,
-                    match_state.env,
-                ),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
         ContinuationFrame::Where {
             node_id,
             parent_id,
@@ -819,49 +773,6 @@ pub(in crate::engine) fn resume_frame(
                         .keyword_bindings
                         .push((pending_keyword_name, value));
                     continue_where(state, node_id, parent_id, where_state)
-                }
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::Prefix {
-            node_id,
-            parent_id,
-            prefix,
-        } => {
-            let result = match input {
-                Ok(value) => apply_prefix_operator(prefix.operator, value).map(EvalStep::Ready),
-                Err(error) => Err(error),
-            };
-            Ok(conclude_resumed_node(state, node_id, parent_id, result))
-        }
-        ContinuationFrame::Binary {
-            node_id,
-            parent_id,
-            mut binary,
-            pending,
-        } => {
-            let result = match input {
-                Ok(value) => {
-                    match pending {
-                        BinaryResumeKind::Lhs => binary.lhs = Some(value),
-                        BinaryResumeKind::Rhs => {
-                            let lhs = binary.lhs.take().ok_or_else(|| {
-                                EvalError::new(
-                                    EvalErrorKind::Internal,
-                                    "binary continuation is missing its left-hand side value",
-                                )
-                            })?;
-                            return Ok(conclude_resumed_node(
-                                state,
-                                node_id,
-                                parent_id,
-                                apply_binary_operator(lhs, binary.operator, value)
-                                    .map(EvalStep::Ready),
-                            ));
-                        }
-                    }
-                    continue_binary(state, node_id, parent_id, binary)
                 }
                 Err(error) => Err(error),
             };

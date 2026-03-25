@@ -197,20 +197,6 @@ pub(super) struct FieldState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BinaryResumeKind {
-    Lhs,
-    Rhs,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BinaryState {
-    pub(super) operator: SyntaxKind,
-    pub(super) rhs: ExprBodyRef,
-    pub(super) env: EvalEnv,
-    pub(super) lhs: Option<Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RangeResumeKind {
     Start,
     End,
@@ -226,21 +212,9 @@ pub(super) struct RangeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct IfState {
-    pub(super) then_branch: ExprBodyRef,
-    pub(super) else_branch: ExprBodyRef,
-    pub(super) env: EvalEnv,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MatchState {
     pub(super) match_plan: MatchPlan,
     pub(super) env: EvalEnv,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PrefixState {
-    pub(super) operator: SyntaxKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,10 +320,6 @@ pub(super) struct ArrayFilterMapState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ContinuationFrame {
-    FinishNode {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-    },
     Fallible {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -454,10 +424,6 @@ pub(super) enum ContinuationFrame {
         map: MapState,
         pending: MapResumeKind,
     },
-    FailMessage {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-    },
     RestoreBranchContext {
         branch_context: EvalBranchContext,
     },
@@ -465,16 +431,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         search: SearchAssumptionState,
-    },
-    Match {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        match_state: MatchState,
-    },
-    Prefix {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        prefix: PrefixState,
     },
     Struct {
         node_id: EvalNodeId,
@@ -513,17 +469,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         field: FieldState,
-    },
-    Binary {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        binary: BinaryState,
-        pending: BinaryResumeKind,
-    },
-    If {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        if_state: IfState,
     },
     Where {
         node_id: EvalNodeId,
@@ -629,16 +574,6 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         let result = f(self);
         self.branch_context = previous;
         result
-    }
-
-    pub(super) fn span_for_node<T: crate::program::HasHandle>(&self, node: &T) -> SourceSpan {
-        self.program.span_for_handle(node.handle())
-    }
-
-    pub(super) fn expr_id(&self, expr: &Expr) -> ExprId {
-        self.program
-            .expr_id(expr.handle())
-            .expect("expression handle should resolve to an expression id")
     }
 
     pub(super) fn expr_id_for(
@@ -833,29 +768,4 @@ pub(super) fn empty_env() -> EvalEnv {
 
 pub(super) fn env_mut(env: &mut EvalEnv) -> &mut OrdMap<String, Value> {
     env
-}
-
-pub(super) fn eval_dependent_expr(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    expr: &Expr,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    if state.current_parent() == Some(node_id) {
-        eval_child_expr(state, expr, env)
-    } else {
-        state.with_active_node(node_id, |state| eval_child_expr(state, expr, env))
-    }
-}
-
-pub(super) fn eval_dependent_expr_id(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    expr_id: ExprId,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let expr = state.program.resolve_expr_id(expr_id)?;
-    state.with_source(expr_id.source(), |state| {
-        eval_dependent_expr(state, node_id, &expr, env)
-    })
 }
