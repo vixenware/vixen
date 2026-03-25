@@ -1429,6 +1429,7 @@ fn eval_call_plan(
         node_id,
         parent_id,
         PlannedCallState {
+            plan_source: call.handle.source(),
             call_source: state.program.span_for_handle(call.handle),
             callee_plan: call.callee.clone(),
             type_args: Arc::clone(&call.type_args),
@@ -1444,6 +1445,7 @@ fn eval_call_plan(
 
 fn immediate_call_callee_plan_value(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source: SourceId,
     callee: &CallCalleePlan,
     env: &EvalEnv,
 ) -> Result<Option<Value>, EvalError> {
@@ -1451,13 +1453,13 @@ fn immediate_call_callee_plan_value(
         CallCalleePlanKind::NameRef => {
             let name_ref = state
                 .program
-                .resolve_name_ref_plan(callee.name_ref_plan_id(state.current_source()))?;
+                .resolve_name_ref_plan(callee.name_ref_plan_id(source))?;
             let name: Arc<str> = Arc::clone(&name_ref.name);
             if let Some(value) = env.get(name.as_ref()) {
                 return Ok(Some(value.clone()));
             }
             Ok(Some(Value::function(FunctionRef::new(
-                state.program.source_id(state.current_source()),
+                state.program.source_id(source),
                 Arc::clone(&name),
                 Arc::from([]),
                 false,
@@ -1467,15 +1469,15 @@ fn immediate_call_callee_plan_value(
             ))))
         }
         CallCalleePlanKind::Direct => {
-            let direct = state.program.resolve_direct_call_callee_plan(
-                callee.direct_call_callee_plan_id(state.current_source()),
-            )?;
-            immediate_direct_call_callee_plan_value(state, direct)
+            let direct = state
+                .program
+                .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(source))?;
+            immediate_direct_call_callee_plan_value(state, source, direct)
         }
         CallCalleePlanKind::Field => {
             let field = state
                 .program
-                .resolve_field_plan(callee.field_plan_id(state.current_source()))?;
+                .resolve_field_plan(callee.field_plan_id(source))?;
             static_namespace_member_plan_value(state, field)
         }
         CallCalleePlanKind::Expr => Ok(None),
@@ -1484,6 +1486,7 @@ fn immediate_call_callee_plan_value(
 
 fn immediate_direct_call_callee_plan_value(
     state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source: SourceId,
     direct: &DirectCallCalleePlan,
 ) -> Result<Option<Value>, EvalError> {
     match direct.kind() {
@@ -1491,7 +1494,7 @@ fn immediate_direct_call_callee_plan_value(
             let plan = state
                 .program
                 .resolve_resolved_function_direct_call_callee_plan(
-                    state.current_source(),
+                    source,
                     direct.resolved_function_index(),
                 )?;
             Ok(Some(Value::function(function_ref_from_compiled(
@@ -1506,7 +1509,7 @@ fn immediate_direct_call_callee_plan_value(
             let plan = state
                 .program
                 .resolve_variant_constructor_direct_call_callee_plan(
-                    state.current_source(),
+                    source,
                     direct.variant_constructor_index(),
                 )?;
             Ok(Some(enum_constructor_or_value(
@@ -1520,20 +1523,20 @@ fn immediate_direct_call_callee_plan_value(
             let plan = state
                 .program
                 .resolve_newtype_constructor_direct_call_callee_plan(
-                    state.current_source(),
+                    source,
                     direct.newtype_constructor_index(),
                 )?;
-            let source = state.program.span_for_handle(plan.handle);
+            let span = state.program.span_for_handle(plan.handle);
             let captures = Arc::from([(
                 Arc::from("__newtype_ctor"),
                 Value::bool(true).with_provenance(Provenance::binding(
-                    source.clone(),
+                    span.clone(),
                     plan.display_name.to_string(),
                 )),
             )]);
             Ok(Some(
                 Value::function(FunctionRef::new(
-                    state.program.source_id(state.current_source()),
+                    state.program.source_id(source),
                     plan.newtype_name.clone(),
                     Arc::from([]),
                     false,
@@ -1541,14 +1544,14 @@ fn immediate_direct_call_callee_plan_value(
                     captures,
                     Some(plan.display_name.clone()),
                 ))
-                .with_provenance(Provenance::binding(source, plan.display_name.to_string())),
+                .with_provenance(Provenance::binding(span, plan.display_name.to_string())),
             ))
         }
         DirectCallCalleePlanKind::StaticMember => {
             let plan = state
                 .program
                 .resolve_static_member_direct_call_callee_plan(
-                    state.current_source(),
+                    source,
                     direct.static_member_index(),
                 )?;
             if let Some(constructor) = &plan.variant_constructor {
@@ -1578,10 +1581,11 @@ fn immediate_direct_call_callee_plan_value(
 
 fn eval_call_callee_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source: SourceId,
     callee: &CallCalleePlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    if let Some(value) = immediate_call_callee_plan_value(state, callee, env)? {
+    if let Some(value) = immediate_call_callee_plan_value(state, source, callee, env)? {
         return Ok(EvalStep::Ready(value));
     }
     match callee.kind() {
@@ -1589,7 +1593,7 @@ fn eval_call_callee_plan(
         CallCalleePlanKind::Field => {
             let field = state
                 .program
-                .resolve_field_plan(callee.field_plan_id(state.current_source()))?;
+                .resolve_field_plan(callee.field_plan_id(source))?;
             eval_field_plan(state, field, env)
         }
         CallCalleePlanKind::NameRef | CallCalleePlanKind::Direct => Err(EvalError::new(
@@ -2195,7 +2199,9 @@ fn continue_planned_call(
         let callee = call.callee_plan.as_ref().ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
         })?;
-        if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, &call.env)? {
+        if let Some(callee_value) =
+            immediate_call_callee_plan_value(state, call.plan_source, callee, &call.env)?
+        {
             if state.queue_child_work && !call.positional_args.is_empty() && call.args.is_empty() {
                 call.callee = Some(callee_value);
                 call.next_arg_index = call.positional_args.len();
@@ -2218,20 +2224,21 @@ fn continue_planned_call(
             }
             call.callee = Some(callee_value);
         } else {
-            let callee_value = match eval_call_callee_plan(state, callee, &mut call.env)? {
-                EvalStep::Ready(value) => value,
-                EvalStep::Suspended(suspension) => {
-                    return Ok(extend_suspension(
-                        suspension,
-                        ContinuationFrame::PlannedCall {
-                            node_id,
-                            parent_id,
-                            call,
-                            pending: PlannedCallResumeKind::Callee,
-                        },
-                    ));
-                }
-            };
+            let callee_value =
+                match eval_call_callee_plan(state, call.plan_source, callee, &mut call.env)? {
+                    EvalStep::Ready(value) => value,
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(extend_suspension(
+                            suspension,
+                            ContinuationFrame::PlannedCall {
+                                node_id,
+                                parent_id,
+                                call,
+                                pending: PlannedCallResumeKind::Callee,
+                            },
+                        ));
+                    }
+                };
             call.callee = Some(callee_value);
         }
     }
@@ -3067,7 +3074,9 @@ fn start_where_plan(
         .callee
         .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {
+    let Some(callee_value) =
+        immediate_call_callee_plan_value(state, call_expr.handle.source(), callee, env)?
+    else {
         return Err(EvalError::new(
             EvalErrorKind::Internal,
             "where call callee must resolve immediately for now",
@@ -3171,6 +3180,7 @@ fn eval_call_with_keyword_bindings(
                 node_id,
                 parent_id,
                 call: PlannedCallState {
+                    plan_source: state.current_source,
                     call_source,
                     callee_plan: None,
                     type_args: Arc::clone(&type_args),
@@ -3190,6 +3200,7 @@ fn eval_call_with_keyword_bindings(
         node_id,
         parent_id,
         PlannedCallState {
+            plan_source: state.current_source,
             call_source,
             callee_plan: None,
             type_args,
@@ -3557,7 +3568,9 @@ pub(super) fn continue_bytecode_body(
         let callee = call_expr.callee.as_ref().ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
         })?;
-        let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {
+        let Some(callee_value) =
+            immediate_call_callee_plan_value(state, call_expr.handle.source(), callee, env)?
+        else {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 "where call callee must resolve immediately for now",
@@ -3658,7 +3671,8 @@ pub(super) fn continue_bytecode_body(
             let callee = call.callee_plan.as_ref().ok_or_else(|| {
                 EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
             })?;
-            if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, &call.env)?
+            if let Some(callee_value) =
+                immediate_call_callee_plan_value(state, call.plan_source, callee, &call.env)?
             {
                 if state.queue_child_work
                     && !call.positional_args.is_empty()
@@ -3686,7 +3700,7 @@ pub(super) fn continue_bytecode_body(
                 }
                 call.callee = Some(callee_value);
             } else {
-                match eval_call_callee_plan(state, callee, &mut call.env)? {
+                match eval_call_callee_plan(state, call.plan_source, callee, &mut call.env)? {
                     EvalStep::Ready(value) => call.callee = Some(value),
                     EvalStep::Suspended(suspension) => {
                         bytecode.pending = Some(BytecodePendingState::Call {
@@ -3795,6 +3809,7 @@ pub(super) fn continue_bytecode_body(
             parent_id,
             bytecode,
             PlannedCallState {
+                plan_source: state.current_source,
                 call_source,
                 callee_plan: None,
                 type_args,
@@ -4971,6 +4986,7 @@ pub(super) fn continue_bytecode_body(
                     parent_id,
                     &mut bytecode,
                     PlannedCallState {
+                        plan_source: call.handle.source(),
                         call_source: state.program.span_for_handle(call.handle),
                         callee_plan: call.callee.clone(),
                         type_args: Arc::clone(&call.type_args),

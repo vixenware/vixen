@@ -117,6 +117,7 @@ pub(super) enum PlannedCallResumeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlannedCallState {
+    pub(super) plan_source: SourceId,
     pub(super) call_source: SourceSpan,
     pub(super) callee_plan: Option<CallCalleePlan>,
     pub(super) type_args: Arc<[Ty]>,

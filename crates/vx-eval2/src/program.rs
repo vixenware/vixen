@@ -4798,7 +4798,10 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
-                ops.push(BytecodeOp::EvalBody(expr));
+                let call = source
+                    .resolve_call_plan(plan.call_plan_id(expr.expr_id().source()))
+                    .expect("bytecode call plan should resolve");
+                ops.push(BytecodeOp::StartCall(call.clone()));
             }
             ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
                 let field = source
@@ -4914,10 +4917,16 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 ops.push(BytecodeOp::StartStructLiteral(struct_literal.clone()));
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
-                ops.push(BytecodeOp::EvalBody(expr));
+                let match_plan = source
+                    .resolve_match_plan(plan.match_plan_id(expr.expr_id().source()))
+                    .expect("bytecode match plan should resolve");
+                ops.push(BytecodeOp::StartMatch(match_plan.clone()));
             }
             ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
-                ops.push(BytecodeOp::EvalBody(expr));
+                let where_plan = source
+                    .resolve_where_plan(plan.where_plan_id(expr.expr_id().source()))
+                    .expect("bytecode where plan should resolve");
+                ops.push(BytecodeOp::StartWhere(where_plan.clone()));
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
                 ops.push(BytecodeOp::EvalPlan(expr));

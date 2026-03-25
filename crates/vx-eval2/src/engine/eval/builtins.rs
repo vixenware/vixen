@@ -1721,6 +1721,7 @@ fn continue_builtin_call_inner(
                 node_id,
                 parent_id,
                 PlannedCallState {
+                    plan_source: state.current_source,
                     call_source,
                     callee_plan: None,
                     type_args: Arc::from([]),
@@ -1795,6 +1796,7 @@ fn continue_builtin_call_inner(
                 node_id,
                 parent_id,
                 PlannedCallState {
+                    plan_source: state.current_source,
                     call_source,
                     callee_plan: None,
                     type_args: Arc::from([]),

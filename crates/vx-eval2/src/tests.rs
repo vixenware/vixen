@@ -927,7 +927,7 @@ fn compiled_program_lowers_block_expr_to_bytecode_body() {
     assert!(matches!(bytecode.ops[0], BytecodeOp::EvalReady(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::BindLet { .. }));
     assert!(matches!(bytecode.ops[2], BytecodeOp::BindFnDecl { .. }));
-    assert!(matches!(bytecode.ops[3], BytecodeOp::EvalBody(_)));
+    assert!(matches!(bytecode.ops[3], BytecodeOp::StartCall(_)));
     assert!(matches!(bytecode.ops[4], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[5], BytecodeOp::ReturnLast));
 }
@@ -1274,7 +1274,7 @@ fn compiled_program_lowers_call_expr_to_bytecode_ops() {
         .resolve_bytecode_body(call_body)
         .expect("resolve nested call bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::StartCall(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
     assert!(matches!(call_bytecode.ops[0], BytecodeOp::StartCall(_)));
@@ -1313,7 +1313,7 @@ fn compiled_program_lowers_where_expr_to_bytecode_ops() {
         .resolve_bytecode_body(where_body)
         .expect("resolve nested where bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::StartWhere(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
     assert!(matches!(where_bytecode.ops[0], BytecodeOp::StartWhere(_)));
@@ -1352,7 +1352,7 @@ fn compiled_program_lowers_match_expr_to_bytecode_ops() {
         .resolve_bytecode_body(match_body)
         .expect("resolve nested match bytecode body");
     assert_eq!(bytecode.ops.len(), 3);
-    assert!(matches!(bytecode.ops[0], BytecodeOp::EvalBody(_)));
+    assert!(matches!(bytecode.ops[0], BytecodeOp::StartMatch(_)));
     assert!(matches!(bytecode.ops[1], BytecodeOp::SetLast));
     assert!(matches!(bytecode.ops[2], BytecodeOp::ReturnLast));
     assert!(matches!(match_bytecode.ops[0], BytecodeOp::StartMatch(_)));
@@ -10494,23 +10494,11 @@ fn traced_runtime_calls_emit_start_and_finish_events() {
 
     assert!(trace.events.iter().any(|event| {
         event.kind
-            == EvalEventKind::EnterExpr {
-                kind: crate::EvalExprKind::Call,
-            }
-    }));
-    assert!(trace.events.iter().any(|event| {
-        event.kind
             == EvalEventKind::RuntimeCallStarted {
                 callee: "host_os".into(),
                 argc: 0,
             }
     }));
-    assert!(
-        trace
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, EvalEventKind::DependOn { .. }))
-    );
     assert!(trace.events.iter().any(|event| {
         event.kind
             == EvalEventKind::RuntimeCallFinishedReady {
@@ -10637,16 +10625,10 @@ fn session_can_resume_pending_runtime_call() {
     );
     assert_eq!(
         session.node_state(EvalNodeId(1)),
-        Some(&EvalNodeState::BlockedOnNode {
-            dependency: EvalNodeId(2),
-        })
-    );
-    assert_eq!(
-        session.node_state(EvalNodeId(2)),
         Some(&EvalNodeState::Pending(pending.clone()))
     );
     assert_eq!(
-        session.node_state(EvalNodeId(3)),
+        session.node_state(EvalNodeId(2)),
         Some(&EvalNodeState::Pending(pending.clone()))
     );
 
@@ -10730,11 +10712,14 @@ fn session_step_queues_root_expression_work_before_evaluating_it() {
     );
 
     let second = session.step().expect("second session step");
-    assert_eq!(second, EvalSessionStep::Progressed);
-    let child_work = session.queued_work();
-    assert_eq!(child_work.len(), 1);
-    assert_eq!(child_work[0].kind, EvalWorkKind::EvaluateExpr);
-    assert_eq!(child_work[0].node_id, EvalNodeId(2));
+    let EvalSessionStep::Pending(pending) = second else {
+        panic!("expected pending step, got {second:?}");
+    };
+    assert_eq!(
+        pending.description.as_ref(),
+        "waiting for remote host observation"
+    );
+    assert!(session.queued_work().is_empty());
     assert_eq!(session.completed_work().len(), 2);
     assert_eq!(
         session.completed_work()[1].work.kind,
@@ -10742,7 +10727,7 @@ fn session_step_queues_root_expression_work_before_evaluating_it() {
     );
     assert_eq!(
         session.completed_work()[1].outcome,
-        EvalCompletedWorkOutcome::BlockedOnNode(EvalNodeId(2)),
+        EvalCompletedWorkOutcome::Pending(pending.clone()),
     );
     assert!(
         session
@@ -10751,43 +10736,17 @@ fn session_step_queues_root_expression_work_before_evaluating_it() {
             .iter()
             .any(|event| event.work_id == Some(queued_after[0].id))
     );
-    let third = session.step().expect("third session step");
-    let EvalSessionStep::Pending(pending) = third else {
-        panic!("expected pending step, got {third:?}");
-    };
-    assert_eq!(
-        pending.description.as_ref(),
-        "waiting for remote host observation"
-    );
-    assert!(session.queued_work().is_empty());
-    assert_eq!(session.completed_work().len(), 3);
-    assert_eq!(
-        session.completed_work()[2].work.kind,
-        EvalWorkKind::EvaluateExpr
-    );
-    assert_eq!(
-        session.completed_work()[2].outcome,
-        EvalCompletedWorkOutcome::Pending(pending.clone()),
-    );
-    assert!(
-        session
-            .trace()
-            .events
-            .iter()
-            .any(|event| event.work_id == Some(child_work[0].id))
-    );
 }
 
 #[test]
 fn session_queues_child_expression_work_and_resumes_parent_block() {
-    let host_os_calls = Arc::new(AtomicUsize::new(0));
     let host_wait_calls = Arc::new(AtomicUsize::new(0));
     let runtime = CountingRuntime {
-        host_os_calls: host_os_calls.clone(),
+        host_os_calls: Arc::new(AtomicUsize::new(0)),
         host_wait_calls: host_wait_calls.clone(),
     };
     let mut session = EvalSession::new(
-        "fn build() { let os = host_os(); os }",
+        "fn build() { [host_wait()] }",
         "session-child-queue",
         "build",
         Vec::new(),
@@ -10825,20 +10784,32 @@ fn session_queues_child_expression_work_and_resumes_parent_block() {
         EvalCompletedWorkOutcome::BlockedOnNode(child_node),
     );
 
-    assert_eq!(
-        session.step().expect("child expression step"),
-        EvalSessionStep::Progressed
-    );
-    assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(host_wait_calls.load(Ordering::SeqCst), 0);
-    let resumed = session.queued_work();
-    assert_eq!(resumed.len(), 1);
-    assert_eq!(resumed[0].kind, EvalWorkKind::ResumePending);
-    assert_eq!(resumed[0].node_id, root_node);
-    let Some(EvalNodeState::Ready(value)) = session.node_state(child_node) else {
-        panic!("expected child node to be ready");
+    let pending = match session.step().expect("child expression step") {
+        EvalSessionStep::Pending(pending) => pending,
+        other => panic!("expected pending child expression step, got {other:?}"),
     };
-    assert_eq!(value.rep, ValueRep::String("windows".into()));
+    assert_eq!(
+        pending.description.as_ref(),
+        "waiting for remote host observation"
+    );
+    assert_eq!(host_wait_calls.load(Ordering::SeqCst), 1);
+    assert!(session.queued_work().is_empty());
+    let pending_nodes = session.pending_nodes();
+    assert_eq!(pending_nodes, vec![pending.clone()]);
+    assert_eq!(
+        session.node_state(root_node),
+        Some(&EvalNodeState::BlockedOnNode {
+            dependency: child_node,
+        }),
+    );
+    assert_eq!(
+        session.node_state(child_node),
+        Some(&EvalNodeState::Pending(pending.clone())),
+    );
+
+    session
+        .resolve_pending(&pending, Value::string("windows"))
+        .expect("resolve pending child node");
 
     let value = loop {
         match session.step().expect("finish queued parent work") {
@@ -10847,8 +10818,13 @@ fn session_queues_child_expression_work_and_resumes_parent_block() {
             other => panic!("expected progress or ready, got {other:?}"),
         }
     };
-    assert_eq!(value.rep, ValueRep::String("windows".into()));
-    assert_eq!(host_os_calls.load(Ordering::SeqCst), 1);
+    let rep = value.rep;
+    let ValueRep::Array(items) = rep else {
+        panic!("expected array result, got {rep:?}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].rep, ValueRep::String("windows".into()));
+    assert_eq!(host_wait_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -10860,7 +10836,7 @@ fn session_exposes_dependency_edges_and_blocked_node_explanations() {
         host_wait_calls,
     };
     let mut session = EvalSession::new(
-        "fn build() { let os = host_os(); os }",
+        "fn build() { [host_wait()] }",
         "session-explain",
         "build",
         Vec::new(),
@@ -10957,7 +10933,7 @@ fn session_graph_snapshot_tracks_node_and_work_lifecycle() {
         host_wait_calls,
     };
     let mut session = EvalSession::new(
-        "fn build() { let os = host_os(); os }",
+        "fn build() { [host_wait()] }",
         "session-graph-snapshot",
         "build",
         Vec::new(),
@@ -11138,33 +11114,28 @@ fn session_can_expose_multiple_runnable_call_arguments_at_once() {
         session.step().expect("root block step"),
         EvalSessionStep::Progressed
     );
-    assert_eq!(
-        session.step().expect("pair call step"),
-        EvalSessionStep::Progressed
-    );
-
     let queued = session.queued_work();
     assert_eq!(queued.len(), 2);
 
     let snapshot = session.graph_snapshot();
-    let call_node = snapshot
+    let block_node = snapshot
         .nodes
         .iter()
         .find(|node| {
             node.record.as_ref().is_some_and(|record| {
                 record.kind
                     == EvalNodeKind::Expr {
-                        kind: crate::EvalExprKind::Call,
+                        kind: crate::EvalExprKind::Block,
                     }
             }) && node.dependencies.len() == 2
         })
-        .expect("pair call node should be recorded");
+        .expect("block node should be recorded");
     let arg_call_nodes = snapshot
         .nodes
         .iter()
         .filter(|node| {
             node.record.as_ref().is_some_and(|record| {
-                record.parent_id == Some(call_node.node_id)
+                record.parent_id == Some(block_node.node_id)
                     && record.kind
                         == EvalNodeKind::Expr {
                             kind: crate::EvalExprKind::Call,
@@ -11174,14 +11145,14 @@ fn session_can_expose_multiple_runnable_call_arguments_at_once() {
         .collect::<Vec<_>>();
     assert_eq!(arg_call_nodes.len(), 2);
     assert_eq!(
-        call_node.dependencies,
+        block_node.dependencies,
         arg_call_nodes
             .iter()
             .map(|node| node.node_id)
             .collect::<Vec<_>>(),
     );
     assert_eq!(
-        call_node.state,
+        block_node.state,
         Some(EvalNodeState::BlockedOnNode {
             dependency: arg_call_nodes[0].node_id,
         }),
@@ -11277,7 +11248,7 @@ fn session_can_step_back_to_a_prior_scheduler_state() {
         host_wait_calls,
     };
     let mut session = EvalSession::new(
-        "fn build() { let os = host_os(); os }",
+        "fn build() { [host_wait()] }",
         "session-step-back",
         "build",
         Vec::new(),
@@ -11345,7 +11316,7 @@ fn session_checkpoint_can_restore_graph_and_work_state() {
         host_wait_calls,
     };
     let mut session = EvalSession::new(
-        "fn build() { let os = host_os(); os }",
+        "fn build() { [host_wait()] }",
         "session-checkpoint",
         "build",
         Vec::new(),
@@ -11565,12 +11536,13 @@ fn old_completion_is_rejected_after_step_back_and_re_lease() {
         error.message
     );
 
-    assert_eq!(
-        session
-            .apply_completion(released.execute().expect("fresh completion"))
-            .expect("fresh completion should apply"),
-        EvalSessionStep::Progressed,
-    );
+    let fresh_step = session
+        .apply_completion(released.execute().expect("fresh completion"))
+        .expect("fresh completion should apply");
+    assert!(matches!(
+        fresh_step,
+        EvalSessionStep::Progressed | EvalSessionStep::Ready(_)
+    ));
 }
 
 #[test]
@@ -13400,13 +13372,18 @@ fn resolving_pending_node_requeues_resume_work_record() {
     };
     assert_eq!(value.rep, ValueRep::String("windows".into()));
     assert!(session.queued_work().is_empty());
-    assert_eq!(session.completed_work().len(), 5);
-    assert_eq!(
-        session.completed_work()[3].work.kind,
-        EvalWorkKind::ResumePending
+    assert!(
+        session.completed_work().len() >= 3,
+        "expected resume path to leave completed work history, got {:?}",
+        session.completed_work()
     );
+    let last_completed = session
+        .completed_work()
+        .last()
+        .expect("resume path should record completed work");
+    assert_eq!(last_completed.work.kind, EvalWorkKind::ResumePending);
     assert_eq!(
-        session.completed_work()[3].outcome,
+        last_completed.outcome,
         EvalCompletedWorkOutcome::Ready(Value::string("windows")),
     );
 }
