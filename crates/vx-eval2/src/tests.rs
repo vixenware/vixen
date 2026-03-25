@@ -1299,12 +1299,7 @@ fn compiled_program_caches_resolved_call_exec_plan() {
     let call = program
         .resolve_call_plan(plan.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
-    let callee = call
-        .callee
-        .map(|callee| program.resolve_call_callee_plan(callee))
-        .transpose()
-        .expect("resolve cached call callee payload");
-    let Some(callee) = callee else {
+    let Some(callee) = call.callee.as_ref() else {
         panic!("expected cached call callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);
@@ -1342,12 +1337,7 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
     let call = program
         .resolve_call_plan(plan.call_plan_id(call_expr.source()))
         .expect("resolve cached call payload");
-    let callee = call
-        .callee
-        .map(|callee| program.resolve_call_callee_plan(callee))
-        .transpose()
-        .expect("resolve cached call callee payload");
-    let Some(callee) = callee else {
+    let Some(callee) = call.callee.as_ref() else {
         panic!("expected cached static member callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);
@@ -1355,6 +1345,41 @@ fn compiled_program_caches_static_member_call_callee_direct_plan() {
         .resolve_direct_call_callee_plan(callee.direct_call_callee_plan_id(call_expr.source()))
         .expect("resolve direct static member payload");
     assert_eq!(direct.kind(), DirectCallCalleePlanKind::StaticMember);
+}
+
+#[test]
+fn compiled_program_caches_dynamic_call_callee_as_body_ref() {
+    let program = CompiledProgram::new(
+        "cached-dynamic-call-callee-plan",
+        "fn build() { ((value) => value)(42) }",
+    );
+    let function = program.find_function("build").expect("find build function");
+    let body = function.body.expect("build function should have a body");
+    let expr = program
+        .resolve_expr_id(body)
+        .expect("resolve build body expr");
+    let ExprKind::Block(block) = expr.kind() else {
+        panic!("expected build body to lower to a block expression, got {expr:?}");
+    };
+    let block_body = program
+        .resolve_block_body(block.body)
+        .expect("resolve lowered block body");
+    let BlockStep::Expr(call_expr) = block_body.steps[0] else {
+        panic!("expected lowered block to contain call expression");
+    };
+    let plan = program
+        .resolve_expr_plan(call_expr)
+        .expect("resolve cached call plan");
+    assert_eq!(plan.kind(), ExprExecKind::Access);
+    assert_eq!(plan.access_kind(), AccessPlanKind::Call);
+    let call = program
+        .resolve_call_plan(plan.call_plan_id(call_expr.source()))
+        .expect("resolve cached call payload");
+    let Some(callee) = call.callee.as_ref() else {
+        panic!("expected cached dynamic call callee");
+    };
+    assert_eq!(callee.kind(), CallCalleePlanKind::Expr);
+    assert_ne!(callee.expr_body().plan().kind(), ExprExecKind::Expr);
 }
 
 #[test]
@@ -1609,16 +1634,10 @@ fn compiled_program_caches_where_exec_plan() {
     } = program
         .resolve_where_plan(plan.where_plan_id(where_expr.source()))
         .expect("resolve cached where payload");
-    let call = call.expect("cached where plan should contain call");
-    let call = program
-        .resolve_call_plan(call)
-        .expect("resolve cached nested where call payload");
-    let callee = call
-        .callee
-        .map(|callee| program.resolve_call_callee_plan(callee))
-        .transpose()
-        .expect("resolve cached where callee payload");
-    let Some(callee) = callee else {
+    let call = call
+        .as_ref()
+        .expect("cached where plan should contain call");
+    let Some(callee) = call.callee.as_ref() else {
         panic!("expected cached where callee to lower to a direct plan");
     };
     assert_eq!(callee.kind(), CallCalleePlanKind::Direct);

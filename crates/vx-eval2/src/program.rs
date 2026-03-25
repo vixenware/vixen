@@ -253,18 +253,6 @@ impl CallPlanId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct CallCalleePlanId {
-    source: u32,
-    index: u32,
-}
-
-impl CallCalleePlanId {
-    pub(crate) fn source(self) -> SourceId {
-        SourceId(self.source)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct DirectCallCalleePlanId {
     source: u32,
     index: u32,
@@ -1089,11 +1077,24 @@ pub(crate) enum CallCalleePlanKind {
 pub(crate) struct CallCalleePlan {
     kind: CallCalleePlanKind,
     payload: u32,
+    expr: Option<ExprBodyRef>,
 }
 
 impl CallCalleePlan {
     fn new(kind: CallCalleePlanKind, payload: u32) -> Self {
-        Self { kind, payload }
+        Self {
+            kind,
+            payload,
+            expr: None,
+        }
+    }
+
+    fn expr(expr: ExprBodyRef) -> Self {
+        Self {
+            kind: CallCalleePlanKind::Expr,
+            payload: 0,
+            expr: Some(expr),
+        }
     }
 
     pub(crate) fn kind(&self) -> CallCalleePlanKind {
@@ -1124,19 +1125,17 @@ impl CallCalleePlan {
         }
     }
 
-    pub(crate) fn expr_id(&self, source: SourceId) -> ExprId {
+    pub(crate) fn expr_body(&self) -> ExprBodyRef {
         debug_assert_eq!(self.kind, CallCalleePlanKind::Expr);
-        ExprId {
-            source: source.0,
-            index: self.payload,
-        }
+        self.expr
+            .expect("call callee expr plan should carry a cached body ref")
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallPlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) callee: Option<CallCalleePlanId>,
+    pub(crate) callee: Option<CallCalleePlan>,
     pub(crate) type_args: Arc<[Ty]>,
     pub(crate) positional_args: Arc<[ExprBodyRef]>,
 }
@@ -1152,7 +1151,7 @@ pub(crate) struct FieldPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WherePlan {
     pub(crate) handle: ProgramNodeHandle,
-    pub(crate) call: Option<CallPlanId>,
+    pub(crate) call: Option<CallPlan>,
     pub(crate) keyword_bindings: Arc<[KeywordBindingPlan]>,
 }
 
@@ -1643,7 +1642,6 @@ struct ExprPlanTables {
     variant_constructor_direct_call_callee_plans: Vec<VariantConstructorDirectCallCalleePlan>,
     newtype_constructor_direct_call_callee_plans: Vec<NewtypeConstructorDirectCallCalleePlan>,
     static_member_direct_call_callee_plans: Vec<StaticMemberDirectCallCalleePlan>,
-    call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
@@ -1679,7 +1677,6 @@ struct CompiledProgramSource {
     variant_constructor_direct_call_callee_plans: Vec<VariantConstructorDirectCallCalleePlan>,
     newtype_constructor_direct_call_callee_plans: Vec<NewtypeConstructorDirectCallCalleePlan>,
     static_member_direct_call_callee_plans: Vec<StaticMemberDirectCallCalleePlan>,
-    call_callee_plans: Vec<CallCalleePlan>,
     call_plans: Vec<CallPlan>,
     field_plans: Vec<FieldPlan>,
     where_plans: Vec<WherePlan>,
@@ -1917,13 +1914,6 @@ impl CompiledProgram {
     ) -> Result<&StaticMemberDirectCallCalleePlan, EvalError> {
         self.source(source)?
             .resolve_static_member_direct_call_callee_plan(index)
-    }
-
-    pub(crate) fn resolve_call_callee_plan(
-        &self,
-        id: CallCalleePlanId,
-    ) -> Result<&CallCalleePlan, EvalError> {
-        self.source(id.source())?.resolve_call_callee_plan(id)
     }
 
     pub(crate) fn resolve_call_plan(&self, id: CallPlanId) -> Result<&CallPlan, EvalError> {
@@ -2356,7 +2346,6 @@ impl CompiledProgramSource {
         let variant_constructor_direct_call_callee_plans = Vec::new();
         let newtype_constructor_direct_call_callee_plans = Vec::new();
         let static_member_direct_call_callee_plans = Vec::new();
-        let call_callee_plans = Vec::new();
         let call_plans = Vec::new();
         let field_plans = Vec::new();
         let where_plans = Vec::new();
@@ -2436,7 +2425,6 @@ impl CompiledProgramSource {
             variant_constructor_direct_call_callee_plans,
             newtype_constructor_direct_call_callee_plans,
             static_member_direct_call_callee_plans,
-            call_callee_plans,
             call_plans,
             field_plans,
             where_plans,
@@ -2781,18 +2769,6 @@ impl CompiledProgramSource {
             })
     }
 
-    fn resolve_call_callee_plan(&self, id: CallCalleePlanId) -> Result<&CallCalleePlan, EvalError> {
-        self.ensure_parsed()?;
-        self.call_callee_plans
-            .get(id.index as usize)
-            .ok_or_else(|| {
-                EvalError::new(
-                    EvalErrorKind::Internal,
-                    format!("call callee plan {:?} was not found", id),
-                )
-            })
-    }
-
     fn resolve_call_plan(&self, id: CallPlanId) -> Result<&CallPlan, EvalError> {
         self.ensure_parsed()?;
         self.call_plans.get(id.index as usize).ok_or_else(|| {
@@ -3015,7 +2991,6 @@ impl CompiledProgramSource {
         self.newtype_constructor_direct_call_callee_plans =
             plans.newtype_constructor_direct_call_callee_plans;
         self.static_member_direct_call_callee_plans = plans.static_member_direct_call_callee_plans;
-        self.call_callee_plans = plans.call_callee_plans;
         self.call_plans = plans.call_plans;
         self.field_plans = plans.field_plans;
         self.where_plans = plans.where_plans;
@@ -3048,6 +3023,23 @@ impl CompiledProgramSource {
         let resolve_function = |function: &mut CompiledFunction, expr_plans: &[ExprExecPlan]| {
             function.body = function.body.map(|body| resolve(body, expr_plans));
         };
+        let resolve_call_callee = |plan: &mut CallCalleePlan, expr_plans: &[ExprExecPlan]| {
+            if let Some(expr) = plan.expr {
+                plan.expr = Some(resolve(expr, expr_plans));
+            }
+        };
+        let resolve_call = |plan: &mut CallPlan, expr_plans: &[ExprExecPlan]| {
+            if let Some(callee) = &mut plan.callee {
+                resolve_call_callee(callee, expr_plans);
+            }
+            plan.positional_args = Arc::from(
+                plan.positional_args
+                    .iter()
+                    .copied()
+                    .map(|body| resolve(body, expr_plans))
+                    .collect::<Vec<_>>(),
+            );
+        };
 
         for function in self.functions_by_name.values_mut() {
             resolve_function(function, &self.expr_plans);
@@ -3076,18 +3068,15 @@ impl CompiledProgramSource {
         }
 
         for plan in &mut self.call_plans {
-            plan.positional_args = Arc::from(
-                plan.positional_args
-                    .iter()
-                    .copied()
-                    .map(|body| resolve(body, &self.expr_plans))
-                    .collect::<Vec<_>>(),
-            );
+            resolve_call(plan, &self.expr_plans);
         }
         for plan in &mut self.field_plans {
             plan.receiver = plan.receiver.map(|body| resolve(body, &self.expr_plans));
         }
         for plan in &mut self.where_plans {
+            if let Some(call) = &mut plan.call {
+                resolve_call(call, &self.expr_plans);
+            }
             plan.keyword_bindings = Arc::from(
                 plan.keyword_bindings
                     .iter()
@@ -3349,15 +3338,6 @@ impl ExprPlanTables {
         let _ = source;
         self.static_member_direct_call_callee_plans.push(plan);
         index
-    }
-
-    fn push_call_callee(&mut self, source: SourceId, plan: CallCalleePlan) -> CallCalleePlanId {
-        let id = CallCalleePlanId {
-            source: source.0,
-            index: self.call_callee_plans.len() as u32,
-        };
-        self.call_callee_plans.push(plan);
-        id
     }
 
     fn push_call(&mut self, source: SourceId, plan: CallPlan) -> CallPlanId {
@@ -3808,17 +3788,17 @@ fn compile_call_callee_plan(
                 plans.push_field(source, plan).index,
             )
         }
-        CallCallee::Expr(expr) => CallCalleePlan::new(CallCalleePlanKind::Expr, expr.index),
+        CallCallee::Expr(expr) => CallCalleePlan::expr(ExprBodyRef::unresolved(*expr)),
     }
 }
 
 fn compile_call_plan(source: SourceId, call: &CallExpr, plans: &mut ExprPlanTables) -> CallPlan {
     CallPlan {
         handle: call.handle,
-        callee: call.callee.as_ref().map(|callee| {
-            let plan = compile_call_callee_plan(source, callee, plans);
-            plans.push_call_callee(source, plan)
-        }),
+        callee: call
+            .callee
+            .as_ref()
+            .map(|callee| compile_call_callee_plan(source, callee, plans)),
         type_args: Arc::clone(&call.type_args),
         positional_args: Arc::from(
             call.positional_args
@@ -3951,10 +3931,10 @@ fn compile_where_plan(
     where_expr: &WhereExpr,
     plans: &mut ExprPlanTables,
 ) -> WherePlan {
-    let call = where_expr.call.as_ref().map(|call| {
-        let call_plan = compile_call_plan(source, call, plans);
-        plans.push_call(source, call_plan)
-    });
+    let call = where_expr
+        .call
+        .as_ref()
+        .map(|call| compile_call_plan(source, call, plans));
     WherePlan {
         handle: where_expr.handle,
         call,

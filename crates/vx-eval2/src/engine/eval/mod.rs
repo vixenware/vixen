@@ -893,7 +893,7 @@ pub(super) fn eval_call_plan_with_node_id(
                 parent_id,
                 PlannedCallState {
                     call_source: state.program.span_for_handle(call.handle),
-                    callee_plan: call.callee,
+                    callee_plan: call.callee.clone(),
                     type_args: Arc::clone(&call.type_args),
                     positional_args: Arc::clone(&call.positional_args),
                     env,
@@ -1124,36 +1124,6 @@ pub(super) fn eval_child_expr(
         return eval_expr_with_node_id(state, child_id, expr, env);
     }
     let child_id = queue_child_expr(state, expr, env);
-    let resume_node = state
-        .current_parent()
-        .expect("child expression should have an active parent node");
-    Ok(wait_on_child_dependency(
-        state,
-        resume_node,
-        child_id,
-        Vec::new(),
-    ))
-}
-
-pub(super) fn eval_child_expr_id(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    expr: ExprId,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let body = PreparedBodyRef::from_expr_id(state.program, expr)?;
-    if !state.queue_child_work {
-        let child_id = state.alloc_node_id();
-        state.emit_current_dependency(child_id, Some(state.program.span_for_expr_id(expr)?));
-        return eval_prepared_body_with_node_id(
-            state,
-            child_id,
-            PreparedEntry {
-                body,
-                env: env.clone(),
-            },
-        );
-    }
-    let child_id = queue_child_expr_body(state, body, env);
     let resume_node = state
         .current_parent()
         .expect("child expression should have an active parent node");
@@ -1627,7 +1597,7 @@ fn eval_call_plan(
         parent_id,
         PlannedCallState {
             call_source: state.program.span_for_handle(call.handle),
-            callee_plan: call.callee,
+            callee_plan: call.callee.clone(),
             type_args: Arc::clone(&call.type_args),
             positional_args: Arc::clone(&call.positional_args),
             env: env.clone(),
@@ -1782,9 +1752,7 @@ fn eval_call_callee_plan(
         return Ok(EvalStep::Ready(value));
     }
     match callee.kind() {
-        CallCalleePlanKind::Expr => {
-            eval_child_expr_id(state, callee.expr_id(state.current_source()), env)
-        }
+        CallCalleePlanKind::Expr => eval_child_body_ref(state, callee.expr_body(), env),
         CallCalleePlanKind::Field => {
             let field = state
                 .program
@@ -2391,11 +2359,7 @@ fn continue_planned_call(
         });
     }
     if call.callee.is_none() {
-        let callee = call
-            .callee_plan
-            .map(|callee| state.program.resolve_call_callee_plan(callee))
-            .transpose()?;
-        let callee = callee.as_ref().ok_or_else(|| {
+        let callee = call.callee_plan.as_ref().ok_or_else(|| {
             EvalError::new(EvalErrorKind::Internal, "call expression has no callee")
         })?;
         if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, &call.env)? {
@@ -3260,18 +3224,14 @@ fn start_where_plan(
     where_expr: &WherePlan,
     env: &mut EvalEnv,
 ) -> Result<EvalStep, EvalError> {
-    let call_expr = where_expr.call.ok_or_else(|| {
+    let call_expr = where_expr.call.as_ref().ok_or_else(|| {
         EvalError::new(
             EvalErrorKind::Internal,
             "where expression currently requires a compiled call plan",
         )
     })?;
-    let call_expr = state.program.resolve_call_plan(call_expr)?;
     let callee = call_expr
         .callee
-        .map(|callee| state.program.resolve_call_callee_plan(callee))
-        .transpose()?;
-    let callee = callee
         .as_ref()
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
     let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? else {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::program::CallCalleePlanId;
+use crate::program::CallCalleePlan;
 
 pub(super) struct EvalState<'source, 'scheduler, Runtime, Sink> {
     pub(super) program: &'source CompiledProgram,
@@ -117,7 +117,7 @@ pub(super) enum PlannedCallResumeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlannedCallState {
     pub(super) call_source: SourceSpan,
-    pub(super) callee_plan: Option<CallCalleePlanId>,
+    pub(super) callee_plan: Option<CallCalleePlan>,
     pub(super) type_args: Arc<[Ty]>,
     pub(super) positional_args: Arc<[ExprBodyRef]>,
     pub(super) env: EvalEnv,
