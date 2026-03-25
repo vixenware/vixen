@@ -108,25 +108,6 @@ pub(super) struct BytecodeState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CallResumeKind {
-    Callee,
-    Arg,
-    JoinArgs,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CallState {
-    pub(super) call_source: SourceSpan,
-    pub(super) type_args: Arc<[Ty]>,
-    pub(super) env: EvalEnv,
-    pub(super) callee: Option<Value>,
-    pub(super) args: Vec<Value>,
-    pub(super) remaining_args: Arc<[ExprBodyRef]>,
-    pub(super) next_arg_index: usize,
-    pub(super) queued_arg_nodes: Vec<EvalNodeId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlannedCallResumeKind {
     Callee,
     Arg,
@@ -135,7 +116,6 @@ pub(super) enum PlannedCallResumeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlannedCallState {
-    pub(super) source_id: SourceId,
     pub(super) call_source: SourceSpan,
     pub(super) callee_plan: Option<CallCalleePlanId>,
     pub(super) type_args: Arc<[Ty]>,
@@ -320,12 +300,6 @@ pub(super) enum ContinuationFrame {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         slot: SlotState,
-    },
-    Call {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        call: CallState,
-        pending: CallResumeKind,
     },
     PlannedCall {
         node_id: EvalNodeId,

@@ -892,7 +892,6 @@ pub(super) fn eval_call_plan_with_node_id(
                 node_id,
                 parent_id,
                 PlannedCallState {
-                    source_id: root_expr_id.source(),
                     call_source: state.program.span_for_handle(call.handle),
                     callee_plan: call.callee,
                     type_args: Arc::clone(&call.type_args),
@@ -1622,103 +1621,18 @@ fn eval_call_plan(
         .copied()
         .expect("call expression should have an active trace node");
     let parent_id = state.stack.iter().rev().nth(1).copied();
-    start_call_plan(state, node_id, parent_id, call, env)
-}
-
-fn start_call_plan(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    call: &CallPlan,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let callee = call
-        .callee
-        .map(|callee| state.program.resolve_call_callee_plan(callee))
-        .transpose()?;
-    let callee = callee
-        .as_ref()
-        .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "call expression has no callee"))?;
-    let call_source = state.program.span_for_handle(call.handle);
-    let type_args = Arc::clone(&call.type_args);
-    let positional_args: Arc<[ExprBodyRef]> = Arc::clone(&call.positional_args);
-    if let Some(callee_value) = immediate_call_callee_plan_value(state, callee, env)? {
-        if state.queue_child_work && !positional_args.is_empty() {
-            let child_nodes = positional_args
-                .iter()
-                .map(|arg| queue_child_body_ref(state, *arg, env))
-                .collect::<Vec<_>>();
-            return Ok(wait_on_child_dependency(
-                state,
-                node_id,
-                child_nodes[0],
-                vec![ContinuationFrame::Call {
-                    node_id,
-                    parent_id,
-                    call: CallState {
-                        call_source,
-                        type_args: Arc::clone(&type_args),
-                        env: empty_env(),
-                        callee: Some(callee_value),
-                        args: Vec::new(),
-                        remaining_args: Arc::from([]),
-                        next_arg_index: 0,
-                        queued_arg_nodes: child_nodes,
-                    },
-                    pending: CallResumeKind::JoinArgs,
-                }],
-            ));
-        }
-        return continue_call(
-            state,
-            node_id,
-            parent_id,
-            CallState {
-                call_source,
-                type_args: Arc::clone(&type_args),
-                env: env.clone(),
-                callee: Some(callee_value),
-                args: Vec::new(),
-                remaining_args: Arc::clone(&positional_args),
-                next_arg_index: 0,
-                queued_arg_nodes: Vec::new(),
-            },
-        );
-    }
-    let callee_value = match eval_call_callee_plan(state, callee, env)? {
-        EvalStep::Ready(value) => value,
-        EvalStep::Suspended(suspension) => {
-            return Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::Call {
-                    node_id,
-                    parent_id,
-                    call: CallState {
-                        call_source,
-                        type_args: Arc::clone(&type_args),
-                        env: env.clone(),
-                        callee: None,
-                        args: Vec::new(),
-                        remaining_args: Arc::clone(&positional_args),
-                        next_arg_index: 0,
-                        queued_arg_nodes: Vec::new(),
-                    },
-                    pending: CallResumeKind::Callee,
-                },
-            ));
-        }
-    };
-    continue_call(
+    continue_planned_call(
         state,
         node_id,
         parent_id,
-        CallState {
-            call_source,
-            type_args,
+        PlannedCallState {
+            call_source: state.program.span_for_handle(call.handle),
+            callee_plan: call.callee,
+            type_args: Arc::clone(&call.type_args),
+            positional_args: Arc::clone(&call.positional_args),
             env: env.clone(),
-            callee: Some(callee_value),
+            callee: None,
             args: Vec::new(),
-            remaining_args: positional_args,
             next_arg_index: 0,
             queued_arg_nodes: Vec::new(),
         },
@@ -2561,64 +2475,6 @@ fn continue_planned_call(
         Arc::clone(&call.type_args),
         call.callee
             .expect("planned call should have a callee before dispatch"),
-        call.args,
-    )
-}
-
-pub(super) fn continue_call(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut call: CallState,
-) -> Result<EvalStep, EvalError> {
-    if state.current_parent() != Some(node_id) {
-        return state.with_active_node(node_id, |state| {
-            continue_call(state, node_id, parent_id, call)
-        });
-    }
-    while let Some(arg_handle) = call.remaining_args.get(call.next_arg_index).copied() {
-        call.next_arg_index += 1;
-        let arg_index = call.args.len();
-        let callee = call
-            .callee
-            .as_ref()
-            .expect("call should have a callee before evaluating arguments");
-        let adapter =
-            function_adapter_value_for_arg(state, callee, arg_index, arg_handle, &call.env)?;
-        let arg_step = match adapter {
-            Some(value) => EvalStep::Ready(value),
-            None => eval_dependent_body_ref(state, node_id, arg_handle, &mut call.env)?,
-        };
-        match arg_step {
-            EvalStep::Ready(value) => call.args.push(value),
-            EvalStep::Suspended(suspension) => {
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Call {
-                        node_id,
-                        parent_id,
-                        call,
-                        pending: CallResumeKind::Arg,
-                    },
-                ));
-            }
-        }
-    }
-    let CallState {
-        call_source,
-        type_args,
-        callee,
-        queued_arg_nodes,
-        ..
-    } = call;
-    debug_assert!(queued_arg_nodes.is_empty());
-    dispatch_call(
-        state,
-        node_id,
-        parent_id,
-        call_source,
-        type_args,
-        callee.expect("call should have a callee before dispatch"),
         call.args,
     )
 }
@@ -3518,34 +3374,36 @@ fn eval_call_with_keyword_bindings(
             state,
             node_id,
             child_nodes[0],
-            vec![ContinuationFrame::Call {
+            vec![ContinuationFrame::PlannedCall {
                 node_id,
                 parent_id,
-                call: CallState {
+                call: PlannedCallState {
                     call_source,
+                    callee_plan: None,
                     type_args: Arc::clone(&type_args),
+                    positional_args: Arc::from([]),
                     env: empty_env(),
                     callee: Some(callee_value),
                     args: Vec::new(),
-                    remaining_args: Arc::from([]),
                     next_arg_index: 0,
                     queued_arg_nodes: child_nodes,
                 },
-                pending: CallResumeKind::JoinArgs,
+                pending: PlannedCallResumeKind::JoinArgs,
             }],
         ));
     }
-    continue_call(
+    continue_planned_call(
         state,
         node_id,
         parent_id,
-        CallState {
+        PlannedCallState {
             call_source,
+            callee_plan: None,
             type_args,
+            positional_args,
             env,
             callee: Some(callee_value),
             args: Vec::new(),
-            remaining_args: positional_args,
             next_arg_index: 0,
             queued_arg_nodes: Vec::new(),
         },
