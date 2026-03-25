@@ -595,7 +595,7 @@ fn function_adapter_value_for_arg(
     callee: &Value,
     arg_index: usize,
     arg: ExprBodyRef,
-    env: &EvalEnv,
+    captures: Arc<FunctionCaptures>,
 ) -> Result<Option<Value>, EvalError> {
     let ValueRep::Function(function) = &callee.rep else {
         return Ok(None);
@@ -616,7 +616,7 @@ fn function_adapter_value_for_arg(
         false,
         Some(arg),
         bytecode_entry,
-        captures_from_scope(env),
+        captures,
         None,
     );
     Ok(Some(Value::function(function).with_provenance(
@@ -627,7 +627,7 @@ fn function_adapter_value_for_arg(
 pub(super) fn bind_named_function_decl(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     function: &crate::program::FunctionStmt,
-    scope: &EvalEnv,
+    captures: Arc<FunctionCaptures>,
 ) -> Result<(String, SourceSpan, Value), EvalError> {
     let name = function.name.to_string();
     let name_source = state.program.span_for_handle(function.compiled.definition);
@@ -637,7 +637,7 @@ pub(super) fn bind_named_function_decl(
         state,
         compiled_name.clone(),
         compiled,
-        captures_from_scope(scope),
+        captures,
         Some(compiled_name.clone()),
     );
     let value = Value::function(function)
@@ -650,7 +650,7 @@ fn eval_closure_body(
     handle: ProgramNodeHandle,
     parameters: Arc<[CompiledParameter]>,
     body: Option<ExprBodyRef>,
-    env: &EvalEnv,
+    captures: Arc<FunctionCaptures>,
 ) -> Result<Value, EvalError> {
     let body = body
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "closure expression has no body"))?;
@@ -663,7 +663,7 @@ fn eval_closure_body(
         false,
         Some(body),
         bytecode_entry,
-        captures_from_scope(env),
+        captures,
         None,
     );
     Ok(Value::function(function).with_provenance(Provenance::literal(closure_source)))
@@ -979,7 +979,7 @@ fn eval_closure_plan(
         closure.handle,
         Arc::clone(&closure.parameters),
         closure.body,
-        env,
+        captures_from_scope(env),
     )
 }
 
@@ -1307,7 +1307,13 @@ fn eval_ready_plan_in_bytecode(
                 .program
                 .resolve_closure_plan(ready.closure_plan_id(state.current_source()))?;
             let scope = bytecode_scope_snapshot(state.program, bytecode)?;
-            eval_closure_plan(state, closure, scope.as_ref())
+            eval_closure_body(
+                state,
+                closure.handle,
+                Arc::clone(&closure.parameters),
+                closure.body,
+                scope,
+            )
         }
         ReadyPlanKind::NameRef => {
             let name_ref = state
@@ -2734,7 +2740,6 @@ pub(super) fn continue_bytecode_body(
         } else {
             Arc::clone(&bytecode.scope)
         };
-        let scope = bytecode_scope.as_ref();
         while let Some(arg_handle) = call.positional_args.get(call.next_arg_index).copied() {
             call.next_arg_index += 1;
             let arg_index = call.args.len();
@@ -2742,8 +2747,13 @@ pub(super) fn continue_bytecode_body(
                 .callee
                 .as_ref()
                 .expect("planned call should have a callee before evaluating arguments");
-            let adapter =
-                function_adapter_value_for_arg(state, callee, arg_index, arg_handle, scope)?;
+            let adapter = function_adapter_value_for_arg(
+                state,
+                callee,
+                arg_index,
+                arg_handle,
+                Arc::clone(&bytecode_scope),
+            )?;
             let arg_step = match adapter {
                 Some(value) => EvalStep::Ready(value),
                 None => eval_dependent_bytecode_body_ref(state, node_id, arg_handle, bytecode)?,
@@ -4486,7 +4496,7 @@ pub(super) fn continue_bytecode_body(
             } => {
                 let scope = bytecode_scope_snapshot(state.program, &mut bytecode)?;
                 let (name, _name_source, value) = state.with_source(source, |state| {
-                    bind_named_function_decl(state, function, scope.as_ref())
+                    bind_named_function_decl(state, function, Arc::clone(&scope))
                 })?;
                 if let Some(slot) = local_slot {
                     bytecode.locals[*slot as usize] = Some(value);
