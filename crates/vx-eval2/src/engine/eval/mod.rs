@@ -1157,101 +1157,6 @@ fn ready_plan_source(
     }
 }
 
-fn expr_plan_source(
-    program: &CompiledProgram,
-    source: SourceId,
-    plan: ExprExecPlan,
-) -> Result<SourceSpan, EvalError> {
-    match plan.kind() {
-        ExprExecKind::Ready => ready_plan_source(program, source, plan),
-        ExprExecKind::Access => match plan.access_kind() {
-            AccessPlanKind::Paren => Ok(program.span_for_handle(
-                program
-                    .resolve_paren_plan(plan.paren_plan_id(source))?
-                    .handle,
-            )),
-            AccessPlanKind::Call => Ok(program
-                .span_for_handle(program.resolve_call_plan(plan.call_plan_id(source))?.handle)),
-            AccessPlanKind::Field => Ok(program.span_for_handle(
-                program
-                    .resolve_field_plan(plan.field_plan_id(source))?
-                    .handle,
-            )),
-        },
-        ExprExecKind::Builder => {
-            match plan.builder_kind() {
-                BuilderPlanKind::Array => Ok(program.span_for_handle(
-                    program
-                        .resolve_array_plan(plan.array_plan_id(source))?
-                        .handle,
-                )),
-                BuilderPlanKind::Tuple => Ok(program.span_for_handle(
-                    program
-                        .resolve_tuple_plan(plan.tuple_plan_id(source))?
-                        .handle,
-                )),
-                BuilderPlanKind::Range => Ok(program.span_for_handle(
-                    program
-                        .resolve_range_plan(plan.range_plan_id(source))?
-                        .handle,
-                )),
-                BuilderPlanKind::Map => Ok(program
-                    .span_for_handle(program.resolve_map_plan(plan.map_plan_id(source))?.handle)),
-                BuilderPlanKind::InterpolatedString => Ok(program.span_for_handle(
-                    program
-                        .resolve_interpolated_string_plan(plan.interpolated_string_plan_id(source))?
-                        .handle,
-                )),
-                BuilderPlanKind::StructLiteral => Ok(program.span_for_handle(
-                    program
-                        .resolve_struct_literal_plan(plan.struct_literal_plan_id(source))?
-                        .handle,
-                )),
-            }
-        }
-        ExprExecKind::Control => {
-            match plan.control_kind() {
-                ControlPlanKind::Fail => Ok(program
-                    .span_for_handle(program.resolve_fail_plan(plan.fail_plan_id(source))?.handle)),
-                ControlPlanKind::Fallible => Ok(program.span_for_handle(
-                    program
-                        .resolve_fallible_plan(plan.fallible_plan_id(source))?
-                        .handle,
-                )),
-                ControlPlanKind::If => Ok(program
-                    .span_for_handle(program.resolve_if_plan(plan.if_plan_id(source))?.handle)),
-                ControlPlanKind::Match => Ok(program.span_for_handle(
-                    program
-                        .resolve_match_plan(plan.match_plan_id(source))?
-                        .handle,
-                )),
-                ControlPlanKind::Where => Ok(program.span_for_handle(
-                    program
-                        .resolve_where_plan(plan.where_plan_id(source))?
-                        .handle,
-                )),
-                ControlPlanKind::Prefix => Ok(program.span_for_handle(
-                    program
-                        .resolve_prefix_plan(plan.prefix_plan_id(source))?
-                        .handle,
-                )),
-                ControlPlanKind::Binary => Ok(program.span_for_handle(
-                    program
-                        .resolve_binary_plan(plan.binary_plan_id(source))?
-                        .handle,
-                )),
-            }
-        }
-        ExprExecKind::Block | ExprExecKind::Expr => Err(EvalError::new(
-            EvalErrorKind::Internal,
-            format!(
-                "bytecode op does not support direct plan kind {:?}",
-                plan.kind()
-            ),
-        )),
-    }
-}
-
 fn eval_builder_plan(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     builder: ExprExecPlan,
@@ -1670,15 +1575,22 @@ fn static_member_value(
     handle: ProgramNodeHandle,
     static_member: &StaticMemberPlan,
 ) -> Result<Value, EvalError> {
+    static_member_value_from_source(state, state.program.span_for_handle(handle), static_member)
+}
+
+fn static_member_value_from_source(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    source: SourceSpan,
+    static_member: &StaticMemberPlan,
+) -> Result<Value, EvalError> {
     if let Some(constructor) = &static_member.variant_constructor {
         return Ok(enum_constructor_or_value(
             state,
             constructor.name.clone(),
             constructor.fields.clone(),
-            state.program.span_for_handle(handle),
+            source,
         ));
     }
-    let source = state.program.span_for_handle(handle);
     Ok(Value::function(FunctionRef::new(
         state.program.source_id(state.current_source()),
         static_member.full_name.clone(),
@@ -2880,6 +2792,33 @@ fn eval_fallible_inner(
     }
 }
 
+fn continue_bytecode_fallible(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    bytecode: &mut BytecodeState,
+    fallible_source: SourceSpan,
+    expr: Option<ExprBodyRef>,
+    resumed: Option<Result<Value, EvalError>>,
+) -> Result<EvalStep, EvalError> {
+    if let Some(result) = resumed {
+        return Ok(wrap_fallible_result(result, fallible_source));
+    }
+    let Some(expr) = expr else {
+        return Err(EvalError::new(
+            EvalErrorKind::Internal,
+            "fallible expression has no operand",
+        ));
+    };
+    match eval_dependent_body_ref(state, node_id, expr, &mut bytecode.scope) {
+        Ok(EvalStep::Ready(value)) => Ok(wrap_fallible_result(Ok(value), fallible_source)),
+        Ok(EvalStep::Suspended(suspension)) => {
+            bytecode.pending = Some(BytecodePendingState::Fallible { fallible_source });
+            Ok(EvalStep::Suspended(suspension))
+        }
+        Err(error) => Ok(wrap_fallible_result(Err(error), fallible_source)),
+    }
+}
+
 pub(super) fn user_fail_error(value: Value) -> EvalError {
     match &value.rep {
         ValueRep::String(message) => EvalError::new(EvalErrorKind::UserFail, message.clone()),
@@ -3452,25 +3391,6 @@ pub(super) fn continue_bytecode_body(
                 );
                 Err(error)
             }
-        }
-    }
-
-    fn eval_bytecode_plan(
-        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-        plan: ExprExecPlan,
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        env: &mut EvalEnv,
-    ) -> Result<EvalStep, EvalError> {
-        match plan.kind() {
-            ExprExecKind::Ready => eval_ready_plan(state, plan, env).map(EvalStep::Ready),
-            ExprExecKind::Access => eval_access_plan(state, node_id, parent_id, plan, env),
-            ExprExecKind::Builder => eval_builder_plan(state, plan, env),
-            ExprExecKind::Control => eval_control_plan(state, plan, env),
-            ExprExecKind::Block | ExprExecKind::Expr => Err(EvalError::new(
-                EvalErrorKind::Internal,
-                format!("bytecode op cannot execute plan kind {:?}", plan.kind()),
-            )),
         }
     }
 
@@ -4791,6 +4711,22 @@ pub(super) fn continue_bytecode_body(
                     expr_nodes,
                     string_source,
                 )?,
+                BytecodePendingState::Fallible { fallible_source } => {
+                    let value = bytecode.acc.take().ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            "bytecode fallible resumed without an operand value",
+                        )
+                    })?;
+                    continue_bytecode_fallible(
+                        state,
+                        node_id,
+                        &mut bytecode,
+                        fallible_source,
+                        None,
+                        Some(Ok(value)),
+                    )?
+                }
                 BytecodePendingState::Call { call, pending } => continue_bytecode_planned_call(
                     state,
                     node_id,
@@ -4881,6 +4817,32 @@ pub(super) fn continue_bytecode_body(
                     node_id,
                     parent_id,
                     Some(name_source.clone()),
+                    EvalEventKind::ExitReady {
+                        reuse: value.meta.reuse.clone(),
+                        crossing: value.meta.crossing.clone(),
+                    },
+                );
+                bytecode.pc += 1;
+                bytecode.acc = Some(value);
+            }
+            BytecodeOp::EvalStaticMember {
+                field_source,
+                static_member,
+            } => {
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(field_source.clone()),
+                    EvalEventKind::EnterExpr {
+                        kind: EvalExprKind::Field,
+                    },
+                );
+                let value =
+                    static_member_value_from_source(state, field_source.clone(), static_member)?;
+                state.emit(
+                    node_id,
+                    parent_id,
+                    Some(field_source.clone()),
                     EvalEventKind::ExitReady {
                         reuse: value.meta.reuse.clone(),
                         crossing: value.meta.crossing.clone(),
@@ -5006,6 +4968,23 @@ pub(super) fn continue_bytecode_body(
                     }
                 }
             }
+            BytecodeOp::StartFallible(fallible) => {
+                bytecode.pc += 1;
+                let step = continue_bytecode_fallible(
+                    state,
+                    node_id,
+                    &mut bytecode,
+                    state.program.span_for_handle(fallible.handle),
+                    fallible.expr,
+                    None,
+                )?;
+                match step {
+                    EvalStep::Ready(value) => bytecode.acc = Some(value),
+                    EvalStep::Suspended(suspension) => {
+                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
+                    }
+                }
+            }
             BytecodeOp::StartMatch(match_plan) => {
                 bytecode.pc += 1;
                 let scope = bytecode.scope.clone();
@@ -5050,38 +5029,6 @@ pub(super) fn continue_bytecode_body(
                 match state.with_source(source, |state| {
                     eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
                 })? {
-                    EvalStep::Ready(value) => bytecode.acc = Some(value),
-                    EvalStep::Suspended(suspension) => {
-                        return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));
-                    }
-                }
-            }
-            BytecodeOp::EvalPlan(body_ref) => {
-                bytecode.pc += 1;
-                let body_source = body_ref.expr_id().source();
-                let plan = body_ref.plan();
-                let step = if state.queue_child_work && plan.kind() != ExprExecKind::Ready {
-                    state.with_source(body_source, |state| {
-                        eval_dependent_body_ref(state, node_id, *body_ref, &mut bytecode.scope)
-                    })?
-                } else {
-                    let child_id = state.alloc_node_id();
-                    let kind = plan.trace_kind();
-                    let child_source = expr_plan_source(state.program, body_source, plan)?;
-                    state.emit_current_dependency(child_id, Some(child_source.clone()));
-                    state.with_source(body_source, |state| {
-                        eval_node_with_kind(state, child_id, kind, child_source, |state| {
-                            eval_bytecode_plan(
-                                state,
-                                plan,
-                                child_id,
-                                Some(node_id),
-                                &mut bytecode.scope,
-                            )
-                        })
-                    })?
-                };
-                match step {
                     EvalStep::Ready(value) => bytecode.acc = Some(value),
                     EvalStep::Suspended(suspension) => {
                         return Ok(suspend_bytecode(suspension, node_id, parent_id, bytecode));

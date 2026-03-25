@@ -1313,6 +1313,10 @@ pub(crate) enum BytecodeOp {
         slot: u32,
         source: SourceSpan,
     },
+    EvalStaticMember {
+        field_source: SourceSpan,
+        static_member: StaticMemberPlan,
+    },
     EvalBytecodeBody(BytecodeBodyId),
     StartArray(ArrayPlan),
     StartTuple(TuplePlan),
@@ -1321,10 +1325,10 @@ pub(crate) enum BytecodeOp {
     StartInterpolatedString(InterpolatedStringPlan),
     StartStructLiteral(StructLiteralPlan),
     StartCall(CallPlan),
+    StartFallible(FalliblePlan),
     StartMatch(MatchPlan),
     StartWhere(WherePlan),
     EvalBody(ExprBodyRef),
-    EvalPlan(ExprBodyRef),
     EvalIfBranches {
         then_branch: ExprBodyRef,
         else_branch: ExprBodyRef,
@@ -4731,6 +4735,210 @@ fn compile_block_step(
     })
 }
 
+fn local_slot_for_name(
+    local_slots: &mut HashMap<String, u32>,
+    local_slot_defs: &mut Vec<BytecodeLocalSlot>,
+    name: &str,
+    prefill_from_scope: bool,
+) -> u32 {
+    if let Some(&slot) = local_slots.get(name) {
+        if prefill_from_scope && let Some(existing) = local_slot_defs.get_mut(slot as usize) {
+            existing.prefill_from_scope = true;
+        }
+        return slot;
+    }
+    let slot = local_slot_defs.len() as u32;
+    local_slots.insert(name.to_string(), slot);
+    local_slot_defs.push(BytecodeLocalSlot {
+        name: Arc::from(name),
+        prefill_from_scope,
+    });
+    slot
+}
+
+fn push_eval_ops(
+    source: &CompiledProgramSource,
+    ops: &mut Vec<BytecodeOp>,
+    local_slots: &mut HashMap<String, u32>,
+    local_slot_defs: &mut Vec<BytecodeLocalSlot>,
+    expr: ExprBodyRef,
+) {
+    let plan = expr.plan();
+    match plan.kind() {
+        ExprExecKind::Ready if plan.ready_kind() == ReadyPlanKind::NameRef => {
+            let name_ref = source
+                .resolve_name_ref_plan(plan.name_ref_plan_id(expr.expr_id().source()))
+                .expect("bytecode name ref plan should resolve");
+            if name_ref.resolved.is_none() {
+                let slot =
+                    local_slot_for_name(local_slots, local_slot_defs, name_ref.name.as_ref(), true);
+                ops.push(BytecodeOp::LoadLocal {
+                    slot,
+                    source: source.span_for_range(name_ref.handle.to_range()),
+                });
+                return;
+            }
+            ops.push(BytecodeOp::EvalReady(plan));
+        }
+        ExprExecKind::Ready => ops.push(BytecodeOp::EvalReady(plan)),
+        ExprExecKind::Block => {
+            ops.push(BytecodeOp::EvalBytecodeBody(
+                plan.block_body_id(expr.expr_id().source()).into(),
+            ));
+        }
+        ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Paren => {
+            let paren = source
+                .resolve_paren_plan(plan.paren_plan_id(expr.expr_id().source()))
+                .expect("bytecode paren plan should resolve");
+            let Some(inner) = paren.expr else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
+        }
+        ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Call => {
+            let call = source
+                .resolve_call_plan(plan.call_plan_id(expr.expr_id().source()))
+                .expect("bytecode call plan should resolve");
+            ops.push(BytecodeOp::StartCall(call.clone()));
+        }
+        ExprExecKind::Access if plan.access_kind() == AccessPlanKind::Field => {
+            let field = source
+                .resolve_field_plan(plan.field_plan_id(expr.expr_id().source()))
+                .expect("bytecode field plan should resolve");
+            let (Some(receiver), Some(field_name)) = (field.receiver, field.field_name.as_ref())
+            else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            if let Some(static_member) = &field.static_member {
+                ops.push(BytecodeOp::EvalStaticMember {
+                    field_source: source.span_for_range(field.handle.to_range()),
+                    static_member: static_member.clone(),
+                });
+                return;
+            }
+            push_eval_ops(source, ops, local_slots, local_slot_defs, receiver);
+            ops.push(BytecodeOp::ProjectField {
+                field_name: Arc::clone(field_name),
+                field_source: source.span_for_range(field.handle.to_range()),
+            });
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::If => {
+            let if_plan = source
+                .resolve_if_plan(plan.if_plan_id(expr.expr_id().source()))
+                .expect("bytecode if plan should resolve");
+            let (Some(condition), Some(then_branch), Some(else_branch)) =
+                (if_plan.condition, if_plan.then_branch, if_plan.else_branch)
+            else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            push_eval_ops(source, ops, local_slots, local_slot_defs, condition);
+            ops.push(BytecodeOp::EvalIfBranches {
+                then_branch,
+                else_branch,
+            });
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Prefix => {
+            let prefix = source
+                .resolve_prefix_plan(plan.prefix_plan_id(expr.expr_id().source()))
+                .expect("bytecode prefix plan should resolve");
+            let (Some(operator), Some(operand)) = (prefix.operator, prefix.expr) else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            push_eval_ops(source, ops, local_slots, local_slot_defs, operand);
+            ops.push(BytecodeOp::ApplyPrefix(operator));
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Binary => {
+            let binary = source
+                .resolve_binary_plan(plan.binary_plan_id(expr.expr_id().source()))
+                .expect("bytecode binary plan should resolve");
+            let (Some(operator), Some(lhs), Some(rhs)) = (binary.operator, binary.lhs, binary.rhs)
+            else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            push_eval_ops(source, ops, local_slots, local_slot_defs, lhs);
+            ops.push(BytecodeOp::EvalBinary { operator, rhs });
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Fail => {
+            let fail = source
+                .resolve_fail_plan(plan.fail_plan_id(expr.expr_id().source()))
+                .expect("bytecode fail plan should resolve");
+            let Some(message) = fail.message else {
+                ops.push(BytecodeOp::EvalBody(expr));
+                return;
+            };
+            push_eval_ops(source, ops, local_slots, local_slot_defs, message);
+            ops.push(BytecodeOp::RaiseUserFail {
+                fail_source: source.span_for_range(fail.handle.to_range()),
+            });
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Fallible => {
+            let fallible = source
+                .resolve_fallible_plan(plan.fallible_plan_id(expr.expr_id().source()))
+                .expect("bytecode fallible plan should resolve");
+            ops.push(BytecodeOp::StartFallible(fallible.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Array => {
+            let array = source
+                .resolve_array_plan(plan.array_plan_id(expr.expr_id().source()))
+                .expect("bytecode array plan should resolve");
+            ops.push(BytecodeOp::StartArray(array.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Tuple => {
+            let tuple = source
+                .resolve_tuple_plan(plan.tuple_plan_id(expr.expr_id().source()))
+                .expect("bytecode tuple plan should resolve");
+            ops.push(BytecodeOp::StartTuple(tuple.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Range => {
+            let range = source
+                .resolve_range_plan(plan.range_plan_id(expr.expr_id().source()))
+                .expect("bytecode range plan should resolve");
+            ops.push(BytecodeOp::StartRange(range.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Map => {
+            let map = source
+                .resolve_map_plan(plan.map_plan_id(expr.expr_id().source()))
+                .expect("bytecode map plan should resolve");
+            ops.push(BytecodeOp::StartMap(map.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::InterpolatedString => {
+            let interpolated = source
+                .resolve_interpolated_string_plan(
+                    plan.interpolated_string_plan_id(expr.expr_id().source()),
+                )
+                .expect("bytecode interpolated string plan should resolve");
+            ops.push(BytecodeOp::StartInterpolatedString(interpolated.clone()));
+        }
+        ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::StructLiteral => {
+            let struct_literal = source
+                .resolve_struct_literal_plan(plan.struct_literal_plan_id(expr.expr_id().source()))
+                .expect("bytecode struct literal plan should resolve");
+            ops.push(BytecodeOp::StartStructLiteral(struct_literal.clone()));
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Match => {
+            let match_plan = source
+                .resolve_match_plan(plan.match_plan_id(expr.expr_id().source()))
+                .expect("bytecode match plan should resolve");
+            ops.push(BytecodeOp::StartMatch(match_plan.clone()));
+        }
+        ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Where => {
+            let where_plan = source
+                .resolve_where_plan(plan.where_plan_id(expr.expr_id().source()))
+                .expect("bytecode where plan should resolve");
+            ops.push(BytecodeOp::StartWhere(where_plan.clone()));
+        }
+        ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
+            ops.push(BytecodeOp::EvalBody(expr));
+        }
+        ExprExecKind::Expr => ops.push(BytecodeOp::EvalBody(expr)),
+    }
+}
+
 fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> BytecodeBody {
     fn local_slot_for_name(
         local_slots: &mut HashMap<String, u32>,
@@ -4792,7 +5000,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     .resolve_paren_plan(plan.paren_plan_id(expr.expr_id().source()))
                     .expect("bytecode paren plan should resolve");
                 let Some(inner) = paren.expr else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
                 push_eval_ops(source, ops, local_slots, local_slot_defs, inner);
@@ -4810,11 +5018,14 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 let (Some(receiver), Some(field_name)) =
                     (field.receiver, field.field_name.as_ref())
                 else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
-                if field.static_member.is_some() {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                if let Some(static_member) = &field.static_member {
+                    ops.push(BytecodeOp::EvalStaticMember {
+                        field_source: source.span_for_range(field.handle.to_range()),
+                        static_member: static_member.clone(),
+                    });
                     return;
                 }
                 push_eval_ops(source, ops, local_slots, local_slot_defs, receiver);
@@ -4830,7 +5041,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 let (Some(condition), Some(then_branch), Some(else_branch)) =
                     (if_plan.condition, if_plan.then_branch, if_plan.else_branch)
                 else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
                 push_eval_ops(source, ops, local_slots, local_slot_defs, condition);
@@ -4844,7 +5055,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     .resolve_prefix_plan(plan.prefix_plan_id(expr.expr_id().source()))
                     .expect("bytecode prefix plan should resolve");
                 let (Some(operator), Some(operand)) = (prefix.operator, prefix.expr) else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
                 push_eval_ops(source, ops, local_slots, local_slot_defs, operand);
@@ -4857,7 +5068,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 let (Some(lhs), Some(rhs), Some(operator)) =
                     (binary.lhs, binary.rhs, binary.operator)
                 else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
                 push_eval_ops(source, ops, local_slots, local_slot_defs, lhs);
@@ -4868,13 +5079,19 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                     .resolve_fail_plan(plan.fail_plan_id(expr.expr_id().source()))
                     .expect("bytecode fail plan should resolve");
                 let Some(message) = fail.message else {
-                    ops.push(BytecodeOp::EvalPlan(expr));
+                    ops.push(BytecodeOp::EvalBody(expr));
                     return;
                 };
                 push_eval_ops(source, ops, local_slots, local_slot_defs, message);
                 ops.push(BytecodeOp::RaiseUserFail {
                     fail_source: source.span_for_range(fail.handle.to_range()),
                 });
+            }
+            ExprExecKind::Control if plan.control_kind() == ControlPlanKind::Fallible => {
+                let fallible = source
+                    .resolve_fallible_plan(plan.fallible_plan_id(expr.expr_id().source()))
+                    .expect("bytecode fallible plan should resolve");
+                ops.push(BytecodeOp::StartFallible(fallible.clone()));
             }
             ExprExecKind::Builder if plan.builder_kind() == BuilderPlanKind::Array => {
                 let array = source
@@ -4929,7 +5146,7 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
                 ops.push(BytecodeOp::StartWhere(where_plan.clone()));
             }
             ExprExecKind::Access | ExprExecKind::Builder | ExprExecKind::Control => {
-                ops.push(BytecodeOp::EvalPlan(expr));
+                ops.push(BytecodeOp::EvalBody(expr));
             }
             ExprExecKind::Expr => ops.push(BytecodeOp::EvalBody(expr)),
         }
@@ -5015,74 +5232,27 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
 fn compile_expr_bytecode_body(
     source: &CompiledProgramSource,
     expr_id: ExprId,
-    expr: &Expr,
+    _expr: &Expr,
 ) -> Option<BytecodeBody> {
     let body = source
         .resolve_expr_body_ref(expr_id)
         .expect("expr bytecode body should resolve cached body ref");
-    let op = match expr.kind() {
-        ExprKind::Call(_) => {
-            let call = source
-                .resolve_call_plan(body.plan().call_plan_id(expr_id.source()))
-                .expect("expr bytecode call plan should resolve");
-            BytecodeOp::StartCall(call.clone())
-        }
-        ExprKind::Array(_) => {
-            let array = source
-                .resolve_array_plan(body.plan().array_plan_id(expr_id.source()))
-                .expect("expr bytecode array plan should resolve");
-            BytecodeOp::StartArray(array.clone())
-        }
-        ExprKind::Tuple(_) => {
-            let tuple = source
-                .resolve_tuple_plan(body.plan().tuple_plan_id(expr_id.source()))
-                .expect("expr bytecode tuple plan should resolve");
-            BytecodeOp::StartTuple(tuple.clone())
-        }
-        ExprKind::Range(_) => {
-            let range = source
-                .resolve_range_plan(body.plan().range_plan_id(expr_id.source()))
-                .expect("expr bytecode range plan should resolve");
-            BytecodeOp::StartRange(range.clone())
-        }
-        ExprKind::Map(_) => {
-            let map = source
-                .resolve_map_plan(body.plan().map_plan_id(expr_id.source()))
-                .expect("expr bytecode map plan should resolve");
-            BytecodeOp::StartMap(map.clone())
-        }
-        ExprKind::InterpolatedString(_) => {
-            let interpolated = source
-                .resolve_interpolated_string_plan(
-                    body.plan().interpolated_string_plan_id(expr_id.source()),
-                )
-                .expect("expr bytecode interpolated string plan should resolve");
-            BytecodeOp::StartInterpolatedString(interpolated.clone())
-        }
-        ExprKind::StructLiteral(_) => {
-            let struct_literal = source
-                .resolve_struct_literal_plan(body.plan().struct_literal_plan_id(expr_id.source()))
-                .expect("expr bytecode struct literal plan should resolve");
-            BytecodeOp::StartStructLiteral(struct_literal.clone())
-        }
-        ExprKind::Where(_) => {
-            let where_plan = source
-                .resolve_where_plan(body.plan().where_plan_id(expr_id.source()))
-                .expect("expr bytecode where plan should resolve");
-            BytecodeOp::StartWhere(where_plan.clone())
-        }
-        ExprKind::Match(_) => {
-            let match_plan = source
-                .resolve_match_plan(body.plan().match_plan_id(expr_id.source()))
-                .expect("expr bytecode match plan should resolve");
-            BytecodeOp::StartMatch(match_plan.clone())
-        }
-        _ => return None,
-    };
+    let mut ops = Vec::new();
+    let mut local_slots = HashMap::new();
+    let mut local_slot_defs = Vec::new();
+    push_eval_ops(
+        source,
+        &mut ops,
+        &mut local_slots,
+        &mut local_slot_defs,
+        body,
+    );
+    ops.push(BytecodeOp::SetLast);
+    ops.push(BytecodeOp::ReturnLast);
     Some(BytecodeBody {
-        local_slots: Arc::from([]),
-        local_count: 0,
-        ops: Arc::from([op, BytecodeOp::SetLast, BytecodeOp::ReturnLast]),
+        local_slots: Arc::from(local_slot_defs),
+        local_count: local_slots.len(),
+        ops: Arc::from(ops),
     })
 }
 

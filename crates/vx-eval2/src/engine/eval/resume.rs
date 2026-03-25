@@ -218,7 +218,23 @@ pub(in crate::engine) fn resume_frame(
                     bytecode.acc = Some(value);
                     continue_bytecode_body(state, node_id, parent_id, bytecode)
                 }
-                Err(error) => Err(error),
+                Err(error) => match bytecode.pending.take() {
+                    Some(BytecodePendingState::Fallible { fallible_source }) => {
+                        continue_bytecode_fallible(
+                            state,
+                            node_id,
+                            &mut bytecode,
+                            fallible_source,
+                            None,
+                            Some(Err(error)),
+                        )
+                    }
+                    Some(pending) => {
+                        bytecode.pending = Some(pending);
+                        Err(error)
+                    }
+                    None => Err(error),
+                },
             };
             Ok(conclude_resumed_node(state, node_id, parent_id, result))
         }

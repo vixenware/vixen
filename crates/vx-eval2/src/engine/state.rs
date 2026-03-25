@@ -176,6 +176,9 @@ pub(super) enum BytecodePendingState {
         expr_nodes: Vec<EvalNodeId>,
         string_source: SourceSpan,
     },
+    Fallible {
+        fallible_source: SourceSpan,
+    },
     Call {
         call: PlannedCallState,
         pending: PlannedCallResumeKind,
