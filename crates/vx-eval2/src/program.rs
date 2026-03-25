@@ -1295,6 +1295,7 @@ pub(crate) struct BlockBody {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BytecodeBody {
     pub(crate) local_slots: Arc<[BytecodeLocalSlot]>,
+    pub(crate) slot_lookup: Arc<HashMap<Arc<str>, u32>>,
     pub(crate) local_count: usize,
     pub(crate) ops: Arc<[BytecodeOp]>,
 }
@@ -4736,6 +4737,16 @@ fn local_slot_for_name(
     slot
 }
 
+fn bytecode_slot_lookup(local_slot_defs: &[BytecodeLocalSlot]) -> Arc<HashMap<Arc<str>, u32>> {
+    Arc::new(
+        local_slot_defs
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| (Arc::clone(&slot.name), index as u32))
+            .collect(),
+    )
+}
+
 fn push_internal_error_op(
     source: &CompiledProgramSource,
     ops: &mut Vec<BytecodeOp>,
@@ -5035,8 +5046,10 @@ fn compile_bytecode_body(source: &CompiledProgramSource, block: &BlockBody) -> B
         }
     }
     ops.push(BytecodeOp::ReturnLast);
+    let slot_lookup = bytecode_slot_lookup(&local_slot_defs);
     BytecodeBody {
         local_slots: Arc::from(local_slot_defs),
+        slot_lookup,
         local_count: local_slots.len(),
         ops: Arc::from(ops),
     }
@@ -5062,8 +5075,10 @@ fn compile_expr_bytecode_body(
     );
     ops.push(BytecodeOp::SetLast);
     ops.push(BytecodeOp::ReturnLast);
+    let slot_lookup = bytecode_slot_lookup(&local_slot_defs);
     Some(BytecodeBody {
         local_slots: Arc::from(local_slot_defs),
+        slot_lookup,
         local_count: local_slots.len(),
         ops: Arc::from(ops),
     })

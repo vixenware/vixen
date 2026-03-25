@@ -2,8 +2,6 @@
 
 use std::{cmp::Ordering, sync::Arc};
 
-use im::OrdMap;
-
 use crate::{
     Claim, CrossingPolicy, ProjectionStep, Provenance, ReuseClass, SourceSpan, ValueMeta,
     program::{CompiledParameter, ExprBodyRef},
@@ -343,12 +341,5 @@ impl FunctionRef {
 
     pub fn captures(&self) -> &[(Arc<str>, Value)] {
         &self.captures
-    }
-
-    pub(crate) fn capture_env(&self) -> OrdMap<String, Value> {
-        self.captures
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect()
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::program::{
-    ArrayPlan, ArrayPlanItem, BytecodeOp, CallCalleePlan, CallCalleePlanKind, ClosurePlan,
-    DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FieldPlan,
+    ArrayPlan, ArrayPlanItem, BytecodeBody, BytecodeOp, CallCalleePlan, CallCalleePlanKind,
+    ClosurePlan, DirectCallCalleePlan, DirectCallCalleePlanKind, ExprExecKind, FieldPlan,
     InterpolatedStringPlan, InterpolatedStringPlanPart, LiteralPlan, MapEntryPlan, MapPlan,
     MatchPlan, NameRefPlan, PathLiteralPlan, RangePlan, ReadyPlanKind, StructLiteralPlan,
     StructLiteralPlanPart, TuplePlan, WherePlan,
@@ -24,6 +24,7 @@ pub(super) struct PreparedBodyRef {
 pub(super) struct PreparedEntry {
     pub(super) body: PreparedBodyRef,
     pub(super) env: EvalEnv,
+    pub(super) locals: Vec<Option<Value>>,
 }
 
 impl PreparedBodyRef {
@@ -61,6 +62,44 @@ impl PreparedBodyRef {
     pub(super) fn root_expr_id(&self) -> ExprId {
         self.root_expr_id
     }
+}
+
+fn empty_bytecode_locals(body: &BytecodeBody) -> Vec<Option<Value>> {
+    vec![None; body.local_count]
+}
+
+fn set_bytecode_local(
+    body: &BytecodeBody,
+    locals: &mut [Option<Value>],
+    name: &str,
+    value: &Value,
+) {
+    if let Some(&slot) = body.slot_lookup.get(name) {
+        locals[slot as usize] = Some(value.clone());
+    }
+}
+
+fn init_bytecode_locals_from_scope(body: &BytecodeBody, scope: &EvalEnv) -> Vec<Option<Value>> {
+    let mut locals = empty_bytecode_locals(body);
+    for (slot, local) in body.local_slots.iter().enumerate() {
+        if local.prefill_from_scope {
+            locals[slot] = scope.get(local.name.as_ref()).cloned();
+        }
+    }
+    locals
+}
+
+fn prepared_entry_from_scope(
+    program: &CompiledProgram,
+    body: PreparedBodyRef,
+    env: EvalEnv,
+) -> Result<PreparedEntry, EvalError> {
+    let bytecode_body = program.resolve_bytecode_body(body.body)?;
+    Ok(PreparedEntry {
+        body,
+        locals: init_bytecode_locals_from_scope(bytecode_body, &env),
+        env,
+    })
 }
 
 pub(super) fn function_ref_from_compiled(
@@ -486,11 +525,19 @@ pub(super) fn prepare_entry(
             format!("function {entry} has no body expression"),
         )
     })?;
-    let env = bind_arguments(state, &function.parameters, args, None)?;
-    Ok(PreparedEntry {
-        body: PreparedBodyRef::from_body_ref(state.program, body)?,
-        env,
-    })
+    let body = PreparedBodyRef::from_body_ref(state.program, body)?;
+    let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
+    let mut env = empty_env();
+    let mut locals = empty_bytecode_locals(bytecode_body);
+    bind_arguments_into_env(
+        state,
+        &mut env,
+        Some((bytecode_body, &mut locals)),
+        &function.parameters,
+        args,
+        None,
+    )?;
+    Ok(PreparedEntry { body, env, locals })
 }
 
 pub(super) fn prepare_function_call(
@@ -522,15 +569,28 @@ pub(super) fn prepare_function_call(
             ),
         ));
     }
-    let mut env = function.capture_env();
-    if let Some(self_name) = &function.self_name {
-        env_mut(&mut env).insert(self_name.to_string(), Value::function(function.clone()));
+    let body = PreparedBodyRef::from_body_ref(state.program, body)?;
+    let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
+    let mut env = empty_env();
+    let mut locals = empty_bytecode_locals(bytecode_body);
+    for (name, value) in function.captures() {
+        env_mut(&mut env).insert(name.to_string(), value.clone());
+        set_bytecode_local(bytecode_body, &mut locals, name.as_ref(), value);
     }
-    bind_arguments_into_env(state, &mut env, &function.parameters, args, parent_id)?;
-    Ok(Some(PreparedEntry {
-        body: PreparedBodyRef::from_body_ref(state.program, body)?,
-        env,
-    }))
+    if let Some(self_name) = &function.self_name {
+        let self_value = Value::function(function.clone());
+        env_mut(&mut env).insert(self_name.to_string(), self_value.clone());
+        set_bytecode_local(bytecode_body, &mut locals, self_name.as_ref(), &self_value);
+    }
+    bind_arguments_into_env(
+        state,
+        &mut env,
+        Some((bytecode_body, &mut locals)),
+        &function.parameters,
+        args,
+        parent_id,
+    )?;
+    Ok(Some(PreparedEntry { body, env, locals }))
 }
 
 pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
@@ -617,20 +677,10 @@ pub(super) fn prepare_keyed_call(
     Ok(prepared)
 }
 
-pub(super) fn bind_arguments(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    parameters: &[CompiledParameter],
-    args: &[Value],
-    parent_id: Option<EvalNodeId>,
-) -> Result<EvalEnv, EvalError> {
-    let mut env = empty_env();
-    bind_arguments_into_env(state, &mut env, parameters, args, parent_id)?;
-    Ok(env)
-}
-
 pub(super) fn bind_arguments_into_env(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     env: &mut EvalEnv,
+    mut bytecode_locals: Option<(&BytecodeBody, &mut [Option<Value>])>,
     parameters: &[CompiledParameter],
     args: &[Value],
     parent_id: Option<EvalNodeId>,
@@ -660,6 +710,9 @@ pub(super) fn bind_arguments_into_env(
             RuntimeInputKind::Argument,
             label.clone(),
         ));
+        if let Some((body, locals)) = bytecode_locals.as_mut() {
+            set_bytecode_local(body, locals, label.as_str(), &bound);
+        }
         env_mut(env).insert(label, bound);
     }
     Ok(())
@@ -731,13 +784,15 @@ fn eval_prepared_body_step(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     node_id: EvalNodeId,
     parent_id: Option<EvalNodeId>,
-    body: PreparedBodyRef,
-    env: &mut EvalEnv,
+    prepared: PreparedEntry,
 ) -> Result<EvalStep, EvalError> {
+    let PreparedEntry { body, env, locals } = prepared;
+
     fn try_eval_small_prepared_bytecode(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-        bytecode_body: &crate::program::BytecodeBody,
+        bytecode_body: &BytecodeBody,
         scope: &EvalEnv,
+        locals: &[Option<Value>],
     ) -> Result<Option<EvalStep>, EvalError> {
         match bytecode_body.ops.as_ref() {
             [
@@ -751,24 +806,17 @@ fn eval_prepared_body_step(
                 BytecodeOp::LoadLocal { slot, .. },
                 BytecodeOp::SetLast,
                 BytecodeOp::ReturnLast,
-            ] => {
-                let local = bytecode_body
-                    .local_slots
+            ] => Ok(Some(EvalStep::Ready(
+                locals
                     .get(*slot as usize)
+                    .and_then(|value| value.clone())
                     .ok_or_else(|| {
                         EvalError::new(
                             EvalErrorKind::Internal,
-                            format!("bytecode local slot {slot} is out of range"),
+                            format!("bytecode local slot {slot} is not initialized"),
                         )
-                    })?;
-                let value = scope.get(local.name.as_ref()).cloned().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        format!("bytecode local slot {} is not initialized", local.name),
-                    )
-                })?;
-                Ok(Some(EvalStep::Ready(value)))
-            }
+                    })?,
+            ))),
             [
                 BytecodeOp::EvalStaticMember {
                     field_source,
@@ -785,22 +833,8 @@ fn eval_prepared_body_step(
         }
     }
 
-    fn init_bytecode_locals(
-        body: &crate::program::BytecodeBody,
-        scope: &EvalEnv,
-    ) -> Vec<Option<Value>> {
-        let mut locals = vec![None; body.local_count];
-        for (slot, local) in body.local_slots.iter().enumerate() {
-            if local.prefill_from_scope {
-                locals[slot] = scope.get(local.name.as_ref()).cloned();
-            }
-        }
-        locals
-    }
-
-    let scope = std::mem::take(env);
     let bytecode_body = state.program.resolve_bytecode_body(body.body)?;
-    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, &scope)? {
+    if let Some(result) = try_eval_small_prepared_bytecode(state, bytecode_body, &env, &locals)? {
         return Ok(result);
     }
     continue_bytecode_body(
@@ -808,8 +842,8 @@ fn eval_prepared_body_step(
         node_id,
         parent_id,
         BytecodeState {
-            scope: scope.clone(),
-            locals: init_bytecode_locals(bytecode_body, &scope),
+            scope: env,
+            locals,
             last: Value::unit(),
             body: body.body,
             pc: 0,
@@ -825,14 +859,14 @@ pub(super) fn eval_prepared_body_with_node_id(
     node_id: EvalNodeId,
     prepared: PreparedEntry,
 ) -> Result<EvalStep, EvalError> {
-    let PreparedEntry { body, mut env } = prepared;
+    let body = prepared.body.clone();
     let root_expr_id = body.root_expr_id();
     let kind = prepared_body_kind(state.program, &body);
     let source = state.program.span_for_expr_id(root_expr_id)?;
     let parent_id = state.current_parent();
     state.with_source(root_expr_id.source(), |state| {
         eval_node_with_kind(state, node_id, kind, source, |state| {
-            eval_prepared_body_step(state, node_id, parent_id, body, &mut env)
+            eval_prepared_body_step(state, node_id, parent_id, prepared)
         })
     })
 }
@@ -888,10 +922,7 @@ pub(super) fn eval_child_body_ref(
         return eval_prepared_body_with_node_id(
             state,
             child_id,
-            PreparedEntry {
-                body: prepared,
-                env: env.clone(),
-            },
+            prepared_entry_from_scope(state.program, prepared, env.clone())?,
         );
     }
     let child_id = queue_child_body_ref(state, body, env);
@@ -2674,19 +2705,6 @@ pub(super) fn continue_bytecode_body(
     parent_id: Option<EvalNodeId>,
     mut bytecode: BytecodeState,
 ) -> Result<EvalStep, EvalError> {
-    fn init_bytecode_locals(
-        body: &crate::program::BytecodeBody,
-        scope: &EvalEnv,
-    ) -> Vec<Option<Value>> {
-        let mut locals = vec![None; body.local_count];
-        for (slot, local) in body.local_slots.iter().enumerate() {
-            if local.prefill_from_scope {
-                locals[slot] = scope.get(local.name.as_ref()).cloned();
-            }
-        }
-        locals
-    }
-
     fn eval_inline_ready_bytecode_plan(
         state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
         node_id: EvalNodeId,
@@ -4194,7 +4212,7 @@ pub(super) fn continue_bytecode_body(
                 let bytecode_body = state.program.resolve_bytecode_body(*body)?;
                 let nested = BytecodeState {
                     scope: bytecode.scope.clone(),
-                    locals: init_bytecode_locals(bytecode_body, &bytecode.scope),
+                    locals: init_bytecode_locals_from_scope(bytecode_body, &bytecode.scope),
                     last: Value::unit(),
                     body: *body,
                     pc: 0,
@@ -4975,10 +4993,18 @@ fn queue_child_expr_body(
         kind: EvalNodeKind::Expr { kind: body_kind },
         source: Some(resolved_source),
     });
+    let locals = init_bytecode_locals_from_scope(
+        state
+            .program
+            .resolve_bytecode_body(body.body)
+            .expect("queued child body should resolve to bytecode"),
+        env,
+    );
     let scheduled = ScheduledExpr {
         root_expr_id: body.root_expr_id(),
         kind: ScheduledExprKind::Prepared(body),
         env: env.clone(),
+        locals,
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {
@@ -5026,6 +5052,7 @@ pub(super) fn queue_child_prepared_entry(
         root_expr_id: prepared.body.root_expr_id(),
         kind: ScheduledExprKind::Prepared(prepared.body),
         env: prepared.env,
+        locals: prepared.locals,
         call_stack: if state.track_calls {
             state.call_stack.clone()
         } else {

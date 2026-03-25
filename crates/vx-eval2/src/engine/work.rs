@@ -961,6 +961,7 @@ pub(super) struct ScheduledExpr {
     pub(super) root_expr_id: ExprId,
     pub(super) kind: ScheduledExprKind,
     pub(super) env: EvalEnv,
+    pub(super) locals: Vec<Option<Value>>,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
 }
 
@@ -2349,6 +2350,7 @@ pub(super) fn execute_ready_task(
                 root_expr_id: prepared.body.root_expr_id(),
                 kind: ScheduledExprKind::Prepared(prepared.body),
                 env: prepared.env,
+                locals: prepared.locals,
                 call_stack,
             };
             state.scheduler.remember_expr_task(
@@ -2384,6 +2386,7 @@ pub(super) fn execute_ready_task(
                 root_expr_id: _root_expr_id,
                 kind,
                 env,
+                locals,
                 call_stack,
             } = scheduled;
             let run = move |state: &mut EvalState<'_, '_, _, _>| match kind.clone() {
@@ -2393,6 +2396,7 @@ pub(super) fn execute_ready_task(
                     PreparedEntry {
                         body,
                         env: env.clone(),
+                        locals: locals.clone(),
                     },
                 ),
             };
