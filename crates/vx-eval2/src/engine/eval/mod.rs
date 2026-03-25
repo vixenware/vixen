@@ -2174,72 +2174,6 @@ fn struct_literal_type_name(type_name: Option<Arc<str>>) -> Result<Arc<str>, Eva
         .ok_or_else(|| EvalError::new(EvalErrorKind::Internal, "struct literal has no type name"))
 }
 
-fn eval_array_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    items: &[ArrayPlanItem],
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("array should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    if state.queue_child_work {
-        let mut child_nodes = Vec::new();
-        for item in items.iter() {
-            match item {
-                ArrayPlanItem::Expr(body) => {
-                    child_nodes.push(ArrayJoinItem::Expr(queue_child_body_ref(state, *body, env)));
-                }
-                ArrayPlanItem::Spread(body) => child_nodes.push(ArrayJoinItem::Spread(
-                    queue_child_body_ref(state, *body, env),
-                )),
-            }
-        }
-        if child_nodes.is_empty() {
-            let provenance = Provenance::literal(state.program.span_for_handle(handle));
-            return Ok(EvalStep::Ready(Value::array(Vec::new()).with_meta(
-                ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
-            )));
-        }
-        let first_child = match child_nodes[0] {
-            ArrayJoinItem::Expr(child_id) | ArrayJoinItem::Spread(child_id) => child_id,
-        };
-        return Ok(wait_on_child_dependency(
-            state,
-            node_id,
-            first_child,
-            vec![ContinuationFrame::ArrayJoin {
-                node_id,
-                parent_id,
-                child_nodes,
-                array_source: state.program.span_for_handle(handle),
-            }],
-        ));
-    }
-    continue_array_items(
-        state,
-        node_id,
-        parent_id,
-        ArrayState {
-            items: Vec::new(),
-            spread: false,
-            remaining_items: items
-                .iter()
-                .cloned()
-                .map(|item| match item {
-                    ArrayPlanItem::Expr(body) => ArrayEvalItem::Expr(body),
-                    ArrayPlanItem::Spread(body) => ArrayEvalItem::Spread(body),
-                })
-                .collect::<Vec<_>>(),
-            env: env.clone(),
-            array_source: state.program.span_for_handle(handle),
-        },
-    )
-}
-
 fn append_array_item(items: &mut Vec<Value>, value: Value, spread: bool) -> Result<(), EvalError> {
     if spread {
         let ValueRep::Array(spread_items) = &value.rep else {
@@ -2253,202 +2187,6 @@ fn append_array_item(items: &mut Vec<Value>, value: Value, spread: bool) -> Resu
         items.push(value);
     }
     Ok(())
-}
-
-fn eval_tuple_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    items: &[ExprBodyRef],
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("tuple should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let items = items.to_vec();
-    if state.queue_child_work {
-        let child_nodes = items
-            .iter()
-            .map(|item| queue_child_body_ref(state, *item, env))
-            .collect::<Vec<_>>();
-        if child_nodes.is_empty() {
-            let provenance = Provenance::literal(state.program.span_for_handle(handle));
-            return Ok(EvalStep::Ready(Value::tuple(Vec::new()).with_meta(
-                ValueMeta::new(provenance, ReuseClass::Stable, CrossingPolicy::ByValue),
-            )));
-        }
-        return Ok(wait_on_child_dependency(
-            state,
-            node_id,
-            child_nodes[0],
-            vec![ContinuationFrame::TupleJoin {
-                node_id,
-                parent_id,
-                child_nodes,
-                tuple_source: state.program.span_for_handle(handle),
-            }],
-        ));
-    }
-    continue_tuple_items(
-        state,
-        node_id,
-        parent_id,
-        TupleState {
-            items: Vec::new(),
-            remaining_items: items.iter().copied().collect::<Vec<_>>(),
-            env: env.clone(),
-            tuple_source: state.program.span_for_handle(handle),
-        },
-    )
-}
-
-fn eval_interpolated_string_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    parts: &[InterpolatedStringPlanPart],
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("interpolated string should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let string_source = state.program.span_for_handle(handle);
-    let parts = parts
-        .iter()
-        .cloned()
-        .map(|part| match part {
-            InterpolatedStringPlanPart::Text(text) => InterpolatedPart::Text(text),
-            InterpolatedStringPlanPart::Interpolation(body) => InterpolatedPart::Expr(body),
-        })
-        .collect::<Vec<_>>();
-
-    if state.queue_child_work {
-        let expr_nodes = parts
-            .iter()
-            .filter_map(|part| match part {
-                InterpolatedPart::Text(_) => None,
-                InterpolatedPart::Expr(body) => Some(queue_child_body_ref(state, *body, env)),
-            })
-            .collect::<Vec<_>>();
-        if let Some(child_id) = expr_nodes.first().copied() {
-            return Ok(wait_on_child_dependency(
-                state,
-                node_id,
-                child_id,
-                vec![ContinuationFrame::InterpolatedStringJoin {
-                    node_id,
-                    parent_id,
-                    parts,
-                    expr_nodes,
-                    string_source,
-                }],
-            ));
-        }
-        return Ok(EvalStep::Ready(ready_interpolated_string_value(
-            Vec::new(),
-            string_source,
-        )));
-    }
-
-    continue_interpolated_string_parts(
-        state,
-        node_id,
-        parent_id,
-        InterpolatedStringState {
-            segments: Vec::new(),
-            remaining_parts: parts,
-            env: env.clone(),
-            string_source,
-        },
-    )
-}
-
-fn eval_range_inner(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    handle: ProgramNodeHandle,
-    start: Option<ExprBodyRef>,
-    end: Option<ExprBodyRef>,
-    inclusive_end: bool,
-    env: &mut EvalEnv,
-) -> Result<EvalStep, EvalError> {
-    let node_id = state
-        .stack
-        .last()
-        .copied()
-        .expect("range should have an active trace node");
-    let parent_id = state.stack.iter().rev().nth(1).copied();
-    let range_source = state.program.span_for_handle(handle);
-
-    if state.queue_child_work {
-        let start_child = start.map(|body| queue_child_body_ref(state, body, env));
-        let end_child = end.map(|body| queue_child_body_ref(state, body, env));
-        if let Some(child_id) = start_child.or(end_child) {
-            return Ok(wait_on_child_dependency(
-                state,
-                node_id,
-                child_id,
-                vec![ContinuationFrame::RangeJoin {
-                    node_id,
-                    parent_id,
-                    start_child,
-                    end_child,
-                    range_source,
-                    inclusive_end,
-                }],
-            ));
-        }
-        return Ok(EvalStep::Ready(ready_range_value(
-            None,
-            None,
-            inclusive_end,
-            range_source,
-        )));
-    }
-
-    if let Some(start_handle) = start {
-        match eval_dependent_body_ref(state, node_id, start_handle, env)? {
-            EvalStep::Ready(start) => continue_range_end(
-                state,
-                node_id,
-                parent_id,
-                Some(start),
-                end,
-                env.clone(),
-                range_source,
-                inclusive_end,
-            ),
-            EvalStep::Suspended(suspension) => Ok(extend_suspension(
-                suspension,
-                ContinuationFrame::Range {
-                    node_id,
-                    parent_id,
-                    range: RangeState {
-                        start: None,
-                        end,
-                        env: env.clone(),
-                        range_source,
-                        inclusive_end,
-                    },
-                    pending: RangeResumeKind::Start,
-                },
-            )),
-        }
-    } else {
-        continue_range_end(
-            state,
-            node_id,
-            parent_id,
-            None,
-            end,
-            env.clone(),
-            range_source,
-            inclusive_end,
-        )
-    }
 }
 
 fn eval_map_inner(
@@ -3238,35 +2976,26 @@ pub(super) fn continue_bytecode_body(
                 Vec::new(),
             ));
         }
-        match eval_array_inner(state, array.handle, &array.items, &mut bytecode.scope)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode array suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Array { array, .. } => BytecodePendingState::Array { array },
-                    ContinuationFrame::ArrayJoin {
-                        child_nodes,
-                        array_source,
-                        ..
-                    } => BytecodePendingState::ArrayJoin {
-                        child_nodes,
-                        array_source,
-                    },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode array frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
-            }
-        }
+        continue_bytecode_array_items(
+            state,
+            node_id,
+            parent_id,
+            bytecode,
+            BytecodeArrayState {
+                items: Vec::new(),
+                spread: false,
+                remaining_items: array
+                    .items
+                    .iter()
+                    .cloned()
+                    .map(|item| match item {
+                        ArrayPlanItem::Expr(body) => ArrayEvalItem::Expr(body),
+                        ArrayPlanItem::Spread(body) => ArrayEvalItem::Spread(body),
+                    })
+                    .collect(),
+                array_source: state.program.span_for_handle(array.handle),
+            },
+        )
     }
 
     fn continue_bytecode_array(
@@ -3274,7 +3003,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut array: ArrayState,
+        mut array: BytecodeArrayState,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -3283,27 +3012,35 @@ pub(super) fn continue_bytecode_body(
             });
         }
         append_array_item(&mut array.items, resumed_value, array.spread)?;
-        match continue_array_items(state, node_id, parent_id, array)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode array resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Array { array, .. } => BytecodePendingState::Array { array },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode array resume frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+        continue_bytecode_array_items(state, node_id, parent_id, bytecode, array)
+    }
+
+    fn continue_bytecode_array_items(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut array: BytecodeArrayState,
+    ) -> Result<EvalStep, EvalError> {
+        let mut remaining = array.remaining_items.into_iter();
+        while let Some(item_handle) = remaining.next() {
+            let (item_handle, spread) = match item_handle {
+                ArrayEvalItem::Expr(handle) => (handle, false),
+                ArrayEvalItem::Spread(handle) => (handle, true),
+            };
+            match eval_dependent_bytecode_body_ref(state, node_id, item_handle, bytecode)? {
+                EvalStep::Ready(value) => append_array_item(&mut array.items, value, spread)?,
+                EvalStep::Suspended(suspension) => {
+                    array.spread = spread;
+                    array.remaining_items = remaining.collect();
+                    bytecode.pending = Some(BytecodePendingState::Array { array });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
             }
         }
+        let provenance = Provenance::literal(array.array_source);
+        let meta = aggregate_child_meta(provenance, array.items.iter());
+        Ok(EvalStep::Ready(Value::array(array.items).with_meta(meta)))
     }
 
     fn continue_bytecode_array_join(
@@ -3382,35 +3119,17 @@ pub(super) fn continue_bytecode_body(
                 Vec::new(),
             ));
         }
-        match eval_tuple_inner(state, tuple.handle, &tuple.items, &mut bytecode.scope)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode tuple suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Tuple { tuple, .. } => BytecodePendingState::Tuple { tuple },
-                    ContinuationFrame::TupleJoin {
-                        child_nodes,
-                        tuple_source,
-                        ..
-                    } => BytecodePendingState::TupleJoin {
-                        child_nodes,
-                        tuple_source,
-                    },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode tuple frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
-            }
-        }
+        continue_bytecode_tuple_items(
+            state,
+            node_id,
+            parent_id,
+            bytecode,
+            BytecodeTupleState {
+                items: Vec::new(),
+                remaining_items: tuple.items.to_vec(),
+                tuple_source: state.program.span_for_handle(tuple.handle),
+            },
+        )
     }
 
     fn continue_bytecode_tuple(
@@ -3418,7 +3137,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut tuple: TupleState,
+        mut tuple: BytecodeTupleState,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -3427,27 +3146,30 @@ pub(super) fn continue_bytecode_body(
             });
         }
         tuple.items.push(resumed_value);
-        match continue_tuple_items(state, node_id, parent_id, tuple)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode tuple resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Tuple { tuple, .. } => BytecodePendingState::Tuple { tuple },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode tuple resume frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+        continue_bytecode_tuple_items(state, node_id, parent_id, bytecode, tuple)
+    }
+
+    fn continue_bytecode_tuple_items(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut tuple: BytecodeTupleState,
+    ) -> Result<EvalStep, EvalError> {
+        let mut remaining = tuple.remaining_items.into_iter();
+        while let Some(item_handle) = remaining.next() {
+            match eval_dependent_bytecode_body_ref(state, node_id, item_handle, bytecode)? {
+                EvalStep::Ready(value) => tuple.items.push(value),
+                EvalStep::Suspended(suspension) => {
+                    tuple.remaining_items = remaining.collect();
+                    bytecode.pending = Some(BytecodePendingState::Tuple { tuple });
+                    return Ok(EvalStep::Suspended(suspension));
+                }
             }
         }
+        let provenance = Provenance::literal(tuple.tuple_source);
+        let meta = aggregate_child_meta(provenance, tuple.items.iter());
+        Ok(EvalStep::Ready(Value::tuple(tuple.items).with_meta(meta)))
     }
 
     fn continue_bytecode_tuple_join(
@@ -3526,47 +3248,43 @@ pub(super) fn continue_bytecode_body(
                 state.program.span_for_handle(range.handle),
             )));
         }
-        match eval_range_inner(
-            state,
-            range.handle,
-            range.start,
-            range.end,
-            range.inclusive_end,
-            &mut bytecode.scope,
-        )? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode range suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Range { range, pending, .. } => {
-                        BytecodePendingState::Range { range, pending }
-                    }
-                    ContinuationFrame::RangeJoin {
-                        start_child,
-                        end_child,
-                        range_source,
-                        inclusive_end,
-                        ..
-                    } => BytecodePendingState::RangeJoin {
-                        start_child,
-                        end_child,
-                        range_source,
-                        inclusive_end,
-                    },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode range frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
-            }
+        let range_source = state.program.span_for_handle(range.handle);
+        match range.start {
+            Some(start) => match eval_dependent_bytecode_body_ref(state, node_id, start, bytecode)?
+            {
+                EvalStep::Ready(start) => continue_bytecode_range_end(
+                    state,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                    Some(start),
+                    range.end,
+                    range_source,
+                    range.inclusive_end,
+                ),
+                EvalStep::Suspended(suspension) => {
+                    bytecode.pending = Some(BytecodePendingState::Range {
+                        range: BytecodeRangeState {
+                            start: None,
+                            end: range.end,
+                            range_source,
+                            inclusive_end: range.inclusive_end,
+                        },
+                        pending: RangeResumeKind::Start,
+                    });
+                    Ok(EvalStep::Suspended(suspension))
+                }
+            },
+            None => continue_bytecode_range_end(
+                state,
+                node_id,
+                parent_id,
+                bytecode,
+                None,
+                range.end,
+                range_source,
+                range.inclusive_end,
+            ),
         }
     }
 
@@ -3575,7 +3293,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        range: RangeState,
+        range: BytecodeRangeState,
         pending: RangeResumeKind,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
@@ -3593,13 +3311,13 @@ pub(super) fn continue_bytecode_body(
             });
         }
         let step = match pending {
-            RangeResumeKind::Start => continue_range_end(
+            RangeResumeKind::Start => continue_bytecode_range_end(
                 state,
                 node_id,
                 parent_id,
+                bytecode,
                 Some(resumed_value),
                 range.end,
-                range.env,
                 range.range_source,
                 range.inclusive_end,
             )?,
@@ -3610,29 +3328,45 @@ pub(super) fn continue_bytecode_body(
                 range.range_source,
             )?),
         };
-        match step {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode range resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::Range { range, pending, .. } => {
-                        BytecodePendingState::Range { range, pending }
+        Ok(step)
+    }
+
+    fn continue_bytecode_range_end(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        start: Option<Value>,
+        end: Option<ExprBodyRef>,
+        range_source: SourceSpan,
+        inclusive_end: bool,
+    ) -> Result<EvalStep, EvalError> {
+        let end = match end {
+            Some(end_handle) => {
+                match eval_dependent_bytecode_body_ref(state, node_id, end_handle, bytecode)? {
+                    EvalStep::Ready(end) => Some(end),
+                    EvalStep::Suspended(suspension) => {
+                        bytecode.pending = Some(BytecodePendingState::Range {
+                            range: BytecodeRangeState {
+                                start,
+                                end: None,
+                                range_source,
+                                inclusive_end,
+                            },
+                            pending: RangeResumeKind::End,
+                        });
+                        return Ok(EvalStep::Suspended(suspension));
                     }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode range resume frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+                }
             }
-        }
+            None => None,
+        };
+        Ok(EvalStep::Ready(build_range_value(
+            start,
+            end,
+            inclusive_end,
+            range_source,
+        )?))
     }
 
     fn continue_bytecode_range_join(
@@ -3850,44 +3584,27 @@ pub(super) fn continue_bytecode_body(
                 state.program.span_for_handle(interpolated.handle),
             )));
         }
-        match eval_interpolated_string_inner(
+        continue_bytecode_interpolated_string_parts(
             state,
-            interpolated.handle,
-            &interpolated.parts,
-            &mut bytecode.scope,
-        )? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode interpolated string suspension is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::InterpolatedString { string, .. } => {
-                        BytecodePendingState::InterpolatedString { string }
-                    }
-                    ContinuationFrame::InterpolatedStringJoin {
-                        parts,
-                        expr_nodes,
-                        string_source,
-                        ..
-                    } => BytecodePendingState::InterpolatedStringJoin {
-                        parts,
-                        expr_nodes,
-                        string_source,
-                    },
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!("unexpected bytecode interpolated string frame: {other:?}"),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
-            }
-        }
+            node_id,
+            parent_id,
+            bytecode,
+            BytecodeInterpolatedStringState {
+                segments: Vec::new(),
+                remaining_parts: interpolated
+                    .parts
+                    .iter()
+                    .cloned()
+                    .map(|part| match part {
+                        InterpolatedStringPlanPart::Text(text) => InterpolatedPart::Text(text),
+                        InterpolatedStringPlanPart::Interpolation(body) => {
+                            InterpolatedPart::Expr(body)
+                        }
+                    })
+                    .collect(),
+                string_source: state.program.span_for_handle(interpolated.handle),
+            },
+        )
     }
 
     fn continue_bytecode_interpolated_string(
@@ -3895,7 +3612,7 @@ pub(super) fn continue_bytecode_body(
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
         bytecode: &mut BytecodeState,
-        mut string: InterpolatedStringState,
+        mut string: BytecodeInterpolatedStringState,
         resumed_value: Value,
     ) -> Result<EvalStep, EvalError> {
         if state.current_parent() != Some(node_id) {
@@ -3913,31 +3630,39 @@ pub(super) fn continue_bytecode_body(
         string
             .segments
             .push(interpolation_segment_text(&resumed_value)?);
-        match continue_interpolated_string_parts(state, node_id, parent_id, string)? {
-            EvalStep::Ready(value) => Ok(EvalStep::Ready(value)),
-            EvalStep::Suspended(mut suspension) => {
-                let frame = suspension.frames.pop().ok_or_else(|| {
-                    EvalError::new(
-                        EvalErrorKind::Internal,
-                        "bytecode interpolated string resume is missing its builder frame",
-                    )
-                })?;
-                bytecode.pending = Some(match frame {
-                    ContinuationFrame::InterpolatedString { string, .. } => {
-                        BytecodePendingState::InterpolatedString { string }
+        continue_bytecode_interpolated_string_parts(state, node_id, parent_id, bytecode, string)
+    }
+
+    fn continue_bytecode_interpolated_string_parts(
+        state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+        node_id: EvalNodeId,
+        _parent_id: Option<EvalNodeId>,
+        bytecode: &mut BytecodeState,
+        mut string: BytecodeInterpolatedStringState,
+    ) -> Result<EvalStep, EvalError> {
+        let mut remaining = string.remaining_parts.into_iter();
+        while let Some(part) = remaining.next() {
+            match part {
+                InterpolatedPart::Text(text) => string.segments.push(text.to_string()),
+                InterpolatedPart::Expr(expr) => {
+                    match eval_dependent_bytecode_body_ref(state, node_id, expr, bytecode)? {
+                        EvalStep::Ready(value) => {
+                            string.segments.push(interpolation_segment_text(&value)?)
+                        }
+                        EvalStep::Suspended(suspension) => {
+                            string.remaining_parts = remaining.collect();
+                            bytecode.pending =
+                                Some(BytecodePendingState::InterpolatedString { string });
+                            return Ok(EvalStep::Suspended(suspension));
+                        }
                     }
-                    other => {
-                        return Err(EvalError::new(
-                            EvalErrorKind::Internal,
-                            format!(
-                                "unexpected bytecode interpolated string resume frame: {other:?}"
-                            ),
-                        ));
-                    }
-                });
-                Ok(EvalStep::Suspended(suspension))
+                }
             }
         }
+        Ok(EvalStep::Ready(ready_interpolated_string_value(
+            string.segments,
+            string.string_source,
+        )))
     }
 
     fn continue_bytecode_interpolated_string_join(
@@ -4781,144 +4506,6 @@ pub(super) fn continue_bytecode_body(
         }
     }
     Ok(EvalStep::Ready(bytecode.last))
-}
-
-pub(super) fn continue_array_items(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut array: ArrayState,
-) -> Result<EvalStep, EvalError> {
-    let mut remaining = array.remaining_items.into_iter();
-    while let Some(item_handle) = remaining.next() {
-        let (item_handle, spread) = match item_handle {
-            ArrayEvalItem::Expr(handle) => (handle, false),
-            ArrayEvalItem::Spread(handle) => (handle, true),
-        };
-        match eval_dependent_body_ref(state, node_id, item_handle, &mut array.env)? {
-            EvalStep::Ready(value) => append_array_item(&mut array.items, value, spread)?,
-            EvalStep::Suspended(suspension) => {
-                array.spread = spread;
-                array.remaining_items = remaining.collect();
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Array {
-                        node_id,
-                        parent_id,
-                        array,
-                    },
-                ));
-            }
-        }
-    }
-    let provenance = Provenance::literal(array.array_source);
-    let meta = aggregate_child_meta(provenance, array.items.iter());
-    Ok(EvalStep::Ready(Value::array(array.items).with_meta(meta)))
-}
-
-pub(super) fn continue_tuple_items(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut tuple: TupleState,
-) -> Result<EvalStep, EvalError> {
-    let mut remaining = tuple.remaining_items.into_iter();
-    while let Some(item_handle) = remaining.next() {
-        match eval_dependent_body_ref(state, node_id, item_handle, &mut tuple.env)? {
-            EvalStep::Ready(value) => tuple.items.push(value),
-            EvalStep::Suspended(suspension) => {
-                tuple.remaining_items = remaining.collect();
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Tuple {
-                        node_id,
-                        parent_id,
-                        tuple,
-                    },
-                ));
-            }
-        }
-    }
-    let provenance = Provenance::literal(tuple.tuple_source);
-    let meta = aggregate_child_meta(provenance, tuple.items.iter());
-    Ok(EvalStep::Ready(Value::tuple(tuple.items).with_meta(meta)))
-}
-
-pub(super) fn continue_range_end(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    start: Option<Value>,
-    end: Option<ExprBodyRef>,
-    mut env: EvalEnv,
-    range_source: SourceSpan,
-    inclusive_end: bool,
-) -> Result<EvalStep, EvalError> {
-    let end = match end {
-        Some(end_handle) => match eval_dependent_body_ref(state, node_id, end_handle, &mut env)? {
-            EvalStep::Ready(end) => Some(end),
-            EvalStep::Suspended(suspension) => {
-                return Ok(extend_suspension(
-                    suspension,
-                    ContinuationFrame::Range {
-                        node_id,
-                        parent_id,
-                        range: RangeState {
-                            start,
-                            end: None,
-                            env,
-                            range_source,
-                            inclusive_end,
-                        },
-                        pending: RangeResumeKind::End,
-                    },
-                ));
-            }
-        },
-        None => None,
-    };
-    Ok(EvalStep::Ready(build_range_value(
-        start,
-        end,
-        inclusive_end,
-        range_source,
-    )?))
-}
-
-pub(super) fn continue_interpolated_string_parts(
-    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
-    node_id: EvalNodeId,
-    parent_id: Option<EvalNodeId>,
-    mut string: InterpolatedStringState,
-) -> Result<EvalStep, EvalError> {
-    let mut remaining = string.remaining_parts.into_iter();
-    while let Some(part) = remaining.next() {
-        match part {
-            InterpolatedPart::Text(text) => string.segments.push(text.to_string()),
-            InterpolatedPart::Expr(expr) => {
-                match eval_dependent_body_ref(state, node_id, expr, &mut string.env)? {
-                    EvalStep::Ready(value) => {
-                        string.segments.push(interpolation_segment_text(&value)?)
-                    }
-                    EvalStep::Suspended(suspension) => {
-                        string.remaining_parts = remaining.collect();
-                        return Ok(extend_suspension(
-                            suspension,
-                            ContinuationFrame::InterpolatedString {
-                                node_id,
-                                parent_id,
-                                string,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(EvalStep::Ready(ready_interpolated_string_value(
-        string.segments,
-        string.string_source,
-    )))
 }
 
 fn build_range_value(

@@ -39,23 +39,6 @@ pub(super) enum ArrayEvalItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ArrayState {
-    pub(super) items: Vec<Value>,
-    pub(super) spread: bool,
-    pub(super) remaining_items: Vec<ArrayEvalItem>,
-    pub(super) env: EvalEnv,
-    pub(super) array_source: SourceSpan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TupleState {
-    pub(super) items: Vec<Value>,
-    pub(super) remaining_items: Vec<ExprBodyRef>,
-    pub(super) env: EvalEnv,
-    pub(super) tuple_source: SourceSpan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ArrayJoinItem {
     Expr(EvalNodeId),
     Spread(EvalNodeId),
@@ -132,21 +115,21 @@ pub(super) struct PlannedCallState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BytecodePendingState {
     Array {
-        array: ArrayState,
+        array: BytecodeArrayState,
     },
     ArrayJoin {
         child_nodes: Vec<ArrayJoinItem>,
         array_source: SourceSpan,
     },
     Tuple {
-        tuple: TupleState,
+        tuple: BytecodeTupleState,
     },
     TupleJoin {
         child_nodes: Vec<EvalNodeId>,
         tuple_source: SourceSpan,
     },
     Range {
-        range: RangeState,
+        range: BytecodeRangeState,
         pending: RangeResumeKind,
     },
     RangeJoin {
@@ -169,7 +152,7 @@ pub(super) enum BytecodePendingState {
         struct_source: SourceSpan,
     },
     InterpolatedString {
-        string: InterpolatedStringState,
+        string: BytecodeInterpolatedStringState,
     },
     InterpolatedStringJoin {
         parts: Vec<InterpolatedPart>,
@@ -192,6 +175,36 @@ pub(super) enum BytecodePendingState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeArrayState {
+    pub(super) items: Vec<Value>,
+    pub(super) spread: bool,
+    pub(super) remaining_items: Vec<ArrayEvalItem>,
+    pub(super) array_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeTupleState {
+    pub(super) items: Vec<Value>,
+    pub(super) remaining_items: Vec<ExprBodyRef>,
+    pub(super) tuple_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeRangeState {
+    pub(super) start: Option<Value>,
+    pub(super) end: Option<ExprBodyRef>,
+    pub(super) range_source: SourceSpan,
+    pub(super) inclusive_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BytecodeInterpolatedStringState {
+    pub(super) segments: Vec<String>,
+    pub(super) remaining_parts: Vec<InterpolatedPart>,
+    pub(super) string_source: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FieldState {
     pub(super) field_expr: ExprId,
 }
@@ -200,15 +213,6 @@ pub(super) struct FieldState {
 pub(super) enum RangeResumeKind {
     Start,
     End,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RangeState {
-    pub(super) start: Option<Value>,
-    pub(super) end: Option<ExprBodyRef>,
-    pub(super) env: EvalEnv,
-    pub(super) range_source: SourceSpan,
-    pub(super) inclusive_end: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,14 +274,6 @@ pub(super) struct StructState {
     pub(super) remaining_parts: Vec<StructLiteralPart>,
     pub(super) env: EvalEnv,
     pub(super) struct_source: SourceSpan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InterpolatedStringState {
-    pub(super) segments: Vec<String>,
-    pub(super) remaining_parts: Vec<InterpolatedPart>,
-    pub(super) env: EvalEnv,
-    pub(super) string_source: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,17 +342,6 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         bytecode: BytecodeState,
     },
-    Array {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        array: ArrayState,
-    },
-    ArrayJoin {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        child_nodes: Vec<ArrayJoinItem>,
-        array_source: SourceSpan,
-    },
     StreamToArrayJoin {
         node_id: EvalNodeId,
         parent_id: Option<EvalNodeId>,
@@ -380,43 +365,6 @@ pub(super) enum ContinuationFrame {
         parent_id: Option<EvalNodeId>,
         items: Vec<StreamJoinItem>,
         stream_provenance: Provenance,
-    },
-    Tuple {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        tuple: TupleState,
-    },
-    TupleJoin {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        child_nodes: Vec<EvalNodeId>,
-        tuple_source: SourceSpan,
-    },
-    InterpolatedString {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        string: InterpolatedStringState,
-    },
-    InterpolatedStringJoin {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        parts: Vec<InterpolatedPart>,
-        expr_nodes: Vec<EvalNodeId>,
-        string_source: SourceSpan,
-    },
-    Range {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        range: RangeState,
-        pending: RangeResumeKind,
-    },
-    RangeJoin {
-        node_id: EvalNodeId,
-        parent_id: Option<EvalNodeId>,
-        start_child: Option<EvalNodeId>,
-        end_child: Option<EvalNodeId>,
-        range_source: SourceSpan,
-        inclusive_end: bool,
     },
     Map {
         node_id: EvalNodeId,
