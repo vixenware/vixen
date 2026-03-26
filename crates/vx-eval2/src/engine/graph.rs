@@ -111,7 +111,7 @@ impl PartialEq for EvalBranchContext {
 
 impl Eq for EvalBranchContext {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EvalWorkKind {
     StartEntry,
     EvaluateExpr,
@@ -119,7 +119,7 @@ pub enum EvalWorkKind {
     ResumePending,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EvalWorkCauseKind {
     Root,
     Child,

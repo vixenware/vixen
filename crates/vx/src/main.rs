@@ -612,7 +612,7 @@ impl CliContext {
             &runtime,
             args.place.clone(),
         );
-        if args.call_profile || args.causal_profile {
+        if args.call_profile {
             session.set_call_profiling_enabled(true);
         }
 

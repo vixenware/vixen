@@ -439,13 +439,13 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub(crate) fn causal_profile(&self) -> EvalSessionCausalProfile {
-        let mut entries = BTreeMap::<
+        let mut entries = HashMap::<
             (
                 EvalWorkKind,
                 EvalWorkCauseKind,
                 Arc<str>,
-                Option<String>,
-                Vec<EvalNodeId>,
+                Option<SourceSpan>,
+                Arc<[EvalNodeId]>,
             ),
             EvalCausalProfileEntry,
         >::new();
@@ -465,13 +465,12 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             let record = self.node_record(completed.work.node_id);
             let label = causal_profile_label_for_completed(completed, record);
             let source = causal_profile_source_for_completed(completed, record);
-            let source_key = source.as_ref().map(|span| format!("{span:?}"));
-            let depend_stack = completed.work.cause.depend_stack.to_vec();
+            let depend_stack = completed.work.cause.depend_stack.clone();
             let key = (
                 completed.work.kind,
                 completed.work.cause.kind,
                 label.clone(),
-                source_key,
+                source.clone(),
                 depend_stack.clone(),
             );
             let entry = entries
@@ -481,7 +480,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                     cause_kind: completed.work.cause.kind,
                     label,
                     source,
-                    depend_stack: Arc::from(depend_stack),
+                    depend_stack,
                     runs: 0,
                     total_time: Duration::default(),
                     max_time: Duration::default(),
