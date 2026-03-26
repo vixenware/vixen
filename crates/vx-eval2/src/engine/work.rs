@@ -4,6 +4,8 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Instant;
 
+const LOCAL_SEGMENT_FOLLOWUP_BUDGET: usize = 63;
+
 #[derive(Debug, Clone)]
 pub(super) struct EvalScheduler {
     pub(super) next_wave_id: u64,
@@ -311,6 +313,7 @@ struct EvalPreparedScheduler<'a> {
     keyed_node_index: HashMap<EvalNodeId, usize>,
     retained_expr_index: HashMap<EvalNodeId, usize>,
     queued: VecDeque<ReadyTaskRecord>,
+    local_followups_drained: usize,
     resolved_local_pending: BTreeSet<EvalNodeId>,
     completed_invalidated: bool,
     reads: RefCell<EvalSnapshotReadSet>,
@@ -328,6 +331,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             keyed_node_index: HashMap::new(),
             retained_expr_index: HashMap::new(),
             queued: VecDeque::new(),
+            local_followups_drained: 0,
             resolved_local_pending: BTreeSet::new(),
             completed_invalidated: false,
             reads: RefCell::new(EvalSnapshotReadSet::default()),
@@ -670,16 +674,26 @@ impl<'a> EvalPreparedScheduler<'a> {
         )
     }
 
+    fn can_drain_locally(&self, task: &ReadyTask) -> bool {
+        match task {
+            ReadyTask::Resume(_) | ReadyTask::ResumeBytecode(_) => true,
+            ReadyTask::EvaluateExpr(_) => self.queued.len() == 1,
+            _ => false,
+        }
+    }
+
     fn take_local_ready_task(&mut self) -> Option<ReadyTaskRecord> {
-        (self.queued.len() == 1)
-            .then(|| {
-                self.queued
-                    .front()
-                    .is_some_and(|record| Self::can_execute_locally(&record.task))
-                    .then(|| self.queued.pop_front())
-                    .flatten()
-            })
-            .flatten()
+        if self.local_followups_drained >= LOCAL_SEGMENT_FOLLOWUP_BUDGET {
+            return None;
+        }
+        let Some(record) = self.queued.front() else {
+            return None;
+        };
+        if !Self::can_execute_locally(&record.task) || !self.can_drain_locally(&record.task) {
+            return None;
+        }
+        self.local_followups_drained += 1;
+        self.queued.pop_front()
     }
 
     fn take_local_pending_entry(&mut self, pending_id: EvalNodeId) -> Option<PendingEntry> {

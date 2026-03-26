@@ -1272,6 +1272,12 @@ fn commit_completion(
     completion: EvalWorkCompletion,
 ) -> Result<CommitCompletionResult, EvalError> {
     owner_commit_profile.completions_committed += 1;
+    match completion.work.kind {
+        EvalWorkKind::StartEntry => owner_commit_profile.committed_start_entry += 1,
+        EvalWorkKind::EvaluateExpr => owner_commit_profile.committed_evaluate_expr += 1,
+        EvalWorkKind::EvaluateKeyed => owner_commit_profile.committed_evaluate_keyed += 1,
+        EvalWorkKind::ResumePending => owner_commit_profile.committed_resume_pending += 1,
+    }
     if completion_targets_superseded_work(scheduler, &completion.work) {
         owner_commit_profile.completions_superseded += 1;
         if collect_completed_work {
@@ -1558,6 +1564,13 @@ fn format_owner_commit_profile_report(profile: &EvalOwnerCommitProfile) -> Strin
         profile.waiter_wakeups,
         profile.resume_tasks_enqueued,
         profile.completed_invalidations,
+    ));
+    lines.push(format!(
+        "  committed_by_kind start_entry={} evaluate_expr={} evaluate_keyed={} resume_pending={}",
+        profile.committed_start_entry,
+        profile.committed_evaluate_expr,
+        profile.committed_evaluate_keyed,
+        profile.committed_resume_pending,
     ));
     lines.push(format!(
         "  delta_items={} avg_per_committed={} node_records={} keyed_nodes={} node_states={} dependency_edges={}",
