@@ -409,11 +409,12 @@ impl<'a> EvalPreparedScheduler<'a> {
             return None;
         }
         if let Some(index) = self.pending_entry_index.get(&pending_id).copied() {
-            Some(&self.delta.pending_entries[index].1)
+            let entry = &self.delta.pending_entries[index].1;
+            entry.visible_kind().map(|_| entry)
         } else {
             let entry = self.base.base.pending_entries.get(&pending_id);
-            self.record_pending_kind_read(pending_id, entry.map(|entry| entry.kind));
-            entry
+            self.record_pending_kind_read(pending_id, entry.and_then(PendingEntry::visible_kind));
+            entry.and_then(|entry| entry.visible_kind().map(|_| entry))
         }
     }
 
@@ -433,7 +434,8 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn pending_kind_local(&self, pending_id: EvalNodeId) -> Option<PendingKind> {
-        self.pending_entry_local(pending_id).map(|entry| entry.kind)
+        self.pending_entry_local(pending_id)
+            .and_then(PendingEntry::visible_kind)
     }
 
     fn keyed_node_local(&self, node_id: EvalNodeId) -> Option<&KeyedNodeMemo> {
@@ -608,7 +610,13 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn take_local_pending_entry(&mut self, pending_id: EvalNodeId) -> Option<PendingEntry> {
-        if self.base.base.pending_entries.contains_key(&pending_id) {
+        if self
+            .base
+            .base
+            .pending_entries
+            .get(&pending_id)
+            .is_some_and(|entry| !entry.resolved)
+        {
             return None;
         }
         let index = self.pending_entry_index.get(&pending_id).copied()?;
@@ -617,6 +625,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             &mut self.delta.pending_entries[index].1,
             PendingEntry {
                 kind: PendingKind::External,
+                resolved: true,
                 waiters: PendingWaiters::default(),
             },
         ))
@@ -869,6 +878,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             pending_id,
             PendingEntry {
                 kind: PendingKind::External,
+                resolved: false,
                 waiters: PendingWaiters::default(),
             },
         ));
@@ -886,12 +896,14 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
         if let Some(index) = self.pending_entry_index.get(&dependency).copied() {
             self.delta.pending_entries[index].1.kind = PendingKind::ChildDependency { dependency };
+            self.delta.pending_entries[index].1.resolved = false;
         } else {
             let index = self.delta.pending_entries.len();
             self.delta.pending_entries.push((
                 dependency,
                 PendingEntry {
                     kind: PendingKind::ChildDependency { dependency },
+                    resolved: false,
                     waiters: PendingWaiters::default(),
                 },
             ));
@@ -907,6 +919,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
     fn register_suspension(&mut self, suspension: EvalSuspension) {
         let pending_id = EvalNodeId(suspension.pending.node_id);
         if let Some(entry) = self.pending_entry_mut(pending_id) {
+            entry.resolved = false;
             entry.waiters.push(suspension);
             return;
         }
@@ -915,6 +928,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             pending_id,
             PendingEntry {
                 kind: PendingKind::External,
+                resolved: false,
                 waiters: PendingWaiters::One(suspension),
             },
         ));
@@ -1306,6 +1320,10 @@ pub(super) enum PendingWaiters {
 }
 
 impl PendingWaiters {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
     fn first(&self) -> Option<&EvalSuspension> {
         match self {
             Self::None => None,
@@ -1349,7 +1367,14 @@ impl PendingWaiters {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingEntry {
     pub(super) kind: PendingKind,
+    pub(super) resolved: bool,
     pub(super) waiters: PendingWaiters,
+}
+
+impl PendingEntry {
+    fn visible_kind(&self) -> Option<PendingKind> {
+        (!self.resolved).then_some(self.kind)
+    }
 }
 
 impl EvalPreparedSnapshot {
@@ -1385,7 +1410,8 @@ fn completion_reads_stale_base(
             current
                 .pending_entries
                 .get(pending_id)
-                .map(|entry| &entry.kind),
+                .and_then(PendingEntry::visible_kind)
+                .as_ref(),
             observed.as_ref(),
         ) {
             return Ok(true);
@@ -1626,6 +1652,7 @@ impl EvalScheduler {
             pending_id,
             PendingEntry {
                 kind: PendingKind::External,
+                resolved: false,
                 waiters: PendingWaiters::default(),
             },
         );
@@ -1644,6 +1671,7 @@ impl EvalScheduler {
             dependency,
             PendingEntry {
                 kind: PendingKind::ChildDependency { dependency },
+                resolved: false,
                 waiters: PendingWaiters::default(),
             },
         );
@@ -1655,7 +1683,7 @@ impl EvalScheduler {
             .pending_entries
             .iter()
             .filter_map(|(_, entry)| {
-                matches!(entry.kind, PendingKind::External)
+                (!entry.resolved && matches!(entry.kind, PendingKind::External))
                     .then(|| entry.waiters.first().map(|waiter| waiter.pending.clone()))
                     .flatten()
             })
@@ -1666,7 +1694,7 @@ impl EvalScheduler {
         self.base
             .pending_entries
             .get(&EvalNodeId(pending.node_id))
-            .map(|entry| entry.kind)
+            .and_then(PendingEntry::visible_kind)
     }
 
     pub(super) fn has_waiting_work(&self) -> bool {
@@ -2210,7 +2238,7 @@ impl EvalScheduler {
             .base
             .pending_entries
             .get(&dependency)
-            .map(|entry| entry.kind)
+            .and_then(PendingEntry::visible_kind)
         {
             Some(PendingKind::ChildDependency {
                 dependency: registered,
@@ -2227,24 +2255,28 @@ impl EvalScheduler {
         pending_id: EvalNodeId,
         result: Result<Value, EvalError>,
     ) -> Result<(), EvalError> {
-        let Some(entry) = self.base_mut().pending_entries.remove(&pending_id) else {
-            return Err(EvalError::new(
-                EvalErrorKind::Internal,
-                format!("pending node {:?} is not registered", pending_id),
-            ));
-        };
-        let Some(pending) = entry
-            .waiters
-            .first()
-            .map(|suspension| suspension.pending.clone())
-        else {
-            return Err(EvalError::new(
-                EvalErrorKind::Internal,
-                format!(
-                    "pending node {:?} had no registered suspensions",
-                    pending_id
-                ),
-            ));
+        let (pending, waiters) = {
+            let Some(entry) = self.base_mut().pending_entries.get_mut(&pending_id) else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!("pending node {:?} is not registered", pending_id),
+                ));
+            };
+            let Some(pending) = entry
+                .waiters
+                .first()
+                .map(|suspension| suspension.pending.clone())
+            else {
+                return Err(EvalError::new(
+                    EvalErrorKind::Internal,
+                    format!(
+                        "pending node {:?} had no registered suspensions",
+                        pending_id
+                    ),
+                ));
+            };
+            entry.resolved = true;
+            (pending, mem::take(&mut entry.waiters))
         };
         let node_id = EvalNodeId(pending.node_id);
         let shared_result = result.map(Arc::new);
@@ -2252,7 +2284,7 @@ impl EvalScheduler {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(Arc::clone(value))),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
-        for suspension in entry.waiters.into_vec() {
+        for suspension in waiters.into_vec() {
             let resume_node = suspension.resume_node;
             let branch_context = suspension.branch_context.clone();
             let task = match &suspension.continuation {
@@ -2300,12 +2332,14 @@ impl EvalScheduler {
     pub(super) fn register_suspension(&mut self, suspension: EvalSuspension) {
         let pending_id = EvalNodeId(suspension.pending.node_id);
         if let Some(entry) = self.base_mut().pending_entries.get_mut(&pending_id) {
+            entry.resolved = false;
             entry.waiters.push(suspension);
         } else {
             self.base_mut().pending_entries.insert(
                 pending_id,
                 PendingEntry {
                     kind: PendingKind::External,
+                    resolved: false,
                     waiters: PendingWaiters::One(suspension),
                 },
             );
@@ -2523,6 +2557,12 @@ impl EvalScheduler {
                         ));
                     }
                     Some(existing) => {
+                        if added_entry.resolved {
+                            existing.resolved = true;
+                        }
+                        if !added_entry.waiters.is_empty() {
+                            existing.resolved = false;
+                        }
                         existing.waiters.extend_unique(added_entry.waiters);
                     }
                     None => {
@@ -2530,6 +2570,7 @@ impl EvalScheduler {
                             pending_id,
                             PendingEntry {
                                 kind: added_entry.kind,
+                                resolved: added_entry.resolved,
                                 waiters: mem::take(&mut added_entry.waiters),
                             },
                         );

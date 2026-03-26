@@ -756,23 +756,6 @@ impl<T: Clone> EvalNodeTable<T> {
         self.get(node_id).is_some()
     }
 
-    pub(super) fn remove(&mut self, node_id: &EvalNodeId) -> Option<T> {
-        if Self::is_dense(*node_id) {
-            let slot = self.dense.get_mut(node_id.0 as usize)?;
-            let previous = slot.take();
-            if previous.is_some() {
-                self.len -= 1;
-            }
-            previous
-        } else {
-            let previous = self.sparse.remove(node_id);
-            if previous.is_some() {
-                self.len -= 1;
-            }
-            previous
-        }
-    }
-
     pub(super) fn keys(&self) -> impl Iterator<Item = EvalNodeId> + '_ {
         let dense = self
             .dense
