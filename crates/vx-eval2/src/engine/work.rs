@@ -313,6 +313,7 @@ struct EvalPreparedScheduler<'a> {
     keyed_node_index: HashMap<EvalNodeId, usize>,
     retained_expr_index: HashMap<EvalNodeId, usize>,
     queued: VecDeque<ReadyTaskRecord>,
+    local_queued: VecDeque<ReadyTaskRecord>,
     local_followups_drained: usize,
     resolved_local_pending: BTreeSet<EvalNodeId>,
     completed_invalidated: bool,
@@ -331,6 +332,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             keyed_node_index: HashMap::new(),
             retained_expr_index: HashMap::new(),
             queued: VecDeque::new(),
+            local_queued: VecDeque::new(),
             local_followups_drained: 0,
             resolved_local_pending: BTreeSet::new(),
             completed_invalidated: false,
@@ -344,6 +346,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             allocator,
             mut delta,
             queued,
+            local_queued,
             resolved_local_pending,
             completed_invalidated,
             reads,
@@ -356,7 +359,7 @@ impl<'a> EvalPreparedScheduler<'a> {
                 .pending_entries
                 .retain(|(pending_id, _)| !resolved_local_pending.contains(pending_id));
         }
-        delta.queued = queued.into_iter().collect();
+        delta.queued = local_queued.into_iter().chain(queued).collect();
         (delta, completed_invalidated, reads.into_inner())
     }
 
@@ -548,7 +551,10 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn work_is_queued(&self, work_id: EvalWorkId) -> bool {
-        self.queued.iter().any(|record| record.work.id == work_id)
+        self.local_queued
+            .iter()
+            .any(|record| record.work.id == work_id)
+            || self.queued.iter().any(|record| record.work.id == work_id)
             || self
                 .base
                 .baseline_ready_tasks
@@ -674,10 +680,18 @@ impl<'a> EvalPreparedScheduler<'a> {
         )
     }
 
-    fn can_drain_locally(&self, task: &ReadyTask) -> bool {
+    fn can_drain_local_queue_task(&self, task: &ReadyTask) -> bool {
         match task {
             ReadyTask::Resume(_) | ReadyTask::ResumeBytecode(_) => true,
-            ReadyTask::EvaluateExpr(_) => self.queued.len() == 1,
+            ReadyTask::EvaluateExpr(_) => self.local_queued.len() == 1,
+            _ => false,
+        }
+    }
+
+    fn can_drain_exported_queue_task(&self, task: &ReadyTask) -> bool {
+        match task {
+            ReadyTask::Resume(_) | ReadyTask::ResumeBytecode(_) => true,
+            ReadyTask::EvaluateExpr(_) => self.local_queued.is_empty() && self.queued.len() == 1,
             _ => false,
         }
     }
@@ -686,10 +700,18 @@ impl<'a> EvalPreparedScheduler<'a> {
         if self.local_followups_drained >= LOCAL_SEGMENT_FOLLOWUP_BUDGET {
             return None;
         }
-        let Some(record) = self.queued.front() else {
-            return None;
-        };
-        if !Self::can_execute_locally(&record.task) || !self.can_drain_locally(&record.task) {
+        if let Some(record) = self.local_queued.front() {
+            if Self::can_execute_locally(&record.task)
+                && self.can_drain_local_queue_task(&record.task)
+            {
+                self.local_followups_drained += 1;
+                return self.local_queued.pop_front();
+            }
+        }
+        let record = self.queued.front()?;
+        if !Self::can_execute_locally(&record.task)
+            || !self.can_drain_exported_queue_task(&record.task)
+        {
             return None;
         }
         self.local_followups_drained += 1;
@@ -773,7 +795,7 @@ impl<'a> EvalPreparedScheduler<'a> {
                     result: shared_result.clone(),
                 }),
             };
-            let work = self.enqueue_ready_task(
+            let work = self.enqueue_local_ready_task(
                 task,
                 EvalWorkKind::ResumePending,
                 resume_node,
@@ -1326,6 +1348,30 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             cause,
         };
         self.queued.push_back(ReadyTaskRecord {
+            work: work.clone(),
+            task,
+            branch_context,
+        });
+        work
+    }
+
+    fn enqueue_local_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        node_id: EvalNodeId,
+        pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
+    ) -> EvalQueuedWork {
+        let work = EvalQueuedWork {
+            id: self.allocator.alloc_work_id(),
+            kind,
+            node_id,
+            pending,
+            cause,
+        };
+        self.local_queued.push_back(ReadyTaskRecord {
             work: work.clone(),
             task,
             branch_context,

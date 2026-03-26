@@ -1260,7 +1260,7 @@ pub(super) fn eval_child_prepared_entry(
         state.emit_current_dependency(child_id, Some(source));
         return eval_prepared_body_with_node_id(state, child_id, prepared);
     }
-    let child_id = queue_child_prepared_entry(state, prepared);
+    let child_id = queue_local_child_prepared_entry(state, prepared);
     let resume_node = state
         .current_parent()
         .expect("prepared child entry should have an active parent node");
@@ -1302,7 +1302,7 @@ pub(super) fn eval_child_body_ref(
             prepared_entry_from_scope(state.program, prepared, env.clone())?,
         );
     }
-    let child_id = queue_child_body_ref(state, body, env);
+    let child_id = queue_local_child_body_ref(state, body, env);
     let resume_node = state
         .current_parent()
         .expect("child expression should have an active parent node");
@@ -2854,17 +2854,18 @@ pub(super) fn continue_bytecode_body(
                 {
                     call.callee = Some(callee_value);
                     call.next_arg_index = call.positional_args.len();
-                    let queued_arg_nodes = call
-                        .positional_args
-                        .iter()
-                        .map(|arg| {
-                            queue_child_prepared_entry(
-                                state,
-                                prepared_entry_from_bytecode(state.program, *arg, bytecode)
-                                    .expect("bytecode call arg should resolve to a prepared entry"),
-                            )
-                        })
-                        .collect::<Vec<_>>();
+                    let localize_first_arg = call.positional_args.len() > 2;
+                    let mut queued_arg_nodes = Vec::with_capacity(call.positional_args.len());
+                    for (index, arg) in call.positional_args.iter().enumerate() {
+                        let prepared = prepared_entry_from_bytecode(state.program, *arg, bytecode)
+                            .expect("bytecode call arg should resolve to a prepared entry");
+                        let child_id = if localize_first_arg && index == 0 {
+                            queue_local_child_prepared_entry(state, prepared)
+                        } else {
+                            queue_child_prepared_entry(state, prepared)
+                        };
+                        queued_arg_nodes.push(child_id);
+                    }
                     let first_child = queued_arg_nodes[0];
                     call.queued_arg_nodes = queued_arg_nodes;
                     bytecode.pending = Some(BytecodePendingState::Call {
@@ -3035,20 +3036,29 @@ pub(super) fn continue_bytecode_body(
             });
         }
         if state.queue_child_work {
+            let localize_first_child = array.items.len() > 2;
             let mut child_nodes = Vec::new();
-            for item in array.items.iter() {
+            for (index, item) in array.items.iter().enumerate() {
                 match item {
                     ArrayPlanItem::Expr(body) => {
-                        child_nodes.push(ArrayJoinItem::Expr(queue_child_prepared_entry(
-                            state,
-                            prepared_entry_from_bytecode(state.program, *body, bytecode)?,
-                        )))
+                        let prepared =
+                            prepared_entry_from_bytecode(state.program, *body, bytecode)?;
+                        let child_id = if localize_first_child && index == 0 {
+                            queue_local_child_prepared_entry(state, prepared)
+                        } else {
+                            queue_child_prepared_entry(state, prepared)
+                        };
+                        child_nodes.push(ArrayJoinItem::Expr(child_id))
                     }
                     ArrayPlanItem::Spread(body) => {
-                        child_nodes.push(ArrayJoinItem::Spread(queue_child_prepared_entry(
-                            state,
-                            prepared_entry_from_bytecode(state.program, *body, bytecode)?,
-                        )))
+                        let prepared =
+                            prepared_entry_from_bytecode(state.program, *body, bytecode)?;
+                        let child_id = if localize_first_child && index == 0 {
+                            queue_local_child_prepared_entry(state, prepared)
+                        } else {
+                            queue_child_prepared_entry(state, prepared)
+                        };
+                        child_nodes.push(ArrayJoinItem::Spread(child_id))
                     }
                 }
             }
@@ -3190,14 +3200,17 @@ pub(super) fn continue_bytecode_body(
             });
         }
         if state.queue_child_work {
-            let child_nodes = tuple
-                .items
-                .iter()
-                .map(|item| {
-                    prepared_entry_from_bytecode(state.program, *item, bytecode)
-                        .map(|prepared| queue_child_prepared_entry(state, prepared))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let localize_first_child = tuple.items.len() > 2;
+            let mut child_nodes = Vec::with_capacity(tuple.items.len());
+            for (index, item) in tuple.items.iter().enumerate() {
+                let prepared = prepared_entry_from_bytecode(state.program, *item, bytecode)?;
+                let child_id = if localize_first_child && index == 0 {
+                    queue_local_child_prepared_entry(state, prepared)
+                } else {
+                    queue_child_prepared_entry(state, prepared)
+                };
+                child_nodes.push(child_id);
+            }
             if child_nodes.is_empty() {
                 let provenance = Provenance::literal(state.program.span_for_handle(tuple.handle));
                 return Ok(EvalStep::Ready(Value::tuple(Vec::new()).with_meta(
@@ -3679,15 +3692,23 @@ pub(super) fn continue_bytecode_body(
                     InterpolatedStringPlanPart::Interpolation(body) => InterpolatedPart::Expr(body),
                 })
                 .collect::<Vec<_>>();
+            let localize_first_expr = parts
+                .iter()
+                .filter(|part| matches!(part, InterpolatedPart::Expr(_)))
+                .count()
+                > 2;
             let mut expr_nodes = Vec::new();
             for part in &parts {
                 let InterpolatedPart::Expr(body) = part else {
                     continue;
                 };
-                expr_nodes.push(queue_child_prepared_entry(
-                    state,
-                    prepared_entry_from_bytecode(state.program, *body, bytecode)?,
-                ));
+                let prepared = prepared_entry_from_bytecode(state.program, *body, bytecode)?;
+                let child_id = if localize_first_expr && expr_nodes.is_empty() {
+                    queue_local_child_prepared_entry(state, prepared)
+                } else {
+                    queue_child_prepared_entry(state, prepared)
+                };
+                expr_nodes.push(child_id);
             }
             if let Some(child_id) = expr_nodes.first().copied() {
                 bytecode.pending = Some(BytecodePendingState::InterpolatedStringJoin {
@@ -3889,17 +3910,21 @@ pub(super) fn continue_bytecode_body(
             && let Some(joinable_fields) = joinable_fields
             && !joinable_fields.is_empty()
         {
+            let localize_first_child = joinable_fields.len() > 2;
             let field_names = joinable_fields
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
-            let child_nodes = joinable_fields
-                .iter()
-                .map(|(_, expr)| {
-                    prepared_entry_from_bytecode(state.program, *expr, bytecode)
-                        .map(|prepared| queue_child_prepared_entry(state, prepared))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut child_nodes = Vec::with_capacity(joinable_fields.len());
+            for (index, (_, expr)) in joinable_fields.iter().enumerate() {
+                let prepared = prepared_entry_from_bytecode(state.program, *expr, bytecode)?;
+                let child_id = if localize_first_child && index == 0 {
+                    queue_local_child_prepared_entry(state, prepared)
+                } else {
+                    queue_child_prepared_entry(state, prepared)
+                };
+                child_nodes.push(child_id);
+            }
             return Ok(wait_on_child_dependency(
                 state,
                 node_id,
@@ -4906,7 +4931,7 @@ fn match_struct_pattern_fields(
     Ok(true)
 }
 
-pub(super) fn queue_child_body_ref(
+fn queue_local_child_body_ref(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     body: ExprBodyRef,
     env: &EvalEnv,
@@ -4916,6 +4941,7 @@ pub(super) fn queue_child_body_ref(
         PreparedBodyRef::from_body_ref(state.program, body)
             .expect("queued child body ref should resolve to an execution body"),
         env,
+        true,
     )
 }
 
@@ -4923,6 +4949,7 @@ fn queue_child_expr_body(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     body: PreparedBodyRef,
     env: &EvalEnv,
+    local_only: bool,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let body_kind = prepared_body_kind(state.program, &body);
@@ -4960,14 +4987,26 @@ fn queue_child_expr_body(
     state
         .scheduler
         .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
-    let work = state.scheduler.enqueue_ready_task(
-        ReadyTask::EvaluateExpr(scheduled),
-        EvalWorkKind::EvaluateExpr,
-        child_id,
-        None,
-        state.branch_context.clone(),
-        EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack()),
-    );
+    let cause = EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack());
+    let work = if local_only {
+        state.scheduler.enqueue_local_ready_task(
+            ReadyTask::EvaluateExpr(scheduled),
+            EvalWorkKind::EvaluateExpr,
+            child_id,
+            None,
+            state.branch_context.clone(),
+            cause,
+        )
+    } else {
+        state.scheduler.enqueue_ready_task(
+            ReadyTask::EvaluateExpr(scheduled),
+            EvalWorkKind::EvaluateExpr,
+            child_id,
+            None,
+            state.branch_context.clone(),
+            cause,
+        )
+    };
     state.scheduler.record_node_state(
         child_id,
         EvalNodeState::Runnable {
@@ -4981,6 +5020,21 @@ fn queue_child_expr_body(
 pub(super) fn queue_child_prepared_entry(
     state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
     prepared: PreparedEntry,
+) -> EvalNodeId {
+    queue_prepared_child_entry(state, prepared, false)
+}
+
+fn queue_local_child_prepared_entry(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prepared: PreparedEntry,
+) -> EvalNodeId {
+    queue_prepared_child_entry(state, prepared, true)
+}
+
+fn queue_prepared_child_entry(
+    state: &mut EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    prepared: PreparedEntry,
+    local_only: bool,
 ) -> EvalNodeId {
     let child_id = state.alloc_node_id();
     let body_kind = prepared_body_kind(state.program, &prepared.body);
@@ -5011,14 +5065,26 @@ pub(super) fn queue_child_prepared_entry(
     state
         .scheduler
         .remember_expr_task(child_id, scheduled.clone(), state.branch_context.clone());
-    let work = state.scheduler.enqueue_ready_task(
-        ReadyTask::EvaluateExpr(scheduled),
-        EvalWorkKind::EvaluateExpr,
-        child_id,
-        None,
-        state.branch_context.clone(),
-        EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack()),
-    );
+    let cause = EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack());
+    let work = if local_only {
+        state.scheduler.enqueue_local_ready_task(
+            ReadyTask::EvaluateExpr(scheduled),
+            EvalWorkKind::EvaluateExpr,
+            child_id,
+            None,
+            state.branch_context.clone(),
+            cause,
+        )
+    } else {
+        state.scheduler.enqueue_ready_task(
+            ReadyTask::EvaluateExpr(scheduled),
+            EvalWorkKind::EvaluateExpr,
+            child_id,
+            None,
+            state.branch_context.clone(),
+            cause,
+        )
+    };
     state.scheduler.record_node_state(
         child_id,
         EvalNodeState::Runnable {

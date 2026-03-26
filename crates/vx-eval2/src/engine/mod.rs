@@ -147,6 +147,18 @@ trait EvalWorkerScheduler {
         cause: EvalWorkCause,
     ) -> EvalQueuedWork;
 
+    fn enqueue_local_ready_task(
+        &mut self,
+        task: ReadyTask,
+        kind: EvalWorkKind,
+        node_id: EvalNodeId,
+        pending: Option<PendingRef>,
+        branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
+    ) -> EvalQueuedWork {
+        self.enqueue_ready_task(task, kind, node_id, pending, branch_context, cause)
+    }
+
     fn resolve_local_child_dependency(
         &mut self,
         _dependency: EvalNodeId,
