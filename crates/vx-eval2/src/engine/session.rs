@@ -14,6 +14,9 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     trace: EvalTrace,
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
+    owner_commit_profile: EvalOwnerCommitProfile,
+    trace_enabled: bool,
+    completed_work_enabled: bool,
     history: Vec<EvalSessionCheckpoint>,
     call_summary: bool,
     call_profiling: bool,
@@ -101,6 +104,9 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             trace: EvalTrace::default(),
             completed_work: Vec::new(),
             completed: None,
+            owner_commit_profile: EvalOwnerCommitProfile::default(),
+            trace_enabled: cfg!(test),
+            completed_work_enabled: cfg!(test) || env::var_os("VX_EVAL2_PROFILE_CALLS").is_some(),
             history: Vec::new(),
             call_summary: false,
             call_profiling: env::var_os("VX_EVAL2_PROFILE_CALLS").is_some(),
@@ -130,6 +136,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         sink: &mut impl EvalEventSink,
         scrub_work_ids: bool,
     ) -> Result<Resolution, EvalError> {
+        self.trace_enabled = true;
         let mut emitted = 0;
         loop {
             let step = self.drive_step_without_history()?;
@@ -266,7 +273,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub fn resolve_pending(&mut self, pending: &PendingRef, value: Value) -> Result<(), EvalError> {
-        self.scheduler.resolve_pending(pending, Ok(value))?;
+        self.scheduler
+            .resolve_pending(pending, Ok(value), &mut self.owner_commit_profile)?;
         Ok(())
     }
 
@@ -275,7 +283,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         pending: &PendingRef,
         error: EvalError,
     ) -> Result<(), EvalError> {
-        self.scheduler.resolve_pending(pending, Err(error))?;
+        self.scheduler
+            .resolve_pending(pending, Err(error), &mut self.owner_commit_profile)?;
         Ok(())
     }
 
@@ -283,8 +292,23 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.scheduler.pending_nodes()
     }
 
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        self.trace_enabled = enabled;
+    }
+
+    pub fn set_completed_work_enabled(&mut self, enabled: bool) {
+        self.completed_work_enabled = enabled;
+    }
+
+    pub fn trace_enabled(&self) -> bool {
+        self.trace_enabled
+    }
+
     pub fn set_call_profiling_enabled(&mut self, enabled: bool) {
         self.call_profiling = enabled;
+        if enabled {
+            self.completed_work_enabled = true;
+        }
     }
 
     pub fn call_profiling_enabled(&self) -> bool {
@@ -293,10 +317,17 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn set_call_summary_enabled(&mut self, enabled: bool) {
         self.call_summary = enabled;
+        if enabled {
+            self.completed_work_enabled = true;
+        }
     }
 
     pub fn call_summary_enabled(&self) -> bool {
         self.call_summary || self.call_profiling
+    }
+
+    pub fn owner_commit_profile(&self) -> &EvalOwnerCommitProfile {
+        &self.owner_commit_profile
     }
 
     pub fn branch_context(&self) -> &EvalBranchContext {
@@ -516,6 +547,10 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         format_causal_profile_report(self, &self.causal_profile(), limit)
     }
 
+    pub fn owner_commit_profile_report(&self) -> String {
+        format_owner_commit_profile_report(&self.owner_commit_profile)
+    }
+
     pub fn profile_summary(&self) -> EvalSessionProfileSummary {
         let profile = self.profile();
         let mut entries =
@@ -706,6 +741,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             trace_len: self.trace.events.len(),
             completed_work_len: self.completed_work.len(),
             completed: self.completed.clone(),
+            owner_commit_profile: self.owner_commit_profile.clone(),
         }
     }
 
@@ -754,6 +790,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         self.trace.events.truncate(checkpoint.trace_len);
         self.completed_work.truncate(checkpoint.completed_work_len);
         self.completed = checkpoint.completed;
+        self.owner_commit_profile = checkpoint.owner_commit_profile;
     }
 
     pub fn prepare_step(&mut self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
@@ -789,6 +826,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             scheduler: self.scheduler.prepared_snapshot(lease.namespace),
             record: lease.record,
             drain_local_segment,
+            collect_trace: self.trace_enabled,
+            collect_completed_work: self.completed_work_enabled,
             call_summary: self.call_summary_enabled(),
             call_profiling: self.call_profiling,
         }))
@@ -873,6 +912,9 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 &mut self.trace,
                 &mut self.completed_work,
                 &mut self.completed,
+                &mut self.owner_commit_profile,
+                self.trace_enabled,
+                self.completed_work_enabled,
                 completion,
             ) {
                 Ok(next) => step = Some(next),
@@ -903,6 +945,9 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             &mut self.trace,
             &mut self.completed_work,
             &mut self.completed,
+            &mut self.owner_commit_profile,
+            self.trace_enabled,
+            self.completed_work_enabled,
             completion,
         ) {
             Ok(step) => step,
@@ -1045,6 +1090,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             scheduler,
             record,
             drain_local_segment,
+            collect_trace,
+            collect_completed_work,
             call_summary,
             call_profiling,
         } = self;
@@ -1063,6 +1110,8 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             scheduler,
             record,
             drain_local_segment,
+            collect_trace,
+            collect_completed_work,
             call_summary,
             call_profiling,
         )?;
@@ -1134,8 +1183,12 @@ fn apply_completion_to_state(
     trace: &mut EvalTrace,
     completed_work: &mut Vec<EvalCompletedWork>,
     completed: &mut Option<Result<Value, EvalError>>,
+    owner_commit_profile: &mut EvalOwnerCommitProfile,
+    collect_trace: bool,
+    collect_completed_work: bool,
     completion: EvalWorkCompletion,
 ) -> Result<EvalSessionStep, EvalError> {
+    owner_commit_profile.completions_seen += 1;
     scheduler.validate_in_flight_task(
         completion.work.id,
         completion.lease_sequence,
@@ -1157,18 +1210,36 @@ fn apply_completion_to_state(
                 ),
             ));
         }
-        let mut committed =
-            commit_completion(scheduler, trace, completed_work, completed, completion)?;
+        let mut committed = commit_completion(
+            scheduler,
+            trace,
+            completed_work,
+            completed,
+            owner_commit_profile,
+            collect_trace,
+            collect_completed_work,
+            completion,
+        )?;
         let mut step = committed.step;
         while !committed.replayed {
             let Some(buffered) = scheduler.take_next_committable_buffered_completion() else {
                 break;
             };
-            committed = commit_completion(scheduler, trace, completed_work, completed, buffered)?;
+            committed = commit_completion(
+                scheduler,
+                trace,
+                completed_work,
+                completed,
+                owner_commit_profile,
+                collect_trace,
+                collect_completed_work,
+                buffered,
+            )?;
             step = committed.step;
         }
         Ok(step)
     } else {
+        owner_commit_profile.completions_buffered += 1;
         scheduler.buffer_completion(completion)?;
         Ok(step_after_buffering(scheduler, completed))
     }
@@ -1195,16 +1266,23 @@ fn commit_completion(
     trace: &mut EvalTrace,
     completed_work: &mut Vec<EvalCompletedWork>,
     completed: &mut Option<Result<Value, EvalError>>,
+    owner_commit_profile: &mut EvalOwnerCommitProfile,
+    collect_trace: bool,
+    collect_completed_work: bool,
     completion: EvalWorkCompletion,
 ) -> Result<CommitCompletionResult, EvalError> {
+    owner_commit_profile.completions_committed += 1;
     if completion_targets_superseded_work(scheduler, &completion.work) {
-        completed_work.push(EvalCompletedWork {
-            work: completion.work,
-            outcome: completion.outcome,
-            base_generation: completion.base_generation,
-            elapsed: completion.elapsed,
-            invocation: completion.invocation,
-        });
+        owner_commit_profile.completions_superseded += 1;
+        if collect_completed_work {
+            completed_work.push(EvalCompletedWork {
+                work: completion.work,
+                outcome: completion.outcome,
+                base_generation: completion.base_generation,
+                elapsed: completion.elapsed,
+                invocation: completion.invocation,
+            });
+        }
         return Ok(CommitCompletionResult::progressed());
     }
     if completion.base_generation > scheduler.base_generation() {
@@ -1219,12 +1297,33 @@ fn commit_completion(
         ));
     }
     if scheduler.completion_reads_stale_base(&completion)? {
+        owner_commit_profile.completions_replayed += 1;
         scheduler.requeue_ready_record_front(completion.record)?;
         return Ok(CommitCompletionResult::replayed());
     }
-    trace.events.extend(completion.delta.trace_events);
+    owner_commit_profile.delta_node_records += completion.delta.scheduler.node_records.len();
+    owner_commit_profile.delta_keyed_nodes += completion.delta.scheduler.keyed_nodes.len();
+    owner_commit_profile.delta_node_states += completion.delta.scheduler.node_states.len();
+    owner_commit_profile.delta_dependency_edges +=
+        completion.delta.scheduler.dependency_edges.len();
+    owner_commit_profile.delta_queued += completion.delta.scheduler.queued.len();
+    owner_commit_profile.delta_pending_entries += completion.delta.scheduler.pending_entries.len();
+    owner_commit_profile.delta_retained_exprs += completion.delta.scheduler.retained_exprs.len();
+    owner_commit_profile.delta_learned_no_goods +=
+        completion.delta.scheduler.learned_no_goods.len();
+    owner_commit_profile.delta_learned_search_no_goods +=
+        completion.delta.scheduler.learned_search_no_goods.len();
+    owner_commit_profile.delta_trace_events += completion.delta.trace_events.len();
+    owner_commit_profile.delta_local_completed_work += completion.delta.local_completed_work.len();
+    owner_commit_profile.completed_invalidations +=
+        usize::from(completion.delta.completed_invalidated);
+    if collect_trace {
+        trace.events.extend(completion.delta.trace_events);
+    }
     let completed_invalidated = completion.delta.completed_invalidated;
-    completed_work.extend(completion.delta.local_completed_work);
+    if collect_completed_work {
+        completed_work.extend(completion.delta.local_completed_work);
+    }
     scheduler.apply_delta(completion.delta.scheduler)?;
     if completed_invalidated {
         *completed = None;
@@ -1233,13 +1332,15 @@ fn commit_completion(
         completion.outcome,
         EvalCompletedWorkOutcome::Ready(_) | EvalCompletedWorkOutcome::Poison(_)
     ) && scheduler.finalize_keyed_completion(completion.work.node_id)?;
-    completed_work.push(EvalCompletedWork {
-        work: completion.work.clone(),
-        outcome: completion.outcome.clone(),
-        base_generation: completion.base_generation,
-        elapsed: completion.elapsed,
-        invocation: completion.invocation.clone(),
-    });
+    if collect_completed_work {
+        completed_work.push(EvalCompletedWork {
+            work: completion.work.clone(),
+            outcome: completion.outcome.clone(),
+            base_generation: completion.base_generation,
+            elapsed: completion.elapsed,
+            invocation: completion.invocation.clone(),
+        });
+    }
     if keyed_stale {
         return Ok(CommitCompletionResult::progressed());
     }
@@ -1252,7 +1353,11 @@ fn commit_completion(
             replayed: false,
         }),
         EvalCompletedWorkOutcome::Ready(value) => {
-            if scheduler.resolve_child_dependency(completion.work.node_id, Ok(value.clone()))? {
+            if scheduler.resolve_child_dependency(
+                completion.work.node_id,
+                Ok(value.clone()),
+                owner_commit_profile,
+            )? {
                 Ok(CommitCompletionResult::progressed())
             } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
                 Ok(CommitCompletionResult::progressed())
@@ -1269,7 +1374,11 @@ fn commit_completion(
             }
         }
         EvalCompletedWorkOutcome::Poison(error) => {
-            if scheduler.resolve_child_dependency(completion.work.node_id, Err(error.clone()))? {
+            if scheduler.resolve_child_dependency(
+                completion.work.node_id,
+                Err(error.clone()),
+                owner_commit_profile,
+            )? {
                 Ok(CommitCompletionResult::progressed())
             } else if !scheduler.queued_work().is_empty() || scheduler.has_waiting_work() {
                 Ok(CommitCompletionResult::progressed())
@@ -1429,6 +1538,46 @@ fn format_causal_profile_report(
         }
     }
 
+    lines.join("\n")
+}
+
+fn format_owner_commit_profile_report(profile: &EvalOwnerCommitProfile) -> String {
+    let committed = profile.completions_committed.max(1);
+    let avg_delta_items = profile.total_delta_items() / committed;
+    let mut lines = vec![format!(
+        "eval2 owner commit profile seen={} committed={} buffered={} replayed={} superseded={}",
+        profile.completions_seen,
+        profile.completions_committed,
+        profile.completions_buffered,
+        profile.completions_replayed,
+        profile.completions_superseded,
+    )];
+    lines.push(format!(
+        "  pending_resolutions={} waiter_wakeups={} resume_tasks_enqueued={} completed_invalidations={}",
+        profile.pending_resolutions,
+        profile.waiter_wakeups,
+        profile.resume_tasks_enqueued,
+        profile.completed_invalidations,
+    ));
+    lines.push(format!(
+        "  delta_items={} avg_per_committed={} node_records={} keyed_nodes={} node_states={} dependency_edges={}",
+        profile.total_delta_items(),
+        avg_delta_items,
+        profile.delta_node_records,
+        profile.delta_keyed_nodes,
+        profile.delta_node_states,
+        profile.delta_dependency_edges,
+    ));
+    lines.push(format!(
+        "  queued={} pending_entries={} retained_exprs={} learned_no_goods={} learned_search_no_goods={} trace_events={} local_completed_work={}",
+        profile.delta_queued,
+        profile.delta_pending_entries,
+        profile.delta_retained_exprs,
+        profile.delta_learned_no_goods,
+        profile.delta_learned_search_no_goods,
+        profile.delta_trace_events,
+        profile.delta_local_completed_work,
+    ));
     lines.join("\n")
 }
 

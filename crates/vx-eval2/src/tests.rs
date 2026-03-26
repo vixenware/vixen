@@ -8418,6 +8418,85 @@ fn session_causal_profile_reports_cold_call_starts_with_depend_stack() {
 }
 
 #[test]
+fn session_owner_commit_profile_reports_delta_and_wakeups() {
+    struct PendingRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for PendingRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &FunctionRef,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee.name.as_ref()) {
+                ("win", "host_wait_bool") => {
+                    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for owner profile".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "host_wait_bool",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = PendingRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn build() {
+  if host_wait_bool() ( 1 ) else ( 0 )
+}
+"#,
+        "session-owner-profile",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+
+    let Resolution::Pending(pending) = session.run().expect("start owner profile session") else {
+        panic!("expected pending owner profile session");
+    };
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve owner profile pending call");
+    let Resolution::Ready(value) = session.run().expect("finish owner profile session") else {
+        panic!("expected ready owner profile session");
+    };
+    assert_eq!(value.rep, ValueRep::U64(1));
+
+    let profile = session.owner_commit_profile();
+    assert!(profile.completions_seen >= 1);
+    assert!(profile.completions_committed >= 1);
+    assert!(profile.pending_resolutions >= 1);
+    assert!(profile.waiter_wakeups >= 1);
+    assert!(profile.resume_tasks_enqueued >= 1);
+    assert!(profile.total_delta_items() >= 1);
+
+    let report = session.owner_commit_profile_report();
+    assert!(report.contains("eval2 owner commit profile"));
+    assert!(report.contains("pending_resolutions="));
+    assert!(report.contains("waiter_wakeups="));
+    assert!(report.contains("delta_items="));
+}
+
+#[test]
 fn session_call_summary_tracks_authored_calls_without_tree_profiling() {
     struct ProfilePendingRuntime {
         calls: Arc<AtomicUsize>,

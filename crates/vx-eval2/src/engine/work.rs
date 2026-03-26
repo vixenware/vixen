@@ -2280,6 +2280,7 @@ impl EvalScheduler {
         &mut self,
         pending: &PendingRef,
         result: Result<Value, EvalError>,
+        owner_commit_profile: &mut EvalOwnerCommitProfile,
     ) -> Result<(), EvalError> {
         match self.pending_kind(pending) {
             Some(PendingKind::External) => {}
@@ -2299,13 +2300,18 @@ impl EvalScheduler {
                 ));
             }
         }
-        self.resolve_registered_suspension(EvalNodeId(pending.node_id), result)
+        self.resolve_registered_suspension(
+            EvalNodeId(pending.node_id),
+            result,
+            owner_commit_profile,
+        )
     }
 
     pub(super) fn resolve_child_dependency(
         &mut self,
         dependency: EvalNodeId,
         result: Result<Value, EvalError>,
+        owner_commit_profile: &mut EvalOwnerCommitProfile,
     ) -> Result<bool, EvalError> {
         match self
             .base
@@ -2316,7 +2322,7 @@ impl EvalScheduler {
             Some(PendingKind::ChildDependency {
                 dependency: registered,
             }) if registered == dependency => {
-                self.resolve_registered_suspension(dependency, result)?;
+                self.resolve_registered_suspension(dependency, result, owner_commit_profile)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -2327,6 +2333,7 @@ impl EvalScheduler {
         &mut self,
         pending_id: EvalNodeId,
         result: Result<Value, EvalError>,
+        owner_commit_profile: &mut EvalOwnerCommitProfile,
     ) -> Result<(), EvalError> {
         let (pending, waiters) = {
             let Some(entry) = self.base_mut().pending_entries.get_mut(&pending_id) else {
@@ -2351,13 +2358,17 @@ impl EvalScheduler {
             entry.resolved = true;
             (pending, mem::take(&mut entry.waiters))
         };
+        let waiters = waiters.into_vec();
+        owner_commit_profile.pending_resolutions += 1;
+        owner_commit_profile.waiter_wakeups += waiters.len();
+        owner_commit_profile.resume_tasks_enqueued += waiters.len();
         let node_id = EvalNodeId(pending.node_id);
         let shared_result = result.map(Arc::new);
         match &shared_result {
             Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(Arc::clone(value))),
             Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
         }
-        for suspension in waiters.into_vec() {
+        for suspension in waiters {
             let resume_node = suspension.resume_node;
             let branch_context = suspension.branch_context.clone();
             let task = match &suspension.continuation {
@@ -3324,6 +3335,37 @@ fn execute_segment_record<Runtime: RuntimeHooks, Sink: EvalEventSink>(
     Ok((outcome, invocation))
 }
 
+enum MaybeTraceSink {
+    Trace(EvalTrace),
+    Null(NullEvalEventSink),
+}
+
+impl MaybeTraceSink {
+    fn new(enabled: bool) -> Self {
+        if enabled {
+            Self::Trace(EvalTrace::default())
+        } else {
+            Self::Null(NullEvalEventSink)
+        }
+    }
+
+    fn into_events(self) -> Vec<EvalEvent> {
+        match self {
+            Self::Trace(trace) => trace.events,
+            Self::Null(_) => Vec::new(),
+        }
+    }
+}
+
+impl EvalEventSink for MaybeTraceSink {
+    fn push(&mut self, event: EvalEvent) {
+        match self {
+            Self::Trace(trace) => trace.push(event),
+            Self::Null(sink) => sink.push(event),
+        }
+    }
+}
+
 pub(super) fn execute_ready_task(
     program: Arc<CompiledProgram>,
     entry: &str,
@@ -3333,8 +3375,56 @@ pub(super) fn execute_ready_task(
     snapshot: EvalPreparedSnapshot,
     record: ReadyTaskRecord,
     drain_local_segment: bool,
+    collect_trace: bool,
+    collect_completed_work: bool,
     call_summary: bool,
     call_profiling: bool,
+) -> Result<
+    (
+        EvalSessionDelta,
+        EvalCompletedWorkOutcome,
+        Option<EvalAuthoredCall>,
+    ),
+    EvalError,
+> {
+    let mut sink = MaybeTraceSink::new(collect_trace);
+    let (delta, outcome, invocation) = execute_ready_task_with_sink(
+        program,
+        entry,
+        args,
+        runtime,
+        place,
+        snapshot,
+        record,
+        drain_local_segment,
+        collect_completed_work,
+        call_summary,
+        call_profiling,
+        &mut sink,
+    )?;
+    Ok((
+        EvalSessionDelta {
+            trace_events: sink.into_events(),
+            ..delta
+        },
+        outcome,
+        invocation,
+    ))
+}
+
+fn execute_ready_task_with_sink<Sink: EvalEventSink>(
+    program: Arc<CompiledProgram>,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+    snapshot: EvalPreparedSnapshot,
+    record: ReadyTaskRecord,
+    drain_local_segment: bool,
+    collect_completed_work: bool,
+    call_summary: bool,
+    call_profiling: bool,
+    sink: &mut Sink,
 ) -> Result<
     (
         EvalSessionDelta,
@@ -3346,14 +3436,13 @@ pub(super) fn execute_ready_task(
     let segment_base_generation = snapshot.base.generation;
     let root_work = record.work.clone();
     let mut prepared_scheduler = EvalPreparedScheduler::new(&snapshot);
-    let mut trace = EvalTrace::default();
     let mut state = EvalState::new(
         program.as_ref(),
         program.entry_source(),
         record.branch_context.clone(),
         runtime,
         place,
-        &mut trace,
+        sink,
         &mut prepared_scheduler,
         Some(record.work.id),
         true,
@@ -3403,7 +3492,7 @@ pub(super) fn execute_ready_task(
                 root_invocation = invocation;
                 root_outcome = outcome.clone();
                 first_record = false;
-            } else {
+            } else if collect_completed_work {
                 local_completed_work.push(EvalCompletedWork {
                     work: record.work,
                     outcome,
@@ -3432,7 +3521,7 @@ pub(super) fn execute_ready_task(
         EvalSessionDelta {
             scheduler: recorded_delta,
             reads,
-            trace_events: trace.events,
+            trace_events: Vec::new(),
             local_completed_work,
             completed_invalidated,
         },

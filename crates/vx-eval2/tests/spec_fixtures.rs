@@ -98,6 +98,7 @@ fn run_case_local(
 
     let program = case_program(case, invocation)?;
     let mut session = EvalSession::new_program(program, entry, args, runtime, place);
+    session.set_trace_enabled(true);
     match session.run() {
         Ok(resolution) => {
             if std::env::var_os("VX_EVAL2_PRINT_STATS").is_some() {
@@ -1572,6 +1573,7 @@ impl Eval2Daemon for FixtureDaemon {
             &self.runtime,
             &request.place.id,
         );
+        session.set_trace_enabled(true);
         match session.run() {
             Ok(resolution) => match resolution_to_outcome(resolution) {
                 Ok(outcome) => proxify_outcome(&self.proxies, &request.place.id, outcome),

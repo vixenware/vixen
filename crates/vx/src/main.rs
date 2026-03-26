@@ -511,6 +511,9 @@ fn print_eval_reports<Runtime: RuntimeHooks>(args: &EvalArgs, session: &EvalSess
     if args.causal_profile {
         eprintln!("{}", session.causal_profile_report(args.profile_limit));
     }
+    if args.owner_profile {
+        eprintln!("{}", session.owner_commit_profile_report());
+    }
     if args.trace {
         eprintln!("{:#?}", session.trace());
     }
@@ -612,6 +615,12 @@ impl CliContext {
             &runtime,
             args.place.clone(),
         );
+        if args.trace {
+            session.set_trace_enabled(true);
+        }
+        if args.profile || args.causal_profile || args.call_profile {
+            session.set_completed_work_enabled(true);
+        }
         if args.call_profile {
             session.set_call_summary_enabled(true);
         }

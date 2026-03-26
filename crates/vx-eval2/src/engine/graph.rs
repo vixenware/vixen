@@ -673,6 +673,46 @@ pub struct EvalSessionCallSummary {
     pub summary: Vec<EvalCallProfileSummaryEntry>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvalOwnerCommitProfile {
+    pub completions_seen: usize,
+    pub completions_buffered: usize,
+    pub completions_committed: usize,
+    pub completions_replayed: usize,
+    pub completions_superseded: usize,
+    pub pending_resolutions: usize,
+    pub waiter_wakeups: usize,
+    pub resume_tasks_enqueued: usize,
+    pub delta_node_records: usize,
+    pub delta_keyed_nodes: usize,
+    pub delta_node_states: usize,
+    pub delta_dependency_edges: usize,
+    pub delta_queued: usize,
+    pub delta_pending_entries: usize,
+    pub delta_retained_exprs: usize,
+    pub delta_learned_no_goods: usize,
+    pub delta_learned_search_no_goods: usize,
+    pub delta_trace_events: usize,
+    pub delta_local_completed_work: usize,
+    pub completed_invalidations: usize,
+}
+
+impl EvalOwnerCommitProfile {
+    pub fn total_delta_items(&self) -> usize {
+        self.delta_node_records
+            + self.delta_keyed_nodes
+            + self.delta_node_states
+            + self.delta_dependency_edges
+            + self.delta_queued
+            + self.delta_pending_entries
+            + self.delta_retained_exprs
+            + self.delta_learned_no_goods
+            + self.delta_learned_search_no_goods
+            + self.delta_trace_events
+            + self.delta_local_completed_work
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalSessionCheckpoint {
     pub(super) branch_context: EvalBranchContext,
@@ -680,6 +720,7 @@ pub struct EvalSessionCheckpoint {
     pub(super) trace_len: usize,
     pub(super) completed_work_len: usize,
     pub(super) completed: Option<Result<Value, EvalError>>,
+    pub(super) owner_commit_profile: EvalOwnerCommitProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +940,8 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) scheduler: EvalPreparedSnapshot,
     pub(super) record: ReadyTaskRecord,
     pub(super) drain_local_segment: bool,
+    pub(super) collect_trace: bool,
+    pub(super) collect_completed_work: bool,
     pub(super) call_summary: bool,
     pub(super) call_profiling: bool,
 }
