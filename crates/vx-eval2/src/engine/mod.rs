@@ -110,6 +110,7 @@ trait EvalWorkerScheduler {
         joined: Value,
         branch_context: EvalBranchContext,
         source: SourceSpan,
+        cause_stack: Arc<[EvalNodeId]>,
     ) -> Result<EvalNodeId, EvalError>;
     fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError>;
     fn keyed_resolution(&self, node_id: EvalNodeId) -> Option<Result<Value, EvalError>>;
@@ -143,6 +144,7 @@ trait EvalWorkerScheduler {
         node_id: EvalNodeId,
         pending: Option<PendingRef>,
         branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
     ) -> EvalQueuedWork;
 }
 

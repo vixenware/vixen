@@ -119,6 +119,32 @@ pub enum EvalWorkKind {
     ResumePending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EvalWorkCauseKind {
+    Root,
+    Child,
+    KeyedDemand,
+    KeyedRefresh,
+    Invalidation,
+    ResumePending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalWorkCause {
+    pub kind: EvalWorkCauseKind,
+    pub depend_stack: Arc<[EvalNodeId]>,
+}
+
+impl EvalWorkCause {
+    pub(super) fn new(kind: EvalWorkCauseKind, depend_stack: Arc<[EvalNodeId]>) -> Self {
+        Self { kind, depend_stack }
+    }
+
+    pub(super) fn root() -> Self {
+        Self::new(EvalWorkCauseKind::Root, Arc::from([]))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalSessionStep {
     Progressed,
@@ -470,6 +496,7 @@ pub struct EvalQueuedWork {
     pub kind: EvalWorkKind,
     pub node_id: EvalNodeId,
     pub pending: Option<PendingRef>,
+    pub cause: EvalWorkCause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,6 +580,24 @@ pub struct EvalProfileEntry {
 pub struct EvalSessionProfile {
     pub total_time: Duration,
     pub entries: Vec<EvalProfileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalCausalProfileEntry {
+    pub(crate) work_kind: EvalWorkKind,
+    pub(crate) cause_kind: EvalWorkCauseKind,
+    pub(crate) label: Arc<str>,
+    pub(crate) source: Option<SourceSpan>,
+    pub(crate) depend_stack: Arc<[EvalNodeId]>,
+    pub(crate) runs: usize,
+    pub(crate) total_time: Duration,
+    pub(crate) max_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalSessionCausalProfile {
+    pub(crate) total_time: Duration,
+    pub(crate) entries: Vec<EvalCausalProfileEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

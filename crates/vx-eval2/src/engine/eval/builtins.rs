@@ -3322,6 +3322,7 @@ pub(in crate::engine) fn continue_keyed_builtin(
         joined,
         state.branch_context.clone(),
         call_source.clone(),
+        state.depend_stack(),
     )?;
     state.emit_current_dependency(keyed_node_id, Some(call_source.clone()));
 

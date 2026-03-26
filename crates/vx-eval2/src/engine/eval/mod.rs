@@ -4872,6 +4872,7 @@ fn queue_child_expr_body(
         child_id,
         None,
         state.branch_context.clone(),
+        EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack()),
     );
     state.scheduler.record_node_state(
         child_id,
@@ -4921,6 +4922,7 @@ pub(super) fn queue_child_prepared_entry(
         child_id,
         None,
         state.branch_context.clone(),
+        EvalWorkCause::new(EvalWorkCauseKind::Child, state.depend_stack()),
     );
     state.scheduler.record_node_state(
         child_id,

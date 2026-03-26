@@ -465,6 +465,10 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         self.stack.last().copied()
     }
 
+    pub(super) fn depend_stack(&self) -> Arc<[EvalNodeId]> {
+        Arc::from(self.stack.clone())
+    }
+
     pub(super) fn current_source(&self) -> SourceId {
         self.current_source
     }

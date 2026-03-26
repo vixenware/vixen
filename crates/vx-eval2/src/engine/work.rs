@@ -504,7 +504,30 @@ impl<'a> EvalPreparedScheduler<'a> {
         parents
     }
 
-    fn enqueue_expr_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+    fn depend_stack_for_node(&self, node_id: EvalNodeId) -> Arc<[EvalNodeId]> {
+        let mut chain = Vec::new();
+        let mut current = self
+            .node_record_local(node_id)
+            .and_then(|record| record.parent_id);
+        let mut seen = BTreeSet::new();
+        while let Some(parent_id) = current {
+            if !seen.insert(parent_id) {
+                break;
+            }
+            chain.push(parent_id);
+            current = self
+                .node_record_local(parent_id)
+                .and_then(|record| record.parent_id);
+        }
+        chain.reverse();
+        Arc::from(chain)
+    }
+
+    fn enqueue_expr_work(
+        &mut self,
+        node_id: EvalNodeId,
+        cause_kind: EvalWorkCauseKind,
+    ) -> Result<(), EvalError> {
         let retained = self.retained_expr_local(node_id).cloned().ok_or_else(|| {
             EvalError::new(
                 EvalErrorKind::Internal,
@@ -517,6 +540,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             node_id,
             None,
             retained.branch_context,
+            EvalWorkCause::new(cause_kind, self.depend_stack_for_node(node_id)),
         );
         self.record_node_state(
             node_id,
@@ -541,7 +565,11 @@ impl<'a> EvalPreparedScheduler<'a> {
         Ok(())
     }
 
-    fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+    fn enqueue_keyed_work(
+        &mut self,
+        node_id: EvalNodeId,
+        cause_kind: EvalWorkCauseKind,
+    ) -> Result<(), EvalError> {
         let branch_context = self
             .keyed_node_local(node_id)
             .map(|memo| memo.branch_context.clone())
@@ -557,6 +585,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             node_id,
             None,
             branch_context,
+            EvalWorkCause::new(cause_kind, self.depend_stack_for_node(node_id)),
         );
         self.record_node_state(
             node_id,
@@ -593,10 +622,10 @@ impl<'a> EvalPreparedScheduler<'a> {
                 | Some(EvalNodeState::Pending(_))
                 | None => {
                     if self.keyed_node_local(node_id).is_some() {
-                        self.enqueue_keyed_work(node_id)?;
+                        self.enqueue_keyed_work(node_id, EvalWorkCauseKind::Invalidation)?;
                         true
                     } else if self.retained_expr_local(node_id).is_some() {
-                        self.enqueue_expr_work(node_id)?;
+                        self.enqueue_expr_work(node_id, EvalWorkCauseKind::Invalidation)?;
                         true
                     } else {
                         false
@@ -753,6 +782,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         joined: Value,
         branch_context: EvalBranchContext,
         source: SourceSpan,
+        cause_stack: Arc<[EvalNodeId]>,
     ) -> Result<EvalNodeId, EvalError> {
         if let Some(node_id) = self.find_keyed_node(&resolver, &key, &branch_context)? {
             let mut widened = false;
@@ -774,7 +804,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
                         memo.active_revision = Some(memo.revision);
                     }
                     Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_)) | None => {
-                        self.enqueue_keyed_work(node_id)?;
+                        self.enqueue_keyed_work(node_id, EvalWorkCauseKind::KeyedRefresh)?;
                         let _ = self.invalidate_completed_dependents(node_id)?;
                     }
                     _ => {}
@@ -809,7 +839,30 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             },
         ));
         self.keyed_node_index.insert(node_id, index);
-        self.enqueue_keyed_work(node_id)?;
+        let branch_context = self
+            .keyed_node_local(node_id)
+            .map(|memo| memo.branch_context.clone())
+            .expect("new keyed node should exist");
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateKeyed(node_id),
+            EvalWorkKind::EvaluateKeyed,
+            node_id,
+            None,
+            branch_context,
+            EvalWorkCause::new(EvalWorkCauseKind::KeyedDemand, cause_stack),
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        let keyed = self
+            .keyed_node_mut(node_id)
+            .expect("keyed node must still exist");
+        keyed.active_revision = Some(keyed.revision);
+        keyed.evaluated_revision = None;
         Ok(node_id)
     }
 
@@ -824,7 +877,7 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             return Ok(false);
         };
         if active_revision < current_revision {
-            self.enqueue_keyed_work(node_id)?;
+            self.enqueue_keyed_work(node_id, EvalWorkCauseKind::KeyedRefresh)?;
             return Ok(true);
         }
         let memo = self.keyed_node_mut(node_id).expect("keyed node must exist");
@@ -997,12 +1050,14 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
         node_id: EvalNodeId,
         pending: Option<PendingRef>,
         branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
     ) -> EvalQueuedWork {
         let work = EvalQueuedWork {
             id: self.allocator.alloc_work_id(),
             kind,
             node_id,
             pending,
+            cause,
         };
         self.queued.push(ReadyTaskRecord {
             work: work.clone(),
@@ -1365,6 +1420,7 @@ impl EvalScheduler {
             ENTRY_WORK_NODE_ID,
             None,
             branch_context,
+            EvalWorkCause::root(),
         );
         self.record_node_state(
             ENTRY_WORK_NODE_ID,
@@ -1500,6 +1556,29 @@ impl EvalScheduler {
         self.ready_tasks.contains_key(&work_id)
     }
 
+    fn depend_stack_for_node(&self, node_id: EvalNodeId) -> Arc<[EvalNodeId]> {
+        let mut chain = Vec::new();
+        let mut current = self
+            .base
+            .node_records
+            .get(&node_id)
+            .and_then(|record| record.parent_id);
+        let mut seen = BTreeSet::new();
+        while let Some(parent_id) = current {
+            if !seen.insert(parent_id) {
+                break;
+            }
+            chain.push(parent_id);
+            current = self
+                .base
+                .node_records
+                .get(&parent_id)
+                .and_then(|record| record.parent_id);
+        }
+        chain.reverse();
+        Arc::from(chain)
+    }
+
     pub(super) fn remember_expr_task(
         &mut self,
         node_id: EvalNodeId,
@@ -1617,7 +1696,11 @@ impl EvalScheduler {
         Ok(())
     }
 
-    fn enqueue_expr_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+    fn enqueue_expr_work(
+        &mut self,
+        node_id: EvalNodeId,
+        cause_kind: EvalWorkCauseKind,
+    ) -> Result<(), EvalError> {
         let retained = self
             .base
             .retained_exprs
@@ -1635,6 +1718,7 @@ impl EvalScheduler {
             node_id,
             None,
             retained.branch_context,
+            EvalWorkCause::new(cause_kind, self.depend_stack_for_node(node_id)),
         );
         self.record_node_state(
             node_id,
@@ -1689,10 +1773,10 @@ impl EvalScheduler {
                 | Some(EvalNodeState::Pending(_))
                 | None => {
                     if self.base.keyed_nodes.contains_key(&node_id) {
-                        self.enqueue_keyed_work(node_id)?;
+                        self.enqueue_keyed_work(node_id, EvalWorkCauseKind::Invalidation)?;
                         true
                     } else if self.base.retained_exprs.contains_key(&node_id) {
-                        self.enqueue_expr_work(node_id)?;
+                        self.enqueue_expr_work(node_id, EvalWorkCauseKind::Invalidation)?;
                         true
                     } else {
                         false
@@ -1707,7 +1791,11 @@ impl EvalScheduler {
         Ok(invalidated)
     }
 
-    fn enqueue_keyed_work(&mut self, node_id: EvalNodeId) -> Result<(), EvalError> {
+    fn enqueue_keyed_work(
+        &mut self,
+        node_id: EvalNodeId,
+        cause_kind: EvalWorkCauseKind,
+    ) -> Result<(), EvalError> {
         let branch_context = if let Some(memo) = self.base.keyed_nodes.get(&node_id) {
             memo.branch_context.clone()
         } else {
@@ -1722,6 +1810,7 @@ impl EvalScheduler {
             node_id,
             None,
             branch_context,
+            EvalWorkCause::new(cause_kind, self.depend_stack_for_node(node_id)),
         );
         self.record_node_state(
             node_id,
@@ -1747,6 +1836,7 @@ impl EvalScheduler {
         joined: Value,
         branch_context: EvalBranchContext,
         source: SourceSpan,
+        cause_stack: Arc<[EvalNodeId]>,
     ) -> Result<EvalNodeId, EvalError> {
         if let Some(node_id) = self.find_keyed_node(&resolver, &key, &branch_context)? {
             let mut widened = false;
@@ -1768,7 +1858,7 @@ impl EvalScheduler {
                         memo.active_revision = Some(memo.revision);
                     }
                     Some(EvalNodeState::Ready(_)) | Some(EvalNodeState::Poison(_)) | None => {
-                        self.enqueue_keyed_work(node_id)?;
+                        self.enqueue_keyed_work(node_id, EvalWorkCauseKind::KeyedRefresh)?;
                         let _ = self.invalidate_completed_dependents(node_id)?;
                     }
                     _ => {}
@@ -1792,13 +1882,34 @@ impl EvalScheduler {
             resolver,
             key,
             joined,
-            branch_context,
+            branch_context: branch_context.clone(),
             revision: 1,
             active_revision: None,
             evaluated_revision: None,
             last_update: EvalKeyedNodeUpdateReason::Created,
         });
-        self.enqueue_keyed_work(node_id)?;
+        let work = self.enqueue_ready_task(
+            ReadyTask::EvaluateKeyed(node_id),
+            EvalWorkKind::EvaluateKeyed,
+            node_id,
+            None,
+            branch_context.clone(),
+            EvalWorkCause::new(EvalWorkCauseKind::KeyedDemand, cause_stack),
+        );
+        self.record_node_state(
+            node_id,
+            EvalNodeState::Runnable {
+                work: work.id,
+                pending: None,
+            },
+        );
+        let keyed = self
+            .base_mut()
+            .keyed_nodes
+            .get_mut(&node_id)
+            .expect("keyed node must still exist");
+        keyed.active_revision = Some(keyed.revision);
+        keyed.evaluated_revision = None;
         Ok(node_id)
     }
 
@@ -1818,7 +1929,7 @@ impl EvalScheduler {
             return Ok(false);
         };
         if active_revision < current_revision {
-            self.enqueue_keyed_work(node_id)?;
+            self.enqueue_keyed_work(node_id, EvalWorkCauseKind::KeyedRefresh)?;
             return Ok(true);
         }
         let memo = self
@@ -1989,6 +2100,10 @@ impl EvalScheduler {
                 resume_node,
                 Some(pending.clone()),
                 branch_context,
+                EvalWorkCause::new(
+                    EvalWorkCauseKind::ResumePending,
+                    self.depend_stack_for_node(resume_node),
+                ),
             );
             self.record_node_state(
                 resume_node,
@@ -2311,6 +2426,7 @@ impl EvalScheduler {
         node_id: EvalNodeId,
         pending: Option<PendingRef>,
         branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
     ) -> EvalQueuedWork {
         let work_id = {
             let base = self.base_mut();
@@ -2323,6 +2439,7 @@ impl EvalScheduler {
             kind,
             node_id,
             pending,
+            cause,
         };
         self.ready_queue.push_back(work.id);
         self.ready_tasks.insert(
@@ -2386,8 +2503,17 @@ impl EvalWorkerScheduler for EvalScheduler {
         joined: Value,
         branch_context: EvalBranchContext,
         source: SourceSpan,
+        cause_stack: Arc<[EvalNodeId]>,
     ) -> Result<EvalNodeId, EvalError> {
-        Self::demand_keyed_node(self, resolver, key, joined, branch_context, source)
+        Self::demand_keyed_node(
+            self,
+            resolver,
+            key,
+            joined,
+            branch_context,
+            source,
+            cause_stack,
+        )
     }
 
     fn finalize_keyed_completion(&mut self, node_id: EvalNodeId) -> Result<bool, EvalError> {
@@ -2456,8 +2582,9 @@ impl EvalWorkerScheduler for EvalScheduler {
         node_id: EvalNodeId,
         pending: Option<PendingRef>,
         branch_context: EvalBranchContext,
+        cause: EvalWorkCause,
     ) -> EvalQueuedWork {
-        Self::enqueue_ready_task(self, task, kind, node_id, pending, branch_context)
+        Self::enqueue_ready_task(self, task, kind, node_id, pending, branch_context, cause)
     }
 }
 
@@ -2555,6 +2682,7 @@ pub(super) fn execute_ready_task(
                 node_id,
                 None,
                 state.branch_context.clone(),
+                EvalWorkCause::root(),
             );
             state.scheduler.record_node_state(
                 node_id,

@@ -17,11 +17,12 @@ use crate::{
     EvalError, EvalErrorKind, EvalEvent, EvalEventKind, EvalExplainTerminal,
     EvalKeyedNodeUpdateReason, EvalLeasedWorkState, EvalNodeId, EvalNodeKind, EvalNodeState,
     EvalProgram, EvalProgramImport, EvalProgramSource, EvalSession, EvalSessionStep, EvalTrace,
-    EvalWorkKind, EvalWorkState, FunctionRef, MapValue, PendingRef, ProjectionStep, Provenance,
-    Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks, RuntimeInputKind, RuntimeReady,
-    RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason, SlotId, SlotResolutionKind,
-    SlotResolved, SlotStore, SlotStoreReason, SlotVerification, SourceSpan, Value, ValueRep,
-    channel_trace, envelope_to_value, eval_source_entry_at_place_with_args_with_source_id,
+    EvalWorkCauseKind, EvalWorkKind, EvalWorkState, FunctionRef, MapValue, PendingRef,
+    ProjectionStep, Provenance, Resolution, ReuseClass, RuntimeCallOutcome, RuntimeHooks,
+    RuntimeInputKind, RuntimeReady, RuntimeSlotPrepare, SlotAction, SlotDecision, SlotEventReason,
+    SlotId, SlotResolutionKind, SlotResolved, SlotStore, SlotStoreReason, SlotVerification,
+    SourceSpan, Value, ValueRep, channel_trace, envelope_to_value,
+    eval_source_entry_at_place_with_args_with_source_id,
     eval_source_entry_at_place_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id, eval_source_entry_with_args_with_source_id_traced,
     eval_source_entry_with_args_with_source_id_with_sink,
@@ -176,6 +177,14 @@ fn maybe_print_session_profile(name: &str, session: &EvalSession<'_, impl Runtim
             .unwrap_or(20);
         eprintln!("vx-eval2 call profile test={name}");
         eprintln!("{}", session.call_profile_report(limit));
+    }
+    if env::var_os("VX_EVAL2_PRINT_CAUSAL_PROFILE").is_some() {
+        let limit = env::var("VX_EVAL2_PRINT_PROFILE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20);
+        eprintln!("vx-eval2 causal profile test={name}");
+        eprintln!("{}", session.causal_profile_report(limit));
     }
 }
 
@@ -8370,6 +8379,42 @@ fn build() {
     assert!(report.contains("callee=build"));
     assert!(report.contains("callee=outer"));
     assert!(report.contains("callee=leaf"));
+}
+
+#[test]
+fn session_causal_profile_reports_cold_call_starts_with_depend_stack() {
+    let program = EvalProgram::single_source(
+        "session-causal-profile",
+        r#"
+        fn leaf() { slow_value() }
+        fn middle() { leaf() }
+        fn build() { middle() }
+        "#,
+    );
+    let runtime = StaggeredRuntime;
+    let mut session = EvalSession::new_program(program, "build", Vec::new(), &runtime, "win");
+    session.set_call_profiling_enabled(true);
+
+    let Resolution::Ready(value) = session.run().expect("run causal profile session") else {
+        panic!("expected ready causal profile session result");
+    };
+    assert_eq!(value.rep, ValueRep::String("slow".into()));
+
+    let profile = session.causal_profile();
+    let leaf_entry = profile
+        .entries
+        .iter()
+        .find(|entry| entry.label.as_ref() == "call:leaf")
+        .expect("expected causal profile entry for leaf call");
+    assert_eq!(leaf_entry.work_kind, EvalWorkKind::EvaluateExpr);
+    assert_eq!(leaf_entry.cause_kind, EvalWorkCauseKind::Child);
+    assert!(!leaf_entry.depend_stack.is_empty());
+
+    let report = session.causal_profile_report(8);
+    assert!(report.contains("eval2 causal profile total="));
+    assert!(report.contains("label=call:leaf"));
+    assert!(report.contains("cause=Child"));
+    assert!(report.contains("stack="));
 }
 
 #[test]

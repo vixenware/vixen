@@ -438,6 +438,79 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         format_profile_summary_report(&self.profile_summary(), limit)
     }
 
+    pub(crate) fn causal_profile(&self) -> EvalSessionCausalProfile {
+        let mut entries = BTreeMap::<
+            (
+                EvalWorkKind,
+                EvalWorkCauseKind,
+                Arc<str>,
+                Option<String>,
+                Vec<EvalNodeId>,
+            ),
+            EvalCausalProfileEntry,
+        >::new();
+        let mut total_time = Duration::default();
+
+        for completed in &self.completed_work {
+            if completed.work.kind == EvalWorkKind::ResumePending {
+                continue;
+            }
+            if let Some(invocation) = &completed.invocation
+                && completed.work.node_id != invocation.root_node_id
+            {
+                continue;
+            }
+
+            total_time += completed.elapsed;
+            let record = self.node_record(completed.work.node_id);
+            let label = causal_profile_label_for_completed(completed, record);
+            let source = causal_profile_source_for_completed(completed, record);
+            let source_key = source.as_ref().map(|span| format!("{span:?}"));
+            let depend_stack = completed.work.cause.depend_stack.to_vec();
+            let key = (
+                completed.work.kind,
+                completed.work.cause.kind,
+                label.clone(),
+                source_key,
+                depend_stack.clone(),
+            );
+            let entry = entries
+                .entry(key)
+                .or_insert_with(|| EvalCausalProfileEntry {
+                    work_kind: completed.work.kind,
+                    cause_kind: completed.work.cause.kind,
+                    label,
+                    source,
+                    depend_stack: Arc::from(depend_stack),
+                    runs: 0,
+                    total_time: Duration::default(),
+                    max_time: Duration::default(),
+                });
+            entry.runs += 1;
+            entry.total_time += completed.elapsed;
+            entry.max_time = entry.max_time.max(completed.elapsed);
+        }
+
+        let mut entries = entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.max_time.cmp(&left.max_time))
+                .then_with(|| right.runs.cmp(&left.runs))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+
+        EvalSessionCausalProfile {
+            total_time,
+            entries,
+        }
+    }
+
+    pub fn causal_profile_report(&self, limit: usize) -> String {
+        format_causal_profile_report(self, &self.causal_profile(), limit)
+    }
+
     pub fn profile_summary(&self) -> EvalSessionProfileSummary {
         let profile = self.profile();
         let mut entries =
@@ -1179,6 +1252,32 @@ fn profile_label_for_record(record: &EvalNodeRecord) -> Arc<str> {
     }
 }
 
+fn causal_profile_label_for_completed(
+    completed: &EvalCompletedWork,
+    record: Option<&EvalNodeRecord>,
+) -> Arc<str> {
+    if let Some(invocation) = &completed.invocation
+        && completed.work.node_id == invocation.root_node_id
+    {
+        return Arc::from(format!("call:{}", invocation.callee));
+    }
+    record
+        .map(profile_label_for_record)
+        .unwrap_or_else(|| Arc::from("<unknown>"))
+}
+
+fn causal_profile_source_for_completed(
+    completed: &EvalCompletedWork,
+    record: Option<&EvalNodeRecord>,
+) -> Option<SourceSpan> {
+    if let Some(invocation) = &completed.invocation
+        && completed.work.node_id == invocation.root_node_id
+    {
+        return Some(invocation.source.clone());
+    }
+    record.and_then(|record| record.source.clone())
+}
+
 fn format_profile_summary_report(profile: &EvalSessionProfileSummary, limit: usize) -> String {
     let mut lines = vec![format!(
         "eval2 profile total={} summary_entries={}",
@@ -1211,6 +1310,74 @@ fn format_profile_summary_report(profile: &EvalSessionProfileSummary, limit: usi
     }
 
     lines.join("\n")
+}
+
+fn format_causal_profile_report(
+    session: &EvalSession<'_, impl RuntimeHooks>,
+    profile: &EvalSessionCausalProfile,
+    limit: usize,
+) -> String {
+    let mut lines = vec![format!(
+        "eval2 causal profile total={} entries={}",
+        format_profile_duration(profile.total_time),
+        profile.entries.len(),
+    )];
+
+    for entry in profile.entries.iter().take(limit) {
+        let avg = if entry.runs == 0 {
+            Duration::default()
+        } else {
+            entry.total_time / (entry.runs as u32)
+        };
+        let source = entry
+            .source
+            .as_ref()
+            .map(|span| format!("{span:?}"))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        lines.push(format!(
+            "  total={} avg={} max={} runs={} work={:?} cause={:?} label={} source={} stack={}",
+            format_profile_duration(entry.total_time),
+            format_profile_duration(avg),
+            format_profile_duration(entry.max_time),
+            entry.runs,
+            entry.work_kind,
+            entry.cause_kind,
+            entry.label,
+            source,
+            format_depend_stack(session, &entry.depend_stack),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_depend_stack(
+    session: &EvalSession<'_, impl RuntimeHooks>,
+    stack: &[EvalNodeId],
+) -> String {
+    if stack.is_empty() {
+        return "<root>".to_string();
+    }
+    stack
+        .iter()
+        .map(|node_id| format_depend_stack_frame(session, *node_id))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn format_depend_stack_frame(
+    session: &EvalSession<'_, impl RuntimeHooks>,
+    node_id: EvalNodeId,
+) -> String {
+    let Some(record) = session.node_record(node_id) else {
+        return format!("{node_id:?}@<unknown>");
+    };
+    let source = record
+        .source
+        .as_ref()
+        .map(|span| format!("{span:?}"))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    format!("{}@{}", profile_label_for_record(record), source)
 }
 
 fn compute_call_run_total_time(
