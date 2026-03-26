@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,8 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
 
 struct EvalParallelWaveCheckpoint {
     ready_queue: VecDeque<EvalWorkId>,
-    ready_tasks: HashMap<EvalWorkId, ReadyTaskRecord>,
-    in_flight_tasks: HashMap<EvalWorkId, InFlightTaskRecord>,
+    ready_tasks: EvalWorkTable<ReadyTaskRecord>,
+    in_flight_tasks: EvalWorkTable<InFlightTaskRecord>,
     buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
     active_wave: Option<EvalWaveId>,
     next_wave_id: u64,

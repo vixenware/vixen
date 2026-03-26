@@ -12,8 +12,8 @@ pub(super) struct EvalScheduler {
     pub(super) active_wave: Option<EvalWaveId>,
     pub(super) base: Arc<EvalSchedulerBase>,
     pub(super) ready_queue: VecDeque<EvalWorkId>,
-    pub(super) ready_tasks: HashMap<EvalWorkId, ReadyTaskRecord>,
-    pub(super) in_flight_tasks: HashMap<EvalWorkId, InFlightTaskRecord>,
+    pub(super) ready_tasks: EvalWorkTable<ReadyTaskRecord>,
+    pub(super) in_flight_tasks: EvalWorkTable<InFlightTaskRecord>,
     pub(super) buffered_completions: BTreeMap<u64, EvalWorkCompletion>,
 }
 
@@ -28,10 +28,83 @@ impl Default for EvalScheduler {
             active_wave: None,
             base: Arc::new(EvalSchedulerBase::default()),
             ready_queue: VecDeque::new(),
-            ready_tasks: HashMap::new(),
-            in_flight_tasks: HashMap::new(),
+            ready_tasks: EvalWorkTable::default(),
+            in_flight_tasks: EvalWorkTable::default(),
             buffered_completions: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EvalWorkTable<T> {
+    slots: Vec<Option<(EvalWorkId, T)>>,
+    free: Vec<usize>,
+    index: HashMap<EvalWorkId, usize>,
+}
+
+impl<T> Default for EvalWorkTable<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+}
+
+impl<T> EvalWorkTable<T> {
+    pub(super) fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    fn contains_key(&self, work_id: &EvalWorkId) -> bool {
+        self.index.contains_key(work_id)
+    }
+
+    fn get(&self, work_id: &EvalWorkId) -> Option<&T> {
+        let slot = *self.index.get(work_id)?;
+        self.slots.get(slot)?.as_ref().map(|(_, value)| value)
+    }
+
+    fn insert(&mut self, work_id: EvalWorkId, value: T) -> Option<T> {
+        if let Some(&slot) = self.index.get(&work_id) {
+            let (_, previous) = self.slots[slot]
+                .replace((work_id, value))
+                .expect("indexed work slot should be occupied");
+            return Some(previous);
+        }
+        let slot = self.free.pop().unwrap_or_else(|| {
+            self.slots.push(None);
+            self.slots.len() - 1
+        });
+        self.slots[slot] = Some((work_id, value));
+        self.index.insert(work_id, slot);
+        None
+    }
+
+    fn remove(&mut self, work_id: &EvalWorkId) -> Option<T> {
+        let slot = self.index.remove(work_id)?;
+        let (_, previous) = self.slots[slot]
+            .take()
+            .expect("indexed work slot should be occupied");
+        self.free.push(slot);
+        Some(previous)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|(_, value)| value))
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.slots
+            .iter_mut()
+            .filter_map(|slot| slot.as_mut().map(|(_, value)| value))
     }
 }
 
@@ -1490,7 +1563,7 @@ impl EvalScheduler {
     }
 
     pub(super) fn prepared_snapshot(&self, namespace: Option<u64>) -> EvalPreparedSnapshot {
-        let mut baseline_ready_tasks = self.ready_tasks.keys().copied().collect::<Vec<_>>();
+        let mut baseline_ready_tasks = self.ready_queue.iter().copied().collect::<Vec<_>>();
         baseline_ready_tasks.sort_unstable();
         EvalPreparedSnapshot {
             base: Arc::clone(&self.base),
