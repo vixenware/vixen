@@ -48,7 +48,7 @@ pub enum EvalEventKind {
     AuthoredCallStarted {
         callee: Arc<str>,
         argc: u32,
-        args_fingerprint: Arc<str>,
+        args_fingerprint: u64,
         caller_node_id: Option<EvalNodeId>,
         caller_work_id: Option<EvalWorkId>,
     },

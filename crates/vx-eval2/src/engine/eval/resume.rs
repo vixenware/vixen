@@ -11,14 +11,19 @@ pub(in crate::engine) fn resume_suspension(
         pending: _,
         branch_context: _,
         continuation,
+        work_invocation,
         call_stack,
     } = suspension;
-    if call_stack.is_empty() {
-        resume_suspension_inner(state, resume_node, continuation, result)
-    } else {
+    if !call_stack.is_empty() {
         state.with_call_stack(call_stack.as_ref().to_vec(), |state| {
             resume_suspension_inner(state, resume_node, continuation, result)
         })
+    } else if work_invocation.is_some() {
+        state.with_work_invocation(work_invocation, |state| {
+            resume_suspension_inner(state, resume_node, continuation, result)
+        })
+    } else {
+        resume_suspension_inner(state, resume_node, continuation, result)
     }
 }
 
@@ -229,6 +234,7 @@ pub(in crate::engine) fn resume_frame(
                                     stream_provenance: stream_provenance.clone(),
                                 },
                             ]),
+                            work_invocation: state.work_invocation.clone(),
                             call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
@@ -265,6 +271,7 @@ pub(in crate::engine) fn resume_frame(
                                     stream_provenance: stream_provenance.clone(),
                                 },
                             ]),
+                            work_invocation: state.work_invocation.clone(),
                             call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
@@ -301,6 +308,7 @@ pub(in crate::engine) fn resume_frame(
                                     stream_provenance: stream_provenance.clone(),
                                 },
                             ]),
+                            work_invocation: state.work_invocation.clone(),
                             call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
@@ -338,6 +346,7 @@ pub(in crate::engine) fn resume_frame(
                                     stream_provenance: stream_provenance.clone(),
                                 },
                             ]),
+                            work_invocation: state.work_invocation.clone(),
                             call_stack: Arc::from(state.call_stack.clone()),
                         }));
                     }
@@ -450,6 +459,7 @@ pub(in crate::engine) fn resume_frame(
                                             struct_source: struct_source.clone(),
                                         },
                                     ]),
+                                    work_invocation: state.work_invocation.clone(),
                                     call_stack: Arc::from(state.call_stack.clone()),
                                 }));
                             }

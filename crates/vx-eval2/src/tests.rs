@@ -8418,6 +8418,111 @@ fn session_causal_profile_reports_cold_call_starts_with_depend_stack() {
 }
 
 #[test]
+fn session_call_summary_tracks_authored_calls_without_tree_profiling() {
+    struct ProfilePendingRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RuntimeHooks for ProfilePendingRuntime {
+        fn call(
+            &self,
+            place: &str,
+            callee: &FunctionRef,
+            _args: &[Value],
+            source: &SourceSpan,
+        ) -> Result<RuntimeCallOutcome, EvalError> {
+            match (place, callee.name.as_ref()) {
+                ("win", "host_wait_bool") => {
+                    let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+                    if call_index == 0 {
+                        Ok(RuntimeCallOutcome::Pending {
+                            description: "waiting for summary predicate".into(),
+                        })
+                    } else {
+                        Ok(RuntimeCallOutcome::Ready(
+                            Value::bool(true).with_provenance(Provenance::host_probe(
+                                source.clone(),
+                                place,
+                                "host_wait_bool",
+                            )),
+                        ))
+                    }
+                }
+                _ => Ok(RuntimeCallOutcome::Unsupported),
+            }
+        }
+    }
+
+    let runtime = ProfilePendingRuntime {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut session = EvalSession::new(
+        r#"
+fn host_wait_bool();
+
+fn leaf(value: U64) {
+  if host_wait_bool() ( value ) else ( 0 )
+}
+
+fn outer(value: U64) {
+  leaf(value)
+}
+
+fn build() {
+  [outer(7), outer(7)]
+}
+"#,
+        "session-call-summary",
+        "build",
+        Vec::new(),
+        &runtime,
+        "win",
+    );
+    session.set_call_summary_enabled(true);
+
+    let Resolution::Pending(pending) = session.run().expect("start summarized session") else {
+        panic!("expected pending summarized session");
+    };
+    session
+        .resolve_pending(&pending, Value::bool(true))
+        .expect("resolve summarized pending call");
+
+    let Resolution::Ready(value) = session.run().expect("finish summarized session") else {
+        panic!("expected ready summarized session");
+    };
+    let ValueRep::Array(items) = &value.rep else {
+        panic!("expected build array result, got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+
+    let summary = session.call_summary();
+    let outer = summary
+        .summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "outer")
+        .expect("outer summary entry");
+    assert_eq!(outer.runs, 2);
+    assert_eq!(outer.distinct_input_count, 1);
+    assert_eq!(outer.repeated_input_count, 1);
+
+    let leaf = summary
+        .summary
+        .iter()
+        .find(|entry| entry.callee.as_ref() == "leaf")
+        .expect("leaf summary entry");
+    assert_eq!(leaf.runs, 2);
+    assert_eq!(leaf.distinct_input_count, 1);
+    assert_eq!(leaf.repeated_input_count, 1);
+
+    let report = session.call_summary_report(8);
+    assert!(report.contains("eval2 call summary attributed="));
+    assert!(report.contains("callee=build"));
+    assert!(report.contains("callee=outer"));
+    assert!(report.contains("callee=leaf"));
+    assert!(!report.contains("call tree:"));
+}
+
+#[test]
 fn session_call_profile_tracks_builtin_calls() {
     let runtime = UnsupportedRuntime;
     let mut session = EvalSession::new(

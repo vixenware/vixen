@@ -506,7 +506,7 @@ fn print_eval_reports<Runtime: RuntimeHooks>(args: &EvalArgs, session: &EvalSess
         eprintln!("{}", session.profile_report(args.profile_limit));
     }
     if args.call_profile {
-        eprintln!("{}", session.call_profile_report(args.profile_limit));
+        eprintln!("{}", session.call_summary_report(args.profile_limit));
     }
     if args.causal_profile {
         eprintln!("{}", session.causal_profile_report(args.profile_limit));
@@ -613,7 +613,7 @@ impl CliContext {
             args.place.clone(),
         );
         if args.call_profile {
-            session.set_call_profiling_enabled(true);
+            session.set_call_summary_enabled(true);
         }
 
         let workers = args.workers.unwrap_or_else(default_eval_workers);

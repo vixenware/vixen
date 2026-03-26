@@ -550,7 +550,7 @@ pub struct EvalAuthoredCallFrame {
     pub root_node_id: EvalNodeId,
     pub root_work_id: Option<EvalWorkId>,
     pub callee: Arc<str>,
-    pub args_fingerprint: Arc<str>,
+    pub args_fingerprint: u64,
     pub source: SourceSpan,
 }
 
@@ -561,7 +561,7 @@ pub struct EvalAuthoredCall {
     pub caller_node_id: Option<EvalNodeId>,
     pub caller_work_id: Option<EvalWorkId>,
     pub callee: Arc<str>,
-    pub args_fingerprint: Arc<str>,
+    pub args_fingerprint: u64,
     pub source: SourceSpan,
 }
 
@@ -664,6 +664,13 @@ pub struct EvalSessionCallProfile {
     pub runs: Vec<EvalCallProfileRun>,
     pub summary: Vec<EvalCallProfileSummaryEntry>,
     pub roots: Vec<EvalCallTreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalSessionCallSummary {
+    pub attributed_time: Duration,
+    pub runs: Vec<EvalCallProfileRun>,
+    pub summary: Vec<EvalCallProfileSummaryEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -908,6 +915,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) base_generation: u64,
     pub(super) scheduler: EvalPreparedSnapshot,
     pub(super) record: ReadyTaskRecord,
+    pub(super) call_summary: bool,
     pub(super) call_profiling: bool,
 }
 

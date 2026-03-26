@@ -10,6 +10,7 @@ use crate::value::compare_value_reps;
 use crate::value::{
     FunctionBytecodeEntry, FunctionCaptures, empty_function_captures, function_captures,
 };
+use std::hash::{Hash, Hasher};
 
 mod builtins;
 pub(in crate::engine) use builtins::*;
@@ -817,12 +818,64 @@ pub(super) fn prepare_function_call(
     }))
 }
 
-pub(super) fn profile_args_fingerprint(args: &[Value]) -> Arc<str> {
-    let items = args
-        .iter()
-        .map(|value| format!("{:?}", value.rep))
-        .collect::<Vec<_>>();
-    Arc::from(format!("[{}]", items.join(", ")))
+fn hash_profile_value(value: &Value, hasher: &mut impl Hasher) {
+    std::mem::discriminant(&value.rep).hash(hasher);
+    match &value.rep {
+        ValueRep::Unit => {}
+        ValueRep::Bool(v) => v.hash(hasher),
+        ValueRep::U64(v) => v.hash(hasher),
+        ValueRep::String(v) => v.hash(hasher),
+        ValueRep::Array(items) | ValueRep::Tuple(items) => {
+            items.len().hash(hasher);
+            for item in items.iter() {
+                hash_profile_value(item, hasher);
+            }
+        }
+        ValueRep::Range(range) => {
+            range.start.hash(hasher);
+            range.end.hash(hasher);
+            range.inclusive_end.hash(hasher);
+        }
+        ValueRep::Map(map) => {
+            map.entries.len().hash(hasher);
+            for (key, value) in map.entries.iter() {
+                hash_profile_value(key, hasher);
+                hash_profile_value(value, hasher);
+            }
+        }
+        ValueRep::Struct(structure) => {
+            structure.type_name.hash(hasher);
+            structure.fields.len().hash(hasher);
+            for (name, value) in structure.fields.iter() {
+                name.hash(hasher);
+                hash_profile_value(value, hasher);
+            }
+        }
+        ValueRep::External(external) => external.hash(hasher),
+        ValueRep::Function(function) => {
+            function.source_id.hash(hasher);
+            function.name.hash(hasher);
+            function.parameters.len().hash(hasher);
+            function.has_keyword_parameters.hash(hasher);
+            function
+                .body
+                .as_ref()
+                .map(|body| body.expr_id())
+                .hash(hasher);
+            function.bytecode_entry.hash(hasher);
+            function.self_name.hash(hasher);
+            function.captures.len().hash(hasher);
+        }
+    }
+}
+
+pub(super) fn profile_args_fingerprint(args: &[Value]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    args.len().hash(&mut hasher);
+    for value in args {
+        hash_profile_value(value, &mut hasher);
+    }
+    hasher.finish()
 }
 
 pub(super) fn authored_call_frame(
@@ -839,6 +892,40 @@ pub(super) fn authored_call_frame(
         args_fingerprint: profile_args_fingerprint(args),
         source,
     }
+}
+
+pub(super) fn authored_call_invocation(
+    state: &EvalState<'_, '_, impl RuntimeHooks, impl EvalEventSink>,
+    node_id: EvalNodeId,
+    callee: Arc<str>,
+    args: &[Value],
+    source: SourceSpan,
+) -> EvalAuthoredCall {
+    EvalAuthoredCall {
+        root_node_id: node_id,
+        root_work_id: state.current_work,
+        caller_node_id: None,
+        caller_work_id: None,
+        callee,
+        args_fingerprint: profile_args_fingerprint(args),
+        source,
+    }
+}
+
+pub(super) fn invocation_from_call_stack(
+    call_stack: &[EvalAuthoredCallFrame],
+) -> Option<EvalAuthoredCall> {
+    let current = call_stack.last()?;
+    let caller = call_stack.iter().rev().nth(1);
+    Some(EvalAuthoredCall {
+        root_node_id: current.root_node_id,
+        root_work_id: current.root_work_id,
+        caller_node_id: caller.map(|frame| frame.root_node_id),
+        caller_work_id: caller.and_then(|frame| frame.root_work_id),
+        callee: current.callee.clone(),
+        args_fingerprint: current.args_fingerprint.clone(),
+        source: current.source.clone(),
+    })
 }
 
 pub(super) fn emit_authored_call_started(
@@ -2091,9 +2178,7 @@ fn dispatch_call(
         };
     }
     if let Some(prepared) = prepare_function_call(state, function, &args, Some(node_id))? {
-        return if !state.track_calls {
-            eval_dependent_prepared_entry(state, node_id, prepared)
-        } else {
+        return if state.track_calls {
             let frame = authored_call_frame(
                 state,
                 node_id,
@@ -2112,6 +2197,14 @@ fn dispatch_call(
             state.with_authored_call(frame, |state| {
                 eval_dependent_prepared_entry(state, node_id, prepared)
             })
+        } else if state.track_call_summary {
+            let invocation =
+                authored_call_invocation(state, node_id, function.name.clone(), &args, call_source);
+            state.with_work_invocation(Some(invocation), |state| {
+                eval_dependent_prepared_entry(state, node_id, prepared)
+            })
+        } else {
+            eval_dependent_prepared_entry(state, node_id, prepared)
         };
     }
     if let Some(field_names) = enum_constructor_field_names(function) {
@@ -4857,6 +4950,7 @@ fn queue_child_expr_body(
         env: Arc::new(env.clone()),
         locals: Arc::from(locals),
         locals_overlay_needed: false,
+        work_invocation: state.work_invocation.clone(),
         call_stack: if state.track_calls {
             Arc::from(state.call_stack.clone())
         } else {
@@ -4907,6 +5001,7 @@ pub(super) fn queue_child_prepared_entry(
         env: prepared.env,
         locals: prepared.locals,
         locals_overlay_needed: prepared.locals_overlay_needed,
+        work_invocation: state.work_invocation.clone(),
         call_stack: if state.track_calls {
             Arc::from(state.call_stack.clone())
         } else {
@@ -4946,6 +5041,7 @@ pub(super) fn wait_on_child_dependency(
         pending,
         branch_context: state.branch_context.clone(),
         continuation: continuation_from_frames(frames),
+        work_invocation: state.work_invocation.clone(),
         call_stack: Arc::from(state.call_stack.clone()),
     })
 }

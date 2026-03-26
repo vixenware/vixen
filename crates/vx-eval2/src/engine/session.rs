@@ -15,6 +15,7 @@ pub struct EvalSession<'runtime, Runtime: RuntimeHooks> {
     completed_work: Vec<EvalCompletedWork>,
     completed: Option<Result<Value, EvalError>>,
     history: Vec<EvalSessionCheckpoint>,
+    call_summary: bool,
     call_profiling: bool,
 }
 
@@ -101,6 +102,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             completed_work: Vec::new(),
             completed: None,
             history: Vec::new(),
+            call_summary: false,
             call_profiling: env::var_os("VX_EVAL2_PROFILE_CALLS").is_some(),
         }
     }
@@ -287,6 +289,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
     pub fn call_profiling_enabled(&self) -> bool {
         self.call_profiling
+    }
+
+    pub fn set_call_summary_enabled(&mut self, enabled: bool) {
+        self.call_summary = enabled;
+    }
+
+    pub fn call_summary_enabled(&self) -> bool {
+        self.call_summary || self.call_profiling
     }
 
     pub fn branch_context(&self) -> &EvalBranchContext {
@@ -629,8 +639,60 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
         }
     }
 
+    pub fn call_summary(&self) -> EvalSessionCallSummary {
+        let mut runs = BTreeMap::<(Option<EvalWorkId>, EvalNodeId), EvalCallProfileRun>::new();
+        let mut attributed_time = Duration::default();
+
+        for completed in &self.completed_work {
+            let Some(invocation) = completed.invocation.clone() else {
+                continue;
+            };
+            attributed_time += completed.elapsed;
+            let key = (invocation.root_work_id, invocation.root_node_id);
+            let run = runs.entry(key).or_insert_with(|| EvalCallProfileRun {
+                invocation,
+                work_count: 0,
+                self_time: Duration::default(),
+                total_time: Duration::default(),
+                max_work_time: Duration::default(),
+            });
+            run.work_count += 1;
+            run.self_time += completed.elapsed;
+            run.total_time += completed.elapsed;
+            run.max_work_time = run.max_work_time.max(completed.elapsed);
+        }
+
+        let mut runs = runs.into_values().collect::<Vec<_>>();
+        runs.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.self_time.cmp(&left.self_time))
+                .then_with(|| left.invocation.callee.cmp(&right.invocation.callee))
+        });
+
+        let mut summary = summarize_call_runs(&runs);
+        summary.sort_by(|left, right| {
+            right
+                .total_time
+                .cmp(&left.total_time)
+                .then_with(|| right.self_time.cmp(&left.self_time))
+                .then_with(|| left.callee.cmp(&right.callee))
+        });
+
+        EvalSessionCallSummary {
+            attributed_time,
+            runs,
+            summary,
+        }
+    }
+
     pub fn call_profile_report(&self, limit: usize) -> String {
         format_call_profile_report(&self.call_profile(), limit)
+    }
+
+    pub fn call_summary_report(&self, limit: usize) -> String {
+        format_call_summary_report(&self.call_summary(), limit)
     }
 
     pub fn completed_work(&self) -> &[EvalCompletedWork] {
@@ -725,6 +787,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             base_generation: self.scheduler.base_generation(),
             scheduler: self.scheduler.prepared_snapshot(lease.namespace),
             record: lease.record,
+            call_summary: self.call_summary_enabled(),
             call_profiling: self.call_profiling,
         }))
     }
@@ -979,6 +1042,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             base_generation,
             scheduler,
             record,
+            call_summary,
             call_profiling,
         } = self;
         #[cfg(test)]
@@ -995,6 +1059,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             &place,
             scheduler,
             record,
+            call_summary,
             call_profiling,
         )?;
         Ok(EvalWorkCompletion {
@@ -1495,7 +1560,7 @@ fn compute_call_run_total_time(
 
 fn summarize_call_runs(runs: &[EvalCallProfileRun]) -> Vec<EvalCallProfileSummaryEntry> {
     let mut entries = BTreeMap::<Arc<str>, EvalCallProfileSummaryEntry>::new();
-    let mut inputs = BTreeMap::<Arc<str>, BTreeSet<Arc<str>>>::new();
+    let mut inputs = BTreeMap::<Arc<str>, BTreeSet<u64>>::new();
 
     for run in runs {
         let key = run.invocation.callee.clone();
@@ -1552,7 +1617,7 @@ fn build_call_tree_entries(
         .into_iter()
         .map(|(_, group)| {
             let first = &runs[group[0]];
-            let mut input_fingerprints = BTreeSet::new();
+            let mut input_fingerprints = BTreeSet::<u64>::new();
             let mut child_indices = Vec::new();
             let mut self_time = Duration::default();
             let mut total_time = Duration::default();
@@ -1632,6 +1697,34 @@ fn format_call_profile_report(profile: &EvalSessionCallProfile, limit: usize) ->
     if !profile.roots.is_empty() {
         lines.push("call tree:".to_string());
         format_call_tree_entries(&mut lines, &profile.roots, 1, limit);
+    }
+
+    lines.join("\n")
+}
+
+fn format_call_summary_report(summary: &EvalSessionCallSummary, limit: usize) -> String {
+    let mut lines = vec![format!(
+        "eval2 call summary attributed={} runs={} summary_entries={}",
+        format_profile_duration(summary.attributed_time),
+        summary.runs.len(),
+        summary.summary.len(),
+    )];
+
+    if !summary.summary.is_empty() {
+        lines.push("hot callsites:".to_string());
+        for entry in summary.summary.iter().take(limit) {
+            lines.push(format!(
+                "  total={} self={} max={} runs={} inputs={}/{} callee={} source={:?}",
+                format_profile_duration(entry.total_time),
+                format_profile_duration(entry.self_time),
+                format_profile_duration(entry.max_total_time),
+                entry.runs,
+                entry.distinct_input_count,
+                entry.runs,
+                entry.callee,
+                entry.source,
+            ));
+        }
     }
 
     lines.join("\n")

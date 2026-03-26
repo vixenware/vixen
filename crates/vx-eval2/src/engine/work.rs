@@ -1084,6 +1084,7 @@ pub(super) struct ScheduledBytecodeResume {
     pub(super) node_id: EvalNodeId,
     pub(super) parent_id: Option<EvalNodeId>,
     pub(super) bytecode: BytecodeState,
+    pub(super) work_invocation: Option<EvalAuthoredCall>,
     pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
     pub(super) result: Result<Arc<Value>, EvalError>,
 }
@@ -1095,6 +1096,7 @@ pub(super) struct ScheduledExpr {
     pub(super) env: Arc<EvalEnv>,
     pub(super) locals: Arc<[Option<Value>]>,
     pub(super) locals_overlay_needed: bool,
+    pub(super) work_invocation: Option<EvalAuthoredCall>,
     pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
 }
 
@@ -2086,6 +2088,7 @@ impl EvalScheduler {
                     node_id: *node_id,
                     parent_id: *parent_id,
                     bytecode: bytecode.clone(),
+                    work_invocation: suspension.work_invocation.clone(),
                     call_stack: Arc::clone(&suspension.call_stack),
                     result: shared_result.clone(),
                 }),
@@ -2601,6 +2604,7 @@ pub(super) fn execute_ready_task(
     place: &str,
     snapshot: EvalPreparedSnapshot,
     record: ReadyTaskRecord,
+    call_summary: bool,
     call_profiling: bool,
 ) -> Result<
     (
@@ -2622,6 +2626,7 @@ pub(super) fn execute_ready_task(
         &mut prepared_scheduler,
         Some(record.work.id),
         true,
+        call_summary,
         call_profiling,
     );
     let mut invocation = None;
@@ -2655,7 +2660,7 @@ pub(super) fn execute_ready_task(
                     &mut state,
                     node_id,
                     Some(ENTRY_WORK_NODE_ID),
-                    body_source,
+                    body_source.clone(),
                     &frame,
                     args.len(),
                 );
@@ -2663,12 +2668,22 @@ pub(super) fn execute_ready_task(
             } else {
                 Vec::new()
             };
+            let work_invocation = (!call_profiling && call_summary).then(|| {
+                authored_call_invocation(
+                    &state,
+                    node_id,
+                    Arc::from(entry),
+                    args,
+                    body_source.clone(),
+                )
+            });
             let scheduled = ScheduledExpr {
                 root_expr_id: prepared.body.root_expr_id(),
                 kind: ScheduledExprKind::Prepared(prepared.body),
                 env: prepared.env,
                 locals: prepared.locals,
                 locals_overlay_needed: prepared.locals_overlay_needed,
+                work_invocation,
                 call_stack: Arc::from(call_stack),
             };
             state.scheduler.remember_expr_task(
@@ -2707,8 +2722,14 @@ pub(super) fn execute_ready_task(
                 env,
                 locals,
                 locals_overlay_needed,
+                work_invocation,
                 call_stack,
             } = scheduled;
+            let scheduled_invocation = if !call_stack.is_empty() {
+                invocation_from_call_stack(call_stack.as_ref())
+            } else {
+                work_invocation.clone()
+            };
             let run = move |state: &mut EvalState<'_, '_, _, _>| match kind.clone() {
                 ScheduledExprKind::Prepared(body) => eval_prepared_body_with_node_id(
                     state,
@@ -2721,12 +2742,14 @@ pub(super) fn execute_ready_task(
                     },
                 ),
             };
-            let step = if call_stack.is_empty() {
-                run(&mut state)
-            } else {
+            let step = if !call_stack.is_empty() {
                 state.with_call_stack(call_stack.as_ref().to_vec(), run)
+            } else if work_invocation.is_some() {
+                state.with_work_invocation(work_invocation, run)
+            } else {
+                run(&mut state)
             };
-            invocation = state.work_invocation.clone();
+            invocation = state.last_invocation.clone().or(scheduled_invocation);
             match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {
@@ -2759,9 +2782,69 @@ pub(super) fn execute_ready_task(
             }
         }
         ReadyTask::EvaluateKeyed(node_id) => {
-            if !call_profiling {
+            if !call_summary {
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
                 match eval_dependent_prepared_entry(&mut state, node_id, prepared)? {
+                    EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
+                    EvalStep::Suspended(suspension) => {
+                        let pending = suspension.pending.clone();
+                        state.scheduler.register_suspension(suspension);
+                        match state.scheduler.pending_kind(&pending) {
+                            Some(PendingKind::External) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::Pending(pending.clone()),
+                                );
+                                EvalCompletedWorkOutcome::Pending(pending)
+                            }
+                            Some(PendingKind::ChildDependency { dependency }) => {
+                                state.scheduler.record_node_state(
+                                    node_id,
+                                    EvalNodeState::BlockedOnNode { dependency },
+                                );
+                                EvalCompletedWorkOutcome::BlockedOnNode(dependency)
+                            }
+                            None => {
+                                return Err(EvalError::new(
+                                    EvalErrorKind::Internal,
+                                    format!(
+                                        "pending node {} has no registered kind",
+                                        pending.node_id
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            } else if call_profiling {
+                let (resolver_name, joined, source) = {
+                    let memo = state.scheduler.keyed_node(node_id).ok_or_else(|| {
+                        EvalError::new(
+                            EvalErrorKind::Internal,
+                            format!("keyed node {:?} is not registered", node_id),
+                        )
+                    })?;
+                    let source = state
+                        .scheduler
+                        .node_record(node_id)
+                        .and_then(|record| record.source.clone())
+                        .unwrap_or_else(|| SourceSpan::synthetic("<keyed>"));
+                    (
+                        memo.resolver.name.clone(),
+                        keyed_context_value(memo.key.clone(), memo.joined.clone()),
+                        source,
+                    )
+                };
+                let frame =
+                    authored_call_frame(&state, node_id, resolver_name, &[joined], source.clone());
+                let fallback_invocation = invocation_from_call_stack(std::slice::from_ref(&frame));
+                emit_authored_call_started(&mut state, node_id, None, source, &frame, 1);
+                let prepared = prepare_keyed_call(&mut state, node_id)?;
+                let step = state.with_authored_call(frame, |state| {
+                    eval_dependent_prepared_entry(state, node_id, prepared)
+                });
+                invocation = state.last_invocation.clone().or(fallback_invocation);
+                match step? {
                     EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
                     EvalStep::Suspended(suspension) => {
                         let pending = suspension.pending.clone();
@@ -2812,14 +2895,14 @@ pub(super) fn execute_ready_task(
                         source,
                     )
                 };
-                let frame =
-                    authored_call_frame(&state, node_id, resolver_name, &[joined], source.clone());
-                emit_authored_call_started(&mut state, node_id, None, source, &frame, 1);
+                let invocation_state =
+                    authored_call_invocation(&state, node_id, resolver_name, &[joined], source);
+                let fallback_invocation = Some(invocation_state.clone());
                 let prepared = prepare_keyed_call(&mut state, node_id)?;
-                let step = state.with_authored_call(frame, |state| {
+                let step = state.with_work_invocation(Some(invocation_state), |state| {
                     eval_dependent_prepared_entry(state, node_id, prepared)
                 });
-                invocation = state.work_invocation.clone();
+                invocation = state.last_invocation.clone().or(fallback_invocation);
                 match step? {
                     EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
                     EvalStep::Suspended(suspension) => {
@@ -2855,12 +2938,17 @@ pub(super) fn execute_ready_task(
             }
         }
         ReadyTask::Resume(ready) => {
+            let fallback_invocation = if !ready.suspension.call_stack.is_empty() {
+                invocation_from_call_stack(ready.suspension.call_stack.as_ref())
+            } else {
+                ready.suspension.work_invocation.clone()
+            };
             let step = resume_suspension(
                 &mut state,
                 ready.suspension,
                 ready.result.map(|value| value.as_ref().clone()),
             );
-            invocation = state.work_invocation.clone();
+            invocation = state.last_invocation.clone().or(fallback_invocation);
             match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {
@@ -2893,6 +2981,11 @@ pub(super) fn execute_ready_task(
             }
         }
         ReadyTask::ResumeBytecode(ready) => {
+            let fallback_invocation = if !ready.call_stack.is_empty() {
+                invocation_from_call_stack(ready.call_stack.as_ref())
+            } else {
+                ready.work_invocation.clone()
+            };
             let run = move |state: &mut EvalState<'_, '_, _, _>| match resume_bytecode_tail(
                 state,
                 ready.node_id,
@@ -2906,12 +2999,14 @@ pub(super) fn execute_ready_task(
                 },
                 ResumeOutcome::Suspended(suspension) => Ok(EvalStep::Suspended(suspension)),
             };
-            let step = if ready.call_stack.is_empty() {
-                run(&mut state)
-            } else {
+            let step = if !ready.call_stack.is_empty() {
                 state.with_call_stack(ready.call_stack.as_ref().to_vec(), run)
+            } else if ready.work_invocation.is_some() {
+                state.with_work_invocation(ready.work_invocation.clone(), run)
+            } else {
+                run(&mut state)
             };
-            invocation = state.work_invocation.clone();
+            invocation = state.last_invocation.clone().or(fallback_invocation);
             match step {
                 Ok(EvalStep::Ready(value)) => EvalCompletedWorkOutcome::Ready(value),
                 Ok(EvalStep::Suspended(suspension)) => {

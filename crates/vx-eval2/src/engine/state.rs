@@ -12,10 +12,12 @@ pub(super) struct EvalState<'source, 'scheduler, Runtime, Sink> {
     pub(super) scheduler: &'scheduler mut dyn EvalWorkerScheduler,
     pub(super) current_work: Option<EvalWorkId>,
     pub(super) queue_child_work: bool,
+    pub(super) track_call_summary: bool,
     pub(super) track_calls: bool,
     pub(super) stack: Vec<EvalNodeId>,
     pub(super) call_stack: Vec<EvalAuthoredCallFrame>,
     pub(super) work_invocation: Option<EvalAuthoredCall>,
+    pub(super) last_invocation: Option<EvalAuthoredCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub(super) struct EvalSuspension {
     pub(super) pending: PendingRef,
     pub(super) branch_context: EvalBranchContext,
     pub(super) continuation: EvalSuspensionContinuation,
+    pub(super) work_invocation: Option<EvalAuthoredCall>,
     pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
 }
 
@@ -438,6 +441,7 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         scheduler: &'scheduler mut dyn EvalWorkerScheduler,
         current_work: Option<EvalWorkId>,
         queue_child_work: bool,
+        track_call_summary: bool,
         track_calls: bool,
     ) -> Self {
         Self {
@@ -450,10 +454,12 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
             scheduler,
             current_work,
             queue_child_work,
+            track_call_summary,
             track_calls,
             stack: Vec::new(),
             call_stack: Vec::new(),
             work_invocation: None,
+            last_invocation: None,
         }
     }
 
@@ -574,11 +580,32 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let previous = std::mem::replace(&mut self.call_stack, call_stack);
-        if let Some(invocation) = self.current_invocation() {
+        let previous_invocation = self.work_invocation.clone();
+        if self.track_call_summary
+            && let Some(invocation) = self.current_invocation()
+        {
             self.work_invocation = Some(invocation);
+        }
+        if self.work_invocation.is_some() {
+            self.last_invocation = self.work_invocation.clone();
         }
         let result = f(self);
         self.call_stack = previous;
+        self.work_invocation = previous_invocation;
+        result
+    }
+
+    pub(super) fn with_work_invocation<T>(
+        &mut self,
+        invocation: Option<EvalAuthoredCall>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if invocation.is_some() {
+            self.last_invocation = invocation.clone();
+        }
+        let previous = std::mem::replace(&mut self.work_invocation, invocation);
+        let result = f(self);
+        self.work_invocation = previous;
         result
     }
 
@@ -588,10 +615,17 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         self.call_stack.push(frame);
-        self.work_invocation = self.current_invocation();
+        let previous_invocation = self.work_invocation.clone();
+        if self.track_call_summary {
+            self.work_invocation = self.current_invocation();
+        }
+        if self.work_invocation.is_some() {
+            self.last_invocation = self.work_invocation.clone();
+        }
         let result = f(self);
         let popped = self.call_stack.pop();
         debug_assert!(popped.is_some());
+        self.work_invocation = previous_invocation;
         result
     }
 }
@@ -667,6 +701,7 @@ pub(super) fn wrap_suspended(
         pending,
         branch_context,
         continuation: continuation_from_frames(vec![frame]),
+        work_invocation: state.work_invocation.clone(),
         call_stack: Arc::from(state.call_stack.clone()),
     })
 }

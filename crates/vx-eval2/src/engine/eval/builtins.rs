@@ -1407,6 +1407,27 @@ pub(in crate::engine) fn continue_builtin_call(
             )
         });
     }
+    if state.track_call_summary {
+        let invocation = authored_call_invocation(
+            state,
+            node_id,
+            Arc::from(callee_name),
+            args,
+            call_source.clone(),
+        );
+        return state.with_work_invocation(Some(invocation), |state| {
+            continue_builtin_call_inner(
+                state,
+                node_id,
+                parent_id,
+                function,
+                callee_name,
+                call_source.clone(),
+                type_args,
+                args,
+            )
+        });
+    }
     continue_builtin_call_inner(
         state,
         node_id,
@@ -3352,6 +3373,7 @@ pub(in crate::engine) fn continue_keyed_builtin(
                     pending,
                     branch_context: state.branch_context.clone(),
                     continuation: continuation_from_frames(Vec::new()),
+                    work_invocation: state.work_invocation.clone(),
                     call_stack: Arc::from(state.call_stack.clone()),
                 }))
             }

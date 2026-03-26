@@ -27,7 +27,7 @@ where
     Arc::new(captures)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionBytecodeEntry {
     pub body: BytecodeBodyId,
     pub local_count: usize,
