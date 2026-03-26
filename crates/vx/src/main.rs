@@ -629,12 +629,7 @@ impl CliContext {
         if workers == 0 {
             bail!("--workers must be at least 1");
         }
-        let resolution = if workers > 1 {
-            session.run_parallel(workers)
-        } else {
-            session.run()
-        }
-        .map_err(eval_error_report)?;
+        let resolution = session.run_parallel(workers).map_err(eval_error_report)?;
         let cli_resolution = eval_cli_resolution(resolution.clone())?;
         print_eval_resolution(&self.mode, &cli_resolution)?;
         print_eval_reports(&args, &session);

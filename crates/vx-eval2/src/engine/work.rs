@@ -310,6 +310,7 @@ struct EvalPreparedScheduler<'a> {
     node_record_index: HashMap<EvalNodeId, usize>,
     node_state_index: HashMap<EvalNodeId, usize>,
     pending_entry_index: HashMap<EvalNodeId, usize>,
+    local_pending_entries: BTreeMap<EvalNodeId, PendingEntry>,
     keyed_node_index: HashMap<EvalNodeId, usize>,
     retained_expr_index: HashMap<EvalNodeId, usize>,
     queued: VecDeque<ReadyTaskRecord>,
@@ -329,6 +330,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             node_record_index: HashMap::new(),
             node_state_index: HashMap::new(),
             pending_entry_index: HashMap::new(),
+            local_pending_entries: BTreeMap::new(),
             keyed_node_index: HashMap::new(),
             retained_expr_index: HashMap::new(),
             queued: VecDeque::new(),
@@ -345,6 +347,8 @@ impl<'a> EvalPreparedScheduler<'a> {
             base,
             allocator,
             mut delta,
+            mut pending_entry_index,
+            local_pending_entries,
             queued,
             local_queued,
             resolved_local_pending,
@@ -358,6 +362,21 @@ impl<'a> EvalPreparedScheduler<'a> {
             delta
                 .pending_entries
                 .retain(|(pending_id, _)| !resolved_local_pending.contains(pending_id));
+        }
+        for (pending_id, entry) in local_pending_entries {
+            if entry.visible_kind().is_none() {
+                continue;
+            }
+            if let Some(index) = pending_entry_index.get(&pending_id).copied() {
+                let existing = &mut delta.pending_entries[index].1;
+                existing.kind = entry.kind;
+                existing.resolved &= entry.resolved;
+                existing.waiters.extend_unique(entry.waiters);
+            } else {
+                let index = delta.pending_entries.len();
+                delta.pending_entries.push((pending_id, entry));
+                pending_entry_index.insert(pending_id, index);
+            }
         }
         delta.queued = local_queued.into_iter().chain(queued).collect();
         (delta, completed_invalidated, reads.into_inner())
@@ -745,7 +764,11 @@ impl<'a> EvalPreparedScheduler<'a> {
         dependency: EvalNodeId,
         result: Result<Value, EvalError>,
     ) -> Result<bool, EvalError> {
-        let Some(entry) = self.take_local_pending_entry(dependency) else {
+        let entry = if let Some(entry) = self.local_pending_entries.remove(&dependency) {
+            entry
+        } else if let Some(entry) = self.take_local_pending_entry(dependency) {
+            entry
+        } else {
             return Ok(false);
         };
         match entry.kind {
@@ -754,11 +777,7 @@ impl<'a> EvalPreparedScheduler<'a> {
             } if registered == dependency => {}
             _ => return Ok(false),
         }
-        let Some(pending) = entry
-            .waiters
-            .first()
-            .map(|suspension| suspension.pending.clone())
-        else {
+        if entry.waiters.is_empty() {
             return Err(EvalError::new(
                 EvalErrorKind::Internal,
                 format!(
@@ -766,40 +785,23 @@ impl<'a> EvalPreparedScheduler<'a> {
                     dependency
                 ),
             ));
-        };
-        let node_id = EvalNodeId(pending.node_id);
+        }
         let shared_result = result.map(Arc::new);
         match &shared_result {
-            Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(Arc::clone(value))),
-            Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
+            Ok(value) => {
+                self.record_node_state(dependency, EvalNodeState::Ready(Arc::clone(value)))
+            }
+            Err(error) => self.record_node_state(dependency, EvalNodeState::Poison(error.clone())),
         }
         for suspension in entry.waiters.into_vec() {
             let resume_node = suspension.resume_node;
             let branch_context = suspension.branch_context.clone();
-            let task = match &suspension.continuation {
-                EvalSuspensionContinuation::Bytecode {
-                    prefix,
-                    node_id,
-                    parent_id,
-                    bytecode,
-                } if prefix.is_empty() => ReadyTask::ResumeBytecode(ScheduledBytecodeResume {
-                    node_id: *node_id,
-                    parent_id: *parent_id,
-                    bytecode: bytecode.clone(),
-                    work_invocation: suspension.work_invocation.clone(),
-                    call_stack: Arc::clone(&suspension.call_stack),
-                    result: shared_result.clone(),
-                }),
-                _ => ReadyTask::Resume(ScheduledResume {
-                    suspension,
-                    result: shared_result.clone(),
-                }),
-            };
+            let task = ready_task_from_suspension(suspension, shared_result.clone());
             let work = self.enqueue_local_ready_task(
                 task,
                 EvalWorkKind::ResumePending,
                 resume_node,
-                Some(pending.clone()),
+                None,
                 branch_context,
                 EvalWorkCause::new(
                     EvalWorkCauseKind::ResumePending,
@@ -810,7 +812,7 @@ impl<'a> EvalPreparedScheduler<'a> {
                 resume_node,
                 EvalNodeState::Runnable {
                     work: work.id,
-                    pending: Some(pending.clone()),
+                    pending: None,
                 },
             );
         }
@@ -1003,30 +1005,40 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
 
     fn alloc_child_dependency_pending(&mut self, dependency: EvalNodeId) -> PendingRef {
         let pending = PendingRef::new(dependency.0, "waiting on child expression");
-        if let Some(index) = self.pending_entry_index.get(&dependency).copied() {
+        if let Some(entry) = self.local_pending_entries.get_mut(&dependency) {
+            entry.kind = PendingKind::ChildDependency { dependency };
+            entry.resolved = false;
+        } else if let Some(index) = self.pending_entry_index.get(&dependency).copied() {
             self.delta.pending_entries[index].1.kind = PendingKind::ChildDependency { dependency };
             self.delta.pending_entries[index].1.resolved = false;
         } else {
-            let index = self.delta.pending_entries.len();
-            self.delta.pending_entries.push((
+            self.local_pending_entries.insert(
                 dependency,
                 PendingEntry {
                     kind: PendingKind::ChildDependency { dependency },
                     resolved: false,
                     waiters: PendingWaiters::default(),
                 },
-            ));
-            self.pending_entry_index.insert(dependency, index);
+            );
         }
         pending
     }
 
     fn pending_kind(&self, pending: &PendingRef) -> Option<PendingKind> {
-        self.pending_kind_local(EvalNodeId(pending.node_id))
+        let pending_id = EvalNodeId(pending.node_id);
+        self.local_pending_entries
+            .get(&pending_id)
+            .and_then(PendingEntry::visible_kind)
+            .or_else(|| self.pending_kind_local(pending_id))
     }
 
     fn register_suspension(&mut self, suspension: EvalSuspension) {
         let pending_id = EvalNodeId(suspension.pending.node_id);
+        if let Some(entry) = self.local_pending_entries.get_mut(&pending_id) {
+            entry.resolved = false;
+            entry.waiters.push(suspension);
+            return;
+        }
         if let Some(entry) = self.pending_entry_mut(pending_id) {
             entry.resolved = false;
             entry.waiters.push(suspension);
@@ -1411,6 +1423,28 @@ pub(super) struct ScheduledBytecodeResume {
     pub(super) work_invocation: Option<EvalAuthoredCall>,
     pub(super) call_stack: Arc<[EvalAuthoredCallFrame]>,
     pub(super) result: Result<Arc<Value>, EvalError>,
+}
+
+fn ready_task_from_suspension(
+    suspension: EvalSuspension,
+    result: Result<Arc<Value>, EvalError>,
+) -> ReadyTask {
+    match &suspension.continuation {
+        EvalSuspensionContinuation::Bytecode {
+            prefix,
+            node_id,
+            parent_id,
+            bytecode,
+        } if prefix.is_empty() => ReadyTask::ResumeBytecode(ScheduledBytecodeResume {
+            node_id: *node_id,
+            parent_id: *parent_id,
+            bytecode: bytecode.clone(),
+            work_invocation: suspension.work_invocation.clone(),
+            call_stack: Arc::clone(&suspension.call_stack),
+            result,
+        }),
+        _ => ReadyTask::Resume(ScheduledResume { suspension, result }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
