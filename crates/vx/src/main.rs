@@ -505,7 +505,7 @@ fn print_eval_reports<Runtime: RuntimeHooks>(args: &EvalArgs, session: &EvalSess
     if args.profile {
         eprintln!("{}", session.profile_report(args.profile_limit));
     }
-    if args.call_profile || session.call_profiling_enabled() {
+    if args.call_profile {
         eprintln!("{}", session.call_profile_report(args.profile_limit));
     }
     if args.causal_profile {
