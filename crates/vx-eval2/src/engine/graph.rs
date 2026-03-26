@@ -588,6 +588,13 @@ pub(crate) struct EvalCausalProfileEntry {
     pub(crate) cause_kind: EvalWorkCauseKind,
     pub(crate) label: Arc<str>,
     pub(crate) source: Option<SourceSpan>,
+    pub(crate) runs: usize,
+    pub(crate) total_time: Duration,
+    pub(crate) max_time: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalCausalProfileStackEntry {
     pub(crate) depend_stack: Arc<[EvalNodeId]>,
     pub(crate) runs: usize,
     pub(crate) total_time: Duration,

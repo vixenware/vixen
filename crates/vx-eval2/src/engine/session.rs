@@ -445,7 +445,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                 EvalWorkCauseKind,
                 Arc<str>,
                 Option<SourceSpan>,
-                Arc<[EvalNodeId]>,
             ),
             EvalCausalProfileEntry,
         >::new();
@@ -465,13 +464,11 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             let record = self.node_record(completed.work.node_id);
             let label = causal_profile_label_for_completed(completed, record);
             let source = causal_profile_source_for_completed(completed, record);
-            let depend_stack = completed.work.cause.depend_stack.clone();
             let key = (
                 completed.work.kind,
                 completed.work.cause.kind,
                 label.clone(),
                 source.clone(),
-                depend_stack.clone(),
             );
             let entry = entries
                 .entry(key)
@@ -480,7 +477,6 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
                     cause_kind: completed.work.cause.kind,
                     label,
                     source,
-                    depend_stack,
                     runs: 0,
                     total_time: Duration::default(),
                     max_time: Duration::default(),
@@ -1316,13 +1312,15 @@ fn format_causal_profile_report(
     profile: &EvalSessionCausalProfile,
     limit: usize,
 ) -> String {
+    let top_entries = profile.entries.iter().take(limit).collect::<Vec<_>>();
+    let top_stacks = causal_profile_top_stacks(session, &top_entries);
     let mut lines = vec![format!(
         "eval2 causal profile total={} entries={}",
         format_profile_duration(profile.total_time),
         profile.entries.len(),
     )];
 
-    for entry in profile.entries.iter().take(limit) {
+    for (index, entry) in top_entries.iter().enumerate() {
         let avg = if entry.runs == 0 {
             Duration::default()
         } else {
@@ -1334,7 +1332,7 @@ fn format_causal_profile_report(
             .map(|span| format!("{span:?}"))
             .unwrap_or_else(|| "<unknown>".to_string());
         lines.push(format!(
-            "  total={} avg={} max={} runs={} work={:?} cause={:?} label={} source={} stack={}",
+            "  total={} avg={} max={} runs={} work={:?} cause={:?} label={} source={}",
             format_profile_duration(entry.total_time),
             format_profile_duration(avg),
             format_profile_duration(entry.max_time),
@@ -1343,11 +1341,106 @@ fn format_causal_profile_report(
             entry.cause_kind,
             entry.label,
             source,
-            format_depend_stack(session, &entry.depend_stack),
         ));
+        for stack in &top_stacks[index] {
+            let avg = if stack.runs == 0 {
+                Duration::default()
+            } else {
+                stack.total_time / (stack.runs as u32)
+            };
+            lines.push(format!(
+                "    stack total={} avg={} max={} runs={} path={}",
+                format_profile_duration(stack.total_time),
+                format_profile_duration(avg),
+                format_profile_duration(stack.max_time),
+                stack.runs,
+                format_depend_stack(session, &stack.depend_stack),
+            ));
+        }
     }
 
     lines.join("\n")
+}
+
+fn causal_profile_top_stacks(
+    session: &EvalSession<'_, impl RuntimeHooks>,
+    entries: &[&EvalCausalProfileEntry],
+) -> Vec<Vec<EvalCausalProfileStackEntry>> {
+    let mut entry_by_key = HashMap::<
+        (
+            EvalWorkKind,
+            EvalWorkCauseKind,
+            Arc<str>,
+            Option<SourceSpan>,
+        ),
+        usize,
+    >::new();
+    for (index, entry) in entries.iter().enumerate() {
+        entry_by_key.insert(
+            (
+                entry.work_kind,
+                entry.cause_kind,
+                entry.label.clone(),
+                entry.source.clone(),
+            ),
+            index,
+        );
+    }
+
+    let mut stacks =
+        vec![HashMap::<Arc<[EvalNodeId]>, EvalCausalProfileStackEntry>::new(); entries.len()];
+    for completed in &session.completed_work {
+        if completed.work.kind == EvalWorkKind::ResumePending {
+            continue;
+        }
+        if let Some(invocation) = &completed.invocation
+            && completed.work.node_id != invocation.root_node_id
+        {
+            continue;
+        }
+
+        let record = session.node_record(completed.work.node_id);
+        let label = causal_profile_label_for_completed(completed, record);
+        let source = causal_profile_source_for_completed(completed, record);
+        let key = (
+            completed.work.kind,
+            completed.work.cause.kind,
+            label,
+            source,
+        );
+        let Some(&entry_index) = entry_by_key.get(&key) else {
+            continue;
+        };
+
+        let stack = completed.work.cause.depend_stack.clone();
+        let stack_entry = stacks[entry_index].entry(stack.clone()).or_insert_with(|| {
+            EvalCausalProfileStackEntry {
+                depend_stack: stack,
+                runs: 0,
+                total_time: Duration::default(),
+                max_time: Duration::default(),
+            }
+        });
+        stack_entry.runs += 1;
+        stack_entry.total_time += completed.elapsed;
+        stack_entry.max_time = stack_entry.max_time.max(completed.elapsed);
+    }
+
+    stacks
+        .into_iter()
+        .map(|stacks| {
+            let mut stacks = stacks.into_values().collect::<Vec<_>>();
+            stacks.sort_by(|left, right| {
+                right
+                    .total_time
+                    .cmp(&left.total_time)
+                    .then_with(|| right.max_time.cmp(&left.max_time))
+                    .then_with(|| right.runs.cmp(&left.runs))
+            });
+            stacks.truncate(3);
+            stacks
+        })
+        .collect()
 }
 
 fn format_depend_stack(

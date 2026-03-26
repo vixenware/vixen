@@ -8408,13 +8408,13 @@ fn session_causal_profile_reports_cold_call_starts_with_depend_stack() {
         .expect("expected causal profile entry for leaf call");
     assert_eq!(leaf_entry.work_kind, EvalWorkKind::EvaluateExpr);
     assert_eq!(leaf_entry.cause_kind, EvalWorkCauseKind::Child);
-    assert!(!leaf_entry.depend_stack.is_empty());
 
     let report = session.causal_profile_report(8);
     assert!(report.contains("eval2 causal profile total="));
     assert!(report.contains("label=call:leaf"));
     assert!(report.contains("cause=Child"));
-    assert!(report.contains("stack="));
+    assert!(report.contains("stack total="));
+    assert!(report.contains("path="));
 }
 
 #[test]
