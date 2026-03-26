@@ -139,6 +139,10 @@ pub(crate) struct EvalArgs {
     #[facet(args::named)]
     pub(crate) call_profile: bool,
 
+    /// Print eval2 causal work profile to stderr
+    #[facet(args::named)]
+    pub(crate) causal_profile: bool,
+
     /// Max entries to print in profiler reports
     #[facet(args::named, default = 20)]
     pub(crate) profile_limit: usize,
