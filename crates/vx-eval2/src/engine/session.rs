@@ -158,7 +158,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             });
         }
 
-        let Some(prepared) = self.prepare_step_impl(false)? else {
+        let Some(prepared) = self.prepare_step_impl(false, false)? else {
             return Ok(step_without_ready_work(&self.scheduler, &self.completed));
         };
         let completion = prepared.execute()?;
@@ -249,7 +249,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
 
         let snapshot = self.checkpoint();
 
-        let Some(prepared) = self.prepare_step_impl(false)? else {
+        let Some(prepared) = self.prepare_step_impl(false, false)? else {
             return Ok(step_without_ready_work(&self.scheduler, &self.completed));
         };
         let completion = prepared.execute()?;
@@ -757,13 +757,14 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     }
 
     pub fn prepare_step(&mut self) -> Option<EvalPreparedWork<'runtime, Runtime>> {
-        self.prepare_step_impl(true)
+        self.prepare_step_impl(true, false)
             .expect("leasing prepared work should not fail")
     }
 
     fn prepare_step_impl(
         &mut self,
         record_history: bool,
+        drain_local_segment: bool,
     ) -> Result<Option<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
         if self.completed.is_some() {
             return Ok(None);
@@ -787,6 +788,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
             base_generation: self.scheduler.base_generation(),
             scheduler: self.scheduler.prepared_snapshot(lease.namespace),
             record: lease.record,
+            drain_local_segment,
             call_summary: self.call_summary_enabled(),
             call_profiling: self.call_profiling,
         }))
@@ -798,7 +800,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalSession<'runtime, Runtime> {
     ) -> Result<Vec<EvalPreparedWork<'runtime, Runtime>>, EvalError> {
         let mut prepared = Vec::new();
         while prepared.len() < max_workers {
-            let Some(next) = self.prepare_step_impl(false)? else {
+            let Some(next) = self.prepare_step_impl(false, true)? else {
                 break;
             };
             prepared.push(next);
@@ -1042,6 +1044,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             base_generation,
             scheduler,
             record,
+            drain_local_segment,
             call_summary,
             call_profiling,
         } = self;
@@ -1059,6 +1062,7 @@ impl<'runtime, Runtime: RuntimeHooks> EvalPreparedWork<'runtime, Runtime> {
             &place,
             scheduler,
             record,
+            drain_local_segment,
             call_summary,
             call_profiling,
         )?;
@@ -1220,6 +1224,7 @@ fn commit_completion(
     }
     trace.events.extend(completion.delta.trace_events);
     let completed_invalidated = completion.delta.completed_invalidated;
+    completed_work.extend(completion.delta.local_completed_work);
     scheduler.apply_delta(completion.delta.scheduler)?;
     if completed_invalidated {
         *completed = None;

@@ -146,6 +146,18 @@ trait EvalWorkerScheduler {
         branch_context: EvalBranchContext,
         cause: EvalWorkCause,
     ) -> EvalQueuedWork;
+
+    fn resolve_local_child_dependency(
+        &mut self,
+        _dependency: EvalNodeId,
+        _result: Result<Value, EvalError>,
+    ) -> Result<bool, EvalError> {
+        Ok(false)
+    }
+
+    fn take_local_ready_task(&mut self) -> Option<ReadyTaskRecord> {
+        None
+    }
 }
 
 struct NoRuntime;

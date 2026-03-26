@@ -2,6 +2,7 @@ use super::*;
 use std::cell::RefCell;
 use std::mem;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub(super) struct EvalScheduler {
@@ -236,7 +237,8 @@ struct EvalPreparedScheduler<'a> {
     pending_entry_index: HashMap<EvalNodeId, usize>,
     keyed_node_index: HashMap<EvalNodeId, usize>,
     retained_expr_index: HashMap<EvalNodeId, usize>,
-    queued: Vec<ReadyTaskRecord>,
+    queued: VecDeque<ReadyTaskRecord>,
+    resolved_local_pending: BTreeSet<EvalNodeId>,
     completed_invalidated: bool,
     reads: RefCell<EvalSnapshotReadSet>,
 }
@@ -252,18 +254,33 @@ impl<'a> EvalPreparedScheduler<'a> {
             pending_entry_index: HashMap::new(),
             keyed_node_index: HashMap::new(),
             retained_expr_index: HashMap::new(),
-            queued: Vec::new(),
+            queued: VecDeque::new(),
+            resolved_local_pending: BTreeSet::new(),
             completed_invalidated: false,
             reads: RefCell::new(EvalSnapshotReadSet::default()),
         }
     }
 
     fn finish(self) -> (RecordedSchedulerDelta, bool, EvalSnapshotReadSet) {
-        let mut delta = self.delta;
-        delta.next_id = self.allocator.owner_next_id(self.base);
-        delta.next_work_id = self.allocator.owner_next_work_id(self.base);
-        delta.queued = self.queued;
-        (delta, self.completed_invalidated, self.reads.into_inner())
+        let Self {
+            base,
+            allocator,
+            mut delta,
+            queued,
+            resolved_local_pending,
+            completed_invalidated,
+            reads,
+            ..
+        } = self;
+        delta.next_id = allocator.owner_next_id(base);
+        delta.next_work_id = allocator.owner_next_work_id(base);
+        if !resolved_local_pending.is_empty() {
+            delta
+                .pending_entries
+                .retain(|(pending_id, _)| !resolved_local_pending.contains(pending_id));
+        }
+        delta.queued = queued.into_iter().collect();
+        (delta, completed_invalidated, reads.into_inner())
     }
 
     fn record_node_record_read(&self, node_id: EvalNodeId, observed: Option<EvalNodeRecord>) {
@@ -388,6 +405,9 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn pending_entry_local(&self, pending_id: EvalNodeId) -> Option<&PendingEntry> {
+        if self.resolved_local_pending.contains(&pending_id) {
+            return None;
+        }
         if let Some(index) = self.pending_entry_index.get(&pending_id).copied() {
             Some(&self.delta.pending_entries[index].1)
         } else {
@@ -398,6 +418,9 @@ impl<'a> EvalPreparedScheduler<'a> {
     }
 
     fn pending_entry_mut(&mut self, pending_id: EvalNodeId) -> Option<&mut PendingEntry> {
+        if self.resolved_local_pending.contains(&pending_id) {
+            return None;
+        }
         if !self.pending_entry_index.contains_key(&pending_id) {
             let base = self.base.base.pending_entries.get(&pending_id)?;
             self.record_pending_kind_read(pending_id, Some(base.kind));
@@ -563,6 +586,148 @@ impl<'a> EvalPreparedScheduler<'a> {
             );
         }
         Ok(())
+    }
+
+    fn can_execute_locally(task: &ReadyTask) -> bool {
+        matches!(
+            task,
+            ReadyTask::EvaluateExpr(_) | ReadyTask::Resume(_) | ReadyTask::ResumeBytecode(_)
+        )
+    }
+
+    fn take_local_ready_task(&mut self) -> Option<ReadyTaskRecord> {
+        (self.queued.len() == 1)
+            .then(|| {
+                self.queued
+                    .front()
+                    .is_some_and(|record| Self::can_execute_locally(&record.task))
+                    .then(|| self.queued.pop_front())
+                    .flatten()
+            })
+            .flatten()
+    }
+
+    fn take_local_pending_entry(&mut self, pending_id: EvalNodeId) -> Option<PendingEntry> {
+        if self.base.base.pending_entries.contains_key(&pending_id) {
+            return None;
+        }
+        let index = self.pending_entry_index.get(&pending_id).copied()?;
+        self.resolved_local_pending.insert(pending_id);
+        Some(mem::replace(
+            &mut self.delta.pending_entries[index].1,
+            PendingEntry {
+                kind: PendingKind::External,
+                waiters: PendingWaiters::default(),
+            },
+        ))
+    }
+
+    fn resolve_local_child_dependency(
+        &mut self,
+        dependency: EvalNodeId,
+        result: Result<Value, EvalError>,
+    ) -> Result<bool, EvalError> {
+        let Some(entry) = self.take_local_pending_entry(dependency) else {
+            return Ok(false);
+        };
+        match entry.kind {
+            PendingKind::ChildDependency {
+                dependency: registered,
+            } if registered == dependency => {}
+            _ => return Ok(false),
+        }
+        let Some(pending) = entry
+            .waiters
+            .first()
+            .map(|suspension| suspension.pending.clone())
+        else {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal,
+                format!(
+                    "local pending node {:?} had no registered suspensions",
+                    dependency
+                ),
+            ));
+        };
+        let node_id = EvalNodeId(pending.node_id);
+        let shared_result = result.map(Arc::new);
+        match &shared_result {
+            Ok(value) => self.record_node_state(node_id, EvalNodeState::Ready(Arc::clone(value))),
+            Err(error) => self.record_node_state(node_id, EvalNodeState::Poison(error.clone())),
+        }
+        for suspension in entry.waiters.into_vec() {
+            let resume_node = suspension.resume_node;
+            let branch_context = suspension.branch_context.clone();
+            let task = match &suspension.continuation {
+                EvalSuspensionContinuation::Bytecode {
+                    prefix,
+                    node_id,
+                    parent_id,
+                    bytecode,
+                } if prefix.is_empty() => ReadyTask::ResumeBytecode(ScheduledBytecodeResume {
+                    node_id: *node_id,
+                    parent_id: *parent_id,
+                    bytecode: bytecode.clone(),
+                    work_invocation: suspension.work_invocation.clone(),
+                    call_stack: Arc::clone(&suspension.call_stack),
+                    result: shared_result.clone(),
+                }),
+                _ => ReadyTask::Resume(ScheduledResume {
+                    suspension,
+                    result: shared_result.clone(),
+                }),
+            };
+            let work = self.enqueue_ready_task(
+                task,
+                EvalWorkKind::ResumePending,
+                resume_node,
+                Some(pending.clone()),
+                branch_context,
+                EvalWorkCause::new(
+                    EvalWorkCauseKind::ResumePending,
+                    self.depend_stack_for_node(resume_node),
+                ),
+            );
+            self.record_node_state(
+                resume_node,
+                EvalNodeState::Runnable {
+                    work: work.id,
+                    pending: Some(pending.clone()),
+                },
+            );
+        }
+        Ok(true)
+    }
+
+    fn segment_root_outcome(
+        &self,
+        root_node_id: EvalNodeId,
+        fallback: EvalCompletedWorkOutcome,
+    ) -> EvalCompletedWorkOutcome {
+        let outcome = outcome_from_node_state(self.node_state_local(root_node_id), fallback);
+        if root_node_id != ENTRY_WORK_NODE_ID
+            || !matches!(outcome, EvalCompletedWorkOutcome::Progressed)
+        {
+            return outcome;
+        }
+        let entry_child = self
+            .delta
+            .dependency_edges
+            .iter()
+            .rev()
+            .find_map(|edge| (edge.parent == ENTRY_WORK_NODE_ID).then_some(edge.child))
+            .or_else(|| {
+                self.base
+                    .base
+                    .dependency_edges
+                    .iter()
+                    .rev()
+                    .find_map(|edge| (edge.parent == ENTRY_WORK_NODE_ID).then_some(edge.child))
+            });
+        let Some(entry_child) = entry_child else {
+            return outcome;
+        };
+        outcome_from_node_state(self.node_state_local(entry_child), outcome)
     }
 
     fn enqueue_keyed_work(
@@ -1059,12 +1224,24 @@ impl EvalWorkerScheduler for EvalPreparedScheduler<'_> {
             pending,
             cause,
         };
-        self.queued.push(ReadyTaskRecord {
+        self.queued.push_back(ReadyTaskRecord {
             work: work.clone(),
             task,
             branch_context,
         });
         work
+    }
+
+    fn resolve_local_child_dependency(
+        &mut self,
+        dependency: EvalNodeId,
+        result: Result<Value, EvalError>,
+    ) -> Result<bool, EvalError> {
+        Self::resolve_local_child_dependency(self, dependency, result)
+    }
+
+    fn take_local_ready_task(&mut self) -> Option<ReadyTaskRecord> {
+        Self::take_local_ready_task(self)
     }
 }
 
@@ -2596,44 +2773,35 @@ fn lease_scoped_id(namespace: u64, local: u64) -> u64 {
     LEASE_FLAG | (namespace << 32) | local
 }
 
-pub(super) fn execute_ready_task(
-    program: Arc<CompiledProgram>,
+fn outcome_from_node_state(
+    state: Option<&EvalNodeState>,
+    fallback: EvalCompletedWorkOutcome,
+) -> EvalCompletedWorkOutcome {
+    match state {
+        Some(EvalNodeState::Ready(value)) => {
+            EvalCompletedWorkOutcome::Ready(value.as_ref().clone())
+        }
+        Some(EvalNodeState::Poison(error)) => EvalCompletedWorkOutcome::Poison(error.clone()),
+        Some(EvalNodeState::Pending(pending)) => EvalCompletedWorkOutcome::Pending(pending.clone()),
+        Some(EvalNodeState::BlockedOnNode { dependency }) => {
+            EvalCompletedWorkOutcome::BlockedOnNode(*dependency)
+        }
+        Some(EvalNodeState::Runnable { .. }) | None => fallback,
+    }
+}
+
+fn execute_segment_record<Runtime: RuntimeHooks, Sink: EvalEventSink>(
+    state: &mut EvalState<'_, '_, Runtime, Sink>,
     entry: &str,
     args: &[Value],
-    runtime: &impl RuntimeHooks,
-    place: &str,
-    snapshot: EvalPreparedSnapshot,
     record: ReadyTaskRecord,
     call_summary: bool,
     call_profiling: bool,
-) -> Result<
-    (
-        EvalSessionDelta,
-        EvalCompletedWorkOutcome,
-        Option<EvalAuthoredCall>,
-    ),
-    EvalError,
-> {
-    let mut prepared_scheduler = EvalPreparedScheduler::new(&snapshot);
-    let mut trace = EvalTrace::default();
-    let mut state = EvalState::new(
-        program.as_ref(),
-        program.entry_source(),
-        record.branch_context.clone(),
-        runtime,
-        place,
-        &mut trace,
-        &mut prepared_scheduler,
-        Some(record.work.id),
-        true,
-        call_summary,
-        call_profiling,
-    );
+) -> Result<(EvalCompletedWorkOutcome, Option<EvalAuthoredCall>), EvalError> {
     let mut invocation = None;
-
     let outcome = match record.task {
         ReadyTask::StartEntry => {
-            let prepared = prepare_entry(&mut state, entry, args)?;
+            let prepared = prepare_entry(state, entry, args)?;
             let node_id = state.alloc_node_id();
             let body_kind = prepared_body_kind(state.program, &prepared.body);
             let body_source = state
@@ -2650,14 +2818,14 @@ pub(super) fn execute_ready_task(
             });
             let call_stack = if call_profiling {
                 let frame = authored_call_frame(
-                    &state,
+                    state,
                     node_id,
                     Arc::from(entry),
                     args,
                     body_source.clone(),
                 );
                 emit_authored_call_started(
-                    &mut state,
+                    state,
                     node_id,
                     Some(ENTRY_WORK_NODE_ID),
                     body_source.clone(),
@@ -2670,7 +2838,7 @@ pub(super) fn execute_ready_task(
             };
             let work_invocation = (!call_profiling && call_summary).then(|| {
                 authored_call_invocation(
-                    &state,
+                    state,
                     node_id,
                     Arc::from(entry),
                     args,
@@ -2747,7 +2915,7 @@ pub(super) fn execute_ready_task(
             } else if work_invocation.is_some() {
                 state.with_work_invocation(work_invocation, run)
             } else {
-                run(&mut state)
+                run(state)
             };
             invocation = state.last_invocation.clone().or(scheduled_invocation);
             match step {
@@ -2783,8 +2951,8 @@ pub(super) fn execute_ready_task(
         }
         ReadyTask::EvaluateKeyed(node_id) => {
             if !call_summary {
-                let prepared = prepare_keyed_call(&mut state, node_id)?;
-                match eval_dependent_prepared_entry(&mut state, node_id, prepared)? {
+                let prepared = prepare_keyed_call(state, node_id)?;
+                match eval_dependent_prepared_entry(state, node_id, prepared)? {
                     EvalStep::Ready(value) => EvalCompletedWorkOutcome::Ready(value),
                     EvalStep::Suspended(suspension) => {
                         let pending = suspension.pending.clone();
@@ -2836,10 +3004,10 @@ pub(super) fn execute_ready_task(
                     )
                 };
                 let frame =
-                    authored_call_frame(&state, node_id, resolver_name, &[joined], source.clone());
+                    authored_call_frame(state, node_id, resolver_name, &[joined], source.clone());
                 let fallback_invocation = invocation_from_call_stack(std::slice::from_ref(&frame));
-                emit_authored_call_started(&mut state, node_id, None, source, &frame, 1);
-                let prepared = prepare_keyed_call(&mut state, node_id)?;
+                emit_authored_call_started(state, node_id, None, source, &frame, 1);
+                let prepared = prepare_keyed_call(state, node_id)?;
                 let step = state.with_authored_call(frame, |state| {
                     eval_dependent_prepared_entry(state, node_id, prepared)
                 });
@@ -2896,9 +3064,9 @@ pub(super) fn execute_ready_task(
                     )
                 };
                 let invocation_state =
-                    authored_call_invocation(&state, node_id, resolver_name, &[joined], source);
+                    authored_call_invocation(state, node_id, resolver_name, &[joined], source);
                 let fallback_invocation = Some(invocation_state.clone());
-                let prepared = prepare_keyed_call(&mut state, node_id)?;
+                let prepared = prepare_keyed_call(state, node_id)?;
                 let step = state.with_work_invocation(Some(invocation_state), |state| {
                     eval_dependent_prepared_entry(state, node_id, prepared)
                 });
@@ -2944,7 +3112,7 @@ pub(super) fn execute_ready_task(
                 ready.suspension.work_invocation.clone()
             };
             let step = resume_suspension(
-                &mut state,
+                state,
                 ready.suspension,
                 ready.result.map(|value| value.as_ref().clone()),
             );
@@ -3004,7 +3172,7 @@ pub(super) fn execute_ready_task(
             } else if ready.work_invocation.is_some() {
                 state.with_work_invocation(ready.work_invocation.clone(), run)
             } else {
-                run(&mut state)
+                run(state)
             };
             invocation = state.last_invocation.clone().or(fallback_invocation);
             match step {
@@ -3039,6 +3207,110 @@ pub(super) fn execute_ready_task(
             }
         }
     };
+    Ok((outcome, invocation))
+}
+
+pub(super) fn execute_ready_task(
+    program: Arc<CompiledProgram>,
+    entry: &str,
+    args: &[Value],
+    runtime: &impl RuntimeHooks,
+    place: &str,
+    snapshot: EvalPreparedSnapshot,
+    record: ReadyTaskRecord,
+    drain_local_segment: bool,
+    call_summary: bool,
+    call_profiling: bool,
+) -> Result<
+    (
+        EvalSessionDelta,
+        EvalCompletedWorkOutcome,
+        Option<EvalAuthoredCall>,
+    ),
+    EvalError,
+> {
+    let segment_base_generation = snapshot.base.generation;
+    let root_work = record.work.clone();
+    let mut prepared_scheduler = EvalPreparedScheduler::new(&snapshot);
+    let mut trace = EvalTrace::default();
+    let mut state = EvalState::new(
+        program.as_ref(),
+        program.entry_source(),
+        record.branch_context.clone(),
+        runtime,
+        place,
+        &mut trace,
+        &mut prepared_scheduler,
+        Some(record.work.id),
+        true,
+        call_summary,
+        call_profiling,
+    );
+    let mut root_invocation = None;
+    let mut root_outcome = EvalCompletedWorkOutcome::Progressed;
+    let mut local_completed_work = Vec::new();
+    let execute_record =
+        |state: &mut EvalState<'_, '_, _, _>,
+         record: ReadyTaskRecord|
+         -> Result<(EvalCompletedWorkOutcome, Option<EvalAuthoredCall>), EvalError> {
+            let branch_context = record.branch_context.clone();
+            state.last_invocation = None;
+            state.with_current_work(Some(record.work.id), |state| {
+                state.with_branch_context(branch_context, |state| {
+                    execute_segment_record(state, entry, args, record, call_summary, call_profiling)
+                })
+            })
+        };
+
+    if drain_local_segment {
+        let mut next_record = Some(record);
+        let mut first_record = true;
+
+        while let Some(record) = next_record.take() {
+            let started = Instant::now();
+            let (outcome, invocation) = execute_record(&mut state, record.clone())?;
+            let elapsed = started.elapsed();
+            let outcome = match &outcome {
+                EvalCompletedWorkOutcome::Ready(value) => {
+                    let _ = state
+                        .scheduler
+                        .resolve_local_child_dependency(record.work.node_id, Ok(value.clone()))?;
+                    outcome
+                }
+                EvalCompletedWorkOutcome::Poison(error) => {
+                    let _ = state
+                        .scheduler
+                        .resolve_local_child_dependency(record.work.node_id, Err(error.clone()))?;
+                    outcome
+                }
+                _ => outcome,
+            };
+            if first_record {
+                root_invocation = invocation;
+                root_outcome = outcome.clone();
+                first_record = false;
+            } else {
+                local_completed_work.push(EvalCompletedWork {
+                    work: record.work,
+                    outcome,
+                    base_generation: segment_base_generation,
+                    elapsed,
+                    invocation,
+                });
+            }
+            next_record = state.scheduler.take_local_ready_task();
+        }
+    } else {
+        let (outcome, invocation) = execute_record(&mut state, record)?;
+        root_outcome = outcome;
+        root_invocation = invocation;
+    }
+
+    drop(state);
+
+    if drain_local_segment {
+        root_outcome = prepared_scheduler.segment_root_outcome(root_work.node_id, root_outcome);
+    }
 
     let (recorded_delta, completed_invalidated, reads) = prepared_scheduler.finish();
 
@@ -3047,9 +3319,10 @@ pub(super) fn execute_ready_task(
             scheduler: recorded_delta,
             reads,
             trace_events: trace.events,
+            local_completed_work,
             completed_invalidated,
         },
-        outcome,
-        invocation,
+        root_outcome,
+        root_invocation,
     ))
 }

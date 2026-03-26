@@ -915,6 +915,7 @@ pub struct EvalPreparedWork<'runtime, Runtime: RuntimeHooks> {
     pub(super) base_generation: u64,
     pub(super) scheduler: EvalPreparedSnapshot,
     pub(super) record: ReadyTaskRecord,
+    pub(super) drain_local_segment: bool,
     pub(super) call_summary: bool,
     pub(super) call_profiling: bool,
 }
@@ -938,6 +939,7 @@ pub(super) struct EvalSessionDelta {
     pub(super) scheduler: RecordedSchedulerDelta,
     pub(super) reads: EvalSnapshotReadSet,
     pub(super) trace_events: Vec<EvalEvent>,
+    pub(super) local_completed_work: Vec<EvalCompletedWork>,
     pub(super) completed_invalidated: bool,
 }
 

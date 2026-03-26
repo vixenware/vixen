@@ -521,6 +521,18 @@ impl<'source, 'scheduler, Runtime: RuntimeHooks, Sink: EvalEventSink>
         result
     }
 
+    pub(super) fn with_current_work<T>(
+        &mut self,
+        current_work: Option<EvalWorkId>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.current_work;
+        self.current_work = current_work;
+        let result = f(self);
+        self.current_work = previous;
+        result
+    }
+
     pub(super) fn expr_id_for(
         &self,
         handle: impl crate::program::IntoExprLookupId,
