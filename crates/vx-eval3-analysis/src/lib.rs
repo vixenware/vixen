@@ -13,7 +13,8 @@ pub use model::{
 
 mod bridge;
 pub use bridge::{
-    BridgeBody, BridgeExpr, BridgeExprKind, BridgeParam, BridgeResolvedRef, SingleSourceBridge,
+    BridgeBindingProduct, BridgeBody, BridgeExpr, BridgeExprKind, BridgeParam, BridgeProduct,
+    BridgeProjection, BridgeResolvedRef, SingleSourceBridge,
 };
 
 mod boundary;

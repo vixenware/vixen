@@ -8,7 +8,7 @@ use vx_resolve::{
 };
 use vx_types::Ty;
 
-use crate::{BodyId, ExprId};
+use crate::{BodyId, ExprId, FieldKey};
 
 #[derive(Debug, Clone)]
 pub struct BridgeParam {
@@ -47,6 +47,29 @@ pub struct BridgeResolvedRef {
     pub target: Result<Definition, ResolveError>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeProduct {
+    pub expr: ExprId,
+    pub body: BodyId,
+    pub fields: Vec<FieldKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeProjection {
+    pub expr: ExprId,
+    pub body: BodyId,
+    pub base: ExprId,
+    pub base_binding: Option<String>,
+    pub field: FieldKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeBindingProduct {
+    pub body: BodyId,
+    pub binding: String,
+    pub fields: Vec<FieldKey>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
@@ -54,6 +77,9 @@ pub struct SingleSourceBridge {
     pub bodies: Vec<BridgeBody>,
     pub exprs: Vec<BridgeExpr>,
     pub resolved_refs: Vec<BridgeResolvedRef>,
+    pub products: Vec<BridgeProduct>,
+    pub projections: Vec<BridgeProjection>,
+    pub binding_products: Vec<BridgeBindingProduct>,
     pub expr_types: BTreeMap<ExprId, Ty>,
     pub parse_errors: Vec<SyntaxError>,
     pub resolve_errors: Vec<ResolveError>,
@@ -98,6 +124,9 @@ impl SingleSourceBridge {
         let bodies = collect_bodies(source_id, &file);
         let exprs = collect_exprs(source_id, &file, &bodies);
         let resolved_refs = collect_resolved_refs(&resolution);
+        let products = collect_products(source_id, &file, &exprs);
+        let projections = collect_projections(source_id, &file, &exprs);
+        let binding_products = collect_binding_products(source_id, &file, &bodies);
         let expr_types = collect_expr_types(&exprs, &type_check);
 
         Self {
@@ -106,12 +135,53 @@ impl SingleSourceBridge {
             bodies,
             exprs,
             resolved_refs,
+            products,
+            projections,
+            binding_products,
             expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
             type_errors: type_check.errors,
             cap_errors: cap_check.errors,
         }
+    }
+}
+
+fn parse_field_key(token: &str) -> FieldKey {
+    if let Some(index) = token
+        .strip_prefix('_')
+        .and_then(|digits| digits.parse::<u32>().ok())
+    {
+        FieldKey::Index(index)
+    } else {
+        FieldKey::Name(token.to_owned())
+    }
+}
+
+fn product_fields_for_expr(expr: &Expr) -> Option<Vec<FieldKey>> {
+    match expr {
+        Expr::Tuple(tuple) => Some(
+            tuple
+                .items()
+                .enumerate()
+                .map(|(index, _)| FieldKey::Index(index as u32))
+                .collect(),
+        ),
+        Expr::Record(record) => Some(
+            record
+                .fields()
+                .filter_map(|field| field.name())
+                .map(|name| FieldKey::Name(name.text().to_owned()))
+                .collect(),
+        ),
+        Expr::StructLiteral(struct_lit) => Some(
+            struct_lit
+                .fields()
+                .filter_map(|field| field.name())
+                .map(|name| FieldKey::Name(name.text().to_owned()))
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -193,6 +263,113 @@ fn collect_resolved_refs(resolution: &NameResolution) -> Vec<BridgeResolvedRef> 
             target: resolved.target.clone(),
         })
         .collect()
+}
+
+fn expr_id_by_span(exprs: &[BridgeExpr]) -> HashMap<SourceSpan, ExprId> {
+    exprs.iter().map(|expr| (expr.span, expr.id)).collect()
+}
+
+fn collect_products(
+    source_id: SourceId,
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
+) -> Vec<BridgeProduct> {
+    let by_span = expr_id_by_span(exprs);
+    let by_id = exprs
+        .iter()
+        .map(|expr| (expr.id, expr))
+        .collect::<HashMap<_, _>>();
+
+    let mut products = file
+        .syntax()
+        .descendants()
+        .filter_map(Expr::cast)
+        .filter_map(|expr| {
+            let fields = product_fields_for_expr(&expr)?;
+            let span = SourceSpan::new(source_id, expr.syntax().text_range());
+
+            let expr_id = by_span.get(&span).copied()?;
+            let body = by_id.get(&expr_id)?.body?;
+            Some(BridgeProduct {
+                expr: expr_id,
+                body,
+                fields,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    products.sort_by_key(|product| (product.body.0, product.expr.0));
+    products
+}
+
+fn collect_projections(
+    source_id: SourceId,
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
+) -> Vec<BridgeProjection> {
+    let by_span = expr_id_by_span(exprs);
+    let by_id = exprs
+        .iter()
+        .map(|expr| (expr.id, expr))
+        .collect::<HashMap<_, _>>();
+
+    let mut projections = file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::FieldExpr::cast)
+        .filter_map(|field_expr| {
+            let receiver = field_expr.receiver()?;
+            let field_name = field_expr.field_name()?;
+            let projection_span = SourceSpan::new(source_id, field_expr.syntax().text_range());
+            let receiver_span = SourceSpan::new(source_id, receiver.syntax().text_range());
+            let expr = by_span.get(&projection_span).copied()?;
+            let base = by_span.get(&receiver_span).copied()?;
+            let body = by_id.get(&expr)?.body?;
+
+            Some(BridgeProjection {
+                expr,
+                body,
+                base,
+                base_binding: match receiver {
+                    Expr::NameRef(name_ref) => {
+                        name_ref.token().map(|token| token.text().to_owned())
+                    }
+                    _ => None,
+                },
+                field: parse_field_key(field_name.text()),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    projections.sort_by_key(|projection| (projection.body.0, projection.expr.0));
+    projections
+}
+
+fn collect_binding_products(
+    source_id: SourceId,
+    file: &SourceFile,
+    bodies: &[BridgeBody],
+) -> Vec<BridgeBindingProduct> {
+    let mut products = file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::LetStmt::cast)
+        .filter_map(|let_stmt| {
+            let binding = let_stmt.name()?.text().to_owned();
+            let expr = let_stmt.expr()?;
+            let fields = product_fields_for_expr(&expr)?;
+            let span = SourceSpan::new(source_id, let_stmt.syntax().text_range());
+            let body = body_for_range(span.range, bodies)?;
+            Some(BridgeBindingProduct {
+                body,
+                binding,
+                fields,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    products.sort_by_key(|product| (product.body.0, product.binding.clone()));
+    products
 }
 
 fn collect_expr_types(exprs: &[BridgeExpr], checked: &TypeCheckResult) -> BTreeMap<ExprId, Ty> {

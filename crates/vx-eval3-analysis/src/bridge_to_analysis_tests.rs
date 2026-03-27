@@ -252,6 +252,87 @@ fn main() -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_seeds_lazy_product_field_for_program_a_like_tuple_projection() {
+    let src = r#"
+fn bomb() -> U64 ( fail "bomb" )
+
+fn main() -> U64 (
+  let pair = (41 + 1, bomb());
+  pair._0
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+    assert!(
+        main_body.extracted_nodes.iter().any(|node| {
+            matches!(
+                node.reason,
+                ExtractedNodeReason::LazyProductField {
+                    field: crate::FieldKey::Index(1)
+                }
+            )
+        }),
+        "projecting _0 should allow sibling _1 to remain lazy"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_does_not_seed_lazy_product_field_without_projection() {
+    let src = r#"
+fn main() -> U64 (
+  let pair = (1, 2);
+  41
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+    assert!(
+        !main_body
+            .extracted_nodes
+            .iter()
+            .any(|node| { matches!(node.reason, ExtractedNodeReason::LazyProductField { .. }) }),
+        "non-projection product should not seed lazy product field extraction"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_product_projection_seed_is_deterministic_across_runs() {
+    let src = r#"
+fn main() -> U64 (
+  let pair = (1, 2);
+  pair._0
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[0].extracted_nodes, analysis_b.bodies[0].extracted_nodes,
+        "product/projection extraction seeding must be deterministic"
+    );
+    assert_eq!(
+        analysis_a.runtime_nodes, analysis_b.runtime_nodes,
+        "runtime node seeding from product/projection should be deterministic"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_need_callable_for_exec_and_discover_deterministically() {
     let src = r#"
 fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (

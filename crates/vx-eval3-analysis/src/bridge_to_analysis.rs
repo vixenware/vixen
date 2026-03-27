@@ -84,6 +84,12 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
+    seed_lazy_product_fields(
+        &mut bodies,
+        &mut runtime_nodes,
+        &mut next_runtime_node,
+        bridge,
+    );
     seed_use_observations(&mut bodies, bridge);
     let closure_layouts = seed_closure_layouts(bridge);
 
@@ -93,6 +99,64 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         runtime_nodes,
         closure_layouts,
         frame_layouts: vec![],
+    }
+}
+
+fn seed_lazy_product_fields(
+    bodies: &mut [AnalyzedBody],
+    runtime_nodes: &mut Vec<RuntimeNode>,
+    next_runtime_node: &mut u32,
+    bridge: &SingleSourceBridge,
+) {
+    let binding_products = bridge
+        .binding_products
+        .iter()
+        .map(|product| ((product.body, product.binding.as_str()), &product.fields))
+        .collect::<HashMap<_, _>>();
+
+    let mut seeds = bridge
+        .projections
+        .iter()
+        .filter_map(|projection| {
+            let binding = projection.base_binding.as_deref()?;
+            let fields = binding_products.get(&(projection.body, binding))?;
+            if fields.len() <= 1 || !fields.contains(&projection.field) {
+                return None;
+            }
+
+            let sibling = fields
+                .iter()
+                .filter(|field| **field != projection.field)
+                .min()
+                .cloned()?;
+            Some((projection.body, projection.base, sibling))
+        })
+        .collect::<Vec<_>>();
+    seeds.sort_by_key(|(body, base, field)| (body.0, base.0, field.clone()));
+    seeds.dedup();
+
+    for (body_id, source_expr, sibling_field) in seeds {
+        let node_id = RuntimeNodeId(*next_runtime_node);
+        *next_runtime_node += 1;
+
+        let source = SourceExpr {
+            body: body_id,
+            expr: source_expr,
+        };
+        runtime_nodes.push(RuntimeNode::Lazy {
+            id: node_id,
+            source: source.clone(),
+        });
+
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == body_id) {
+            body.extracted_nodes.push(ExtractedNode {
+                id: node_id,
+                source,
+                reason: ExtractedNodeReason::LazyProductField {
+                    field: sibling_field,
+                },
+            });
+        }
     }
 }
 
