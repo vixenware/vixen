@@ -786,13 +786,12 @@ fn main(n: U64) -> U64 (
     let bridge = SingleSourceBridge::from_source_text(src);
     let analysis = build_minimal_analysis(&bridge);
 
-    assert_eq!(
-        analysis
-            .propagated_result_demands
-            .get(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
-        Some(&Observation::NeedValue),
-        "direct named local call should seed one-step callee-body result demand"
-    );
+    let callee_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("callee body should exist");
+    assert_eq!(callee_body.result_observation, Observation::NeedValue);
 }
 
 #[test]
@@ -813,13 +812,12 @@ fn main(n: U64) -> U64 (
         .copied()
         .expect("recoverable closure call should have a layout link");
 
-    assert_eq!(
-        analysis
-            .propagated_result_demands
-            .get(&crate::ResultDemandCallee::ClosureLayout(linked_layout)),
-        Some(&Observation::NeedValue),
-        "recoverable local closure call should seed one-step closure-layout result demand"
-    );
+    let layout = analysis
+        .closure_layouts
+        .iter()
+        .find(|layout| layout.id == linked_layout)
+        .expect("linked closure layout should exist");
+    assert_eq!(layout.incoming_use_observation, Observation::NeedValue);
 }
 
 #[test]
@@ -833,10 +831,7 @@ fn apply(f: Fn(U64) -> U64, n: U64) -> U64 (
     let bridge = SingleSourceBridge::from_source_text(src);
     let analysis = build_minimal_analysis(&bridge);
 
-    assert!(
-        analysis.propagated_result_demands.is_empty(),
-        "non-recoverable local callable path should not propagate through unknown callee"
-    );
+    assert_eq!(analysis.closure_layouts.len(), 0);
 }
 
 #[test]
@@ -854,8 +849,16 @@ fn main(n: U64) -> U64 (
     let analysis_b = build_minimal_analysis(&bridge);
 
     assert_eq!(
-        analysis_a.propagated_result_demands,
-        analysis_b.propagated_result_demands
+        analysis_a
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.result_observation.clone()))
+            .collect::<Vec<_>>(),
+        analysis_b
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.result_observation.clone()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -868,13 +871,6 @@ fn main(n: U64) -> U64 ( plus_one(n) )
 
     let bridge = SingleSourceBridge::from_source_text(src);
     let analysis = build_minimal_analysis(&bridge);
-    assert_eq!(
-        analysis
-            .propagated_use_demands
-            .get(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
-        Some(&Observation::NeedValue),
-        "direct named local call should seed one-step callee use-observation demand"
-    );
     let callee_body = analysis
         .bodies
         .iter()
@@ -912,13 +908,6 @@ fn main(n: U64) -> U64 (
         .copied()
         .expect("recoverable closure call should have a layout link");
 
-    assert_eq!(
-        analysis
-            .propagated_use_demands
-            .get(&crate::ResultDemandCallee::ClosureLayout(linked_layout)),
-        Some(&Observation::NeedValue),
-        "recovered local closure call should seed one-step closure-layout use-observation demand"
-    );
     let layout = analysis
         .closure_layouts
         .iter()
@@ -948,12 +937,6 @@ fn main(n: U64) -> U64 ( n + 1 )
     let bridge = SingleSourceBridge::from_source_text(src);
     let analysis = build_minimal_analysis(&bridge);
 
-    assert!(
-        !analysis
-            .propagated_use_demands
-            .contains_key(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
-        "unused helper should not receive propagated one-step use-observation pressure"
-    );
     let helper_body = analysis
         .bodies
         .iter()
@@ -984,10 +967,6 @@ fn main(n: U64) -> U64 (
     let analysis_a = build_minimal_analysis(&bridge);
     let analysis_b = build_minimal_analysis(&bridge);
 
-    assert_eq!(
-        analysis_a.propagated_use_demands,
-        analysis_b.propagated_use_demands
-    );
     assert_eq!(
         analysis_a
             .bodies
@@ -1076,13 +1055,12 @@ fn main(n: U64) -> U64 (
         .copied()
         .expect("recoverable closure call should have a layout link");
 
-    assert_eq!(
-        analysis
-            .propagated_result_demands
-            .get(&crate::ResultDemandCallee::ClosureLayout(linked_layout)),
-        Some(&Observation::NeedValue),
-        "recovered local closure callee should get NeedValue via first propagation step"
-    );
+    let layout = analysis
+        .closure_layouts
+        .iter()
+        .find(|layout| layout.id == linked_layout)
+        .expect("linked closure layout should exist");
+    assert_eq!(layout.incoming_use_observation, Observation::NeedValue);
 }
 
 #[test]

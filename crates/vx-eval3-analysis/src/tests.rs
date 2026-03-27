@@ -1,6 +1,5 @@
 use crate::{
-    BodyId, ExprId, ExtractedNodeReason, LayoutId, Observation, ResultDemandCallee,
-    RuntimeBoundaryKind, RuntimeNode, UseSiteId,
+    BodyId, ExprId, ExtractedNodeReason, Observation, RuntimeBoundaryKind, RuntimeNode, UseSiteId,
     fixtures::{
         build_shaped_exec_fixture, canonical_program_a_fixture, canonical_program_b_fixture,
         canonical_program_c_fixture, canonical_program_d_fixture,
@@ -66,10 +65,8 @@ fn program_b_represents_closure_layout_selected_sibling_and_callable_demand() {
         "selected sibling demand should be represented explicitly"
     );
     assert_eq!(
-        analysis
-            .propagated_use_demands
-            .get(&ResultDemandCallee::ClosureLayout(LayoutId(10))),
-        Some(&Observation::NeedValue)
+        analysis.closure_layouts[0].incoming_use_observation,
+        Observation::NeedValue
     );
 }
 
@@ -122,12 +119,7 @@ fn program_d_keeps_higher_order_callable_path_first_class() {
         !has_exec_or_discover_boundary,
         "higher-order local call should not collapse into runtime boundary calls"
     );
-    assert_eq!(
-        analysis
-            .propagated_use_demands
-            .get(&ResultDemandCallee::TopLevelBody(BodyId(3))),
-        Some(&Observation::NeedValue)
-    );
+    assert_eq!(apply_body.incoming_use_observation, Observation::NeedValue);
 }
 
 #[test]

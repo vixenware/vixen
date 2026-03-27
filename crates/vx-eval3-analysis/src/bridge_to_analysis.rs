@@ -94,16 +94,8 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     seed_source_local_callee_origins(&mut bodies, bridge);
     seed_source_local_call_edges(&mut bodies);
     seed_callee_closure_layout_links(&mut bodies, &closure_layouts);
-    let propagated_result_demands = seed_first_result_propagation_step(&bodies);
-    seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
-    seed_kernel_demands(&mut bodies, &mut kernels);
-    let propagated_use_demands = seed_first_use_observation_propagation_step(&bodies);
     seed_use_observations(&mut bodies, bridge);
-    apply_one_step_propagated_use_pressure(
-        &mut bodies,
-        &mut closure_layouts,
-        &propagated_use_demands,
-    );
+    apply_one_step_local_call_demands(&mut bodies, &mut kernels, &mut closure_layouts, bridge);
 
     AnalysisResult {
         bodies,
@@ -111,57 +103,24 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         runtime_nodes,
         closure_layouts,
         frame_layouts: vec![],
-        propagated_result_demands,
-        propagated_use_demands,
     }
 }
 
-fn apply_one_step_propagated_use_pressure(
+fn apply_one_step_local_call_demands(
     bodies: &mut [AnalyzedBody],
+    kernels: &mut [KernelRegion],
     layouts: &mut [ClosureEnvLayout],
-    propagated: &BTreeMap<crate::ResultDemandCallee, Observation>,
-) {
-    for (callee, obs) in propagated {
-        match callee {
-            crate::ResultDemandCallee::TopLevelBody(body_id) => {
-                if let Some(body) = bodies.iter_mut().find(|body| body.id == *body_id)
-                    && body.incoming_use_observation == Observation::NoObs
-                {
-                    body.incoming_use_observation = obs.clone();
-                    let next_use_site = body
-                        .use_observations
-                        .keys()
-                        .map(|id| id.0)
-                        .max()
-                        .map(|max| max + 1)
-                        .unwrap_or(0);
-                    body.use_observations
-                        .insert(UseSiteId(next_use_site), obs.clone());
-                }
-            }
-            crate::ResultDemandCallee::ClosureLayout(layout_id) => {
-                if let Some(layout) = layouts.iter_mut().find(|layout| layout.id == *layout_id)
-                    && layout.incoming_use_observation == Observation::NoObs
-                {
-                    layout.incoming_use_observation = obs.clone();
-                    for capture in &mut layout.captures {
-                        if capture.incoming_use_observation == Observation::NoObs {
-                            capture.incoming_use_observation = obs.clone();
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn seed_body_result_observations(
-    bodies: &mut [AnalyzedBody],
     bridge: &SingleSourceBridge,
-    propagated: &BTreeMap<crate::ResultDemandCallee, Observation>,
 ) {
     for body in bodies.iter_mut() {
         body.result_observation = Observation::NoObs;
+        body.incoming_use_observation = Observation::NoObs;
+    }
+    for layout in layouts.iter_mut() {
+        layout.incoming_use_observation = Observation::NoObs;
+        for capture in &mut layout.captures {
+            capture.incoming_use_observation = Observation::NoObs;
+        }
     }
 
     let entry_ids = {
@@ -181,20 +140,61 @@ fn seed_body_result_observations(
             mains
         }
     };
-    for entry_id in entry_ids {
-        if let Some(body) = bodies.iter_mut().find(|body| body.id == entry_id) {
+    for entry_id in &entry_ids {
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == *entry_id) {
             body.result_observation = Observation::NeedValue;
         }
     }
 
-    for (callee, obs) in propagated {
-        let crate::ResultDemandCallee::TopLevelBody(callee_body) = callee else {
+    let mut demanded_bodies = BTreeSet::new();
+    let mut demanded_layouts = BTreeSet::new();
+    for entry_id in entry_ids {
+        let Some(caller) = bodies.iter().find(|body| body.id == entry_id) else {
             continue;
         };
-        if let Some(body) = bodies.iter_mut().find(|body| body.id == *callee_body) {
-            body.result_observation = obs.clone();
+        for edge in &caller.source_local_call_edges {
+            match edge.callee {
+                crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
+                    demanded_bodies.insert(callee_body);
+                }
+                crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
+                    if let Some(layout_id) = caller.callee_closure_layouts.get(&edge.call_expr) {
+                        demanded_layouts.insert(*layout_id);
+                    }
+                }
+                crate::SourceLocalCalleeOrigin::LocalDef(_) => {}
+            }
         }
     }
+
+    for callee_body in demanded_bodies {
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == callee_body) {
+            body.result_observation = Observation::NeedValue;
+            if body.incoming_use_observation == Observation::NoObs {
+                body.incoming_use_observation = Observation::NeedValue;
+                let next_use_site = body
+                    .use_observations
+                    .keys()
+                    .map(|id| id.0)
+                    .max()
+                    .map(|max| max + 1)
+                    .unwrap_or(0);
+                body.use_observations
+                    .insert(UseSiteId(next_use_site), Observation::NeedValue);
+            }
+        }
+    }
+
+    for layout_id in demanded_layouts {
+        if let Some(layout) = layouts.iter_mut().find(|layout| layout.id == layout_id) {
+            layout.incoming_use_observation = Observation::NeedValue;
+            for capture in &mut layout.captures {
+                capture.incoming_use_observation = Observation::NeedValue;
+            }
+        }
+    }
+
+    seed_kernel_demands(bodies, kernels);
 }
 
 fn seed_kernel_demands(bodies: &mut [AnalyzedBody], kernels: &mut [KernelRegion]) {
@@ -207,41 +207,6 @@ fn seed_kernel_demands(bodies: &mut [AnalyzedBody], kernels: &mut [KernelRegion]
             kernel.result_obs = body.result_observation.clone();
         }
     }
-}
-
-fn seed_first_use_observation_propagation_step(
-    bodies: &[AnalyzedBody],
-) -> BTreeMap<crate::ResultDemandCallee, Observation> {
-    let mut demands = BTreeMap::new();
-
-    for body in bodies {
-        if body.result_observation == Observation::NoObs {
-            continue;
-        }
-        for edge in &body.source_local_call_edges {
-            match edge.callee {
-                crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
-                    demands.insert(
-                        crate::ResultDemandCallee::TopLevelBody(callee_body),
-                        Observation::NeedValue,
-                    );
-                }
-                crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
-                    let Some(layout_id) = body.callee_closure_layouts.get(&edge.call_expr).copied()
-                    else {
-                        continue;
-                    };
-                    demands.insert(
-                        crate::ResultDemandCallee::ClosureLayout(layout_id),
-                        Observation::NeedValue,
-                    );
-                }
-                crate::SourceLocalCalleeOrigin::LocalDef(_) => {}
-            }
-        }
-    }
-
-    demands
 }
 
 fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {
@@ -345,38 +310,6 @@ fn seed_callee_closure_layout_links(bodies: &mut [AnalyzedBody], layouts: &[Clos
             body.callee_closure_layouts.insert(expr, layout);
         }
     }
-}
-
-fn seed_first_result_propagation_step(
-    bodies: &[AnalyzedBody],
-) -> BTreeMap<crate::ResultDemandCallee, Observation> {
-    let mut demands = BTreeMap::new();
-
-    for body in bodies {
-        for edge in &body.source_local_call_edges {
-            match edge.callee {
-                crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
-                    demands.insert(
-                        crate::ResultDemandCallee::TopLevelBody(callee_body),
-                        Observation::NeedValue,
-                    );
-                }
-                crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
-                    let Some(layout_id) = body.callee_closure_layouts.get(&edge.call_expr).copied()
-                    else {
-                        continue;
-                    };
-                    demands.insert(
-                        crate::ResultDemandCallee::ClosureLayout(layout_id),
-                        Observation::NeedValue,
-                    );
-                }
-                crate::SourceLocalCalleeOrigin::LocalDef(_) => {}
-            }
-        }
-    }
-
-    demands
 }
 
 fn seed_lazy_product_fields(
