@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use vx_resolve::SourceSpan;
 
 use crate::{
-    AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, ExtractedNode, ExtractedNodeReason,
-    KernelEntrypoint, KernelId, KernelRegion, Observation, RuntimeBoundaryKind, RuntimeNode,
-    RuntimeNodeId, SingleSourceBridge, SourceExpr,
+    AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, BridgeExprKind, ExtractedNode,
+    ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion, Observation,
+    RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge, SourceExpr, UseSiteId,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -81,12 +81,65 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         }
     }
 
+    seed_use_observations(&mut bodies, bridge);
+
     AnalysisResult {
         bodies,
         kernels,
         runtime_nodes,
         closure_layouts: vec![],
         frame_layouts: vec![],
+    }
+}
+
+fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {
+    let mut seeds = Vec::new();
+
+    for resolved in &bridge.resolved_refs {
+        let obs = match resolved.name.as_str() {
+            "exec" | "discover" => Observation::NeedCallable,
+            _ => continue,
+        };
+        let Some(source) =
+            enclosing_expr_source_with_kind(resolved.span, &bridge.exprs, BridgeExprKind::Call)
+        else {
+            continue;
+        };
+        seeds.push((source.body, source.expr, obs));
+    }
+
+    for expr in bridge
+        .exprs
+        .iter()
+        .filter(|expr| expr.kind == BridgeExprKind::Field)
+    {
+        let Some(body) = expr.body else {
+            continue;
+        };
+        seeds.push((body, expr.id, Observation::NeedValue));
+    }
+
+    seeds.sort_by_key(|(body, expr, obs)| {
+        let obs_rank = match obs {
+            Observation::NoObs => 0u8,
+            Observation::NeedValue => 1,
+            Observation::NeedCallable => 2,
+            Observation::NeedProduct(_) => 3,
+        };
+        (body.0, expr.0, obs_rank)
+    });
+    seeds.dedup();
+
+    for body in bodies {
+        let mut next_id = 0u32;
+        for (_, _, obs) in seeds
+            .iter()
+            .filter(|(seed_body, _, _)| *seed_body == body.id)
+        {
+            body.use_observations
+                .insert(UseSiteId(next_id), obs.clone());
+            next_id += 1;
+        }
     }
 }
 
@@ -131,9 +184,18 @@ fn kernel_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> KernelRegion {
 }
 
 fn enclosing_expr_source(span: SourceSpan, exprs: &[BridgeExpr]) -> Option<SourceExpr> {
+    enclosing_expr_source_with_kind(span, exprs, BridgeExprKind::Other)
+}
+
+fn enclosing_expr_source_with_kind(
+    span: SourceSpan,
+    exprs: &[BridgeExpr],
+    kind: BridgeExprKind,
+) -> Option<SourceExpr> {
     exprs
         .iter()
         .filter(|expr| expr.span.range.contains_range(span.range))
+        .filter(|expr| kind == BridgeExprKind::Other || expr.kind == kind)
         .min_by_key(|expr| {
             let len = u32::from(expr.span.range.end()) - u32::from(expr.span.range.start());
             (len, expr.id.0)

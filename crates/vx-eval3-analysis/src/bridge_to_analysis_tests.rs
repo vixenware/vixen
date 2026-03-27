@@ -1,4 +1,7 @@
-use crate::{BodyId, RuntimeBoundaryKind, RuntimeNode, SingleSourceBridge, build_minimal_analysis};
+use crate::{
+    BodyId, Observation, RuntimeBoundaryKind, RuntimeNode, SingleSourceBridge,
+    build_minimal_analysis,
+};
 
 #[test]
 fn bridge_to_analysis_is_deterministic_for_canonical_like_source() {
@@ -67,4 +70,62 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
             }
         )
     }));
+}
+
+#[test]
+fn bridge_to_analysis_seeds_need_value_for_field_projection() {
+    let src = r#"
+fn main() -> U64 (
+  let pair = (1, 2);
+  pair._0
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+
+    assert!(
+        body.use_observations
+            .values()
+            .any(|obs| *obs == Observation::NeedValue),
+        "field projection should seed NeedValue use observation"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_seeds_need_callable_for_exec_and_discover_deterministically() {
+    let src = r#"
+fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+  exec [cc, "-c", @root/main.c, "-o", @out/main.o] where {
+    observer: (proc, tree) => tree,
+  }
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[0].use_observations, analysis_b.bodies[0].use_observations,
+        "use observation seeding must be deterministic"
+    );
+
+    let callable_count = analysis_a.bodies[0]
+        .use_observations
+        .values()
+        .filter(|obs| **obs == Observation::NeedCallable)
+        .count();
+    assert!(
+        callable_count >= 2,
+        "exec and discover should seed NeedCallable observations"
+    );
 }

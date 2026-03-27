@@ -18,10 +18,18 @@ pub struct BridgeBody {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeExprKind {
+    Call,
+    Field,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeExpr {
     pub id: ExprId,
     pub span: SourceSpan,
     pub body: Option<BodyId>,
+    pub kind: BridgeExprKind,
 }
 
 #[derive(Debug, Clone)]
@@ -126,10 +134,16 @@ fn collect_exprs(source_id: SourceId, file: &SourceFile, bodies: &[BridgeBody]) 
         .enumerate()
         .map(|(index, expr)| {
             let span = SourceSpan::new(source_id, expr.syntax().text_range());
+            let kind = match expr {
+                Expr::Call(_) => BridgeExprKind::Call,
+                Expr::Field(_) => BridgeExprKind::Field,
+                _ => BridgeExprKind::Other,
+            };
             BridgeExpr {
                 id: ExprId(index as u32),
                 span,
                 body: body_for_range(span.range, bodies),
+                kind,
             }
         })
         .collect::<Vec<_>>()
