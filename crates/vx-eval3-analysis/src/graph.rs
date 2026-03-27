@@ -241,12 +241,16 @@ impl AnalysisGraph {
         );
         out.push_str("  .legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #2f435a; }\n");
         out.push_str("  .legend-line { width: 24px; height: 0; border-top: 2px solid #5f7d9a; border-radius: 2px; }\n");
+        out.push_str("  .source-lane-band { fill: #0d1623; stroke: #243244; stroke-width: 1; }\n");
+        out.push_str("  .source-lane-band.alt { fill: #101b2a; }\n");
+        out.push_str("  .source-lane-label { font-size: 11px; fill: #8ba5c1; }\n");
         out.push_str(
             "  .node rect { fill: #162233; stroke: #4f6b87; stroke-width: 1.2; rx: 8; ry: 8; }\n",
         );
         out.push_str("  .node text { font-size: 12px; fill: #dbe7f3; pointer-events: none; }\n");
         out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
-        out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; }\n");
+        out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; pointer-events: none; }\n");
+        out.push_str("  .edge-label-hit { pointer-events: auto; cursor: pointer; }\n");
         out.push_str("  .node-kind-body rect { fill: #1b293c; stroke: #7dd3fc; }\n");
         out.push_str("  .node-kind-kernel rect { fill: #222636; stroke: #f9e2af; }\n");
         out.push_str("  .node-kind-runtime_boundary rect { fill: #2a2236; stroke: #f38ba8; }\n");
@@ -300,32 +304,168 @@ const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
 
+const nodeWidth = 196;
+const nodeHeight = 54;
+const yStart = 64;
+const nodeSpacing = 72;
+const kindOrder = ["body", "kernel", "runtime_boundary", "closure_layout"];
 const columns = {
   body: 120,
-  kernel: 390,
-  runtime_boundary: 670,
-  closure_layout: 940,
+  kernel: 400,
+  runtime_boundary: 680,
+  closure_layout: 960,
 };
-const ySpacing = 112;
-const yStart = 70;
 
-const grouped = new Map();
+function sourceIdForNode(node) {
+  const sourceId = node?.metadata?.span_source_id;
+  return sourceId === undefined || sourceId === null || String(sourceId) === "" ? "unmapped" : String(sourceId);
+}
+function nodeSortKey(node) {
+  return `${String(node.kind)}|${String(sourceIdForNode(node))}|${String(node.id)}`;
+}
+function sourcePathById(sourceId) {
+  if (!Array.isArray(graph.source_files)) return "";
+  const item = graph.source_files.find((f) => String(f.source_id) === String(sourceId));
+  return item?.path ? String(item.path) : "";
+}
+function sourceLabel(sourceId) {
+  if (sourceId === "unmapped") return "unmapped";
+  const path = sourcePathById(sourceId);
+  if (!path) return `source ${sourceId}`;
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return slash >= 0 ? path.slice(slash + 1) : path;
+}
+function sourceRank(sourceId, laneOrder) {
+  const idx = laneOrder.indexOf(String(sourceId));
+  return idx === -1 ? laneOrder.length + 1 : idx;
+}
+function edgeLinkCountByEndpoints(edges) {
+  const counts = new Map();
+  for (const edge of edges) {
+    const key = `${edge.from}|${edge.to}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+function hashDeterministic(value) {
+  let h = 0;
+  for (let i = 0; i < value.length; i++) {
+    h = (h * 131 + value.charCodeAt(i)) >>> 0;
+  }
+  return h;
+}
+
+const grouped = new Map(kindOrder.map((kind) => [kind, []]));
 for (const node of graph.nodes) {
-  if (!grouped.has(node.kind)) grouped.set(node.kind, []);
-  grouped.get(node.kind).push(node);
+  const kind = kindOrder.includes(node.kind) ? node.kind : "body";
+  grouped.get(kind).push(node);
+}
+for (const kind of kindOrder) {
+  grouped.get(kind).sort((a, b) => nodeSortKey(a).localeCompare(nodeSortKey(b)));
+}
+
+const declaredSourceFiles = Array.isArray(graph.source_files) ? graph.source_files : [];
+const declaredSourceIds = declaredSourceFiles
+  .slice()
+  .sort((a, b) => (a.source_id - b.source_id) || String(a.path).localeCompare(String(b.path)))
+  .map((f) => String(f.source_id));
+const discoveredSourceIds = Array.from(new Set(graph.nodes.map((node) => sourceIdForNode(node))));
+const laneOrder = [
+  ...declaredSourceIds,
+  ...discoveredSourceIds
+    .filter((sourceId) => !declaredSourceIds.includes(sourceId))
+    .sort((a, b) => String(a).localeCompare(String(b))),
+];
+if (!laneOrder.includes("unmapped")) laneOrder.push("unmapped");
+
+const laneHeightBySource = new Map();
+for (const sourceId of laneOrder) {
+  let maxNodesInKind = 0;
+  for (const kind of kindOrder) {
+    const count = grouped
+      .get(kind)
+      .filter((node) => sourceIdForNode(node) === sourceId)
+      .length;
+    maxNodesInKind = Math.max(maxNodesInKind, count);
+  }
+  laneHeightBySource.set(sourceId, Math.max(128, maxNodesInKind * nodeSpacing + 52));
+}
+
+const laneYStartBySource = new Map();
+let laneCursor = yStart;
+for (const sourceId of laneOrder) {
+  laneYStartBySource.set(sourceId, laneCursor);
+  laneCursor += laneHeightBySource.get(sourceId);
+}
+
+const edgeNeighborsByNode = new Map();
+for (const edge of graph.edges) {
+  if (!edgeNeighborsByNode.has(edge.from)) edgeNeighborsByNode.set(edge.from, []);
+  if (!edgeNeighborsByNode.has(edge.to)) edgeNeighborsByNode.set(edge.to, []);
+  edgeNeighborsByNode.get(edge.from).push(edge.to);
+  edgeNeighborsByNode.get(edge.to).push(edge.from);
+}
+
+const orderedByKind = new Map();
+for (const kind of kindOrder) {
+  orderedByKind.set(kind, grouped.get(kind).slice());
 }
 
 const positions = new Map();
-for (const [kind, items] of grouped.entries()) {
-  const x = columns[kind] ?? 120;
-  items.forEach((node, i) => {
-    const y = yStart + i * ySpacing;
-    positions.set(node.id, { x, y });
-  });
+function recomputePositions() {
+  positions.clear();
+  for (const kind of kindOrder) {
+    const x = columns[kind] ?? 120;
+    const laneIndexBySource = new Map();
+    for (const node of orderedByKind.get(kind)) {
+      const sourceId = sourceIdForNode(node);
+      const laneStart = laneYStartBySource.get(sourceId) ?? yStart;
+      const idx = laneIndexBySource.get(sourceId) ?? 0;
+      laneIndexBySource.set(sourceId, idx + 1);
+      const y = laneStart + 26 + idx * nodeSpacing;
+      positions.set(node.id, { x, y });
+    }
+  }
+}
+function barycenterForNode(nodeId) {
+  const neighbors = edgeNeighborsByNode.get(nodeId) ?? [];
+  if (neighbors.length === 0) return Number.POSITIVE_INFINITY;
+  let total = 0;
+  let count = 0;
+  for (const neighbor of neighbors) {
+    const p = positions.get(neighbor);
+    if (!p) continue;
+    total += p.y;
+    count++;
+  }
+  if (count === 0) return Number.POSITIVE_INFINITY;
+  return total / count;
+}
+recomputePositions();
+for (let pass = 0; pass < 3; pass++) {
+  for (const kind of kindOrder) {
+    const next = orderedByKind.get(kind).slice();
+    next.sort((a, b) => {
+      const sourceCmp = sourceRank(sourceIdForNode(a), laneOrder) - sourceRank(sourceIdForNode(b), laneOrder);
+      if (sourceCmp !== 0) return sourceCmp;
+      const aCenter = barycenterForNode(a.id);
+      const bCenter = barycenterForNode(b.id);
+      if (Number.isFinite(aCenter) && Number.isFinite(bCenter) && aCenter !== bCenter) {
+        return aCenter - bCenter;
+      }
+      if (Number.isFinite(aCenter) && !Number.isFinite(bCenter)) return -1;
+      if (!Number.isFinite(aCenter) && Number.isFinite(bCenter)) return 1;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    orderedByKind.set(kind, next);
+  }
+  recomputePositions();
 }
 
-const maxY = Math.max(800, ...Array.from(positions.values()).map(p => p.y + 100));
+const maxY = Math.max(800, laneCursor + 36, ...Array.from(positions.values()).map((p) => p.y + 100));
+const maxX = Math.max(1120, ...Array.from(positions.values()).map((p) => p.x + 220));
 svg.setAttribute("height", String(maxY));
+svg.setAttribute("width", String(maxX));
 
 const svgns = "http://www.w3.org/2000/svg";
 function el(name, attrs = {}) {
@@ -468,28 +608,75 @@ marker.appendChild(el("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#64748b" }));
 defs.appendChild(marker);
 svg.appendChild(defs);
 
+const laneLayer = el("g", { "aria-label": "source lanes" });
+laneOrder.forEach((sourceId, idx) => {
+  const laneStart = laneYStartBySource.get(sourceId) ?? yStart;
+  const laneHeight = laneHeightBySource.get(sourceId) ?? 128;
+  const laneRect = el("rect", {
+    x: 16,
+    y: laneStart,
+    width: maxX - 32,
+    height: laneHeight,
+    class: `source-lane-band${idx % 2 === 1 ? " alt" : ""}`
+  });
+  laneLayer.appendChild(laneRect);
+  const laneText = el("text", { x: 24, y: laneStart + 16, class: "source-lane-label" });
+  laneText.textContent = sourceId === "unmapped" ? "source: unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
+  laneLayer.appendChild(laneText);
+});
+svg.appendChild(laneLayer);
+
+const edgePairCounts = edgeLinkCountByEndpoints(graph.edges);
+const edgePairSeen = new Map();
+
 for (const edge of graph.edges) {
   const from = positions.get(edge.from);
   const to = positions.get(edge.to);
   if (!from || !to) continue;
-  const line = el("line", {
-    x1: from.x + 100, y1: from.y + 24,
-    x2: to.x - 100, y2: to.y + 24,
+  const x1 = from.x + nodeWidth / 2 + 2;
+  const y1 = from.y + nodeHeight / 2 - 1;
+  const x2 = to.x - nodeWidth / 2 - 2;
+  const y2 = to.y + nodeHeight / 2 - 1;
+  const pairKey = `${edge.from}|${edge.to}`;
+  const parallelCount = edgePairCounts.get(pairKey) ?? 1;
+  const parallelIndex = edgePairSeen.get(pairKey) ?? 0;
+  edgePairSeen.set(pairKey, parallelIndex + 1);
+  const det = hashDeterministic(`${edge.kind}|${edge.from}|${edge.to}|${edge.label}`);
+  const bucket = ((det % 5) - 2) + (parallelIndex - (parallelCount - 1) / 2);
+  const rawDy = y2 - y1;
+  const bend = Math.max(-58, Math.min(58, rawDy * 0.16 + bucket * 8));
+  const c1x = x1 + (x2 - x1) * 0.33;
+  const c2x = x1 + (x2 - x1) * 0.67;
+  const c1y = y1 + bend;
+  const c2y = y2 - bend;
+  const path = el("path", {
+    d: `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`,
     class: "edge",
     "marker-end": "url(#arrow)"
   });
-  line.classList.add(`edge-kind-${edge.kind}`);
+  path.classList.add(`edge-kind-${edge.kind}`);
   const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
-  if (edgeSourceId) line.setAttribute("data-source-id", edgeSourceId);
-  sourceBoundElements.push({ el: line, sourceId: edgeSourceId });
-  line.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
-  svg.appendChild(line);
+  if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
+  sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
+  path.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
+  svg.appendChild(path);
 
-  const label = el("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 6, class: "edge-label", "text-anchor": "middle" });
-  if (edgeSourceId) label.setAttribute("data-source-id", edgeSourceId);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const labelOffset = 10 + Math.abs(bucket) * 4;
+  const labelX = (x1 + x2) / 2 + nx * labelOffset;
+  const labelY = (y1 + y2) / 2 + ny * labelOffset - 3;
+  const label = el("text", { x: labelX, y: labelY, class: "edge-label", "text-anchor": "middle" });
+  if (edgeSourceId) {
+    label.setAttribute("data-source-id", edgeSourceId);
+    label.classList.add("edge-label-hit");
+    label.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
+  }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
   label.textContent = edge.label;
-  label.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
   svg.appendChild(label);
 }
 

@@ -88,6 +88,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-body"));
     assert!(html.contains("edge-kind-runtime_value_dependency"));
+    assert!(html.contains("source-lane-band"));
+    assert!(html.contains("source-lane-label"));
+    assert!(html.contains("barycenterForNode"));
+    assert!(html.contains("laneOrder"));
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
@@ -176,6 +180,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-runtime_boundary"));
     assert!(html.contains("edge-kind-body_to_runtime_boundary"));
+    assert!(html.contains("source-lane-band"));
+    assert!(html.contains("source lanes"));
+    assert!(html.contains("source-lane-label"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
