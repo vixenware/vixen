@@ -7,7 +7,7 @@ use crate::{
     BridgeLocalBindingId, BridgeLocalBindingKind, CaptureSlot, ClosureEnvLayout, ExprId,
     ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion, LayoutId,
     Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge, SourceExpr,
-    UseSiteId, boundary::classify_runtime_boundary,
+    UseSiteId,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -27,25 +27,23 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     let mut next_runtime_node = 0u32;
 
     let mut boundary_refs = bridge
-        .resolved_refs
+        .call_sites
         .iter()
-        .filter_map(|resolved| {
-            let kind = classify_runtime_boundary(bridge.source_id, resolved)?;
-            let source = enclosing_expr_source(resolved.span, &bridge.exprs)?;
-            Some((resolved.span, source, kind))
+        .filter_map(|site| match site.kind {
+            crate::BridgeCallSiteKind::StdlibBoundary(kind) => Some((
+                SourceExpr {
+                    body: site.body,
+                    expr: site.expr,
+                },
+                kind,
+            )),
+            _ => None,
         })
         .collect::<Vec<_>>();
 
-    boundary_refs.sort_by_key(|(span, source, kind)| {
-        (
-            u32::from(span.range.start()),
-            source.body.0,
-            source.expr.0,
-            *kind as u8,
-        )
-    });
+    boundary_refs.sort_by_key(|(source, kind)| (source.body.0, source.expr.0, *kind as u8));
 
-    for (_, source, kind) in boundary_refs {
+    for (source, kind) in boundary_refs {
         let node_id = RuntimeNodeId(next_runtime_node);
         next_runtime_node += 1;
 
@@ -236,17 +234,10 @@ fn seed_structural_sharing(
 fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {
     let mut seeds = Vec::new();
 
-    for resolved in &bridge.resolved_refs {
-        let Some(_kind) = classify_runtime_boundary(bridge.source_id, resolved) else {
-            continue;
-        };
-        let obs = Observation::NeedCallable;
-        let Some(source) =
-            enclosing_expr_source_with_kind(resolved.span, &bridge.exprs, BridgeExprKind::Call)
-        else {
-            continue;
-        };
-        seeds.push((source.body, source.expr, obs));
+    for site in &bridge.call_sites {
+        if let crate::BridgeCallSiteKind::StdlibBoundary(_) = site.kind {
+            seeds.push((site.body, site.expr, Observation::NeedCallable));
+        }
     }
 
     for expr in bridge

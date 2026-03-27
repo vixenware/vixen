@@ -1,4 +1,4 @@
-use crate::{BridgeLocalBindingKind, SingleSourceBridge};
+use crate::{BridgeCallSiteKind, BridgeLocalBindingKind, RuntimeBoundaryKind, SingleSourceBridge};
 
 #[test]
 fn bridge_carries_single_source_shape_for_canonical_like_program() {
@@ -211,4 +211,87 @@ fn main(n: U64) -> U64 (
 
     assert_eq!(bridge_a.local_bindings, bridge_b.local_bindings);
     assert_eq!(bridge_a.local_uses, bridge_b.local_uses);
+}
+
+#[test]
+fn bridge_classifies_direct_named_function_call_site() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    assert!(
+        bridge
+            .call_sites
+            .iter()
+            .any(|site| site.kind == BridgeCallSiteKind::DirectNamedFunction),
+        "plus_one(n) should classify as direct named function call"
+    );
+}
+
+#[test]
+fn bridge_classifies_local_callable_call_site() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    assert!(
+        bridge
+            .call_sites
+            .iter()
+            .any(|site| site.kind == BridgeCallSiteKind::LocalCallableBinding),
+        "add_n(1) should classify as local callable binding call"
+    );
+}
+
+#[test]
+fn bridge_classifies_stdlib_boundary_call_sites() {
+    let src = r#"
+fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+  exec [cc, "-c", @root/main.c, "-o", @out/main.o] where {
+    observer: (proc, tree) => tree,
+  };
+  stabilize(() => "w", (w) => w)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+
+    assert!(bridge.call_sites.iter().any(|site| {
+        site.kind == BridgeCallSiteKind::StdlibBoundary(RuntimeBoundaryKind::Exec)
+    }));
+    assert!(bridge.call_sites.iter().any(|site| {
+        site.kind == BridgeCallSiteKind::StdlibBoundary(RuntimeBoundaryKind::Discover)
+    }));
+    assert!(bridge.call_sites.iter().any(|site| {
+        site.kind == BridgeCallSiteKind::StdlibBoundary(RuntimeBoundaryKind::SharedKeyed)
+    }));
+}
+
+#[test]
+fn bridge_call_site_classification_is_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+  plus_one(n) + add_n(1);
+  exec [cc, "-c", @root/main.c, "-o", @out/main.o] where {
+    observer: (proc, tree) => tree,
+  };
+  stabilize(() => "w", (w) => w)
+)
+"#;
+
+    let bridge_a = SingleSourceBridge::from_source_text(src);
+    let bridge_b = SingleSourceBridge::from_source_text(src);
+    assert_eq!(bridge_a.call_sites, bridge_b.call_sites);
 }

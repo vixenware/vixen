@@ -8,7 +8,7 @@ use vx_resolve::{
 };
 use vx_types::Ty;
 
-use crate::{BodyId, ExprId, FieldKey};
+use crate::{BodyId, ExprId, FieldKey, RuntimeBoundaryKind, boundary::classify_runtime_boundary};
 
 #[derive(Debug, Clone)]
 pub struct BridgeParam {
@@ -95,6 +95,21 @@ pub struct BridgeLocalUse {
     pub binding: BridgeLocalBindingId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeCallSiteKind {
+    DirectNamedFunction,
+    LocalCallableBinding,
+    StdlibBoundary(RuntimeBoundaryKind),
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeCallSite {
+    pub body: BodyId,
+    pub expr: ExprId,
+    pub kind: BridgeCallSiteKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
@@ -107,6 +122,7 @@ pub struct SingleSourceBridge {
     pub binding_products: Vec<BridgeBindingProduct>,
     pub local_bindings: Vec<BridgeLocalBinding>,
     pub local_uses: Vec<BridgeLocalUse>,
+    pub call_sites: Vec<BridgeCallSite>,
     pub expr_types: BTreeMap<ExprId, Ty>,
     pub parse_errors: Vec<SyntaxError>,
     pub resolve_errors: Vec<ResolveError>,
@@ -156,6 +172,7 @@ impl SingleSourceBridge {
         let binding_products = collect_binding_products(source_id, &file, &bodies);
         let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
         let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
+        let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
         let expr_types = collect_expr_types(&exprs, &type_check);
 
         Self {
@@ -169,6 +186,7 @@ impl SingleSourceBridge {
             binding_products,
             local_bindings,
             local_uses,
+            call_sites,
             expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
@@ -522,4 +540,74 @@ fn collect_local_uses(
     uses.sort_by_key(|usage| (usage.body.0, usage.expr.0, usage.binding.0));
     uses.dedup();
     uses
+}
+
+fn collect_call_sites(
+    source_id: SourceId,
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
+    resolved_refs: &[BridgeResolvedRef],
+) -> Vec<BridgeCallSite> {
+    let by_span = expr_id_by_span(exprs);
+    let by_id = exprs
+        .iter()
+        .map(|expr| (expr.id, expr))
+        .collect::<HashMap<_, _>>();
+
+    let mut call_sites = file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::CallExpr::cast)
+        .filter_map(|call| {
+            let call_span = SourceSpan::new(source_id, call.syntax().text_range());
+            let call_expr = by_span.get(&call_span).copied()?;
+            let body = by_id.get(&call_expr)?.body?;
+            let callee = call.callee()?;
+            let callee_span = SourceSpan::new(source_id, callee.syntax().text_range());
+
+            let resolved = resolved_refs
+                .iter()
+                .filter(|resolved| callee_span.range.contains_range(resolved.span.range))
+                .min_by_key(|resolved| {
+                    let len = u32::from(resolved.span.range.end())
+                        - u32::from(resolved.span.range.start());
+                    (len, u32::from(resolved.span.range.start()))
+                });
+
+            let kind = match resolved {
+                Some(resolved) => {
+                    if let Some(boundary_kind) = classify_runtime_boundary(source_id, resolved) {
+                        BridgeCallSiteKind::StdlibBoundary(boundary_kind)
+                    } else {
+                        match resolved.target.as_ref().ok().map(|target| target.kind) {
+                            Some(DefKind::Function) => BridgeCallSiteKind::DirectNamedFunction,
+                            Some(DefKind::Binding) | Some(DefKind::Parameter) => {
+                                BridgeCallSiteKind::LocalCallableBinding
+                            }
+                            _ => BridgeCallSiteKind::Other,
+                        }
+                    }
+                }
+                None => BridgeCallSiteKind::Other,
+            };
+
+            Some(BridgeCallSite {
+                body,
+                expr: call_expr,
+                kind,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    call_sites.sort_by_key(|site| {
+        let rank = match site.kind {
+            BridgeCallSiteKind::DirectNamedFunction => 0u8,
+            BridgeCallSiteKind::LocalCallableBinding => 1,
+            BridgeCallSiteKind::StdlibBoundary(kind) => 2 + kind as u8,
+            BridgeCallSiteKind::Other => 10,
+        };
+        (site.body.0, site.expr.0, rank)
+    });
+    call_sites.dedup();
+    call_sites
 }
