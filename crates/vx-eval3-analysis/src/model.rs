@@ -96,6 +96,7 @@ pub struct CaptureSlot {
 pub struct ClosureEnvLayout {
     pub id: LayoutId,
     pub source: SourceExpr,
+    pub incoming_use_observation: Observation,
     pub captures: Vec<CaptureSlot>,
 }
 
@@ -157,6 +158,7 @@ impl RuntimeNode {
 pub struct AnalyzedBody {
     pub id: BodyId,
     pub result_observation: Observation,
+    pub incoming_use_observation: Observation,
     pub use_observations: BTreeMap<UseSiteId, Observation>,
     pub callee_targets: BTreeMap<ExprId, DefId>,
     pub callee_local_origins: BTreeMap<ExprId, SourceLocalCalleeOrigin>,

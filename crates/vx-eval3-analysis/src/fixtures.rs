@@ -19,6 +19,7 @@ pub fn canonical_program_a_fixture() -> AnalysisResult {
         bodies: vec![AnalyzedBody {
             id: main_body,
             result_observation: Observation::NeedValue,
+            incoming_use_observation: Observation::NoObs,
             use_observations: BTreeMap::from([
                 (UseSiteId(0), Observation::NeedProduct(pair_obs)),
                 (UseSiteId(1), Observation::NeedValue),
@@ -76,6 +77,7 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
         bodies: vec![AnalyzedBody {
             id: main_body,
             result_observation: Observation::NeedValue,
+            incoming_use_observation: Observation::NoObs,
             use_observations: BTreeMap::from([
                 (UseSiteId(10), Observation::NeedCallable),
                 (UseSiteId(11), Observation::NeedValue),
@@ -152,6 +154,7 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
                 body: main_body,
                 expr: add_n_expr,
             },
+            incoming_use_observation: Observation::NeedValue,
             captures: vec![CaptureSlot {
                 name: "n".to_owned(),
                 source: SourceExpr {
@@ -177,6 +180,7 @@ pub fn canonical_program_c_fixture() -> AnalysisResult {
         bodies: vec![AnalyzedBody {
             id: main_body,
             result_observation: Observation::NeedValue,
+            incoming_use_observation: Observation::NoObs,
             use_observations: BTreeMap::from([
                 (UseSiteId(20), Observation::NeedValue),
                 (UseSiteId(21), Observation::NeedValue),
@@ -233,6 +237,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
             AnalyzedBody {
                 id: apply_body,
                 result_observation: Observation::NeedValue,
+                incoming_use_observation: Observation::NeedValue,
                 use_observations: BTreeMap::from([
                     (UseSiteId(30), Observation::NeedCallable),
                     (UseSiteId(31), Observation::NeedValue),
@@ -255,6 +260,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
             AnalyzedBody {
                 id: main_body,
                 result_observation: Observation::NeedValue,
+                incoming_use_observation: Observation::NoObs,
                 use_observations: BTreeMap::from([(UseSiteId(40), Observation::NeedCallable)]),
                 callee_targets: BTreeMap::new(),
                 callee_local_origins: BTreeMap::new(),
@@ -331,6 +337,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
                 body: main_body,
                 expr: ExprId(40),
             },
+            incoming_use_observation: Observation::NoObs,
             captures: vec![CaptureSlot {
                 name: "n".to_owned(),
                 source: SourceExpr {
@@ -356,6 +363,7 @@ pub fn build_shaped_exec_fixture() -> AnalysisResult {
         bodies: vec![AnalyzedBody {
             id: build_body,
             result_observation: Observation::NeedValue,
+            incoming_use_observation: Observation::NoObs,
             use_observations: BTreeMap::from([
                 (UseSiteId(50), Observation::NeedValue),
                 (UseSiteId(51), Observation::NeedValue),

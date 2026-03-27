@@ -89,7 +89,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
-    let closure_layouts = seed_closure_layouts(bridge);
+    let mut closure_layouts = seed_closure_layouts(bridge);
     seed_callee_targets(&mut bodies, bridge);
     seed_source_local_callee_origins(&mut bodies, bridge);
     seed_source_local_call_edges(&mut bodies);
@@ -98,6 +98,11 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
     seed_kernel_demands(&mut bodies, &mut kernels);
     let propagated_use_demands = seed_first_use_observation_propagation_step(&bodies);
+    apply_one_step_propagated_use_pressure(
+        &mut bodies,
+        &mut closure_layouts,
+        &propagated_use_demands,
+    );
     seed_use_observations(&mut bodies, bridge);
 
     AnalysisResult {
@@ -108,6 +113,31 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         frame_layouts: vec![],
         propagated_result_demands,
         propagated_use_demands,
+    }
+}
+
+fn apply_one_step_propagated_use_pressure(
+    bodies: &mut [AnalyzedBody],
+    layouts: &mut [ClosureEnvLayout],
+    propagated: &BTreeMap<crate::ResultDemandCallee, Observation>,
+) {
+    for (callee, obs) in propagated {
+        match callee {
+            crate::ResultDemandCallee::TopLevelBody(body_id) => {
+                if let Some(body) = bodies.iter_mut().find(|body| body.id == *body_id)
+                    && body.incoming_use_observation == Observation::NoObs
+                {
+                    body.incoming_use_observation = obs.clone();
+                }
+            }
+            crate::ResultDemandCallee::ClosureLayout(layout_id) => {
+                if let Some(layout) = layouts.iter_mut().find(|layout| layout.id == *layout_id)
+                    && layout.incoming_use_observation == Observation::NoObs
+                {
+                    layout.incoming_use_observation = obs.clone();
+                }
+            }
+        }
     }
 }
 
@@ -623,6 +653,7 @@ fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
                 body: body_id,
                 expr: closure_expr.id,
             },
+            incoming_use_observation: Observation::NoObs,
             captures,
         });
     }
@@ -640,6 +671,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
     AnalyzedBody {
         id: body.id,
         result_observation: Observation::NeedValue,
+        incoming_use_observation: Observation::NoObs,
         use_observations: BTreeMap::new(),
         callee_targets: BTreeMap::new(),
         callee_local_origins: BTreeMap::new(),

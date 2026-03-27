@@ -46,6 +46,10 @@ fn program_b_represents_closure_layout_selected_sibling_and_callable_demand() {
     assert_eq!(analysis.closure_layouts.len(), 1);
     assert_eq!(analysis.closure_layouts[0].captures.len(), 1);
     assert_eq!(analysis.closure_layouts[0].captures[0].name, "n");
+    assert_eq!(
+        analysis.closure_layouts[0].incoming_use_observation,
+        Observation::NeedValue
+    );
 
     let body = analysis
         .bodies
@@ -106,6 +110,7 @@ fn program_d_keeps_higher_order_callable_path_first_class() {
         apply_body.use_observations.get(&UseSiteId(30)),
         Some(&Observation::NeedCallable)
     );
+    assert_eq!(apply_body.incoming_use_observation, Observation::NeedValue);
 
     let has_exec_or_discover_boundary = analysis.runtime_nodes.iter().any(|node| {
         matches!(

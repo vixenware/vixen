@@ -875,6 +875,16 @@ fn main(n: U64) -> U64 ( plus_one(n) )
         Some(&Observation::NeedValue),
         "direct named local call should seed one-step callee use-observation demand"
     );
+    let callee_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("callee body should exist");
+    assert_eq!(
+        callee_body.incoming_use_observation,
+        Observation::NeedValue,
+        "direct named callee should reflect propagated use pressure in body analysis state"
+    );
 }
 
 #[test]
@@ -902,6 +912,16 @@ fn main(n: U64) -> U64 (
         Some(&Observation::NeedValue),
         "recovered local closure call should seed one-step closure-layout use-observation demand"
     );
+    let layout = analysis
+        .closure_layouts
+        .iter()
+        .find(|layout| layout.id == linked_layout)
+        .expect("linked closure layout should exist");
+    assert_eq!(
+        layout.incoming_use_observation,
+        Observation::NeedValue,
+        "recovered closure callee should reflect propagated use pressure in layout state"
+    );
 }
 
 #[test]
@@ -919,6 +939,16 @@ fn main(n: U64) -> U64 ( n + 1 )
             .propagated_use_demands
             .contains_key(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
         "unused helper should not receive propagated one-step use-observation pressure"
+    );
+    let helper_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("helper body should exist");
+    assert_eq!(
+        helper_body.incoming_use_observation,
+        Observation::NoObs,
+        "unused helper should stay clean in callee-side incoming use state"
     );
 }
 
@@ -939,6 +969,30 @@ fn main(n: U64) -> U64 (
     assert_eq!(
         analysis_a.propagated_use_demands,
         analysis_b.propagated_use_demands
+    );
+    assert_eq!(
+        analysis_a
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.incoming_use_observation.clone()))
+            .collect::<Vec<_>>(),
+        analysis_b
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.incoming_use_observation.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        analysis_a
+            .closure_layouts
+            .iter()
+            .map(|layout| (layout.id, layout.incoming_use_observation.clone()))
+            .collect::<Vec<_>>(),
+        analysis_b
+            .closure_layouts
+            .iter()
+            .map(|layout| (layout.id, layout.incoming_use_observation.clone()))
+            .collect::<Vec<_>>()
     );
 }
 
