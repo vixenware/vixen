@@ -155,7 +155,7 @@ actions, keyed on everything that went into those decisions or actions, so
 that they may be reused in subsequent builds, whether on the same host or a
 different one.
 
-### Doing worse
+### Baby steps
 
 The first step to doing better is to do worse, and so I'm going to show you a
 Vixen program that is intentionally very bad, mirroring the shell script we saw
@@ -227,7 +227,7 @@ workspace/
 fn build(params: BuildParams) -> Tree (
   let toolchain = find_clang(default_exec_class());
   let src = @({params.workspace}/src);
-  exec [toolchain.clang, @({src}/main.c), "-o", "main"]
+  exec [toolchain.clang, @src/main.c, "-o", "main"]
 )
 ```
 
@@ -236,7 +236,13 @@ However, this still doesn't work because main.c actually includes util.h!
 No worries, we can mount the entire src directory:
 
 ```vixen
-FIXME: fill in
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = @({params.workspace}/src);
+  exec [toolchain.clang, @src/main.c, "-o", "main"] where {
+    mounts: %{ @src => src }
+  }
+)
 ```
 
 Next problem: the returned tree is actually empty (.vx/out is empty after `vx
@@ -246,7 +252,245 @@ returned.
 Easy fix:
 
 ```vixen
-FIXME: fill in, -o out/main
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = @({params.workspace}/src);
+  exec [toolchain.clang, @src/main.c, "-o", @out/main] where {
+    mounts: %{ @src => src }
+  }
+)
 ```
 
-FIXME: what do we talk about next? remote exec?
+With a bit more sugar:
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+  exec [toolchain.clang, @src/main.c, "-o", @out/main] where {
+    mounts: %{ src }
+  }
+)
+```
+
+### Local is just another remote
+
+Now that we have declared all our inputs (@src), all our outputs (@out), and
+which toolchain to use to run the compilation, that compilation can run anywhere.
+
+Right now, because we used `default_exec_class()`, it's running... wherever
+the default is, which for `vx build`, would probably be "the local machine": in
+my case, a macOS laptop.
+
+But `vx build` could accept a `--prefer-remote` knob, changing the default
+executor, and then, it would connect to a `vxd` running on that machine, transfer
+the `discover` closure so we can gather information about clang, and then run
+the `exec` on it — mounting a VFS with the inputs (streamed from the local host)
+and collecting the outputs on completion.
+
+Remote execution isn't special in Vixen. All execution is remote, with "local"
+being the closest remote (and benefitting from a few performance improvemenst).
+
+### This isn't imperative code
+
+Looking at the build function, it would be natural to try and read it from top
+to bottom and imagine in which order things are being executed. 
+
+If that were true, then this code would fail:
+
+```vixen
+fn bomb() -> Tree {
+  fail "should not run"
+}
+
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+  
+  // 💣
+  let unused = bomb();
+  
+  exec [toolchain.clang, @src/main.c, "-o", @out/main] where {
+    mounts: %{ src }
+  }
+)
+```
+
+Because upon reaching the call to bomb, fail would be evaluated, which would
+poison the entire computation, and then we would never get to the end result. 
+
+But because it's never actually used to produce the end result, it's never
+actually evaluated. You can think of it as dead code elimination, but kind of
+hardcore. 
+
+What's happening instead is starting from the the command line invocation
+demands the return value of build, therefore we need the tree produced by exec.
+Therefore we need to evaluate exec. Therefore we need to evaluate all its
+arguments. Therefore we need to evaluate src, which and we need to evaluate
+toolchain.clang, which requires toolchain, which requires find clang, which
+requires default exec class, etc., etc. And we have this tree of things that we
+need to evaluate, and `unused` is in nowhere in that tree, so it never gets
+evaluated.
+
+Simple. 
+
+### Implicit concurrency
+
+This same demand-driven model is where Vixen's concurrency comes from.
+
+There is no `parallel` keyword here:
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+
+  let main_o =
+    exec [toolchain.clang, "-c", @src/main.c, "-o", @out/main.o] where {
+      mounts: %{ src }
+    };
+
+  let util_o =
+    exec [toolchain.clang, "-c", @src/util.c, "-o", @out/util.o] where {
+      mounts: %{ src }
+    };
+
+  let log_o =
+    exec [toolchain.clang, "-c", @src/log.c, "-o", @out/log.o] where {
+      mounts: %{ src }
+    };
+
+  exec [
+    toolchain.clang,
+    ..main_o,
+    ..util_o,
+    ..log_o,
+    "-o",
+    @out/main,
+  ]
+)
+```
+
+But the three compilation steps are independent from one another. The final
+link step needs all three object files, so demand reaches all three of them.
+Once that happens, the runtime is free to progress them concurrently, and only
+then proceed to the final link.
+
+This scales naturally:
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+
+  fn compile_one(name: String) -> Tree (
+    exec [
+      toolchain.clang,
+      "-c",
+      @(src/{name}.c),
+      "-o",
+      @(out/{name}.o),
+    ] where {
+      mounts: %{ src }
+    }
+  );
+
+  let objects =
+    ["main", "util", "log"]
+      .map(compile_one);
+
+  exec [toolchain.clang, ..objects, "-o", @out/main]
+)
+```
+
+This is why Vixen's parallelism is not just "run a hand-written build graph
+with a thread pool". It falls out of the evaluation model itself:
+
+  * dead work is never entered
+  * shared work only needs to be entered once
+  * independent demanded work can progress concurrently
+
+Source order does not force execution order. Demand does.
+
+### What gets reused
+
+At this point, we have seen that Vixen does not evaluate everything eagerly,
+and that independent demanded work can progress concurrently.
+
+The next question is: if a computation is needed more than once, do we do it
+more than once?
+
+The answer is no.
+
+Within a single evaluation, Vixen reuses computations that have already been
+entered instead of re-entering them from scratch.
+
+That means if two different parts of the build depend on the same subtree, the
+same toolchain discovery, or the same generated file, the runtime does not need
+to duplicate that work just because it was demanded from two places.
+
+That is local reuse inside one build.
+
+But Vixen also wants reuse across different builds.
+
+If you build the same thing tomorrow, on the same code, with the same inputs,
+with the same discovered toolchain facts, then ideally Vixen should not repeat
+all the work. It should reuse the results of computations that are still
+justified.
+
+That includes obvious things like compiler invocations, but it also includes
+more than that:
+
+  * discovered facts about toolchains and executors
+  * generated trees
+  * package-resolution subcomputations
+  * any other pure or boundary-crossing computation whose inputs are the same
+
+So the guiding idea is not "cache processes". It is "reuse computations".
+
+That is why Vixen is demand-driven in the first place. The runtime is not just
+trying to run actions. It is trying to identify computations, understand what
+they depend on, and avoid repeating work whose justification has not changed.
+
+### When does work have to run again?
+
+A computation has to run again when something it depends on has changed.
+
+For a pure local computation, that means its arguments changed, or the code of
+the computation changed.
+
+For an `exec`, that means things like:
+
+  * the executable path changed
+  * the command line changed
+  * the mounted inputs changed
+  * the environment changed
+  * the discovered toolchain facts it depends on no longer validate
+
+And because Vixen runs processes against a virtual file system, we also get
+some things that are unusually hard in other build systems almost for free.
+
+If a computation tried to read a file and that file was absent, that absence is
+itself part of what was observed. If that file appears before the next build,
+then the computation is no longer justified and has to run again.
+
+Similarly, if a computation globbed for `*.c` in some directory, then the set of
+matching files is part of what it depended on. Adding or removing a matching
+file invalidates that computation too.
+
+So the question is not "did we call this function before?"
+
+The question is "is this still the same computation, justified by the same
+inputs and the same discovered facts?"
+
+If yes, Vixen should reuse it.
+
+If no, Vixen should run it again.
+
+### There's more
+
+Things we haven't talked about yet. We haven't talked about, well, remote
+execution in much detail. Of course, we haven't talked about like laziness in
+general, like demand-driven evaluation. We specifically haven't talked about
+join and key, and I need to fucking look up how it actually works. Oh, we
+haven't talked about deserialization.
