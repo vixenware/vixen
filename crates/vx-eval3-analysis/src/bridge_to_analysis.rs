@@ -235,8 +235,13 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
     let mut seeds = Vec::new();
 
     for site in &bridge.call_sites {
-        if let crate::BridgeCallSiteKind::StdlibBoundary(_) = site.kind {
-            seeds.push((site.body, site.expr, Observation::NeedCallable));
+        match site.kind {
+            crate::BridgeCallSiteKind::DirectNamedFunction
+            | crate::BridgeCallSiteKind::LocalCallableBinding
+            | crate::BridgeCallSiteKind::StdlibBoundary(_) => {
+                seeds.push((site.body, site.expr, Observation::NeedCallable));
+            }
+            crate::BridgeCallSiteKind::Other => {}
         }
     }
 

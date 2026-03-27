@@ -170,9 +170,9 @@ fn main() -> U64 (
         .values()
         .filter(|obs| **obs == Observation::NeedCallable)
         .count();
-    assert_eq!(
-        callable_count, 0,
-        "local non-stdlib exec call should not seed NeedCallable boundary observation"
+    assert!(
+        callable_count >= 1,
+        "local non-stdlib exec should still seed callable demand as a direct call"
     );
 }
 
@@ -361,6 +361,78 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
     assert!(
         callable_count >= 2,
         "exec and discover should seed NeedCallable observations"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_seeds_need_callable_for_direct_named_function_call() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  plus_one(n)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+
+    assert!(
+        main_body
+            .use_observations
+            .values()
+            .any(|obs| *obs == Observation::NeedCallable),
+        "direct named function call should seed NeedCallable"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_seeds_need_callable_for_local_callable_binding_call() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+
+    assert!(
+        main_body
+            .use_observations
+            .values()
+            .any(|obs| *obs == Observation::NeedCallable),
+        "local callable binding call should seed NeedCallable"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_callable_seeding_from_call_sites_is_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  plus_one(n) + add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[1].use_observations, analysis_b.bodies[1].use_observations,
+        "call-site callable seeding should be deterministic"
     );
 }
 
