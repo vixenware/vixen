@@ -362,9 +362,9 @@ fn build(params: BuildParams) -> Tree (
 
   exec [
     toolchain.clang,
-    ..main_o,
-    ..util_o,
-    ..log_o,
+    main_o,
+    util_o,
+    log_o,
     "-o",
     @out/main,
   ]
@@ -486,6 +486,50 @@ inputs and the same discovered facts?"
 If yes, Vixen should reuse it.
 
 If no, Vixen should run it again.
+
+### Why Vixen needs analysis
+
+At this point, Vixen is very far from "read the program top to bottom and do
+what it says".
+
+The source code is not the execution plan.
+
+Instead, Vixen has to analyze the program as a graph of computations.
+
+That analysis answers questions like:
+
+  * which computations are actually demanded by the final result
+  * which computations are shared
+  * which computations are independent
+  * which computations cross explicit boundaries like `exec` or `discover`
+  * which observed facts justify reusing a previous result
+
+Without that analysis, Vixen would collapse back into a line-by-line
+interpreter, which is the wrong execution model for this language.
+
+This is also how Vixen can be efficient.
+
+Some parts of a program are just ordinary local computation: building argument
+lists, selecting flags, constructing paths, combining arrays, choosing between
+branches, and so on.
+
+Other parts are real boundaries: discovering host facts, reading the
+filesystem, running a process in a sandbox, validating previously discovered
+assumptions, and returning results across an executor boundary.
+
+The local parts can be analyzed and compiled into efficient straight-line
+kernels.
+
+The boundary-crossing parts must remain explicit runtime-managed nodes, because
+they are exactly where Vixen's correctness story lives.
+
+So analysis is not an implementation detail bolted on afterward. It is the
+thing that lets Vixen preserve its semantics while still being practical:
+
+  * precise reuse
+  * implicit concurrency
+  * explicit boundaries
+  * efficient execution
 
 ### There's more
 

@@ -247,8 +247,12 @@ model, but they are not part of the core language syntax.
 > InTree { tree: some_tree, suffix: /* empty relative path */ }
 > ```
 >
-> `exec` mounts the tree at a synthetic VFS root chosen by the runtime
-> and passes that mount root path to the process. Passing a `Blob`
+> `exec` mounts the tree at a synthetic VFS root chosen by the runtime.
+> If the tree contains exactly one file entry, `exec` passes that file's
+> path to the process directly. Otherwise it passes the mount root path.
+> This makes singleton output trees convenient to feed into later `exec`
+> calls without extra path extraction, while keeping plural trees explicit.
+> Passing a `Blob`
 > directly is sugar for:
 >
 > ```vixen
