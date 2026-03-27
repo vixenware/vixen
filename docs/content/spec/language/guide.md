@@ -1,447 +1,214 @@
 +++
-title = "Syntax Guide"
+title = "Language Guide"
 insert_anchor_links = "heading"
+weight = 10
 +++
 
-# Vixen Syntax Guide
+# Vixen Language Guide
 
-This page is a guide-level overview of the current syntax direction.
-It teaches the raw expression forms first, then the real sugar on top of
-them.
-
-If this page and the normative spec disagree, the spec wins:
+This guide is the shortest route to reading and writing current Vixen. It is
+non-normative and example-first. If it disagrees with the rest of the spec,
+these pages win:
 
 - [Core Language](core.md)
-- [Build and Evaluation](build.md)
+- [Evaluation](build.md)
+- [Build and Runtime Standard Library](../stdlib/build.md)
 
-## 1. What counts as one value
+## Start from a real build file
 
-Vixen application is unary, so the first thing to learn is what can act
-as a single payload.
-
-### Parentheses
+The fastest way to understand Vixen is to read a small real build:
 
 ```vixen
-(expr);          // grouping
-(left, right);   // tuple
-(
-  let x = 1;
-  x + 1
-);               // block expression
-```
-
-### Brackets
-
-```vixen
-[a, b, c];       // array
-```
-
-### Braces
-
-```vixen
-{ x: 1, y: 2 };                       // record
-{ 80: "http", 443: "https" };         // map
-{ @bin/lua: lua_exe, @lib/lib.a: a }; // map with Path keys
-```
-
-Use braces for both records and maps:
-
-- field-name keys give you a record
-- general expression keys give you a map
-
-### Paths
-
-```vixen
-@out/bin/lua;
-@(out/obj/{file}.o);
-```
-
-Use:
-
-- bare `@path` for the simple case
-- `@( ... )` when interpolation is needed
-
-Bare paths do not interpolate.
-Their lexical envelope is the simple ASCII set
-`[A-Za-z0-9_./-]+`.
-Inside `@( ... )`, `{expr}` interpolates and `{{` / `}}` produce
-literal braces.
-
-For application syntax, bare `@path` is not self-delimiting enough to
-use in juxtaposed call position. Use `f(@path)` for ordinary calls, or
-`f @(...)` when you want the juxtaposed form.
-
-## 2. Unary application
-
-The base call form is:
-
-```vixen
-f(x)
-```
-
-Vixen application is unary. A call always passes one payload value.
-That payload can itself be a tuple, array, record, map, path, or block:
-
-```vixen
-f((x, y));
-f([x, y]);
-f({ left: x, right: y });
-f({
-  @bin/lua: lua_exe,
-  @lib/liblua.a: liblua,
-});
-f((
-  let tmp = build_input;
-  tmp
-));
-```
-
-When the payload is self-delimiting, you can use the shorter juxtaposed
-form instead:
-
-```vixen
-f [x, y];
-f { left: x, right: y };
-f @(out/obj/{file}.o);
-```
-
-Use parentheses for ordinary expressions and identifiers:
-
-```vixen
-host.hash(@tool);
-host.hash(tool.path);
-files.map(compile);
-```
-
-Bare path literals also use parentheses in ordinary call position:
-
-```vixen
-f(@out/bin/lua);
-```
-
-Chained application is left-associative:
-
-```vixen
-f(x)(y);    // means: (f(x))(y)
-```
-
-To navigate the result of an application, group it first:
-
-```vixen
-(discover_tool(class)).path
-```
-
-## 3. Fields and methods
-
-Dot syntax is only for fields and methods.
-
-```vixen
-x.y;
-x.y.z;
-```
-
-Zero-arg invocation uses ordinary `()`:
-
-```vixen
-blob.utf8();
-get_config();
-get_config().database.port;
-```
-
-Postfix chains are left-associative:
-
-```vixen
-blob.utf8().trim()
-```
-
-## 4. Methods and namespaces
-
-Methods live in type namespaces:
-
-```vixen
-namespace Blob {
-  fn Blob(s: String) -> Self;
-  fn utf8(self) -> String;
-  fn utf8_lossy(self) -> String;
-}
-```
-
-Dot never falls back to free-function UFCS. If you want to chain free
-functions, use `|>`.
-
-## 5. Sugar: multi-parameter declarations
-
-This declaration:
-
-```vixen
-fn add(a: U64, b: U64) -> U64
-```
-
-is sugar for a function whose one payload is a tuple.
-
-So the call site is:
-
-```vixen
-add(1, 2)
-```
-
-not:
-
-```vixen
-add 1 2
-```
-
-Likewise:
-
-```vixen
-fn distance(p1: (F64, F64), p2: (F64, F64)) -> F64
-```
-
-is called as:
-
-```vixen
-distance((x1, y1), (x2, y2))
-```
-
-## 6. Records and keyword application
-
-First, a function can declare keyword parameters with `where`:
-
-```vixen
-fn exec[T](args: Array[ExecInput]) where {
-  observer: Fn(Process, Tree) #sandbox -> T,
-} -> T;
-```
-
-Then the call site uses:
-
-```vixen
-where expr
-```
-
-where `expr` evaluates to a record.
-
-So these are both valid:
-
-```vixen
-exec [cc, "-c", file] where { mounts: src };
-exec [cc, "-c", file] where common;
-```
-
-The second form is possible because records are real values:
-
-```vixen
-let common = { observer };
-```
-
-Record shorthand:
-
-```vixen
-{ observer }
-```
-
-means:
-
-```vixen
-{ observer: observer }
-```
-
-Record spread also works inside keyword application:
-
-```vixen
-exec [cc, "-c", file] where { ..common, mounts: src }
-```
-
-## 7. Constructors
-
-Constructors are ordinary unary callables.
-
-These are ordinary calls:
-
-```vixen
-Blob("hello")
-Point { x: 1.0, y: 2.0 }
-Tree [compile @lua.c, liblua]
-Tree {
-  @bin/lua: lua_exe,
-  @lib/liblua.a: liblua,
-}
-```
-
-So:
-
-```vixen
-Tree [ ... ]
-```
-
-is not a special form. It is just `Tree` applied to an array payload.
-
-And:
-
-```vixen
-Tree { ... }
-```
-
-is just `Tree` applied to a map payload.
-
-Named-field constructors take record payloads:
-
-```vixen
-Point { x: 1.0, y: 2.0 }
-Shape.Circle { radius: 5.0 }
-```
-
-`Point { ... }` produces a `Point`. `Shape.Circle { ... }` produces a
-`Shape.Circle`, which widens to `Shape` only when a checking context
-asks for the parent enum.
-
-Opaque declarations do not synthesize constructors:
-
-```vixen
-type Tree;
-```
-
-If an opaque type supports construction, it declares that surface
-explicitly. That is why `Tree [ ... ]` and `Tree { ... }` can exist even
-though `Tree` is not a visible struct.
-
-## 8. Sugar: pipe
-
-Pipe is sugar for threading a value into the next stage.
-
-```vixen
-x |> f
-```
-
-means:
-
-```vixen
-f(x)
-```
-
-Use `_` when the piped value does not go in the default position, or
-when the stage needs to navigate from the current value:
-
-```vixen
-get_blob(my_blob) |> _.utf8()
-```
-
-means:
-
-```vixen
-(get_blob(my_blob)).utf8()
-```
-
-Likewise:
-
-```vixen
-x |> pair(y, _)
-```
-
-means:
-
-```vixen
-pair(y, x)
-```
-
-For multiline pipelines, just write an ordinary multiline binary chain:
-
-```vixen
-let liblua =
-  objs
-  |> cexec [ar, "rc", @out/liblua.a, .._]
-  |> cexec [ranlib, _];
-```
-
-Use `_` only in pipes.
-
-## 9. Sugar: closure shorthand
-
-This:
-
-```vixen
-(tool) => verify_tool(host, tool)
-```
-
-can be written as:
-
-```vixen
-verify_tool(host, $)
-```
-
-More examples:
-
-```vixen
-files.map($.utf8());
-items.reduce($0 + $1);
-```
-
-Use `$` only for closures.
-
-## 10. Sugar: partial application
-
-This:
-
-```vixen
-(args) => exec(args) where common
-```
-
-can be written as:
-
-```vixen
-partial exec where common
-```
-
-That means:
-
-- written positional applications are bound
-- omitted positional applications stay open
-- written keyword arguments are bound
-- unspecified keyword arguments stay open
-
-## 11. Sugar: callable return transformation
-
-This:
-
-```vixen
-(args) => parse(load(args))
-```
-
-can be written as:
-
-```vixen
-load.then(parse)
-```
-
-`.then` keeps the callable's positional and keyword surface and changes
-only what happens to its return value.
-
-## 12. A build-shaped example
-
-```vixen
-fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
-  let src = Tree(ws);
-  let common = { observer };
-  let cexec = partial exec where common;
-
-  fn compile(file: Path) -> Tree (
-    cexec [cc, "-c", "-o", @(out/obj/{file}.o), file] where { mounts: src }
-  );
-
-  let liblua =
-    all_lib_sources.map(compile)
-    |> _.merge();
-  let lua_exe = link(Tree [compile @lua.c, liblua]);
-
-  Tree {
-    @bin/lua: lua_exe,
-    @lib/liblua.a: liblua,
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
+  let class = executor_class("default");
+  let rustc = discover(class, (host) => host.which("rustc"));
+  let source = Tree %{
+    @main.rs => Blob("fn main() {\n  println!(\"hello from vx eval\");\n}\n"),
+  };
+
+  exec [rustc, @src/main.rs, "-o", @out/hello] where {
+    mounts: %{ @src => source },
+    writable: [@out],
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `rustc failed`
+      ) else (
+        vfs
+      )
+    ),
   }
 )
 ```
 
-## Intentionally unspecified for now
+That one example already shows most of the authored surface:
 
-These are intentionally postponed details:
+- `build` is an ordinary function that returns a `Tree`.
+- `discover` probes an executor host and returns an ordinary value.
+- `Tree %{ ... }` builds a tree from a map of paths to entries.
+- `Blob("...")` builds a file-like value from text.
+- `exec [ ... ] where { ... }` runs a process with positional inputs and a
+  keyword record.
+- `observer: (proc, vfs) => ...` is a closure.
+- `if cond ( then ) else ( else )` is an expression.
 
-- constructor visibility rules are not specified yet
+## Records are not maps
+
+Vixen uses two distinct literal forms that look similar at first:
+
+```vixen
+let settings = { optimize: true, debug: false }
+let outputs = %{ @bin/app => binary, @lib/libapp.a => archive }
+```
+
+- `{ field: value }` is a record.
+- `%{ key => value }` is a map.
+
+That distinction matters everywhere:
+
+- record literals use field names
+- map literals use general key expressions
+- `where { ... }` passes keyword arguments as a record
+- `Tree %{ ... }` takes a map payload, not a record payload
+
+If you remember one syntax rule, remember this one.
+
+## Paths are their own type
+
+`Path` is not just a `String`. Authored Vixen uses path literals heavily:
+
+```vixen
+@src/main.rs
+@out/hello
+@(out/{name}.o)
+workspace / @zoo/lua-src
+```
+
+Use path literals when you mean paths. Use strings when you mean text.
+
+- `@src/main.rs` is a literal path.
+- `@(out/{name}.o)` is an interpolated path.
+- `workspace / @zoo/lua-src` joins paths with `/`.
+
+Paths show up constantly in `Tree` construction, `exec` arguments, and mount
+maps.
+
+## Calls and `where`
+
+Most Vixen code reads like ordinary function calls:
+
+```vixen
+f(x)
+g [a, b, c]
+Tree %{ @bin/app => binary }
+Point { x: 1, y: 2 }
+```
+
+The practical rule is:
+
+- `f { ... }` passes a record payload
+- `f %{ ... }` passes a map payload
+- `where { ... }` is keyword application
+
+So these are different:
+
+```vixen
+exec [cc, "-c", file] where { mounts: %{ @src => source } }
+Point { x: 1, y: 2 }
+Tree %{ @bin/app => binary }
+```
+
+`where` is the only keyword-argument form.
+
+## Blocks, bindings, and conditionals
+
+Vixen uses expressions almost everywhere. Blocks are parenthesized:
+
+```vixen
+let result = (
+  let message = "hello";
+  if ok (
+    message
+  ) else (
+    fail `not ok`
+  )
+)
+```
+
+The main things to notice:
+
+- `let` introduces a binding
+- blocks use `(` ... `)`, not `{ ... }`
+- the last expression is the block's value
+- `if` always has an `else`
+
+This is why real observers often look like this:
+
+```vixen
+observer: (proc, vfs) => (
+  if proc.exit_code != 0 (
+    fail `process failed`
+  ) else (
+    vfs.subtree(@out)
+  )
+)
+```
+
+## Closures, pipelines, and partial application
+
+Closures use arrow syntax:
+
+```vixen
+(x) => x + 1
+(proc, vfs) => vfs
+```
+
+They are common in combinators:
+
+```vixen
+config.platforms(env)
+  .map((name) => Tree %{ @({name}) => compile_hello(config.executor_for_platform(name)) })
+  .merge()
+```
+
+And in reusable partially applied helpers:
+
+```vixen
+let cexec = partial exec where {
+  executor: class,
+  observer: (proc, vfs) => (
+    if proc.exit_code != 0 (
+      fail `process failed`
+    ) else (
+      vfs.subtree(@out)
+    )
+  ),
+};
+```
+
+That lets later calls supply only the changing parts:
+
+```vixen
+cexec [tc.cc, "-c", @(src/{file}), "-o", @(out/obj/{file}.o)] where {
+  mounts: %{ @src => src },
+  writable: [@out],
+}
+```
+
+## What belongs where
+
+Keep this split in mind while reading the rest of the spec:
+
+- the core language covers syntax, functions, closures, records, maps,
+  control flow, types, and modules
+- the evaluation chapter covers laziness, demand, forcing, memoization, and
+  boundaries
+- the standard library covers `build`, `discover`, `exec`, `Blob`, `Tree`,
+  `Path`, and related runtime-backed APIs
+
+## Read next
+
+Once this guide feels natural, read the normative pages in this order:
+
+1. [Core Language](core.md)
+2. [Evaluation](build.md)
+3. [Build and Runtime Standard Library](../stdlib/build.md)

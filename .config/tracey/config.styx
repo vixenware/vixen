@@ -18,6 +18,20 @@ specs (
         )
     }
     {
+        name stdlib
+        include (
+            docs/content/spec/stdlib/*.md
+            docs/content/spec/stdlib/**/*.md
+        )
+        impls (
+            {
+                name rust
+                include (crates/**/*.rs)
+                exclude (target/**)
+            }
+        )
+    }
+    {
         name internals
         include (docs/content/spec/internals.md)
         impls (

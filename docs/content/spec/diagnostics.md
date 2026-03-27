@@ -1,6 +1,7 @@
 +++
 title = "Diagnostics Rendering Specification"
 insert_anchor_links = "heading"
+weight = 40
 +++
 
 # Diagnostics Rendering Specification

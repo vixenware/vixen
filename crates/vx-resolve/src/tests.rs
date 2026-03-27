@@ -1297,7 +1297,7 @@ fn main() {
     assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Bytes")))));
 }
 
-// r[type.builtin.blob] — blob.utf8() returns String
+// r[store.blob.utf8] — blob.utf8() returns String
 #[test]
 fn blob_utf8_returns_string() {
     let src = r#"

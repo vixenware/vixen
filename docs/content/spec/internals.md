@@ -1,6 +1,7 @@
 +++
 title = "Internals Specification"
 insert_anchor_links = "heading"
+weight = 30
 +++
 
 # Vixen Internals Specification

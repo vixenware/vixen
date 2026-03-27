@@ -1,6 +1,7 @@
 +++
 title = "Core Language"
 insert_anchor_links = "heading"
+weight = 20
 +++
 
 # Vixen Core Language Specification
@@ -527,16 +528,16 @@ insert_anchor_links = "heading"
 
 > r[expr.map]
 >
-> Map literals use braces with general key expressions:
+> Map literals use `%{ ... }` with general key expressions:
 >
 > ```vixen
-> let outputs = { @bin/lua: lua_exe, @lib/liblua.a: liblua }
-> let port_names = { 80: "http", 443: "https" }
+> let outputs = %{ @bin/lua => lua_exe, @lib/liblua.a => liblua }
+> let port_names = %{ 80 => "http", 443 => "https" }
 > ```
 >
 > Keys and values are arbitrary expressions. Trailing commas are allowed.
-> The type is `Map[K, V]`. A braced literal whose entries are all bare
-> field labels is a record instead.
+> The type is `Map[K, V]`. Records and maps are distinct surface forms:
+> `{ ... }` is a record literal and `%{ ... }` is a map literal.
 
 ### Function call expressions
 
@@ -549,16 +550,18 @@ insert_anchor_links = "heading"
 > f(x)
 > ```
 >
-> Array, braced, and parenthesized-path payloads can also be applied directly:
+> Array, record, map, and parenthesized-path payloads can also be applied
+> directly:
 >
 > ```vixen
 > f [x, y]
 > f { left: x, right: y }
+> f %{ @bin/lua => exe }
 > f @(out/bin/lua)
 > ```
 >
 > Canonical formatting has no space before `(`, and a separating space
-> before `[` or `{`.
+> before `[`, `{`, or `%{`.
 >
 > A function receives one payload value. If you want to pass what would
 > traditionally be “multiple positional arguments”, package them into a
@@ -570,7 +573,7 @@ insert_anchor_links = "heading"
 > ```
 >
 > Juxtaposition application is only allowed when the payload is
-> self-delimiting: `(...)`, `[...]`, `{...}`, or `@(...)`. Bare
+> self-delimiting: `(...)`, `[...]`, `{...}`, `%{...}`, or `@(...)`. Bare
 > identifiers, bare path literals, and most other expressions must use
 > parentheses.
 >
@@ -596,8 +599,9 @@ insert_anchor_links = "heading"
 >
 > is not.
 >
-> `f { ... }` is ordinary unary application to a braced payload. It is
-> never keyword application. `where` is the only keyword-application
+> `f { ... }` is ordinary unary application to a record payload.
+> `f %{ ... }` is ordinary unary application to a map payload.
+> Neither is keyword application. `where` is the only keyword-application
 > form.
 >
 > A self-delimiting payload closes the application before any following
@@ -663,7 +667,7 @@ insert_anchor_links = "heading"
 > ```
 >
 > The same unary application model applies to non-record constructors:
-> `Tree { @bin/lua: exe }` is `Tree` applied to a map payload, not a
+> `Tree %{ @bin/lua => exe }` is `Tree` applied to a map payload, not a
 > record payload.
 
 ### Field access expressions
@@ -1434,7 +1438,7 @@ insert_anchor_links = "heading"
 > Opaque declarations (`type Name;`) do not synthesize a constructor
 > surface by themselves. Constructors for opaque builtins may still be
 > declared explicitly and may accept other payload kinds, such as maps
-> (`Tree { ... }`) or arrays (`Tree [ ... ]`), without becoming separate
+> (`Tree %{ ... }`) or arrays (`Tree [ ... ]`), without becoming separate
 > syntax classes.
 
 ## Records
@@ -1472,20 +1476,18 @@ insert_anchor_links = "heading"
 
 > r[collect.map]
 >
-> Map literals also use braces, but with value keys rather than field
-> labels:
+> Map literals use `%{ ... }` and `=>`:
 >
 > ```vixen
-> let outputs = { @bin/lua: lua_exe, @lib/liblua.a: liblua }
-> let port_names = { 80: "http", 443: "https" }
-> let build_flags = { (target): flags_for target }
+> let outputs = %{ @bin/lua => lua_exe, @lib/liblua.a => liblua }
+> let port_names = %{ 80 => "http", 443 => "https" }
+> let build_flags = %{ (target) => flags_for target }
 > ```
 >
 > The type is `Map[K, V]`. Keys can be any Vixen type — all types are
-> comparable for equality and hashable. A braced literal whose entries
-> are all field labels is a record; a braced literal whose entries use
-> general key expressions is a map. Mixing record fields and general map
-> keys in one literal is an error.
+> comparable for equality and hashable. Records and maps do not share
+> one literal form: `{ field: value }` is a record, `%{ key => value }`
+> is a map.
 
 > r[collect.map.order]
 >
