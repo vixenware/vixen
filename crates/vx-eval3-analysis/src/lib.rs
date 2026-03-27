@@ -8,7 +8,8 @@ pub use model::{
     AnalysisError, AnalysisResult, AnalyzedBody, BodyId, CaptureSlot, ClosureEnvLayout, ExprId,
     ExtractedNode, ExtractedNodeReason, FieldKey, FrameLayout, KernelEntrypoint, KernelId,
     KernelParam, KernelRegion, LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode,
-    RuntimeNodeId, SharedKeyedNode, SourceExpr, SourceLocalCalleeOrigin, UseSiteId,
+    RuntimeNodeId, SharedKeyedNode, SourceExpr, SourceLocalCallEdge, SourceLocalCalleeOrigin,
+    UseSiteId,
 };
 
 mod bridge;

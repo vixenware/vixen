@@ -91,6 +91,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     );
     seed_callee_targets(&mut bodies, bridge);
     seed_source_local_callee_origins(&mut bodies, bridge);
+    seed_source_local_call_edges(&mut bodies);
     seed_use_observations(&mut bodies, bridge);
     let closure_layouts = seed_closure_layouts(bridge);
 
@@ -136,6 +137,29 @@ fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &Single
         for (expr, origin) in seeds {
             body.callee_local_origins.insert(expr, origin);
         }
+    }
+}
+
+fn seed_source_local_call_edges(bodies: &mut [AnalyzedBody]) {
+    for body in bodies {
+        let mut edges = body
+            .callee_local_origins
+            .iter()
+            .map(|(call_expr, callee)| crate::SourceLocalCallEdge {
+                call_expr: *call_expr,
+                callee: *callee,
+            })
+            .collect::<Vec<_>>();
+        edges.sort_by_key(|edge| {
+            let callee_rank = match edge.callee {
+                crate::SourceLocalCalleeOrigin::TopLevelBody(body) => (0u8, body.0, 0u32),
+                crate::SourceLocalCalleeOrigin::LocalDef(DefId::Source { source, local }) => {
+                    (1, source.0, local)
+                }
+            };
+            (edge.call_expr.0, callee_rank)
+        });
+        body.source_local_call_edges = edges;
     }
 }
 
@@ -443,6 +467,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
         use_observations: BTreeMap::new(),
         callee_targets: BTreeMap::new(),
         callee_local_origins: BTreeMap::new(),
+        source_local_call_edges: vec![],
         extracted_nodes: vec![],
         kernel_entries: vec![KernelEntrypoint {
             body: body.id,

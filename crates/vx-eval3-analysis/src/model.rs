@@ -159,6 +159,7 @@ pub struct AnalyzedBody {
     pub use_observations: BTreeMap<UseSiteId, Observation>,
     pub callee_targets: BTreeMap<ExprId, DefId>,
     pub callee_local_origins: BTreeMap<ExprId, SourceLocalCalleeOrigin>,
+    pub source_local_call_edges: Vec<SourceLocalCallEdge>,
     pub extracted_nodes: Vec<ExtractedNode>,
     pub kernel_entries: Vec<KernelEntrypoint>,
 }
@@ -167,6 +168,12 @@ pub struct AnalyzedBody {
 pub enum SourceLocalCalleeOrigin {
     TopLevelBody(BodyId),
     LocalDef(DefId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocalCallEdge {
+    pub call_expr: ExprId,
+    pub callee: SourceLocalCalleeOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

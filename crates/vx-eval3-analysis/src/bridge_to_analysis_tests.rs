@@ -598,6 +598,79 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_indexes_direct_named_source_local_call_edge() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  plus_one(n)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+
+    assert!(
+        main_body
+            .source_local_call_edges
+            .iter()
+            .any(|edge| { edge.callee == crate::SourceLocalCalleeOrigin::TopLevelBody(BodyId(0)) })
+    );
+}
+
+#[test]
+fn bridge_to_analysis_indexes_local_callable_source_local_call_edge_when_recoverable() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let expected_local_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == crate::BridgeCallSiteKind::LocalCallableBinding)
+        .and_then(|site| site.target)
+        .expect("local callable call site should have a resolved target");
+    let analysis = build_minimal_analysis(&bridge);
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+
+    assert!(main_body.source_local_call_edges.iter().any(|edge| {
+        edge.callee == crate::SourceLocalCalleeOrigin::LocalDef(expected_local_target)
+    }));
+}
+
+#[test]
+fn bridge_to_analysis_source_local_call_edges_are_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  plus_one(n) + add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[1].source_local_call_edges, analysis_b.bodies[1].source_local_call_edges,
+        "source-local call edges should be deterministic across repeated runs"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (
