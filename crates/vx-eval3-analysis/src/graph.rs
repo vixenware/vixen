@@ -229,13 +229,38 @@ impl AnalysisGraph {
         );
         out.push_str("  .raw-json-pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.35; background: #0b1420; color: #c7d6e6; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; }\n");
         out.push_str("  .legend { margin: 8px 0 0 0; font-size: 12px; color: #8ba5c1; }\n");
+        out.push_str("  .graph-legend { margin: 10px; border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; font-size: 12px; color: #c7d6e6; }\n");
+        out.push_str(
+            "  .graph-legend h3 { margin: 0 0 8px 0; font-size: 13px; color: #dbe7f3; }\n",
+        );
+        out.push_str(
+            "  .legend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }\n",
+        );
+        out.push_str(
+            "  .legend-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }\n",
+        );
+        out.push_str("  .legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #2f435a; }\n");
+        out.push_str("  .legend-line { width: 24px; height: 0; border-top: 2px solid #5f7d9a; border-radius: 2px; }\n");
         out.push_str(
             "  .node rect { fill: #162233; stroke: #4f6b87; stroke-width: 1.2; rx: 8; ry: 8; }\n",
         );
         out.push_str("  .node text { font-size: 12px; fill: #dbe7f3; pointer-events: none; }\n");
         out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
         out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; }\n");
+        out.push_str("  .node-kind-body rect { fill: #1b293c; stroke: #7dd3fc; }\n");
+        out.push_str("  .node-kind-kernel rect { fill: #222636; stroke: #f9e2af; }\n");
+        out.push_str("  .node-kind-runtime_boundary rect { fill: #2a2236; stroke: #f38ba8; }\n");
+        out.push_str("  .node-kind-closure_layout rect { fill: #1f2f2a; stroke: #a6e3a1; }\n");
+        out.push_str("  .edge-kind-body_to_kernel { stroke: #f9e2af; }\n");
+        out.push_str("  .edge-kind-body_to_runtime_boundary { stroke: #f38ba8; }\n");
+        out.push_str(
+            "  .edge-kind-runtime_value_dependency { stroke: #fab387; stroke-dasharray: 6 4; }\n",
+        );
+        out.push_str("  .edge-kind-runtime_boundary_to_closure_layout { stroke: #a6e3a1; stroke-dasharray: 3 3; }\n");
+        out.push_str("  .edge-kind-call_to_body { stroke: #89b4fa; }\n");
+        out.push_str("  .edge-kind-call_to_closure_layout { stroke: #94e2d5; }\n");
         out.push_str("  .dimmed { opacity: 0.18; }\n");
+        out.push_str("  .arb-snippet { white-space: pre-wrap; word-break: break-word; }\n");
         out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
         out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
         out.push_str("  .arb-snippet .arb-string { color: #a6e3a1; }\n");
@@ -260,7 +285,7 @@ impl AnalysisGraph {
         );
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
-        out.push_str("<div class=\"canvas-wrap\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div>\n");
+        out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div>\n");
         out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
@@ -378,7 +403,7 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => !["source_path", "source_snippet", "span_source_id", "span_start", "span_end"].includes(key))
+    .filter(([key]) => !["source_path", "source_snippet", "source_snippet_highlighted_html", "span_source_id", "span_start", "span_end"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => detailRow(key, val))
     .join("");
@@ -453,6 +478,7 @@ for (const edge of graph.edges) {
     class: "edge",
     "marker-end": "url(#arrow)"
   });
+  line.classList.add(`edge-kind-${edge.kind}`);
   const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
   if (edgeSourceId) line.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: line, sourceId: edgeSourceId });
@@ -471,6 +497,7 @@ for (const node of graph.nodes) {
   const p = positions.get(node.id);
   if (!p) continue;
   const g = el("g", { class: "node", transform: `translate(${p.x - 98}, ${p.y})` });
+  g.classList.add(`node-kind-${node.kind}`);
   const nodeSourceId = String(node?.metadata?.span_source_id ?? "");
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
