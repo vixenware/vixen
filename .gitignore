@@ -32,3 +32,6 @@ zoo/libpng-src/
 # vx build system cache (auto-added by vx)
 /.vx
 .ship/
+
+# local manager/executor work files
+/work
