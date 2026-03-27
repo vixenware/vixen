@@ -1,4 +1,4 @@
-# eval3 slice 0 lazy core
+# lazy core
 
 Status: planning draft.
 
@@ -7,15 +7,15 @@ This note defines the internal lazy core used by slice 0.
 It sits between:
 
 - the semantic planning notes in
-  [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md),
-  [`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md),
+  [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md),
+  [`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md),
   and
-  [`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md)
+  [`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md)
 - and the Kajit-facing lowering plan in
-  [`slice0-lowering.md`](/Users/amos/bearcove/vixen/eval3/slice0-lowering.md)
+  [`slice0-lowering.md`](/Users/amos/bearcove/vixen/docs/design/compiler-pipeline.md)
 
 Concrete IR sketch:
-[`slice0-lazy-core-ir.md`](/Users/amos/bearcove/vixen/eval3/slice0-lazy-core-ir.md).
+[`slice0-lazy-core-ir.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core-ir.md).
 
 Its job is simple:
 
@@ -125,7 +125,7 @@ explicit and typed.
 ### Observations
 
 The core should carry explicit `Obs<T>` values as defined in
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md).
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md).
 
 At minimum:
 
@@ -328,7 +328,7 @@ transformation rule.
 
 ### Program A
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L299):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L299):
 
 ```vx
 fn bomb() -> U64 = trap("bomb")
@@ -354,7 +354,7 @@ Notably absent:
 
 ### Program C
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L332):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L332):
 
 ```vx
 fn plus_one(n: U64) -> U64 {
@@ -402,7 +402,7 @@ Those decisions belong in the lazy core already.
 ## Relationship to the oracle
 
 The oracle in
-[`slice0-oracle.md`](/Users/amos/bearcove/vixen/eval3/slice0-oracle.md)
+[`slice0-oracle.md`](/Users/amos/bearcove/vixen/docs/design/reference-harness.md)
 should validate the same semantic model as the lazy core.
 
 The easiest long-term shape is:

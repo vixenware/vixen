@@ -1,9 +1,9 @@
-# eval3 slice 0 ABI
+# runtime ABI
 
 Status: planning draft.
 
 This note is the ABI/object-layout companion to
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md).
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md).
 
 Its job is not to settle every future `eval3` representation.
 Its job is to make slice 0 concrete enough that "typed lazy refs" stops being a
@@ -135,7 +135,7 @@ No async protocol is involved.
 ## Observations at the ABI boundary
 
 Slice 0 should use the observation model from
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L106), but with one
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L106), but with one
 important practical normalization.
 
 ### Scalars
@@ -404,7 +404,7 @@ The semantic rule is the important part:
 
 ### Program A: lazy field selection
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L299):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L299):
 
 - `pair` is a product object with two field refs
 - field `0` may be an immediate ready scalar ref or a tiny thunk
@@ -413,7 +413,7 @@ From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L299):
 
 ### Program B: closure capture
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L316):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L316):
 
 - `add_n` is a closure object
 - its environment stores `n` as `Ref<U64>`
@@ -422,7 +422,7 @@ From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L316):
 
 ### Program C: local sharing
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L332):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L332):
 
 - `x` is one thunk for `plus_one(n)`
 - the first use of `x` enters that thunk and updates it
@@ -430,7 +430,7 @@ From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L332):
 
 ### Program D: higher-order local helper
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L350):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L350):
 
 - `apply` receives `f` as a typed callable value
 - `x` arrives as `Ref<U64>`

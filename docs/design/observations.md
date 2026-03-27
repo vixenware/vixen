@@ -1,10 +1,10 @@
-# eval3 slice 0 observations
+# observations
 
 Status: planning draft.
 
 This note is the observation-lattice companion to
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md) and
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md).
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md) and
+[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md).
 
 Its purpose is simple:
 
@@ -233,7 +233,7 @@ For slice 0:
   can themselves satisfy the requested child observations
 
 This matches the ABI normalization in
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md#L135):
+[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md#L135):
 
 - the shell may exist without forcing every field
 - field refs are entered later under their own child observations
@@ -367,7 +367,7 @@ shared thunk instead of treating the uses as unrelated recomputations.
 
 ### Program A
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L299):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L299):
 
 ```vx
 fn bomb() -> U64 = trap("bomb")
@@ -390,7 +390,7 @@ So `bomb()` remains under `NoObs`.
 
 ### Program B
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L316):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L316):
 
 ```vx
 fn main(n: U64) -> U64 {
@@ -412,7 +412,7 @@ So only the second call result is entered.
 
 ### Program C
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L332):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L332):
 
 ```vx
 fn plus_one(n: U64) -> U64 {
@@ -435,7 +435,7 @@ One shared local thunk can satisfy that once and be reused.
 
 ### Program D
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L350):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L350):
 
 ```vx
 fn apply(f: Fn(U64) -> U64, x: U64) -> U64 {

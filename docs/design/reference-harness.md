@@ -1,13 +1,18 @@
-# eval3 slice 0 oracle
+# reference harness
 
 Status: planning draft.
 
 This note describes the reference oracle for
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md),
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md),
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md),
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md),
+[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md),
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md),
 and
-[`slice0-lowering.md`](/Users/amos/bearcove/vixen/eval3/slice0-lowering.md).
+[`slice0-lowering.md`](/Users/amos/bearcove/vixen/docs/design/compiler-pipeline.md).
+
+In implementation discussion, "reference harness" is the clearer name.
+
+Whatever we call it, this component is for semantic result + trace checks.
+It is not the frontend boundary for lowering.
 
 The oracle is not `eval2` in miniature.
 
@@ -38,6 +43,7 @@ The oracle should not be:
 - built on snapshot/delta owner/worker machinery
 - used as a performance baseline
 - treated as the final runtime object model
+- treated as the compiler input language for `eval3` lowering
 
 It is a correctness model for one tiny semantic slice.
 
@@ -62,11 +68,15 @@ The oracle should be executable Rust code, but intentionally simple.
 
 The right shape is probably:
 
-- one small Rust module or crate under `eval3/`
+- one small Rust module or crate dedicated to reference-harness execution
 - handwritten AST for the slice-0 subset
 - handwritten typed observation model
 - handwritten node store / environment store
 - deterministic trace output for tests
+
+That is acceptable only as reference-harness machinery.
+The real `eval3` compiler path should still start from the actual Vixen
+frontend.
 
 It is fine if the oracle internally uses Rust enums and maps.
 
@@ -78,7 +88,7 @@ Its job is to model semantics clearly, not prove low-level layout choices.
 ## Semantic subset
 
 The oracle should implement exactly the subset frozen in
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L47):
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L47):
 
 - `U64`
 - `Bool`
@@ -160,7 +170,7 @@ Each thunk node should record at least:
 ### Observations
 
 Use the exact slice-0 observation model from
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md):
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md):
 
 - `NoObs`
 - `NeedValue`
@@ -229,7 +239,7 @@ The trace should make this visible:
 ## Success criteria for the oracle itself
 
 The oracle is useful if it can run the four canonical slice-0 programs from
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L295) and report:
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L295) and report:
 
 ### Program A
 

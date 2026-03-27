@@ -1,6 +1,9 @@
-## eval3
+# execution model
 
 Status: foundation draft.
+
+Current implementation status lives in
+[`implementation-plan.md`](/Users/amos/bearcove/vixen/docs/design/implementation-plan.md).
 
 `eval3` is not "eval2, but faster".
 
@@ -22,6 +25,29 @@ mostly as native code without lying about what the language is.
 
 This README is a foundation note. It is not a full design, but it is meant to
 pin down the shape of the machine before implementation runs away again.
+
+## Document map
+
+- [`implementation-plan.md`](/Users/amos/bearcove/vixen/docs/design/implementation-plan.md):
+  current implementation order, code-status note, and next-task order
+- [`frontend-bridge.md`](/Users/amos/bearcove/vixen/docs/design/frontend-bridge.md):
+  the intended input seam from the real Vixen frontend into `eval3` analysis
+- [`analysis-plan.md`](/Users/amos/bearcove/vixen/docs/design/analysis-plan.md): the
+  missing centerpiece between frontend input and lowering
+- [`canonical-examples.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md):
+  the frozen slice-0 semantic subset and the four canonical examples
+- [`observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md):
+  typed observation model for slice 0
+- [`runtime-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md): object and
+  calling-model direction for refs, thunks, closures, and products
+- [`compiler-pipeline.md`](/Users/amos/bearcove/vixen/docs/design/compiler-pipeline.md):
+  required compiler pipeline and analysis-before-lowering direction
+- [`lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md):
+  role of the internal lazy core layer
+- [`lazy-core-ir.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core-ir.md):
+  a concrete slice-0 lazy-core IR sketch
+- [`reference-harness.md`](/Users/amos/bearcove/vixen/docs/design/reference-harness.md):
+  reference-harness note for result + trace checks on the canonical examples
 
 ## What eval2 taught
 

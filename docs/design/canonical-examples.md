@@ -1,17 +1,17 @@
-# eval3 slice 0
+# canonical examples
 
 Status: planning draft.
 
 This note turns "slice 0" from
-[`eval3/README.md`](/Users/amos/bearcove/vixen/eval3/README.md) into a concrete
+[`execution-model.md`](/Users/amos/bearcove/vixen/docs/design/execution-model.md) into a concrete
 proof target.
 
 Companion note:
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md),
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md),
-[`slice0-lowering.md`](/Users/amos/bearcove/vixen/eval3/slice0-lowering.md),
-[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/eval3/slice0-lazy-core.md),
-[`slice0-oracle.md`](/Users/amos/bearcove/vixen/eval3/slice0-oracle.md).
+[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md),
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md),
+[`slice0-lowering.md`](/Users/amos/bearcove/vixen/docs/design/compiler-pipeline.md),
+[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md),
+[`slice0-oracle.md`](/Users/amos/bearcove/vixen/docs/design/reference-harness.md).
 
 Slice 0 is intentionally below current zoo build/solver semantics.
 

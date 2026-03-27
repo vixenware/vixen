@@ -1,9 +1,9 @@
-# eval3 slice 0 lazy core IR
+# lazy core IR
 
 Status: planning draft.
 
 This note makes
-[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/eval3/slice0-lazy-core.md)
+[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md)
 concrete.
 
 The previous note explained what the lazy core must do.

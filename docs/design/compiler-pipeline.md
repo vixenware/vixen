@@ -1,12 +1,12 @@
-# eval3 slice 0 lowering
+# compiler pipeline
 
 Status: planning draft.
 
 This note is the lowering-plan companion to
-[`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md),
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md), and
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md),
-[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/eval3/slice0-lazy-core.md).
+[`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md),
+[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md), and
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md),
+[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md).
 
 Its purpose is:
 
@@ -397,7 +397,7 @@ When one binding is used from multiple sites:
 - update and reuse it
 
 This is where the planning result from
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md)
+[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md)
 feeds directly into code generation.
 
 ## Worked lowering sketches
@@ -406,7 +406,7 @@ The point here is not final syntax. It is the execution shape.
 
 ### Program A
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L299):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L299):
 
 ```vx
 fn bomb() -> U64 = trap("bomb")
@@ -433,7 +433,7 @@ Lowered shape:
 
 ### Program C
 
-From [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md#L332):
+From [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md#L332):
 
 ```vx
 fn plus_one(n: U64) -> U64 {
@@ -480,11 +480,11 @@ to a lazy execution model.
 This note completes the planning only when it is paired with:
 
 1. the semantic subset in
-   [`slice0.md`](/Users/amos/bearcove/vixen/eval3/slice0.md)
+   [`slice0.md`](/Users/amos/bearcove/vixen/docs/design/canonical-examples.md)
 2. the object/ABI note in
-   [`slice0-abi.md`](/Users/amos/bearcove/vixen/eval3/slice0-abi.md)
+   [`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md)
 3. the observation note in
-   [`slice0-observations.md`](/Users/amos/bearcove/vixen/eval3/slice0-observations.md)
+   [`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md)
 
 After that, the remaining work is implementation planning, not conceptual
 guesswork:
