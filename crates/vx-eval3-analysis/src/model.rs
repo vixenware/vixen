@@ -179,6 +179,12 @@ pub struct SourceLocalCallEdge {
     pub callee: SourceLocalCalleeOrigin,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ResultDemandCallee {
+    TopLevelBody(BodyId),
+    ClosureLayout(LayoutId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnalysisResult {
     pub bodies: Vec<AnalyzedBody>,
@@ -186,6 +192,7 @@ pub struct AnalysisResult {
     pub runtime_nodes: Vec<RuntimeNode>,
     pub closure_layouts: Vec<ClosureEnvLayout>,
     pub frame_layouts: Vec<FrameLayout>,
+    pub propagated_result_demands: BTreeMap<ResultDemandCallee, Observation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

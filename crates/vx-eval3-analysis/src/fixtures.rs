@@ -62,6 +62,7 @@ pub fn canonical_program_a_fixture() -> AnalysisResult {
         }],
         closure_layouts: vec![],
         frame_layouts: vec![],
+        propagated_result_demands: BTreeMap::new(),
     }
 }
 
@@ -158,6 +159,7 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
             }],
         }],
         frame_layouts: vec![],
+        propagated_result_demands: BTreeMap::new(),
     }
 }
 
@@ -211,6 +213,7 @@ pub fn canonical_program_c_fixture() -> AnalysisResult {
         }],
         closure_layouts: vec![],
         frame_layouts: vec![],
+        propagated_result_demands: BTreeMap::new(),
     }
 }
 
@@ -330,6 +333,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
             }],
         }],
         frame_layouts: vec![],
+        propagated_result_demands: BTreeMap::new(),
     }
 }
 
@@ -385,5 +389,6 @@ pub fn build_shaped_exec_fixture() -> AnalysisResult {
         }],
         closure_layouts: vec![],
         frame_layouts: vec![],
+        propagated_result_demands: BTreeMap::new(),
     }
 }
