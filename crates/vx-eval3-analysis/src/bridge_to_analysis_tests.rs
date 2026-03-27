@@ -860,6 +860,89 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_propagates_use_observation_to_direct_named_callee_body() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    assert_eq!(
+        analysis
+            .propagated_use_demands
+            .get(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
+        Some(&Observation::NeedValue),
+        "direct named local call should seed one-step callee use-observation demand"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_propagates_use_observation_to_recovered_local_closure_layout() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let linked_layout = analysis.bodies[0]
+        .callee_closure_layouts
+        .values()
+        .next()
+        .copied()
+        .expect("recoverable closure call should have a layout link");
+
+    assert_eq!(
+        analysis
+            .propagated_use_demands
+            .get(&crate::ResultDemandCallee::ClosureLayout(linked_layout)),
+        Some(&Observation::NeedValue),
+        "recovered local closure call should seed one-step closure-layout use-observation demand"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_unused_helper_has_no_propagated_use_observation_pressure() {
+    let src = r#"
+fn helper(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( n + 1 )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    assert!(
+        !analysis
+            .propagated_use_demands
+            .contains_key(&crate::ResultDemandCallee::TopLevelBody(BodyId(0))),
+        "unused helper should not receive propagated one-step use-observation pressure"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_first_use_observation_propagation_step_is_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  plus_one(n) + add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.propagated_use_demands,
+        analysis_b.propagated_use_demands
+    );
+}
+
+#[test]
 fn bridge_to_analysis_leaves_unused_helper_body_nondemanded() {
     let src = r#"
 fn helper(n: U64) -> U64 ( n + 1 )

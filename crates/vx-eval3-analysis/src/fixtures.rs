@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     AnalysisResult, AnalyzedBody, BodyId, CaptureSlot, ClosureEnvLayout, ExprId, ExtractedNode,
     ExtractedNodeReason, FieldKey, KernelEntrypoint, KernelId, KernelParam, KernelRegion, LayoutId,
-    Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SourceExpr, UseSiteId,
+    Observation, ResultDemandCallee, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SourceExpr,
+    UseSiteId,
 };
 
 pub fn canonical_program_a_fixture() -> AnalysisResult {
@@ -63,6 +64,7 @@ pub fn canonical_program_a_fixture() -> AnalysisResult {
         closure_layouts: vec![],
         frame_layouts: vec![],
         propagated_result_demands: BTreeMap::new(),
+        propagated_use_demands: BTreeMap::new(),
     }
 }
 
@@ -160,6 +162,10 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
         }],
         frame_layouts: vec![],
         propagated_result_demands: BTreeMap::new(),
+        propagated_use_demands: BTreeMap::from([(
+            ResultDemandCallee::ClosureLayout(LayoutId(10)),
+            Observation::NeedValue,
+        )]),
     }
 }
 
@@ -214,6 +220,7 @@ pub fn canonical_program_c_fixture() -> AnalysisResult {
         closure_layouts: vec![],
         frame_layouts: vec![],
         propagated_result_demands: BTreeMap::new(),
+        propagated_use_demands: BTreeMap::new(),
     }
 }
 
@@ -334,6 +341,10 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
         }],
         frame_layouts: vec![],
         propagated_result_demands: BTreeMap::new(),
+        propagated_use_demands: BTreeMap::from([(
+            ResultDemandCallee::TopLevelBody(apply_body),
+            Observation::NeedValue,
+        )]),
     }
 }
 
@@ -390,5 +401,6 @@ pub fn build_shaped_exec_fixture() -> AnalysisResult {
         closure_layouts: vec![],
         frame_layouts: vec![],
         propagated_result_demands: BTreeMap::new(),
+        propagated_use_demands: BTreeMap::new(),
     }
 }

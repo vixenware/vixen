@@ -97,6 +97,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     let propagated_result_demands = seed_first_result_propagation_step(&bodies);
     seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
     seed_kernel_demands(&mut bodies, &mut kernels);
+    let propagated_use_demands = seed_first_use_observation_propagation_step(&bodies);
     seed_use_observations(&mut bodies, bridge);
 
     AnalysisResult {
@@ -106,6 +107,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         closure_layouts,
         frame_layouts: vec![],
         propagated_result_demands,
+        propagated_use_demands,
     }
 }
 
@@ -161,6 +163,41 @@ fn seed_kernel_demands(bodies: &mut [AnalyzedBody], kernels: &mut [KernelRegion]
             kernel.result_obs = body.result_observation.clone();
         }
     }
+}
+
+fn seed_first_use_observation_propagation_step(
+    bodies: &[AnalyzedBody],
+) -> BTreeMap<crate::ResultDemandCallee, Observation> {
+    let mut demands = BTreeMap::new();
+
+    for body in bodies {
+        if body.result_observation == Observation::NoObs {
+            continue;
+        }
+        for edge in &body.source_local_call_edges {
+            match edge.callee {
+                crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
+                    demands.insert(
+                        crate::ResultDemandCallee::TopLevelBody(callee_body),
+                        Observation::NeedValue,
+                    );
+                }
+                crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
+                    let Some(layout_id) = body.callee_closure_layouts.get(&edge.call_expr).copied()
+                    else {
+                        continue;
+                    };
+                    demands.insert(
+                        crate::ResultDemandCallee::ClosureLayout(layout_id),
+                        Observation::NeedValue,
+                    );
+                }
+                crate::SourceLocalCalleeOrigin::LocalDef(_) => {}
+            }
+        }
+    }
+
+    demands
 }
 
 fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {

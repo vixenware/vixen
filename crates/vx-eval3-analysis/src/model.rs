@@ -193,6 +193,7 @@ pub struct AnalysisResult {
     pub closure_layouts: Vec<ClosureEnvLayout>,
     pub frame_layouts: Vec<FrameLayout>,
     pub propagated_result_demands: BTreeMap<ResultDemandCallee, Observation>,
+    pub propagated_use_demands: BTreeMap<ResultDemandCallee, Observation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
