@@ -25,6 +25,12 @@ mod boundary;
 mod bridge_to_analysis;
 pub use bridge_to_analysis::build_minimal_analysis;
 
+mod graph;
+pub use graph::{
+    AnalysisGraph, GraphEdge, GraphEdgeKind, GraphNode, GraphNodeKind, graph_from_file,
+    graph_from_source_text, project_analysis_graph,
+};
+
 #[cfg(test)]
 mod fixtures;
 
@@ -36,3 +42,6 @@ mod bridge_tests;
 
 #[cfg(test)]
 mod bridge_to_analysis_tests;
+
+#[cfg(test)]
+mod graph_tests;
