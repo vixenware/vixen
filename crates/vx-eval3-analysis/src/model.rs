@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use vx_resolve::DefId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BodyId(pub u32);
 
@@ -155,6 +157,7 @@ pub struct AnalyzedBody {
     pub id: BodyId,
     pub result_observation: Observation,
     pub use_observations: BTreeMap<UseSiteId, Observation>,
+    pub callee_targets: BTreeMap<ExprId, DefId>,
     pub extracted_nodes: Vec<ExtractedNode>,
     pub kernel_entries: Vec<KernelEntrypoint>,
 }

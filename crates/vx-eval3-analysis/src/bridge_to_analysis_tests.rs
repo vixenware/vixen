@@ -437,6 +437,90 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_carries_direct_call_target_into_analysis_body() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  plus_one(n)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let expected_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == crate::BridgeCallSiteKind::DirectNamedFunction)
+        .and_then(|site| site.target)
+        .expect("bridge direct call site should carry a target");
+
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+    assert!(
+        main_body
+            .callee_targets
+            .values()
+            .any(|target| *target == expected_target),
+        "direct call target should survive into analysis output"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_carries_local_callable_target_into_analysis_body() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let expected_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == crate::BridgeCallSiteKind::LocalCallableBinding)
+        .and_then(|site| site.target)
+        .expect("bridge local callable call site should carry a target");
+
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+    assert!(
+        main_body
+            .callee_targets
+            .values()
+            .any(|target| *target == expected_target),
+        "local callable target should survive into analysis output"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_callee_target_links_are_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  plus_one(n) + add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[1].callee_targets, analysis_b.bodies[1].callee_targets,
+        "callee target links should be deterministic across repeated runs"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (

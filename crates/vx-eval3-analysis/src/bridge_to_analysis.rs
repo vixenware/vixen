@@ -89,6 +89,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
+    seed_callee_targets(&mut bodies, bridge);
     seed_use_observations(&mut bodies, bridge);
     let closure_layouts = seed_closure_layouts(bridge);
 
@@ -280,6 +281,41 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
     }
 }
 
+fn seed_callee_targets(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {
+    let mut seeds = bridge
+        .call_sites
+        .iter()
+        .filter_map(|site| {
+            let target = site.target?;
+            match site.kind {
+                crate::BridgeCallSiteKind::DirectNamedFunction
+                | crate::BridgeCallSiteKind::LocalCallableBinding => {
+                    Some((site.body, site.expr, target))
+                }
+                crate::BridgeCallSiteKind::StdlibBoundary(_) | crate::BridgeCallSiteKind::Other => {
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    seeds.sort_by_key(|(body, expr, target)| {
+        let (source, local) = match target {
+            DefId::Source { source, local } => (source.0, *local),
+        };
+        (body.0, expr.0, source, local)
+    });
+    seeds.dedup();
+
+    for body in bodies {
+        for (_, expr, target) in seeds
+            .iter()
+            .filter(|(seed_body, _, _)| *seed_body == body.id)
+        {
+            body.callee_targets.insert(*expr, *target);
+        }
+    }
+}
+
 fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
     let mut closure_exprs = bridge
         .exprs
@@ -368,6 +404,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
         id: body.id,
         result_observation: Observation::NeedValue,
         use_observations: BTreeMap::new(),
+        callee_targets: BTreeMap::new(),
         extracted_nodes: vec![],
         kernel_entries: vec![KernelEntrypoint {
             body: body.id,
