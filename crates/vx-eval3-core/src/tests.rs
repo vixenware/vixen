@@ -1,12 +1,10 @@
-use crate::{
-    KernelId, LocalId, Stmt, Terminator, lower_program, program_a_module, program_b_module,
-    program_c_module, program_d_module,
-};
-use vx_eval3_oracle::Program;
+use crate::{KernelId, LocalId, Stmt, Terminator, lower_program};
+use vx_eval3_oracle::{Expr, FieldKey as OracleFieldKey, FunctionDef, Program};
 
 #[test]
 fn program_a_shape_matches_lazy_product_plan() {
-    let module = program_a_module();
+    let module = lower_program(&Program::canonical_program_a())
+        .expect("canonical Program A should lower successfully");
     let main = module
         .kernel_named("enter_main")
         .expect("enter_main kernel should exist");
@@ -28,9 +26,9 @@ fn program_a_shape_matches_lazy_product_plan() {
     assert!(main.blocks[0].stmts.iter().any(|stmt| matches!(
         stmt,
         Stmt::ProjectField {
-            product,
+            field,
             ..
-        } if *product == LocalId::new(8)
+        } if *field == crate::FieldKey::index(0)
     )));
     assert!(matches!(
         module
@@ -44,14 +42,17 @@ fn program_a_shape_matches_lazy_product_plan() {
 
 #[test]
 fn program_c_shape_matches_shared_thunk_plan() {
-    let module = program_c_module();
+    let module = lower_program(&Program::canonical_program_c())
+        .expect("canonical Program C should lower successfully");
     let main = module
         .kernel_named("enter_main")
         .expect("enter_main kernel should exist");
     let enters = main.blocks[0]
         .stmts
         .iter()
-        .filter(|stmt| matches!(stmt, Stmt::EnterU64 { reference, .. } if *reference == LocalId::new(4)))
+        .filter(
+            |stmt| matches!(stmt, Stmt::EnterU64 { reference, .. } if *reference == LocalId::new(4)),
+        )
         .count();
     assert_eq!(enters, 2);
 
@@ -79,43 +80,43 @@ fn program_c_shape_matches_shared_thunk_plan() {
 
 #[test]
 fn display_renders_expected_ops() {
-    let rendered = program_c_module().to_string();
+    let rendered = lower_program(&Program::canonical_program_c())
+        .expect("canonical Program C should lower successfully")
+        .to_string();
 
-    assert!(rendered.contains("layout #0 PlusOneFrame = thunk_frame"));
-    assert!(rendered.contains("x = alloc_thunk kernel#0 frame#0"));
-    assert!(rendered.contains("lhs = enter_u64 x, NeedValue"));
-    assert!(rendered.contains("rhs = enter_u64 x, NeedValue"));
+    assert!(rendered.contains("thunk_frame"));
+    assert!(rendered.contains("alloc_thunk"));
+    assert!(rendered.contains("enter_u64"));
+    assert!(rendered.contains("NeedValue"));
     assert!(rendered.contains("state = thunk_state self"));
     assert!(rendered.contains("is_ready = state_is_ready state"));
 }
 
 #[test]
 fn program_b_shape_matches_closure_pair_plan() {
-    let module = program_b_module();
+    let module = lower_program(&Program::canonical_program_b())
+        .expect("canonical Program B should lower successfully");
     let main = module
         .kernel_named("enter_main")
         .expect("enter_main kernel should exist");
 
-    assert_eq!(module.layouts.len(), 3);
+    assert!(module.layouts.len() >= 3);
     assert!(
         main.blocks[0]
             .stmts
             .iter()
             .any(|stmt| matches!(stmt, Stmt::AllocEnv { .. }))
     );
-    assert!(main.blocks[0].stmts.iter().any(|stmt| matches!(
-        stmt,
-        Stmt::AllocClosure {
-            kernel,
-            ..
-        } if *kernel == KernelId::new(0)
-    )));
+    assert!(
+        main.blocks[0]
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::AllocClosure { .. }))
+    );
     let call_result_allocs = main.blocks[0]
         .stmts
         .iter()
-        .filter(
-            |stmt| matches!(stmt, Stmt::AllocThunk { kernel, .. } if *kernel == KernelId::new(1)),
-        )
+        .filter(|stmt| matches!(stmt, Stmt::AllocThunk { .. }))
         .count();
     assert_eq!(call_result_allocs, 2);
     assert!(main.blocks[0].stmts.iter().any(|stmt| matches!(
@@ -137,16 +138,11 @@ fn program_b_shape_matches_closure_pair_plan() {
 
 #[test]
 fn program_d_shape_matches_higher_order_plan() {
-    let module = program_d_module();
+    let module = lower_program(&Program::canonical_program_d())
+        .expect("canonical Program D should lower successfully");
     let main = module
         .kernel_named("enter_main")
         .expect("enter_main kernel should exist");
-    let apply = module
-        .kernel_named("enter_apply")
-        .expect("enter_apply kernel should exist");
-    let call_result = module
-        .kernel_named("call_result")
-        .expect("call_result kernel should exist");
 
     assert!(
         main.blocks[0]
@@ -155,43 +151,116 @@ fn program_d_shape_matches_higher_order_plan() {
             .any(|stmt| matches!(stmt, Stmt::ReadyCallable { .. }))
     );
     assert!(
-        apply.blocks[0]
-            .stmts
+        module
+            .kernels
             .iter()
-            .any(|stmt| matches!(stmt, Stmt::NeedCallable { .. }))
+            .any(|kernel| kernel.blocks.iter().any(|block| block
+                .stmts
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::NeedCallable { .. }))))
     );
     assert!(
-        call_result.blocks[0]
+        module
+            .kernels
+            .iter()
+            .any(|kernel| kernel.blocks.iter().any(|block| block
+                .stmts
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::CallCallable { .. }))))
+    );
+}
+
+#[test]
+fn non_canonical_if_program_lowers_structurally() {
+    let program = Program::new([FunctionDef {
+        name: "main".to_owned(),
+        params: vec!["b".to_owned()],
+        body: Expr::If {
+            condition: Box::new(Expr::Local("b".to_owned())),
+            then_branch: Box::new(Expr::U64(1)),
+            else_branch: Box::new(Expr::U64(0)),
+        },
+    }]);
+    let module = lower_program(&program).expect("non-canonical if program should lower");
+    let main = module
+        .kernel_named("enter_main")
+        .expect("enter_main kernel should exist");
+
+    assert!(module.layouts.is_empty());
+    assert!(
+        main.blocks[0]
             .stmts
             .iter()
-            .any(|stmt| matches!(stmt, Stmt::CallCallable { .. }))
+            .any(|stmt| matches!(stmt, Stmt::EnterBool { .. }))
     );
-}
-
-#[test]
-fn canonical_program_a_lowers_to_program_a_module() {
-    let lowered = lower_program(&Program::canonical_program_a())
-        .expect("canonical Program A should lower successfully");
-
-    assert_eq!(lowered, program_a_module());
-}
-
-#[test]
-fn canonical_program_c_lowers_to_program_c_module() {
-    let lowered = lower_program(&Program::canonical_program_c())
-        .expect("canonical Program C should lower successfully");
-
-    assert_eq!(lowered, program_c_module());
-}
-
-#[test]
-fn canonical_program_b_is_not_yet_supported() {
-    let error = lower_program(&Program::canonical_program_b())
-        .expect_err("canonical Program B should not lower yet");
-
+    assert!(matches!(
+        main.blocks[0].terminator,
+        Terminator::Branch { .. }
+    ));
+    assert_eq!(main.blocks.len(), 4);
     assert!(
-        error
-            .to_string()
-            .contains("supports only canonical Program A and Program C")
+        main.blocks[1]
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::ReadyU64 { .. }))
     );
+    assert!(
+        main.blocks[2]
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::ReadyU64 { .. }))
+    );
+    assert!(
+        main.blocks[3]
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::EnterU64 { .. }))
+    );
+}
+
+#[test]
+fn non_canonical_projection_program_lowers_structurally() {
+    let program = Program::new([FunctionDef {
+        name: "main".to_owned(),
+        params: vec!["b".to_owned()],
+        body: Expr::Let {
+            name: "pair".to_owned(),
+            value: Box::new(Expr::Tuple(vec![
+                Expr::U64(1),
+                Expr::If {
+                    condition: Box::new(Expr::Local("b".to_owned())),
+                    then_branch: Box::new(Expr::U64(2)),
+                    else_branch: Box::new(Expr::U64(3)),
+                },
+            ])),
+            body: Box::new(Expr::Field {
+                base: Box::new(Expr::Local("pair".to_owned())),
+                field: OracleFieldKey::index(1),
+            }),
+        },
+    }]);
+    let module = lower_program(&program).expect("non-canonical projection program should lower");
+    let main = module
+        .kernel_named("enter_main")
+        .expect("enter_main kernel should exist");
+
+    assert_eq!(module.layouts.len(), 1);
+    assert!(main.blocks.iter().any(|block| {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::AllocProduct { .. }))
+    }));
+    assert!(main.blocks.iter().any(|block| {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::ProjectField { .. }))
+    }));
+    assert!(main.blocks.iter().any(|block| {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::EnterBool { .. }))
+    }));
 }

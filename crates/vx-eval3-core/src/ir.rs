@@ -36,7 +36,7 @@ impl BlockId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FieldKey {
     Index(usize),
     Name(String),
