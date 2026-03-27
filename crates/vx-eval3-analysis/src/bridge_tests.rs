@@ -1,4 +1,4 @@
-use crate::SingleSourceBridge;
+use crate::{BridgeLocalBindingKind, SingleSourceBridge};
 
 #[test]
 fn bridge_carries_single_source_shape_for_canonical_like_program() {
@@ -123,4 +123,92 @@ fn main() {
         bridge.type_errors.is_empty() || !bridge.cap_errors.is_empty(),
         "bridge should still carry cap diagnostics even when typing is otherwise acceptable"
     );
+}
+
+#[test]
+fn bridge_indexes_repeated_local_binding_use() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let x = n + 1;
+  x + x
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+
+    let x_binding = bridge
+        .local_bindings
+        .iter()
+        .find(|binding| binding.name == "x" && binding.kind == BridgeLocalBindingKind::Let)
+        .expect("x let binding should be indexed");
+    let x_uses = bridge
+        .local_uses
+        .iter()
+        .filter(|usage| usage.binding == x_binding.id)
+        .count();
+    assert_eq!(x_uses, 2, "x should have two indexed uses in x + x");
+}
+
+#[test]
+fn bridge_indexes_single_use_local_binding() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let x = n + 1;
+  x + 1
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+
+    let x_binding = bridge
+        .local_bindings
+        .iter()
+        .find(|binding| binding.name == "x" && binding.kind == BridgeLocalBindingKind::Let)
+        .expect("x let binding should be indexed");
+    let x_uses = bridge
+        .local_uses
+        .iter()
+        .filter(|usage| usage.binding == x_binding.id)
+        .count();
+    assert_eq!(x_uses, 1, "x should have one indexed use");
+}
+
+#[test]
+fn bridge_indexes_parameter_references_in_top_level_body() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  n + 1
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+
+    let n_binding = bridge
+        .local_bindings
+        .iter()
+        .find(|binding| binding.name == "n" && binding.kind == BridgeLocalBindingKind::Parameter)
+        .expect("parameter n should be indexed");
+    assert!(
+        bridge
+            .local_uses
+            .iter()
+            .any(|usage| usage.binding == n_binding.id),
+        "parameter n should have at least one indexed local use"
+    );
+}
+
+#[test]
+fn bridge_local_binding_use_index_is_deterministic() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let x = n + 1;
+  x + x
+)
+"#;
+
+    let bridge_a = SingleSourceBridge::from_source_text(src);
+    let bridge_b = SingleSourceBridge::from_source_text(src);
+
+    assert_eq!(bridge_a.local_bindings, bridge_b.local_bindings);
+    assert_eq!(bridge_a.local_uses, bridge_b.local_uses);
 }

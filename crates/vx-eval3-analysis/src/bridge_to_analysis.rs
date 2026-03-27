@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use vx_resolve::{DefId, DefKind, SourceSpan};
+use vx_resolve::{DefId, SourceSpan};
 
 use crate::{
-    AnalysisResult, AnalyzedBody, BodyId, BridgeBody, BridgeExpr, BridgeExprKind, CaptureSlot,
-    ClosureEnvLayout, ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion,
-    LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge,
-    SourceExpr, UseSiteId, boundary::classify_runtime_boundary,
+    AnalysisResult, AnalyzedBody, BodyId, BridgeBody, BridgeExpr, BridgeExprKind,
+    BridgeLocalBindingId, BridgeLocalBindingKind, CaptureSlot, ClosureEnvLayout, ExprId,
+    ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion, LayoutId,
+    Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge, SourceExpr,
+    UseSiteId, boundary::classify_runtime_boundary,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -166,53 +167,54 @@ fn seed_structural_sharing(
     next_runtime_node: &mut u32,
     bridge: &SingleSourceBridge,
 ) {
-    let mut refs_by_binding = HashMap::<(BodyId, DefId), Vec<SourceExpr>>::new();
+    let binding_by_id = bridge
+        .local_bindings
+        .iter()
+        .map(|binding| (binding.id, binding))
+        .collect::<HashMap<_, _>>();
 
-    for resolved in &bridge.resolved_refs {
-        let Some(target) = resolved.target.as_ref().ok() else {
+    let mut refs_by_binding = HashMap::<(BodyId, BridgeLocalBindingId), Vec<ExprId>>::new();
+    for usage in &bridge.local_uses {
+        let Some(binding) = binding_by_id.get(&usage.binding) else {
             continue;
         };
-        if target.kind != DefKind::Binding {
+        if binding.kind != BridgeLocalBindingKind::Let {
             continue;
         }
-        if target.source() != bridge.source_id {
-            continue;
-        }
-
-        let Some(source) = enclosing_expr_source(resolved.span, &bridge.exprs) else {
-            continue;
-        };
-
         refs_by_binding
-            .entry((source.body, target.id))
+            .entry((usage.body, usage.binding))
             .or_default()
-            .push(source);
+            .push(usage.expr);
     }
 
     let mut seeds = refs_by_binding
         .into_iter()
-        .filter_map(|((body, def_id), mut refs)| {
+        .filter_map(|((body, binding_id), mut refs)| {
             if refs.len() <= 1 {
                 return None;
             }
-            refs.sort_by_key(|source| source.expr.0);
+            refs.sort_by_key(|expr| expr.0);
             refs.dedup();
             if refs.len() <= 1 {
                 return None;
             }
-            let source = refs[0].clone();
-            Some((body, def_id, source))
+            let def_id = binding_by_id.get(&binding_id)?.def_id;
+            let source = SourceExpr {
+                body,
+                expr: refs[0],
+            };
+            Some((body, binding_id, def_id, source))
         })
         .collect::<Vec<_>>();
 
-    seeds.sort_by_key(|(body, def_id, source)| {
+    seeds.sort_by_key(|(body, _, def_id, source)| {
         let (def_source, local) = match *def_id {
             DefId::Source { source, local } => (source, local),
         };
         (body.0, def_source.0, local, source.expr.0)
     });
 
-    for (body_id, _, source) in seeds {
+    for (body_id, _, _, source) in seeds {
         let node_id = RuntimeNodeId(*next_runtime_node);
         *next_runtime_node += 1;
 

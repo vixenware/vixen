@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use vx_parser::{AstNode, Expr, Parsed, SourceFile, SyntaxError};
 use vx_resolve::{
-    Definition, ImportGraph, NameResolution, ResolveError, SourceFileRef, SourceId, SourceSpan,
-    TypeCheckResult, check_capabilities, collect_types_for_sources, resolve_in_program,
+    DefId, DefKind, Definition, ImportGraph, NameResolution, ResolveError, SourceFileRef, SourceId,
+    SourceSpan, TypeCheckResult, check_capabilities, collect_types_for_sources, resolve_in_program,
     stdlib_sources, type_check,
 };
 use vx_types::Ty;
@@ -70,6 +70,31 @@ pub struct BridgeBindingProduct {
     pub fields: Vec<FieldKey>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BridgeLocalBindingId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeLocalBindingKind {
+    Let,
+    Parameter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeLocalBinding {
+    pub id: BridgeLocalBindingId,
+    pub body: BodyId,
+    pub name: String,
+    pub kind: BridgeLocalBindingKind,
+    pub def_id: DefId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeLocalUse {
+    pub body: BodyId,
+    pub expr: ExprId,
+    pub binding: BridgeLocalBindingId,
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
@@ -80,6 +105,8 @@ pub struct SingleSourceBridge {
     pub products: Vec<BridgeProduct>,
     pub projections: Vec<BridgeProjection>,
     pub binding_products: Vec<BridgeBindingProduct>,
+    pub local_bindings: Vec<BridgeLocalBinding>,
+    pub local_uses: Vec<BridgeLocalUse>,
     pub expr_types: BTreeMap<ExprId, Ty>,
     pub parse_errors: Vec<SyntaxError>,
     pub resolve_errors: Vec<ResolveError>,
@@ -127,6 +154,8 @@ impl SingleSourceBridge {
         let products = collect_products(source_id, &file, &exprs);
         let projections = collect_projections(source_id, &file, &exprs);
         let binding_products = collect_binding_products(source_id, &file, &bodies);
+        let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
+        let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
         let expr_types = collect_expr_types(&exprs, &type_check);
 
         Self {
@@ -138,6 +167,8 @@ impl SingleSourceBridge {
             products,
             projections,
             binding_products,
+            local_bindings,
+            local_uses,
             expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
@@ -383,4 +414,112 @@ fn collect_expr_types(exprs: &[BridgeExpr], checked: &TypeCheckResult) -> BTreeM
         .iter()
         .filter_map(|(span, ty)| by_span.get(span).copied().map(|id| (id, ty.clone())))
         .collect()
+}
+
+fn enclosing_expr_source(span: SourceSpan, exprs: &[BridgeExpr]) -> Option<(BodyId, ExprId)> {
+    exprs
+        .iter()
+        .filter_map(|expr| {
+            let body = expr.body?;
+            if expr.span.range.contains_range(span.range) {
+                let len = u32::from(expr.span.range.end()) - u32::from(expr.span.range.start());
+                Some((len, body, expr.id))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(len, _, expr)| (*len, expr.0))
+        .map(|(_, body, expr)| (body, expr))
+}
+
+fn collect_local_bindings(
+    source_id: SourceId,
+    resolution: &NameResolution,
+    bodies: &[BridgeBody],
+) -> Vec<BridgeLocalBinding> {
+    let param_spans = bodies
+        .iter()
+        .flat_map(|body| body.params.iter().map(move |param| (body.id, param.span)))
+        .collect::<Vec<_>>();
+
+    let mut entries = resolution
+        .scopes
+        .all_definitions_in(source_id)
+        .into_iter()
+        .filter_map(|def| {
+            let body = body_for_range(def.name_span.range, bodies)?;
+            let kind = match def.kind {
+                DefKind::Binding => BridgeLocalBindingKind::Let,
+                DefKind::Parameter => {
+                    if !param_spans
+                        .iter()
+                        .any(|(param_body, span)| *param_body == body && *span == def.name_span)
+                    {
+                        return None;
+                    }
+                    BridgeLocalBindingKind::Parameter
+                }
+                _ => return None,
+            };
+
+            Some((body, def.name_span, def.name.clone(), kind, def.id))
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by_key(|(body, span, name, kind, _)| {
+        let kind_rank = match kind {
+            BridgeLocalBindingKind::Parameter => 0u8,
+            BridgeLocalBindingKind::Let => 1,
+        };
+        (
+            body.0,
+            u32::from(span.range.start()),
+            u32::from(span.range.end()),
+            kind_rank,
+            name.clone(),
+        )
+    });
+
+    entries
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, (body, _, name, kind, def_id))| BridgeLocalBinding {
+                id: BridgeLocalBindingId(index as u32),
+                body,
+                name,
+                kind,
+                def_id,
+            },
+        )
+        .collect()
+}
+
+fn collect_local_uses(
+    resolution: &NameResolution,
+    exprs: &[BridgeExpr],
+    local_bindings: &[BridgeLocalBinding],
+) -> Vec<BridgeLocalUse> {
+    let binding_by_def = local_bindings
+        .iter()
+        .map(|binding| (binding.def_id, binding.id))
+        .collect::<HashMap<_, _>>();
+
+    let mut uses = resolution
+        .refs
+        .iter()
+        .filter_map(|resolved| {
+            let target = resolved.target.as_ref().ok()?;
+            let binding = binding_by_def.get(&target.id).copied()?;
+            let (body, expr) = enclosing_expr_source(resolved.span, exprs)?;
+            Some(BridgeLocalUse {
+                body,
+                expr,
+                binding,
+            })
+        })
+        .collect::<Vec<_>>();
+    uses.sort_by_key(|usage| (usage.body.0, usage.expr.0, usage.binding.0));
+    uses.dedup();
+    uses
 }
