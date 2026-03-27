@@ -1,8 +1,11 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
-    GraphEdgeKind, GraphNodeKind, fixtures::canonical_program_b_fixture, graph_from_file,
-    project_analysis_graph,
+    GraphEdgeKind, GraphNodeKind, export_graph_html_from_file,
+    fixtures::canonical_program_b_fixture, graph_from_file, project_analysis_graph,
 };
 
 #[test]
@@ -40,6 +43,12 @@ fn canonical_fixture_graph_has_expected_nodes_edges_and_mermaid_text() {
     assert!(mermaid.contains("body_b1"));
     assert!(mermaid.contains("kernel_k10"));
     assert!(mermaid.contains("layout_l10"));
+
+    let json = graph.to_json_pretty();
+    assert!(json.contains("\"graph_type\": \"structural_analysis_graph\""));
+    assert!(json.contains("\"kind\": \"body\""));
+    assert!(json.contains("\"kind\": \"kernel\""));
+    assert!(json.contains("\"kind\": \"closure_layout\""));
 }
 
 #[test]
@@ -59,6 +68,19 @@ fn zoo_cc_version_graph_smoke() {
 
     let mermaid = graph.to_mermaid_flowchart();
     assert!(mermaid.starts_with("flowchart TD\n"));
+
+    let html = graph.to_standalone_html();
+    assert!(html.contains("Vixen Structural Analysis Graph"));
+    assert!(html.contains("structural analysis graph"));
+    assert!(html.contains("cc-version.vx"));
+
+    let output = unique_temp_path("cc-version-graph.html");
+    export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
+    let written =
+        std::fs::read_to_string(&output).expect("written html artifact should be readable");
+    assert!(written.contains("Vixen Structural Analysis Graph"));
+    assert!(written.contains("cc-version.vx"));
+    let _ = std::fs::remove_file(&output);
 }
 
 #[test]
@@ -72,4 +94,14 @@ fn zoo_graph_projection_and_export_are_deterministic_across_repeated_runs() {
         graph_a.to_mermaid_flowchart(),
         graph_b.to_mermaid_flowchart()
     );
+    assert_eq!(graph_a.to_json_pretty(), graph_b.to_json_pretty());
+    assert_eq!(graph_a.to_standalone_html(), graph_b.to_standalone_html());
+}
+
+fn unique_temp_path(filename: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic enough for temp name")
+        .as_nanos();
+    std::env::temp_dir().join(format!("vx-eval3-analysis-{nanos}-{filename}"))
 }

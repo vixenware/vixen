@@ -27,8 +27,9 @@ pub use bridge_to_analysis::build_minimal_analysis;
 
 mod graph;
 pub use graph::{
-    AnalysisGraph, GraphEdge, GraphEdgeKind, GraphNode, GraphNodeKind, graph_from_file,
-    graph_from_source_text, project_analysis_graph,
+    AnalysisGraph, GraphEdge, GraphEdgeKind, GraphMetadata, GraphNode, GraphNodeKind,
+    export_graph_html_from_file, graph_from_file, graph_from_source_text, project_analysis_graph,
+    project_analysis_graph_with_bridge,
 };
 
 #[cfg(test)]
