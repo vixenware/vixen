@@ -95,6 +95,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     seed_source_local_call_edges(&mut bodies);
     seed_callee_closure_layout_links(&mut bodies, &closure_layouts);
     let propagated_result_demands = seed_first_result_propagation_step(&bodies);
+    seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
     seed_use_observations(&mut bodies, bridge);
 
     AnalysisResult {
@@ -104,6 +105,48 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         closure_layouts,
         frame_layouts: vec![],
         propagated_result_demands,
+    }
+}
+
+fn seed_body_result_observations(
+    bodies: &mut [AnalyzedBody],
+    bridge: &SingleSourceBridge,
+    propagated: &BTreeMap<crate::ResultDemandCallee, Observation>,
+) {
+    for body in bodies.iter_mut() {
+        body.result_observation = Observation::NoObs;
+    }
+
+    let entry_ids = {
+        let mains = bridge
+            .bodies
+            .iter()
+            .filter(|body| body.name == "main")
+            .map(|body| body.id)
+            .collect::<Vec<_>>();
+        if mains.is_empty() {
+            bridge
+                .bodies
+                .first()
+                .map(|body| vec![body.id])
+                .unwrap_or_default()
+        } else {
+            mains
+        }
+    };
+    for entry_id in entry_ids {
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == entry_id) {
+            body.result_observation = Observation::NeedValue;
+        }
+    }
+
+    for (callee, obs) in propagated {
+        let crate::ResultDemandCallee::TopLevelBody(callee_body) = callee else {
+            continue;
+        };
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == *callee_body) {
+            body.result_observation = obs.clone();
+        }
     }
 }
 

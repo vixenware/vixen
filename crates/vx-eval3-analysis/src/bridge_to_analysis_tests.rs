@@ -860,6 +860,103 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_leaves_unused_helper_body_nondemanded() {
+    let src = r#"
+fn helper(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( n + 1 )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let helper_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("helper should be first top-level body");
+    assert_eq!(
+        helper_body.result_observation,
+        Observation::NoObs,
+        "unused non-entry helper body should stay non-demanded"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_marks_direct_top_level_callee_body_demanded_via_propagation() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let plus_one_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("plus_one should be first top-level body");
+
+    assert_eq!(
+        plus_one_body.result_observation,
+        Observation::NeedValue,
+        "directly called top-level callee body should be marked demanded via propagation"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_recovered_local_closure_callee_gets_need_value_propagation() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let linked_layout = analysis.bodies[0]
+        .callee_closure_layouts
+        .values()
+        .next()
+        .copied()
+        .expect("recoverable closure call should have a layout link");
+
+    assert_eq!(
+        analysis
+            .propagated_result_demands
+            .get(&crate::ResultDemandCallee::ClosureLayout(linked_layout)),
+        Some(&Observation::NeedValue),
+        "recovered local closure callee should get NeedValue via first propagation step"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_body_result_observations_are_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.result_observation.clone()))
+            .collect::<Vec<_>>(),
+        analysis_b
+            .bodies
+            .iter()
+            .map(|body| (body.id, body.result_observation.clone()))
+            .collect::<Vec<_>>(),
+        "demand-driven non-entry body result observations should be deterministic"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (
