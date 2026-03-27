@@ -47,6 +47,8 @@ pub enum GraphEdgeKind {
     BodyToRuntimeBoundary,
     CallToBody,
     CallToClosureLayout,
+    RuntimeValueDependency,
+    RuntimeBoundaryToClosureLayout,
 }
 
 impl GraphEdgeKind {
@@ -56,6 +58,8 @@ impl GraphEdgeKind {
             Self::BodyToRuntimeBoundary => "body_to_runtime_boundary",
             Self::CallToBody => "call_to_body",
             Self::CallToClosureLayout => "call_to_closure_layout",
+            Self::RuntimeValueDependency => "runtime_value_dependency",
+            Self::RuntimeBoundaryToClosureLayout => "runtime_boundary_to_closure_layout",
         }
     }
 }
@@ -585,6 +589,109 @@ fn project_analysis_graph_internal(
         }
     }
 
+    if let Some(ctx) = context {
+        let mut boundary_runtime_by_call = BTreeMap::new();
+        for body in &analysis.bodies {
+            for extracted in &body.extracted_nodes {
+                if matches!(
+                    extracted.reason,
+                    ExtractedNodeReason::RuntimeBoundary { .. }
+                ) {
+                    boundary_runtime_by_call.insert(
+                        (extracted.source.body, extracted.source.expr),
+                        extracted.id.0,
+                    );
+                }
+            }
+        }
+        let layout_by_source = analysis
+            .closure_layouts
+            .iter()
+            .map(|layout| ((layout.source.body, layout.source.expr), layout.id.0))
+            .collect::<BTreeMap<_, _>>();
+        let producer_call_by_binding = ctx
+            .local_boundary_inits
+            .iter()
+            .map(|init| (init.binding, (init.body, init.call_expr)))
+            .collect::<BTreeMap<_, _>>();
+
+        for arg in &ctx.boundary_arg_bindings {
+            let Some((producer_body, producer_call_expr)) =
+                producer_call_by_binding.get(&arg.binding)
+            else {
+                continue;
+            };
+            let Some(producer_runtime_id) =
+                boundary_runtime_by_call.get(&(*producer_body, *producer_call_expr))
+            else {
+                continue;
+            };
+            let Some(consumer_runtime_id) =
+                boundary_runtime_by_call.get(&(arg.body, arg.call_expr))
+            else {
+                continue;
+            };
+
+            let binding_label = ctx.binding_name(arg.binding).unwrap_or("<binding>");
+            let mut metadata = vec![
+                ("binding_id".to_owned(), arg.binding.0.to_string()),
+                ("binding_name".to_owned(), binding_label.to_owned()),
+                (
+                    "producer_runtime_id".to_owned(),
+                    producer_runtime_id.to_string(),
+                ),
+                (
+                    "consumer_runtime_id".to_owned(),
+                    consumer_runtime_id.to_string(),
+                ),
+            ];
+            append_source_expr_metadata(
+                &mut metadata,
+                &SourceExpr {
+                    body: arg.body,
+                    expr: arg.call_expr,
+                },
+                context,
+            );
+            finalize_metadata(&mut metadata);
+            edges.insert(GraphEdge {
+                from: runtime_node_id(*producer_runtime_id),
+                to: runtime_node_id(*consumer_runtime_id),
+                kind: GraphEdgeKind::RuntimeValueDependency,
+                label: format!("runtime arg `{binding_label}`"),
+                metadata,
+            });
+        }
+
+        for closure_arg in &ctx.boundary_arg_closures {
+            let Some(runtime_id) =
+                boundary_runtime_by_call.get(&(closure_arg.body, closure_arg.call_expr))
+            else {
+                continue;
+            };
+            let Some(layout_id) = layout_by_source.get(&(
+                closure_arg.closure_source.body,
+                closure_arg.closure_source.expr,
+            )) else {
+                continue;
+            };
+
+            let mut metadata = vec![
+                ("runtime_id".to_owned(), runtime_id.to_string()),
+                ("layout_id".to_owned(), layout_id.to_string()),
+            ];
+            append_source_expr_metadata(&mut metadata, &closure_arg.closure_source, context);
+            finalize_metadata(&mut metadata);
+            edges.insert(GraphEdge {
+                from: runtime_node_id(*runtime_id),
+                to: layout_node_id(*layout_id),
+                kind: GraphEdgeKind::RuntimeBoundaryToClosureLayout,
+                label: "boundary owns closure arg".to_owned(),
+                metadata,
+            });
+        }
+    }
+
     nodes.sort_by_key(|node| (node.kind, node.id.clone(), node.label.clone()));
 
     AnalysisGraph {
@@ -732,11 +839,15 @@ fn escape_html(input: &str) -> String {
 #[derive(Debug, Clone)]
 struct BridgeGraphContext<'a> {
     body_names: BTreeMap<BodyId, String>,
+    binding_names: BTreeMap<BridgeLocalBindingId, String>,
     body_spans: BTreeMap<BodyId, SourceSpan>,
     expr_spans: BTreeMap<ExprId, SourceSpan>,
     expr_snippets: BTreeMap<ExprId, String>,
     closure_names: BTreeMap<(BodyId, ExprId), String>,
     call_site_kinds: BTreeMap<(BodyId, ExprId), BridgeCallSiteKind>,
+    boundary_arg_bindings: Vec<crate::BridgeBoundaryArgBinding>,
+    boundary_arg_closures: Vec<crate::BridgeBoundaryArgClosure>,
+    local_boundary_inits: Vec<crate::BridgeLocalBoundaryInit>,
     source_paths: BTreeMap<u32, String>,
     source_file: Option<String>,
     _source_text: Option<&'a str>,
@@ -752,6 +863,11 @@ impl<'a> BridgeGraphContext<'a> {
             .bodies
             .iter()
             .map(|body| (body.id, body.name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let binding_names = bridge
+            .local_bindings
+            .iter()
+            .map(|binding| (binding.id, binding.name.clone()))
             .collect::<BTreeMap<_, _>>();
         let body_spans = bridge
             .bodies
@@ -776,14 +892,14 @@ impl<'a> BridgeGraphContext<'a> {
             }
         }
 
-        let binding_names = bridge
+        let binding_name_refs = bridge
             .local_bindings
             .iter()
             .map(|binding| (binding.id, binding.name.as_str()))
             .collect::<BTreeMap<BridgeLocalBindingId, &str>>();
         let mut closure_names = BTreeMap::new();
         for init in &bridge.local_closure_inits {
-            let name = binding_names
+            let name = binding_name_refs
                 .get(&init.binding)
                 .copied()
                 .unwrap_or("<closure>");
@@ -806,11 +922,15 @@ impl<'a> BridgeGraphContext<'a> {
 
         Self {
             body_names,
+            binding_names,
             body_spans,
             expr_spans,
             expr_snippets,
             closure_names,
             call_site_kinds,
+            boundary_arg_bindings: bridge.boundary_arg_bindings.clone(),
+            boundary_arg_closures: bridge.boundary_arg_closures.clone(),
+            local_boundary_inits: bridge.local_boundary_inits.clone(),
             source_paths,
             source_file: source_file.map(|path| path.display().to_string()),
             _source_text: source_text,
@@ -863,6 +983,10 @@ impl<'a> BridgeGraphContext<'a> {
             .iter()
             .map(|(id, path)| (*id, path.clone()))
             .collect()
+    }
+
+    fn binding_name(&self, binding: BridgeLocalBindingId) -> Option<&str> {
+        self.binding_names.get(&binding).map(String::as_str)
     }
 }
 

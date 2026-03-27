@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -125,6 +125,27 @@ pub struct BridgeCallSite {
     pub target: Option<DefId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BridgeBoundaryArgBinding {
+    pub body: BodyId,
+    pub call_expr: ExprId,
+    pub binding: BridgeLocalBindingId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeBoundaryArgClosure {
+    pub body: BodyId,
+    pub call_expr: ExprId,
+    pub closure_source: SourceExpr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BridgeLocalBoundaryInit {
+    pub body: BodyId,
+    pub binding: BridgeLocalBindingId,
+    pub call_expr: ExprId,
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
@@ -140,6 +161,9 @@ pub struct SingleSourceBridge {
     pub local_uses: Vec<BridgeLocalUse>,
     pub local_closure_inits: Vec<BridgeLocalClosureInit>,
     pub call_sites: Vec<BridgeCallSite>,
+    pub boundary_arg_bindings: Vec<BridgeBoundaryArgBinding>,
+    pub boundary_arg_closures: Vec<BridgeBoundaryArgClosure>,
+    pub local_boundary_inits: Vec<BridgeLocalBoundaryInit>,
     pub expr_types: BTreeMap<ExprId, Ty>,
     pub parse_errors: Vec<SyntaxError>,
     pub resolve_errors: Vec<ResolveError>,
@@ -179,6 +203,16 @@ impl SingleSourceBridge {
         let local_closure_inits =
             collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
         let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
+        let (boundary_arg_bindings, boundary_arg_closures, local_boundary_inits) =
+            collect_boundary_call_links(
+                source_id,
+                &file,
+                &exprs,
+                &resolved_refs,
+                &local_bindings,
+                &local_closure_inits,
+                &call_sites,
+            );
         let expr_types = collect_expr_types(&exprs, &type_check);
 
         Self {
@@ -195,6 +229,9 @@ impl SingleSourceBridge {
             local_uses,
             local_closure_inits,
             call_sites,
+            boundary_arg_bindings,
+            boundary_arg_closures,
+            local_boundary_inits,
             expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
@@ -235,6 +272,16 @@ impl SingleSourceBridge {
         let local_closure_inits =
             collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
         let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
+        let (boundary_arg_bindings, boundary_arg_closures, local_boundary_inits) =
+            collect_boundary_call_links(
+                source_id,
+                &file,
+                &exprs,
+                &resolved_refs,
+                &local_bindings,
+                &local_closure_inits,
+                &call_sites,
+            );
         let expr_types = collect_expr_types(&exprs, &type_check);
 
         Ok(Self {
@@ -251,6 +298,9 @@ impl SingleSourceBridge {
             local_uses,
             local_closure_inits,
             call_sites,
+            boundary_arg_bindings,
+            boundary_arg_closures,
+            local_boundary_inits,
             expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
@@ -873,4 +923,145 @@ fn collect_call_sites(
     });
     call_sites.dedup();
     call_sites
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_boundary_call_links(
+    source_id: SourceId,
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
+    resolved_refs: &[BridgeResolvedRef],
+    local_bindings: &[BridgeLocalBinding],
+    local_closure_inits: &[BridgeLocalClosureInit],
+    call_sites: &[BridgeCallSite],
+) -> (
+    Vec<BridgeBoundaryArgBinding>,
+    Vec<BridgeBoundaryArgClosure>,
+    Vec<BridgeLocalBoundaryInit>,
+) {
+    let by_span = expr_id_by_span(exprs);
+    let by_id = exprs
+        .iter()
+        .map(|expr| (expr.id, expr))
+        .collect::<HashMap<_, _>>();
+    let local_binding_by_def = local_bindings
+        .iter()
+        .map(|binding| (binding.def_id, binding.id))
+        .collect::<HashMap<_, _>>();
+    let closure_by_binding = local_closure_inits
+        .iter()
+        .map(|init| (init.binding, init.source.clone()))
+        .collect::<HashMap<_, _>>();
+    let boundary_calls = call_sites
+        .iter()
+        .filter(|site| matches!(site.kind, BridgeCallSiteKind::StdlibBoundary(_)))
+        .map(|site| site.expr)
+        .collect::<HashSet<_>>();
+
+    let mut arg_bindings = Vec::new();
+    let mut arg_closures = Vec::new();
+    let mut boundary_inits = Vec::new();
+
+    for call in file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::CallExpr::cast)
+    {
+        let call_span = SourceSpan::new(source_id, call.syntax().text_range());
+        let Some(call_expr) = by_span.get(&call_span).copied() else {
+            continue;
+        };
+        if !boundary_calls.contains(&call_expr) {
+            continue;
+        }
+        let Some(body) = by_id.get(&call_expr).and_then(|expr| expr.body) else {
+            continue;
+        };
+
+        if let Some(let_stmt) = call.syntax().ancestors().find_map(vx_parser::LetStmt::cast)
+            && let Some(let_expr) = let_stmt.expr()
+            && let_expr.syntax() == call.syntax()
+            && let Some(name) = let_stmt.name()
+            && let Some(binding) = local_bindings.iter().find(|binding| {
+                binding.kind == BridgeLocalBindingKind::Let
+                    && binding.body == body
+                    && binding.name == name.text()
+            })
+        {
+            boundary_inits.push(BridgeLocalBoundaryInit {
+                body,
+                binding: binding.id,
+                call_expr,
+            });
+        }
+
+        let mut arg_exprs = call.positional_args();
+        arg_exprs.extend(call.keyword_args().filter_map(|arg| arg.expr()));
+
+        for arg_expr in arg_exprs {
+            let arg_span = SourceSpan::new(source_id, arg_expr.syntax().text_range());
+            let mut bindings_for_arg = resolved_refs
+                .iter()
+                .filter(|resolved| arg_span.range.contains_range(resolved.span.range))
+                .filter_map(|resolved| {
+                    let def = resolved.target.as_ref().ok()?;
+                    local_binding_by_def.get(&def.id).copied()
+                })
+                .collect::<Vec<_>>();
+            bindings_for_arg.sort_by_key(|binding| binding.0);
+            bindings_for_arg.dedup();
+
+            for binding in bindings_for_arg {
+                arg_bindings.push(BridgeBoundaryArgBinding {
+                    body,
+                    call_expr,
+                    binding,
+                });
+                if let Some(closure_source) = closure_by_binding.get(&binding).cloned() {
+                    arg_closures.push(BridgeBoundaryArgClosure {
+                        body,
+                        call_expr,
+                        closure_source,
+                    });
+                }
+            }
+
+            let arg_source_span = SourceSpan::new(source_id, arg_expr.syntax().text_range());
+            let direct_closure = match arg_expr {
+                Expr::Closure(_) => {
+                    by_span
+                        .get(&arg_source_span)
+                        .copied()
+                        .map(|closure_expr| SourceExpr {
+                            body,
+                            expr: closure_expr,
+                        })
+                }
+                _ => None,
+            };
+            if let Some(closure_source) = direct_closure {
+                arg_closures.push(BridgeBoundaryArgClosure {
+                    body,
+                    call_expr,
+                    closure_source,
+                });
+            }
+        }
+    }
+
+    arg_bindings.sort_by_key(|arg| (arg.body.0, arg.call_expr.0, arg.binding.0));
+    arg_bindings.dedup();
+    arg_closures.sort_by_key(|arg| {
+        (
+            arg.body.0,
+            arg.call_expr.0,
+            arg.closure_source.body.0,
+            arg.closure_source.expr.0,
+        )
+    });
+    arg_closures.dedup();
+    boundary_inits.sort_by_key(|init| (init.body.0, init.binding.0, init.call_expr.0));
+    boundary_inits.dedup();
+
+    (arg_bindings, arg_closures, boundary_inits)
 }

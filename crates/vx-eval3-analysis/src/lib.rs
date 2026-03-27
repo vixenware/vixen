@@ -14,10 +14,11 @@ pub use model::{
 
 mod bridge;
 pub use bridge::{
-    BridgeBindingProduct, BridgeBody, BridgeCallSite, BridgeCallSiteKind, BridgeExpr,
-    BridgeExprKind, BridgeLocalBinding, BridgeLocalBindingId, BridgeLocalBindingKind,
-    BridgeLocalClosureInit, BridgeLocalUse, BridgeParam, BridgeProduct, BridgeProjection,
-    BridgeResolvedRef, SingleSourceBridge,
+    BridgeBindingProduct, BridgeBody, BridgeBoundaryArgBinding, BridgeBoundaryArgClosure,
+    BridgeCallSite, BridgeCallSiteKind, BridgeExpr, BridgeExprKind, BridgeLocalBinding,
+    BridgeLocalBindingId, BridgeLocalBindingKind, BridgeLocalBoundaryInit, BridgeLocalClosureInit,
+    BridgeLocalUse, BridgeParam, BridgeProduct, BridgeProjection, BridgeResolvedRef,
+    SingleSourceBridge,
 };
 
 mod boundary;

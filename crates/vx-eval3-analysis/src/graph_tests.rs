@@ -68,6 +68,7 @@ fn zoo_cc_version_graph_smoke() {
 
     let mermaid = graph.to_mermaid_flowchart();
     assert!(mermaid.starts_with("flowchart TD\n"));
+    assert!(mermaid.contains("boundary owns closure arg"));
 
     let html = graph.to_standalone_html();
     assert!(html.contains("Vixen Structural Analysis Graph"));
@@ -81,6 +82,34 @@ fn zoo_cc_version_graph_smoke() {
     assert!(written.contains("Vixen Structural Analysis Graph"));
     assert!(written.contains("cc-version.vx"));
     let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn zoo_cc_version_includes_runtime_dependency_and_boundary_to_layout_edges() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let graph = graph_from_file(&zoo_file).expect("zoo graph projection should succeed");
+
+    let has_discover_to_exec = graph.edges.iter().any(|edge| {
+        edge.kind == GraphEdgeKind::RuntimeValueDependency
+            && edge
+                .metadata
+                .iter()
+                .any(|(k, v)| k == "binding_name" && v == "cc")
+    });
+    assert!(
+        has_discover_to_exec,
+        "cc-version should include discover->exec runtime dependency via `cc` binding"
+    );
+
+    let boundary_to_layout_count = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == GraphEdgeKind::RuntimeBoundaryToClosureLayout)
+        .count();
+    assert!(
+        boundary_to_layout_count >= 2,
+        "cc-version should include boundary->layout edges for host lambda and observer lambda"
+    );
 }
 
 #[test]
