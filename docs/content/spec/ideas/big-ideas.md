@@ -99,11 +99,11 @@ file hashes.
 However, even though Buck2 has [dynamic
 dependencies](https://buck2.build/docs/rule_authors/dynamic_dependencies/),
 building a Rust project with regular crates.io dependencies is impractical without
-the use of a separate tool (reindeer) ran ahead of time, which invokes cargo
+the use of a separate tool (reindeer) run ahead of time, which invokes cargo
 and translates its lockfiles to BUCK files.
 
-The "hermeticity" of Buck2 is also, in practice, a Linux-only affair, guaranteed
-by remote execution inside of containerized/VM'd executors.
+The "hermeticity" of Buck2 is also, in practice, only true when builds are executed
+remotely. Local execution (on a macOS machine for example) is not, actually, hermetic.
 
 ### Cargo
 
@@ -114,7 +114,7 @@ system. It is not hermetic. It does not do precise caching. Its support for
 cross compilation is minimal.
 
 One of the main day-to-day annoyances of using Cargo is under-caching: turning a
-cargo feature on or off will routinely override parts of the cache, instead of
+cargo feature on or off will routinely overwrite parts of the cache, instead of
 keeping it to the side for when you do that same build again. 
 
 (Switching back and forth from workspace builds to `-p pkg` builds makes this
@@ -124,7 +124,7 @@ Cargo's solution for cross-language builds is `build.rs`, where arbitrary Rust
 code is compiled and executed, and has full access to the entire environment,
 the entire host, and can do anything unchecked.
 
-If a build script forgets to declare even one of its dependency, which is
+If a build script forgets to declare even one of its dependencies, which is
 extremely easy to do, given that they inherit from the ambient environment and
 can call arbitrary processes, usually provided by the system, then cargo
 exhibits problems of over-caching: re-using the previous build, even though it
