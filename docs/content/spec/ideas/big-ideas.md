@@ -158,69 +158,95 @@ different one.
 ### Doing worse
 
 The first step to doing better is to do worse, and so I'm going to show you a
-Vixen program that is intentionally very bad:
+Vixen program that is intentionally very bad, mirroring the shell script we saw
+above:
 
 ```vixen
-exec ["clang", "main.c", "-o", "main"]
-```
-
-(This is a function application. We're applying an array to a function called exec.)
-
-This is problematic in a number of ways. For example, where does clang come
-from? Is it from the `PATH` env variable? How do we know to rerun compilation
-(and change the cache key) when clang changes?
-
-Same questions for `main.c`: is it a local file? If yes, say it's local to my
-macOS machine, I want to build on a remote Linux server, how is `main.c` sent over
-there? How is `main` sent back to me?
-
-And if it's on a remote machine, how do we know that they have clang? How do we
-make sure we don't makes things that run here and things that run there?
-
-Vixen has answers for all of these.
-
-First of, a `build.vx` file is not a naked expression. It exports a build function,
-which takes build parameters.
-
-```vixen
-fn build(params: BuildParams) (
-  // body goes here
+fn build(params: BuildParams) -> Tree (
+  exec ["clang", "main.c", "-o", "main"]
 )
 ```
 
-Those include:
+We're defining a function called build that takes build params; that's the entry
+point to your vixen program. It returns a Tree, which for now you can think of
+as a directory. 
 
-  * Command-line arguments, environment variables, and a path to the workspace.
-  
-So if we have:
+If you try to run this in Vixen, you will immediately encounter an issue:
+`clang` is not found.
+
+And that's because every exec in Vixen, be it local or remote, runs inside of a
+sandbox. If you want to run Clang, you first have to discover information about it:
+
+It might look something like this:
+
+```vixen
+fn find_clang(class: ExecutorClass) -> Map[String, String] {
+  discover(class, () => (
+    let clang = host.which "clang";
+    let clang_hash = host.blake3 clang;
+    %{ clang, clang_hash }
+  ))
+}
+```
+
+Which you could then use like so:
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  exec [toolchain.clang, "main.c", "-o", "main"]
+)
+```
+
+The problem here: hashing the clang executable is actually not enough. System
+headers and libraries can change. From underneath it: we might be over-caching,
+which would produce incorrect builds.
+
+On the other hand, it is often impractical to hash the entire toolchain for
+performance reasons, and it is impractical to provide the entire toolchain, for
+legal reasons. That's why code like this is better left to packages that would
+use strategies like looking at the operating system version and the SDK version,
+etc.
+
+However, that code still doesn't actually run: we now have access to the entire
+toolchain inside of the sandbox (TODO: why? How is it magically mounted? which
+paths, and through which mechanisms?), but not our input files.
+
+That's where `BuildParams` comes in: it gives us a `Path` corresponding to the
+root of our workspace:
 
 ```
-my-project/
+workspace/
   build.vx
   src/
     main.c
-    main.h
+    util.h
 ```
 
-Then `vx build` will have `params.workspace` set to `my-project/` and we can
-build a path to `main.c` from it:
-
 ```vixen
-fn build(params: BuildParams) (
-  let main_c = @({params.workspace}/src/main.c); // path literal, with interpolation
-  exec ["clang", main_c, "-o", "main"]
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = @({params.workspace}/src);
+  exec [toolchain.clang, @({src}/main.c), "-o", "main"]
 )
 ```
 
-However, this will fail because `main.c` depends on `main.h`, and thus, we actually want to
-mount all of `src`
+However, this still doesn't work because main.c actually includes util.h!
+
+No worries, we can mount the entire src directory:
 
 ```vixen
-fn build(params: BuildParams) (
-  exec ["clang", @(src/main.c), "-o", "main"] where {
-    mounts: %{ @(src) => @({params.workspace}/src) }
-  }
-)
+FIXME: fill in
 ```
 
-Regarding the output,
+Next problem: the returned tree is actually empty (.vx/out is empty after `vx
+build`). That's because by default, only the contents of the out folder are
+returned.
+
+Easy fix:
+
+```vixen
+FIXME: fill in, -o out/main
+```
+
+FIXME: what do we talk about next? remote exec?
