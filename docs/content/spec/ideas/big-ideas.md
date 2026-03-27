@@ -38,7 +38,7 @@ main:
   clang main.c -o main
 ```
 
-But oops, we forgot to specify that main dependended on main.c:
+But oops, we forgot to specify that main depended on main.c:
 
 ```make
 main: main.c
@@ -84,3 +84,48 @@ So the responsibilities split here is:
     incorrect build if the dependency edges were underspecified, and completely
     unaware of a whole category of changes that would require reconfiguring
     (like a new source file, turning a feature on/off, etc.)
+  
+### Buck2
+
+Buck2 brings several improvements on the CMake + Ninja combo: it lets you define
+rules in the Starlark language, it lets you execute them in a hermetic environment
+(quote, "Missing dependencies are errors"), and it caches build results.
+
+The speed of Buck2 comes from different sources. One of them is that it has a
+persistent daemon running. That daemon is able to react to file system change
+events, which means it doesn't have to rescan the disk for changed mtimes or
+file hashes.
+
+However, even though Buck2 has [dynamic
+dependencies](https://buck2.build/docs/rule_authors/dynamic_dependencies/),
+building a Rust project with regular crates.io dependencies is impractical without
+the use of a separate tool (reindeer) ran ahead of time, which invokes cargo
+and translates its lockfiles to BUCK files.
+
+The "hermeticity" of Buck2 is also, in practice, a Linux-only affair, guaranteed
+by remote execution inside of containerized/VM'd executors.
+
+### Cargo
+
+Cargo is a mix of a package manager and a build tool.
+
+Its power is its convenience and ubiquity, but it is not a principled build
+system. It is not hermetic. It does not do precise caching. Its support for
+cross compilation is minimal.
+
+One of the main day-to-day annoyances of using Cargo is under-caching: turning a
+cargo feature on or off will routinely override parts of the cache, instead of
+keeping it to the side for when you do that same build again. 
+
+(Switching back and forth from workspace builds to `-p pkg` builds makes this
+problem painfully obvious).
+
+Cargo's solution for cross-language builds is `build.rs`, where arbitrary Rust
+code is compiled and executed, and has full access to the entire environment,
+the entire host, and can do anything unchecked.
+
+If a build script forgets to declare even one of its dependency, which is
+extremely easy to do, given that they inherit from the ambient environment and
+can call arbitrary processes, usually provided by the system, then cargo
+exhibits problems of over-caching: re-using the previous build, even though it
+should have actually rebuilt it.
