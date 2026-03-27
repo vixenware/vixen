@@ -4,6 +4,20 @@
 
 specs (
     {
+        name ideas
+        include (
+            docs/content/spec/ideas/*.md
+            docs/content/spec/ideas/**/*.md
+        )
+        impls (
+            {
+                name rust
+                include (crates/**/*.rs)
+                exclude (target/**)
+            }
+        )
+    }
+    {
         name language
         include (
             docs/content/spec/language/*.md
