@@ -1,5 +1,5 @@
 use crate::{
-    BodyId, Observation, RuntimeBoundaryKind, RuntimeNode, SingleSourceBridge,
+    BodyId, ExtractedNodeReason, Observation, RuntimeBoundaryKind, RuntimeNode, SingleSourceBridge,
     build_minimal_analysis,
 };
 
@@ -25,9 +25,20 @@ fn main(n: U64) -> U64 (
 
     assert_eq!(analysis_a.bodies.len(), 2);
     assert_eq!(analysis_a.kernels.len(), 2);
-    assert!(analysis_a.runtime_nodes.is_empty());
     assert_eq!(analysis_a.bodies[0].id, BodyId(0));
     assert_eq!(analysis_a.bodies[1].id, BodyId(1));
+
+    let main_body = analysis_a
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+    assert!(
+        main_body
+            .extracted_nodes
+            .iter()
+            .any(|node| { matches!(node.reason, ExtractedNodeReason::SharedAcrossUses) })
+    );
 }
 
 #[test]
@@ -162,6 +173,55 @@ fn main() -> U64 (
     assert_eq!(
         callable_count, 0,
         "local non-stdlib exec call should not seed NeedCallable boundary observation"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_does_not_seed_shared_node_for_single_use_local_binding() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+
+fn main(n: U64) -> U64 (
+  let x = plus_one(n);
+  x + 1
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main body should exist");
+    assert!(
+        !main_body
+            .extracted_nodes
+            .iter()
+            .any(|node| { matches!(node.reason, ExtractedNodeReason::SharedAcrossUses) }),
+        "single-use local binding should not seed shared extraction"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_sharing_seed_is_deterministic_across_runs() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+
+fn main(n: U64) -> U64 (
+  let x = plus_one(n);
+  x + x
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a, analysis_b,
+        "sharing seed should be deterministic"
     );
 }
 

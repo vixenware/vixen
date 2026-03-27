@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use vx_resolve::SourceSpan;
+use vx_resolve::{DefId, DefKind, SourceSpan};
 
 use crate::{
-    AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, BridgeExprKind, CaptureSlot,
+    AnalysisResult, AnalyzedBody, BodyId, BridgeBody, BridgeExpr, BridgeExprKind, CaptureSlot,
     ClosureEnvLayout, ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion,
     LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge,
     SourceExpr, UseSiteId, boundary::classify_runtime_boundary,
@@ -78,6 +78,12 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         }
     }
 
+    seed_structural_sharing(
+        &mut bodies,
+        &mut runtime_nodes,
+        &mut next_runtime_node,
+        bridge,
+    );
     seed_use_observations(&mut bodies, bridge);
     let closure_layouts = seed_closure_layouts(bridge);
 
@@ -87,6 +93,77 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         runtime_nodes,
         closure_layouts,
         frame_layouts: vec![],
+    }
+}
+
+fn seed_structural_sharing(
+    bodies: &mut [AnalyzedBody],
+    runtime_nodes: &mut Vec<RuntimeNode>,
+    next_runtime_node: &mut u32,
+    bridge: &SingleSourceBridge,
+) {
+    let mut refs_by_binding = HashMap::<(BodyId, DefId), Vec<SourceExpr>>::new();
+
+    for resolved in &bridge.resolved_refs {
+        let Some(target) = resolved.target.as_ref().ok() else {
+            continue;
+        };
+        if target.kind != DefKind::Binding {
+            continue;
+        }
+        if target.source() != bridge.source_id {
+            continue;
+        }
+
+        let Some(source) = enclosing_expr_source(resolved.span, &bridge.exprs) else {
+            continue;
+        };
+
+        refs_by_binding
+            .entry((source.body, target.id))
+            .or_default()
+            .push(source);
+    }
+
+    let mut seeds = refs_by_binding
+        .into_iter()
+        .filter_map(|((body, def_id), mut refs)| {
+            if refs.len() <= 1 {
+                return None;
+            }
+            refs.sort_by_key(|source| source.expr.0);
+            refs.dedup();
+            if refs.len() <= 1 {
+                return None;
+            }
+            let source = refs[0].clone();
+            Some((body, def_id, source))
+        })
+        .collect::<Vec<_>>();
+
+    seeds.sort_by_key(|(body, def_id, source)| {
+        let (def_source, local) = match *def_id {
+            DefId::Source { source, local } => (source, local),
+        };
+        (body.0, def_source.0, local, source.expr.0)
+    });
+
+    for (body_id, _, source) in seeds {
+        let node_id = RuntimeNodeId(*next_runtime_node);
+        *next_runtime_node += 1;
+
+        runtime_nodes.push(RuntimeNode::Lazy {
+            id: node_id,
+            source: source.clone(),
+        });
+
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == body_id) {
+            body.extracted_nodes.push(ExtractedNode {
+                id: node_id,
+                source,
+                reason: ExtractedNodeReason::SharedAcrossUses,
+            });
+        }
     }
 }
 
