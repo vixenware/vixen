@@ -590,6 +590,64 @@ thing that lets Vixen preserve its semantics while still being practical:
   * explicit boundaries
   * efficient execution
 
+### Kernels and boundaries
+
+At that point, the runtime should not have to take control back after every
+tiny local step.
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+
+  let flags =
+    if toolchain.clang.contains("clang") (
+      ["-Wall", "-O2"]
+    ) else (
+      ["-Wall", "-O2", "-fPIC"]
+    );
+
+  let args = [
+    toolchain.clang,
+    "-c",
+    ..flags,
+    @src/main.c,
+    "-o",
+    @out/main.o,
+  ];
+
+  exec args where {
+    mounts: %{ src }
+  }
+)
+```
+
+Everything up to `exec args` is ordinary local computation.
+
+It should be possible to run that whole region in one shot, producing the final
+command line and mount table, instead of bouncing through the runtime after each
+`let`, each branch, and each array construction.
+
+That is what kernels are for.
+
+A kernel is an analyzed region of local Vixen computation that can be executed
+straight-line.
+
+What matters here is the semantic split, not the exact backend:
+
+  * local computation can run in one shot
+  * boundaries like `exec` and `discover` stay explicit
+  * the runtime only has to take control back at those boundaries
+
+An implementation might lower those kernels first to a compact bytecode, and
+later to machine code. That choice is important for engineering, but it does
+not change the basic shape of the system.
+
+The important part is that Vixen does not need to choose between "fully
+interpreted" and "lie about the semantics". It can keep the demand-driven,
+boundary-aware model, while still compiling ordinary local regions into
+efficient kernels.
+
 ### There's more
 
 Things we haven't talked about yet. We haven't talked about, well, remote

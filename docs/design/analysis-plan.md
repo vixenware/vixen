@@ -91,6 +91,10 @@ This phase does not need to settle:
 - exact Kajit HIR instruction selection
 - backend ABI details
 
+It may also postpone the full shared-search implementation, but not the shape
+needed to admit it later. In particular, the analysis result must be able to
+grow a distinct class of extracted runtime nodes for keyed/shared search work.
+
 Those belong to later stages.
 
 ## How the four canonical programs exercise the analysis
@@ -179,6 +183,27 @@ If this artifact is missing, one of two bad things happens:
    accident
 
 The analysis plan is the thing that prevents both failures.
+
+## Pressure from Cargo-style search
+
+The first implementation slice can stay smaller than full package resolution,
+but the analysis model must already be compatible with it.
+
+Cargo-style resolution adds one more kind of extracted node pressure:
+
+- repeated requests should meet at keyed shared nodes
+- joined demand must be represented explicitly
+- local candidate filtering can still remain kernel-local
+- conflict production must remain structured
+
+So the long-term model is still the same:
+
+- kernels own local straight-line work
+- runtime nodes own shared identity, boundaries, and later keyed search state
+
+The first slice only proves the local/boundary split.
+The next slice should prove that the same analysis model extends cleanly to
+shared search.
 
 ## Suggested implementation order
 
