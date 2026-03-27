@@ -45,37 +45,41 @@ main: main.c
   clang main.c -o main
 ```
 
-And oops! Actually, it doesn't just depend on main.c — it also depends on system
-headers.
+And oops! Actually, it doesn't just depend on main.c — it also depends on many
+other inputs that are easy to leave undeclared, like headers, compiler flags,
+generated files, environment variables, link inputs, and the compiler itself.
 
 Another oops: we can change the contents of main.c, as long as the timestamp is
 the same, make is just not gonna notice any difference or rerun the compiler.
 
-In general, systems like make only allow local caching, and even then, it's very
-frequent to just clean everything because the build was corrupted in some way,
-and you hope to God that you detected the failure.
+In general, systems like make give you local incremental rebuild based mostly
+on declared edges and file timestamps. And even then, it's very frequent to
+just clean everything because the build was corrupted in some way, and you hope
+to God that you detected the failure.
 
 ### CMake + Ninja
 
 CMake is one of the many attempts at solving the problem of oh, actually, we
 might not be using clang to build C. The platform we're on might have an
-executable suffix like .exe, It might name its libraries funny. The compiler
+executable suffix like .exe. It might name its libraries funny. The compiler
 flags are not at all the same. The way to find if you have a library or to link
 against the library are completely different.
 
-Someone has to take care of this, and CMake is one of those someones. It is able
-from that information to generate a build graph using backends like ninja!
+Someone has to take care of this, and CMake is one of those someones. CMake
+projects often use a configure phase to probe the environment, make
+project-specific decisions, and generate a build graph using backends like
+Ninja.
 
-Ninja removes most features from GNU Make and adds the ones that they deemed
-useful, such as special support for discovering extra dependencies at build
-time, multiple outputs per edge, dependency on the command line that was use to
-generate outputs, etc., etc.
+Ninja is the other half of that split. It is not trying to be a full build
+language. It is trying to be a low-level explicit build graph format and fast
+executor, with support for features such as discovered dependencies, multiple
+outputs per edge, and rebuilds when the generating command line changes.
 
 So the responsibilities split here is:
 
-  * Phase 1: CMake discovers the environment, determines what features are going
-    to be enabled or disabled with which compiler against which dependencies,
-    etc.
+  * Phase 1: a CMake configure step probes the environment, determines what
+    features are going to be enabled or disabled with which compiler against
+    which dependencies, etc.
   * Phase 2: Ninja runs the compiler in parallel as fast as possible, giving an
     incorrect build if the dependency edges were underspecified, and completely
     unaware of a whole category of changes that would require reconfiguring
