@@ -11,8 +11,20 @@ pub use model::{
     RuntimeNodeId, SharedKeyedNode, SourceExpr, UseSiteId,
 };
 
+mod bridge;
+pub use bridge::{BridgeBody, BridgeExpr, BridgeResolvedRef, SingleSourceBridge};
+
+mod bridge_to_analysis;
+pub use bridge_to_analysis::build_minimal_analysis;
+
 #[cfg(test)]
 mod fixtures;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bridge_tests;
+
+#[cfg(test)]
+mod bridge_to_analysis_tests;

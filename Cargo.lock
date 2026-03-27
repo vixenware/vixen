@@ -4023,6 +4023,11 @@ dependencies = [
 [[package]]
 name = "vx-eval3-analysis"
 version = "0.1.0"
+dependencies = [
+ "vx-parser",
+ "vx-resolve",
+ "vx-types",
+]
 
 [[package]]
 name = "vx-eval3-core"
