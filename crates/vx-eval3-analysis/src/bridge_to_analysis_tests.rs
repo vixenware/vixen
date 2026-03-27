@@ -957,6 +957,126 @@ fn main(n: U64) -> U64 ( plus_one(n) )
 }
 
 #[test]
+fn bridge_to_analysis_unused_helper_kernel_entry_and_result_stay_nondemanded() {
+    let src = r#"
+fn helper(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( n + 1 )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let helper_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("helper should be first top-level body");
+    assert!(
+        helper_body
+            .kernel_entries
+            .iter()
+            .all(|entry| entry.demanded_result == Observation::NoObs),
+        "unused helper body kernel entries should stay non-demanded"
+    );
+
+    assert!(
+        analysis
+            .kernels
+            .iter()
+            .filter(|kernel| kernel.body == BodyId(0))
+            .all(|kernel| kernel.result_obs == Observation::NoObs),
+        "unused helper body kernels should stay non-demanded"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_direct_callee_kernel_entry_and_result_get_need_value() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let plus_one_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("plus_one should be first top-level body");
+
+    assert!(
+        plus_one_body
+            .kernel_entries
+            .iter()
+            .all(|entry| entry.demanded_result == Observation::NeedValue),
+        "direct callee body kernel entries should become demanded via propagation"
+    );
+    assert!(
+        analysis
+            .kernels
+            .iter()
+            .filter(|kernel| kernel.body == BodyId(0))
+            .all(|kernel| kernel.result_obs == Observation::NeedValue),
+        "direct callee kernels should become demanded via propagation"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_kernel_demand_shape_is_deterministic() {
+    let src = r#"
+fn plus_one(n: U64) -> U64 ( n + 1 )
+fn main(n: U64) -> U64 ( plus_one(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a
+            .bodies
+            .iter()
+            .map(|body| {
+                (
+                    body.id,
+                    body.kernel_entries
+                        .iter()
+                        .map(|entry| entry.demanded_result.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        analysis_b
+            .bodies
+            .iter()
+            .map(|body| {
+                (
+                    body.id,
+                    body.kernel_entries
+                        .iter()
+                        .map(|entry| entry.demanded_result.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        "kernel entry demand shape should be deterministic"
+    );
+    assert_eq!(
+        analysis_a
+            .kernels
+            .iter()
+            .map(|kernel| (kernel.id, kernel.result_obs.clone()))
+            .collect::<Vec<_>>(),
+        analysis_b
+            .kernels
+            .iter()
+            .map(|kernel| (kernel.id, kernel.result_obs.clone()))
+            .collect::<Vec<_>>(),
+        "kernel region result demand shape should be deterministic"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (

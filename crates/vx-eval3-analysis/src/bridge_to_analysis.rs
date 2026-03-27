@@ -17,7 +17,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         .map(|body| analyzed_body_shell(body, &bridge.exprs))
         .collect::<Vec<_>>();
 
-    let kernels = bridge
+    let mut kernels = bridge
         .bodies
         .iter()
         .map(|body| kernel_shell(body, &bridge.exprs))
@@ -96,6 +96,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     seed_callee_closure_layout_links(&mut bodies, &closure_layouts);
     let propagated_result_demands = seed_first_result_propagation_step(&bodies);
     seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
+    seed_kernel_demands(&mut bodies, &mut kernels);
     seed_use_observations(&mut bodies, bridge);
 
     AnalysisResult {
@@ -146,6 +147,18 @@ fn seed_body_result_observations(
         };
         if let Some(body) = bodies.iter_mut().find(|body| body.id == *callee_body) {
             body.result_observation = obs.clone();
+        }
+    }
+}
+
+fn seed_kernel_demands(bodies: &mut [AnalyzedBody], kernels: &mut [KernelRegion]) {
+    for body in bodies {
+        for entry in &mut body.kernel_entries {
+            entry.demanded_result = body.result_observation.clone();
+        }
+
+        for kernel in kernels.iter_mut().filter(|kernel| kernel.body == body.id) {
+            kernel.result_obs = body.result_observation.clone();
         }
     }
 }
