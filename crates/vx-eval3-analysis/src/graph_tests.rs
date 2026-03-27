@@ -79,6 +79,9 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("Raw JSON"));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
+    assert!(html.contains("color-scheme: dark"));
+    assert!(html.contains(".source-registry li.active"));
+    assert!(html.contains("snippet-line"));
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
@@ -161,6 +164,7 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("zlib-lib.vx"));
     assert!(html.contains("libpng-lib.vx"));
     assert!(html.contains("pnggen-app.vx"));
+    assert!(html.contains("data-source-id"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {

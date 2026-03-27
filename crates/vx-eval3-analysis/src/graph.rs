@@ -189,39 +189,48 @@ impl AnalysisGraph {
         );
         out.push_str("<title>Vixen Structural Analysis Graph</title>\n");
         out.push_str("<style>\n");
-        out.push_str("  :root { color-scheme: light; }\n");
-        out.push_str("  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #f8fafc; color: #0f172a; }\n");
-        out.push_str("  .header { padding: 16px 20px; border-bottom: 1px solid #cbd5e1; background: linear-gradient(90deg, #e2e8f0, #f8fafc); }\n");
-        out.push_str("  .title { margin: 0 0 6px 0; font-size: 18px; }\n");
-        out.push_str("  .sub { margin: 0; color: #334155; font-size: 13px; }\n");
+        out.push_str("  :root { color-scheme: dark; }\n");
+        out.push_str("  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
+        out.push_str("  .header { padding: 16px 20px; border-bottom: 1px solid #243244; background: linear-gradient(90deg, #162233, #111b2a); }\n");
+        out.push_str("  .title { margin: 0 0 6px 0; font-size: 18px; color: #f1f5f9; }\n");
+        out.push_str("  .sub { margin: 0; color: #93adc8; font-size: 13px; }\n");
         out.push_str("  .layout { display: grid; grid-template-columns: 1fr 380px; min-height: calc(100vh - 84px); }\n");
         out.push_str("  .canvas-wrap { padding: 10px; overflow: auto; }\n");
         out.push_str(
-            "  .panel { border-left: 1px solid #cbd5e1; background: #ffffff; padding: 12px; }\n",
+            "  .panel { border-left: 1px solid #243244; background: #121d2b; padding: 12px; }\n",
         );
-        out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 14px; }\n");
-        out.push_str("  .detail-card { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 10px; margin-bottom: 10px; }\n");
-        out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; }\n");
+        out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 14px; color: #dbe7f3; }\n");
+        out.push_str("  .detail-card { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 10px; }\n");
+        out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; color: #dbe7f3; }\n");
         out.push_str("  .detail-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin-bottom: 6px; font-size: 12px; }\n");
         out.push_str("  .detail-row:last-child { margin-bottom: 0; }\n");
-        out.push_str("  .detail-key { color: #334155; }\n");
-        out.push_str("  .detail-val { color: #0f172a; word-break: break-word; }\n");
-        out.push_str("  .snippet { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
-        out.push_str("  .source-registry { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .detail-key { color: #8ba5c1; }\n");
+        out.push_str("  .detail-val { color: #e2e8f0; word-break: break-word; }\n");
+        out.push_str("  .snippet { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: #0b1420; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
+        out.push_str("  .snippet-line { display: grid; grid-template-columns: 2.4em 1fr; gap: 10px; margin-bottom: 2px; }\n");
+        out.push_str("  .snippet-line:last-child { margin-bottom: 0; }\n");
+        out.push_str("  .snippet-ln { color: #647b95; text-align: right; user-select: none; }\n");
+        out.push_str(
+            "  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; }\n",
+        );
+        out.push_str("  .source-registry { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
-        out.push_str("  .source-registry li { margin: 4px 0; word-break: break-word; }\n");
+        out.push_str(
+            "  .source-registry li { margin: 4px 0; word-break: break-word; color: #c7d6e6; }\n",
+        );
+        out.push_str("  .source-registry li.active { color: #7dd3fc; font-weight: 600; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
-            "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #1d4ed8; }\n",
+            "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
         );
-        out.push_str("  .raw-json-pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.35; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }\n");
-        out.push_str("  .legend { margin: 8px 0 0 0; font-size: 12px; color: #334155; }\n");
+        out.push_str("  .raw-json-pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.35; background: #0b1420; color: #c7d6e6; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; }\n");
+        out.push_str("  .legend { margin: 8px 0 0 0; font-size: 12px; color: #8ba5c1; }\n");
         out.push_str(
-            "  .node rect { fill: #fff; stroke: #475569; stroke-width: 1.2; rx: 8; ry: 8; }\n",
+            "  .node rect { fill: #162233; stroke: #4f6b87; stroke-width: 1.2; rx: 8; ry: 8; }\n",
         );
-        out.push_str("  .node text { font-size: 12px; fill: #0f172a; pointer-events: none; }\n");
-        out.push_str("  .edge { stroke: #64748b; stroke-width: 1.3; fill: none; }\n");
-        out.push_str("  .edge-label { font-size: 11px; fill: #1e293b; }\n");
+        out.push_str("  .node text { font-size: 12px; fill: #dbe7f3; pointer-events: none; }\n");
+        out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
+        out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; }\n");
         out.push_str("</style>\n</head>\n<body>\n");
         out.push_str("<div class=\"header\">\n");
         out.push_str("<h1 class=\"title\">Vixen Structural Analysis Graph</h1>\n");
@@ -298,11 +307,25 @@ function normalizeMetadata(value) {
   if (!value || typeof value !== "object") return {};
   return value;
 }
+function renderSnippet(snippet) {
+  const lines = String(snippet).split("\n");
+  const lineHtml = lines
+    .map((line, idx) => `<div class="snippet-line"><span class="snippet-ln">${idx + 1}</span><span class="snippet-code">${htmlEscape(line)}</span></div>`)
+    .join("");
+  return `<div class="snippet">${lineHtml}</div>`;
+}
+function highlightSourceInRegistry(sourceId) {
+  const items = sourceRegistry.querySelectorAll("li[data-source-id]");
+  for (const item of items) {
+    item.classList.toggle("active", String(sourceId) !== "" && item.dataset.sourceId === String(sourceId));
+  }
+}
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
   const kind = value.kind || value.type || "graph";
   const label = value.label || "";
   const sourcePath = metadata.source_path || value.source_file || "";
+  const sourceId = metadata.span_source_id || "";
   const span = formatSpan(metadata);
   const snippet = metadata.source_snippet || "";
 
@@ -312,6 +335,7 @@ function setDetails(value) {
     label ? detailRow("Label", label) : "",
     value.id ? detailRow("ID", value.id) : "",
     value.from && value.to ? detailRow("Endpoints", `${value.from} -> ${value.to}`) : "",
+    sourceId ? detailRow("Source ID", sourceId) : "",
     sourcePath ? detailRow("Source Path", sourcePath) : "",
     span ? detailRow("Span", span) : "",
   ].join("");
@@ -323,7 +347,7 @@ function setDetails(value) {
     .join("");
 
   const snippetBlock = snippet
-    ? `<div class="detail-card"><div class="detail-title">Source Snippet</div><div class="snippet">${htmlEscape(snippet)}</div></div>`
+    ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${renderSnippet(snippet)}</div>`
     : "";
 
   const metadataBlock = metadataRows
@@ -343,6 +367,7 @@ function setDetails(value) {
       <pre class="raw-json-pre">${htmlEscape(JSON.stringify(value, null, 2))}</pre>
     </details>
   `;
+  highlightSourceInRegistry(sourceId);
 }
 function renderSourceRegistry(graph) {
   const files = Array.isArray(graph.source_files) ? graph.source_files : [];
@@ -353,7 +378,7 @@ function renderSourceRegistry(graph) {
   const list = files
     .slice()
     .sort((a, b) => (a.source_id - b.source_id) || String(a.path).localeCompare(String(b.path)))
-    .map((file) => `<li><strong>${htmlEscape(file.source_id)}</strong>: ${htmlEscape(file.path)}</li>`)
+    .map((file) => `<li data-source-id="${htmlEscape(file.source_id)}"><strong>${htmlEscape(file.source_id)}</strong>: ${htmlEscape(file.path)}</li>`)
     .join("");
   sourceRegistry.innerHTML = `
     <div>This graph includes ${files.length} source file(s).</div>
@@ -406,6 +431,7 @@ for (const node of graph.nodes) {
   svg.appendChild(g);
 }
 
+renderSourceRegistry(graph);
 setDetails({
   type: "graph",
   graph_type: graph.graph_type,
@@ -414,7 +440,6 @@ setDetails({
   node_count: graph.nodes.length,
   edge_count: graph.edges.length
 });
-renderSourceRegistry(graph);
 </script>"##,
         );
         out.push_str("\n</body>\n</html>\n");
