@@ -2,8 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
+    sync::{Arc, Mutex, OnceLock},
 };
 
+use arborium::advanced::{CompiledGrammar, GrammarConfig};
+use arborium::{Config, GrammarStore, Highlighter, HtmlFormat};
 use vx_resolve::SourceSpan;
 
 use crate::{
@@ -216,9 +219,10 @@ impl AnalysisGraph {
         out.push_str("  .source-registry { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
         out.push_str(
-            "  .source-registry li { margin: 4px 0; word-break: break-word; color: #c7d6e6; }\n",
+            "  .source-registry li { margin: 4px 0; word-break: break-word; color: #c7d6e6; cursor: pointer; }\n",
         );
         out.push_str("  .source-registry li.active { color: #7dd3fc; font-weight: 600; }\n");
+        out.push_str("  .source-registry li.focused { color: #a5f3fc; font-weight: 700; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
@@ -231,6 +235,20 @@ impl AnalysisGraph {
         out.push_str("  .node text { font-size: 12px; fill: #dbe7f3; pointer-events: none; }\n");
         out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
         out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; }\n");
+        out.push_str("  .dimmed { opacity: 0.18; }\n");
+        out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
+        out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
+        out.push_str("  .arb-snippet .arb-string { color: #a6e3a1; }\n");
+        out.push_str("  .arb-snippet .arb-comment { color: #6c7f95; }\n");
+        out.push_str("  .arb-snippet .arb-type { color: #f9e2af; }\n");
+        out.push_str("  .arb-snippet .arb-variable { color: #cdd6f4; }\n");
+        out.push_str("  .arb-snippet .arb-constant { color: #fab387; }\n");
+        out.push_str("  .arb-snippet .arb-number { color: #fab387; }\n");
+        out.push_str("  .arb-snippet .arb-property { color: #94e2d5; }\n");
+        out.push_str("  .arb-snippet .arb-operator { color: #89dceb; }\n");
+        out.push_str("  .arb-snippet .arb-punctuation { color: #bac2de; }\n");
+        out.push_str("  .arb-snippet .arb-tag { color: #f38ba8; }\n");
+        out.push_str("  .arb-snippet .arb-attribute { color: #89b4fa; }\n");
         out.push_str("</style>\n</head>\n<body>\n");
         out.push_str("<div class=\"header\">\n");
         out.push_str("<h1 class=\"title\">Vixen Structural Analysis Graph</h1>\n");
@@ -254,6 +272,8 @@ const graph = JSON.parse(document.getElementById("graph-json").textContent);
 const svg = document.getElementById("graph-svg");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
+let sourceFilterSourceId = "";
+const sourceBoundElements = [];
 
 const columns = {
   body: 120,
@@ -317,7 +337,23 @@ function renderSnippet(snippet) {
 function highlightSourceInRegistry(sourceId) {
   const items = sourceRegistry.querySelectorAll("li[data-source-id]");
   for (const item of items) {
-    item.classList.toggle("active", String(sourceId) !== "" && item.dataset.sourceId === String(sourceId));
+    const isMatch = String(sourceId) !== "" && item.dataset.sourceId === String(sourceId);
+    item.classList.toggle("active", isMatch);
+    item.classList.toggle("focused", isMatch && sourceFilterSourceId === String(sourceId));
+  }
+}
+function applySourceFilter(sourceId) {
+  sourceFilterSourceId = String(sourceId ?? "");
+  for (const entry of sourceBoundElements) {
+    const shouldDim =
+      sourceFilterSourceId !== "" &&
+      entry.sourceId !== "" &&
+      entry.sourceId !== sourceFilterSourceId;
+    entry.el.classList.toggle("dimmed", shouldDim);
+  }
+  const items = sourceRegistry.querySelectorAll("li[data-source-id]");
+  for (const item of items) {
+    item.classList.toggle("focused", sourceFilterSourceId !== "" && item.dataset.sourceId === sourceFilterSourceId);
   }
 }
 function setDetails(value) {
@@ -328,6 +364,7 @@ function setDetails(value) {
   const sourceId = metadata.span_source_id || "";
   const span = formatSpan(metadata);
   const snippet = metadata.source_snippet || "";
+  const snippetHighlighted = metadata.source_snippet_highlighted_html || "";
 
   const baseRows = [
     detailRow("Type", value.type || "graph"),
@@ -347,7 +384,11 @@ function setDetails(value) {
     .join("");
 
   const snippetBlock = snippet
-    ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${renderSnippet(snippet)}</div>`
+    ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${
+        snippetHighlighted
+          ? `<div class="snippet arb-snippet">${snippetHighlighted}</div>`
+          : renderSnippet(snippet)
+      }</div>`
     : "";
 
   const metadataBlock = metadataRows
@@ -368,6 +409,9 @@ function setDetails(value) {
     </details>
   `;
   highlightSourceInRegistry(sourceId);
+  if (sourceFilterSourceId === "") {
+    applySourceFilter(sourceId);
+  }
 }
 function renderSourceRegistry(graph) {
   const files = Array.isArray(graph.source_files) ? graph.source_files : [];
@@ -384,6 +428,13 @@ function renderSourceRegistry(graph) {
     <div>This graph includes ${files.length} source file(s).</div>
     <ul>${list}</ul>
   `;
+  const items = sourceRegistry.querySelectorAll("li[data-source-id]");
+  for (const item of items) {
+    item.addEventListener("click", () => {
+      const next = item.dataset.sourceId === sourceFilterSourceId ? "" : item.dataset.sourceId;
+      applySourceFilter(next);
+    });
+  }
 }
 
 const defs = el("defs");
@@ -402,10 +453,15 @@ for (const edge of graph.edges) {
     class: "edge",
     "marker-end": "url(#arrow)"
   });
+  const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
+  if (edgeSourceId) line.setAttribute("data-source-id", edgeSourceId);
+  sourceBoundElements.push({ el: line, sourceId: edgeSourceId });
   line.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
   svg.appendChild(line);
 
   const label = el("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 6, class: "edge-label", "text-anchor": "middle" });
+  if (edgeSourceId) label.setAttribute("data-source-id", edgeSourceId);
+  sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
   label.textContent = edge.label;
   label.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
   svg.appendChild(label);
@@ -415,6 +471,9 @@ for (const node of graph.nodes) {
   const p = positions.get(node.id);
   if (!p) continue;
   const g = el("g", { class: "node", transform: `translate(${p.x - 98}, ${p.y})` });
+  const nodeSourceId = String(node?.metadata?.span_source_id ?? "");
+  if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
+  sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
   g.addEventListener("click", () => setDetails({ type: "node", ...node }));
 
   const rect = el("rect", { width: 196, height: 54 });
@@ -432,6 +491,7 @@ for (const node of graph.nodes) {
 }
 
 renderSourceRegistry(graph);
+applySourceFilter("");
 setDetails({
   type: "graph",
   graph_type: graph.graph_type,
@@ -853,6 +913,9 @@ fn append_source_expr_metadata(
         }
         if let Some(snippet) = ctx.expr_snippet(source.expr) {
             metadata.push(("source_snippet".to_owned(), snippet.to_owned()));
+            if let Some(highlighted) = highlight_vixen_snippet_html(snippet) {
+                metadata.push(("source_snippet_highlighted_html".to_owned(), highlighted));
+            }
         }
     }
 }
@@ -1132,4 +1195,49 @@ fn snippet_for_span(source_text: &str, span: SourceSpan) -> Option<String> {
             Some(format!("{}…", &normalized[..max]))
         }
     }
+}
+
+struct SnippetHighlighter {
+    highlighter: Highlighter,
+}
+
+impl SnippetHighlighter {
+    fn try_new() -> Result<Self, String> {
+        let grammar = Arc::new(
+            CompiledGrammar::new(GrammarConfig {
+                language: tree_sitter_vixen::language().into(),
+                highlights_query: tree_sitter_vixen::HIGHLIGHTS_QUERY,
+                injections_query: tree_sitter_vixen::INJECTIONS_QUERY,
+                locals_query: tree_sitter_vixen::LOCALS_QUERY,
+            })
+            .map_err(|err| err.to_string())?,
+        );
+
+        let store = Arc::new(GrammarStore::new());
+        store.insert("vixen", grammar.clone());
+        store.insert("vx", grammar);
+        let config = Config {
+            html_format: HtmlFormat::ClassNamesWithPrefix("arb".to_owned()),
+            ..Config::default()
+        };
+
+        Ok(Self {
+            highlighter: Highlighter::with_store_and_config(store, config),
+        })
+    }
+
+    fn highlight_vixen(&mut self, source: &str) -> Option<String> {
+        self.highlighter
+            .highlight("vixen", source)
+            .or_else(|_| self.highlighter.highlight("vx", source))
+            .ok()
+    }
+}
+
+fn highlight_vixen_snippet_html(snippet: &str) -> Option<String> {
+    static HIGHLIGHTER: OnceLock<Mutex<Option<SnippetHighlighter>>> = OnceLock::new();
+    let cell = HIGHLIGHTER.get_or_init(|| Mutex::new(SnippetHighlighter::try_new().ok()));
+    let mut guard = cell.lock().ok()?;
+    let highlighter = guard.as_mut()?;
+    highlighter.highlight_vixen(snippet)
 }

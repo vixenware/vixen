@@ -11,9 +11,11 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+arborium = { workspace = true }
 vx-parser = { workspace = true }
 vx-resolve = { workspace = true }
 vx-types = { workspace = true }
+tree-sitter-vixen = { git = "https://github.com/bearcove/tree-sitter-vixen", rev = "9fe14bea91399543282035090086fec8a868fb6c" }
 
 [lints]
 workspace = true
