@@ -12,7 +12,9 @@ pub use model::{
 };
 
 mod bridge;
-pub use bridge::{BridgeBody, BridgeExpr, BridgeExprKind, BridgeResolvedRef, SingleSourceBridge};
+pub use bridge::{
+    BridgeBody, BridgeExpr, BridgeExprKind, BridgeParam, BridgeResolvedRef, SingleSourceBridge,
+};
 
 mod bridge_to_analysis;
 pub use bridge_to_analysis::build_minimal_analysis;

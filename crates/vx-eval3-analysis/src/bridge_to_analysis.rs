@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use vx_resolve::SourceSpan;
 
 use crate::{
-    AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, BridgeExprKind, ExtractedNode,
-    ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion, Observation,
-    RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge, SourceExpr, UseSiteId,
+    AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, BridgeExprKind, CaptureSlot,
+    ClosureEnvLayout, ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion,
+    LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge,
+    SourceExpr, UseSiteId,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -82,12 +83,13 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     }
 
     seed_use_observations(&mut bodies, bridge);
+    let closure_layouts = seed_closure_layouts(bridge);
 
     AnalysisResult {
         bodies,
         kernels,
         runtime_nodes,
-        closure_layouts: vec![],
+        closure_layouts,
         frame_layouts: vec![],
     }
 }
@@ -141,6 +143,83 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
             next_id += 1;
         }
     }
+}
+
+fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
+    let mut closure_exprs = bridge
+        .exprs
+        .iter()
+        .filter(|expr| expr.kind == BridgeExprKind::Closure)
+        .filter_map(|expr| Some((expr.body?, expr)))
+        .collect::<Vec<_>>();
+    closure_exprs.sort_by_key(|(body_id, expr)| (body_id.0, expr.id.0));
+
+    let mut layouts = Vec::new();
+    for (index, (body_id, closure_expr)) in closure_exprs.into_iter().enumerate() {
+        let Some(body) = bridge.bodies.iter().find(|body| body.id == body_id) else {
+            continue;
+        };
+
+        let nested_closure_ranges = bridge
+            .exprs
+            .iter()
+            .filter(|expr| expr.kind == BridgeExprKind::Closure)
+            .filter(|expr| expr.id != closure_expr.id)
+            .map(|expr| expr.span.range)
+            .filter(|range| closure_expr.span.range.contains_range(*range))
+            .collect::<Vec<_>>();
+
+        let body_param_spans = body
+            .params
+            .iter()
+            .map(|param| param.span)
+            .collect::<HashSet<_>>();
+
+        let mut candidates = bridge
+            .resolved_refs
+            .iter()
+            .filter(|resolved| closure_expr.span.range.contains_range(resolved.span.range))
+            .filter(|resolved| {
+                !nested_closure_ranges
+                    .iter()
+                    .any(|range| range.contains_range(resolved.span.range))
+            })
+            .filter_map(|resolved| {
+                let target = resolved.target.as_ref().ok()?;
+                if target.kind != vx_resolve::DefKind::Parameter {
+                    return None;
+                }
+                if !body_param_spans.contains(&target.name_span) {
+                    return None;
+                }
+
+                let source = enclosing_expr_source(resolved.span, &bridge.exprs)?;
+                Some((target.name.clone(), target.name_span, source))
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by_key(|(name, span, source)| {
+            (
+                u32::from(span.range.start()),
+                u32::from(span.range.end()),
+                name.clone(),
+                source.expr.0,
+            )
+        });
+        candidates.dedup_by(|lhs, rhs| lhs.1 == rhs.1);
+
+        let captures = candidates
+            .into_iter()
+            .map(|(name, _, source)| CaptureSlot { name, source })
+            .collect();
+
+        layouts.push(ClosureEnvLayout {
+            id: LayoutId(index as u32),
+            captures,
+        });
+    }
+
+    layouts
 }
 
 fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody {

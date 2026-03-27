@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use vx_parser::{AstNode, Expr, Parsed, SourceFile, SyntaxError};
 use vx_resolve::{
-    ImportGraph, NameResolution, ResolveError, SourceFileRef, SourceId, SourceSpan,
+    Definition, ImportGraph, NameResolution, ResolveError, SourceFileRef, SourceId, SourceSpan,
     TypeCheckResult, check_capabilities, collect_types_for_sources, resolve_in_program,
     stdlib_sources, type_check,
 };
@@ -11,15 +11,23 @@ use vx_types::Ty;
 use crate::{BodyId, ExprId};
 
 #[derive(Debug, Clone)]
+pub struct BridgeParam {
+    pub name: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone)]
 pub struct BridgeBody {
     pub id: BodyId,
     pub name: String,
     pub span: SourceSpan,
+    pub params: Vec<BridgeParam>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeExprKind {
     Call,
+    Closure,
     Field,
     Other,
 }
@@ -36,7 +44,7 @@ pub struct BridgeExpr {
 pub struct BridgeResolvedRef {
     pub span: SourceSpan,
     pub name: String,
-    pub target: Result<vx_resolve::DefId, ResolveError>,
+    pub target: Result<Definition, ResolveError>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +124,21 @@ fn collect_bodies(source_id: SourceId, file: &SourceFile) -> Vec<BridgeBody> {
     }) {
         if let Some(name) = fn_decl.name() {
             let body_id = BodyId(bodies.len() as u32);
+            let params = fn_decl
+                .parameters()
+                .filter_map(|parameter| {
+                    let name = parameter.name()?;
+                    Some(BridgeParam {
+                        name: name.text().to_owned(),
+                        span: SourceSpan::new(source_id, name.text_range()),
+                    })
+                })
+                .collect();
             bodies.push(BridgeBody {
                 id: body_id,
                 name: name.text().to_owned(),
                 span: SourceSpan::new(source_id, fn_decl.syntax().text_range()),
+                params,
             });
         }
     }
@@ -136,6 +155,7 @@ fn collect_exprs(source_id: SourceId, file: &SourceFile, bodies: &[BridgeBody]) 
             let span = SourceSpan::new(source_id, expr.syntax().text_range());
             let kind = match expr {
                 Expr::Call(_) => BridgeExprKind::Call,
+                Expr::Closure(_) => BridgeExprKind::Closure,
                 Expr::Field(_) => BridgeExprKind::Field,
                 _ => BridgeExprKind::Other,
             };
@@ -170,7 +190,7 @@ fn collect_resolved_refs(resolution: &NameResolution) -> Vec<BridgeResolvedRef> 
         .map(|resolved| BridgeResolvedRef {
             span: resolved.span,
             name: resolved.name.clone(),
-            target: resolved.target.clone().map(|def| def.id),
+            target: resolved.target.clone(),
         })
         .collect()
 }

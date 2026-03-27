@@ -129,3 +129,80 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
         "exec and discover should seed NeedCallable observations"
     );
 }
+
+#[test]
+fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    assert_eq!(analysis.closure_layouts.len(), 1);
+    let captures = &analysis.closure_layouts[0].captures;
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].name, "n");
+}
+
+#[test]
+fn bridge_to_analysis_seeds_empty_capture_for_non_capturing_closure() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let id = (x) => x;
+  id(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(analysis_a.closure_layouts, analysis_b.closure_layouts);
+    assert_eq!(analysis_a.closure_layouts.len(), 1);
+    assert!(
+        analysis_a.closure_layouts[0].captures.is_empty(),
+        "non-capturing closure should have empty capture set"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_excludes_nested_closure_refs_from_outer_capture_seed() {
+    let src = r#"
+fn main(n: U64, m: U64) -> U64 (
+  let outer = (x) => (
+    let inner = (y) => m + y;
+    n + x
+  );
+  outer(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    assert_eq!(analysis.closure_layouts.len(), 2);
+    let mut capture_name_sets = analysis
+        .closure_layouts
+        .iter()
+        .map(|layout| {
+            let mut names = layout
+                .captures
+                .iter()
+                .map(|capture| capture.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        })
+        .collect::<Vec<_>>();
+    capture_name_sets.sort();
+
+    assert_eq!(
+        capture_name_sets,
+        vec![vec!["m".to_owned()], vec!["n".to_owned()]],
+        "outer closure should capture n only; inner closure should capture m only"
+    );
+}
