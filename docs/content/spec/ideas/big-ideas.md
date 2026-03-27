@@ -102,8 +102,8 @@ building a Rust project with regular crates.io dependencies is impractical witho
 the use of a separate tool (reindeer) run ahead of time, which invokes cargo
 and translates its lockfiles to BUCK files.
 
-The "hermeticity" of Buck2 is also, in practice, only true when builds are executed
-remotely. Local execution (on a macOS machine for example) is not, actually, hermetic.
+Buck2's hermeticity story is, in practice, a remote-execution story. Local
+execution, on a macOS machine for example, is not actually hermetic.
 
 ### Cargo
 
@@ -129,3 +129,98 @@ extremely easy to do, given that they inherit from the ambient environment and
 can call arbitrary processes, usually provided by the system, then cargo
 exhibits problems of over-caching: re-using the previous build, even though it
 should have actually rebuilt it.
+
+### Doing better
+
+The tools we have seen so far cover many different jobs.
+
+Configuration, which involves discovering facts about hosts and targets,
+selecting features and options, and determining which tools and
+libraries are available.
+
+Resolution, which involves starting from the package requests in a Cargo
+manifest and recursively selecting concrete package versions from a
+registry, using algorithms such as PubGrub to satisfy all version
+constraints.
+
+Scheduling, which decides in which order and where to run the many different
+steps that a build is made up of. 
+
+Execution, which involves actually running processes (compilers, linkers,
+various binutils, etc.) in an executor with the correct inputs, ideally denying
+access to undeclared inputs, and retrieving the outputs.
+
+Caching, which tries to record decisions made or the results of
+actions, keyed on everything that went into those decisions or actions, so
+that they may be reused in subsequent builds, whether on the same host or a
+different one.
+
+### Doing worse
+
+The first step to doing better is to do worse, and so I'm going to show you a
+Vixen program that is intentionally very bad:
+
+```vixen
+exec ["clang", "main.c", "-o", "main"]
+```
+
+(This is a function application. We're applying an array to a function called exec.)
+
+This is problematic in a number of ways. For example, where does clang come
+from? Is it from the `PATH` env variable? How do we know to rerun compilation
+(and change the cache key) when clang changes?
+
+Same questions for `main.c`: is it a local file? If yes, say it's local to my
+macOS machine, I want to build on a remote Linux server, how is `main.c` sent over
+there? How is `main` sent back to me?
+
+And if it's on a remote machine, how do we know that they have clang? How do we
+make sure we don't makes things that run here and things that run there?
+
+Vixen has answers for all of these.
+
+First of, a `build.vx` file is not a naked expression. It exports a build function,
+which takes build parameters.
+
+```vixen
+fn build(params: BuildParams) (
+  // body goes here
+)
+```
+
+Those include:
+
+  * Command-line arguments, environment variables, and a path to the workspace.
+  
+So if we have:
+
+```
+my-project/
+  build.vx
+  src/
+    main.c
+    main.h
+```
+
+Then `vx build` will have `params.workspace` set to `my-project/` and we can
+build a path to `main.c` from it:
+
+```vixen
+fn build(params: BuildParams) (
+  let main_c = @({params.workspace}/src/main.c); // path literal, with interpolation
+  exec ["clang", main_c, "-o", "main"]
+)
+```
+
+However, this will fail because `main.c` depends on `main.h`, and thus, we actually want to
+mount all of `src`
+
+```vixen
+fn build(params: BuildParams) (
+  exec ["clang", @(src/main.c), "-o", "main"] where {
+    mounts: %{ @(src) => @({params.workspace}/src) }
+  }
+)
+```
+
+Regarding the output,
