@@ -207,6 +207,9 @@ impl AnalysisGraph {
         out.push_str("  .detail-key { color: #334155; }\n");
         out.push_str("  .detail-val { color: #0f172a; word-break: break-word; }\n");
         out.push_str("  .snippet { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
+        out.push_str("  .source-registry { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
+        out.push_str("  .source-registry li { margin: 4px 0; word-break: break-word; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #1d4ed8; }\n",
@@ -231,9 +234,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div>\n");
-        out.push_str(
-            "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
-        );
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -243,6 +244,7 @@ impl AnalysisGraph {
 const graph = JSON.parse(document.getElementById("graph-json").textContent);
 const svg = document.getElementById("graph-svg");
 const details = document.getElementById("details");
+const sourceRegistry = document.getElementById("source-registry");
 
 const columns = {
   body: 120,
@@ -342,6 +344,22 @@ function setDetails(value) {
     </details>
   `;
 }
+function renderSourceRegistry(graph) {
+  const files = Array.isArray(graph.source_files) ? graph.source_files : [];
+  if (files.length === 0) {
+    sourceRegistry.innerHTML = `<div>No source registry for this graph.</div>`;
+    return;
+  }
+  const list = files
+    .slice()
+    .sort((a, b) => (a.source_id - b.source_id) || String(a.path).localeCompare(String(b.path)))
+    .map((file) => `<li><strong>${htmlEscape(file.source_id)}</strong>: ${htmlEscape(file.path)}</li>`)
+    .join("");
+  sourceRegistry.innerHTML = `
+    <div>This graph includes ${files.length} source file(s).</div>
+    <ul>${list}</ul>
+  `;
+}
 
 const defs = el("defs");
 const marker = el("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 8, markerHeight: 8, orient: "auto-start-reverse" });
@@ -392,9 +410,11 @@ setDetails({
   type: "graph",
   graph_type: graph.graph_type,
   source_file: graph.source_file,
+  source_file_count: Array.isArray(graph.source_files) ? graph.source_files.length : 0,
   node_count: graph.nodes.length,
   edge_count: graph.edges.length
 });
+renderSourceRegistry(graph);
 </script>"##,
         );
         out.push_str("\n</body>\n</html>\n");

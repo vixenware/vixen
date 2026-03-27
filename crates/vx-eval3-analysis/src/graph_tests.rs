@@ -156,6 +156,11 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     let html = graph.to_standalone_html();
     assert!(html.contains("tri-platform-png.vx"));
     assert!(html.contains("structural analysis graph"));
+    assert!(html.contains("Source Registry"));
+    assert!(html.contains("This graph includes"));
+    assert!(html.contains("zlib-lib.vx"));
+    assert!(html.contains("libpng-lib.vx"));
+    assert!(html.contains("pnggen-app.vx"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
