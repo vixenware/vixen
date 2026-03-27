@@ -885,6 +885,13 @@ fn main(n: U64) -> U64 ( plus_one(n) )
         Observation::NeedValue,
         "direct named callee should reflect propagated use pressure in body analysis state"
     );
+    assert!(
+        callee_body
+            .use_observations
+            .values()
+            .any(|obs| *obs == Observation::NeedValue),
+        "direct named callee should gain concrete callee-side use-observation pressure"
+    );
 }
 
 #[test]
@@ -922,6 +929,13 @@ fn main(n: U64) -> U64 (
         Observation::NeedValue,
         "recovered closure callee should reflect propagated use pressure in layout state"
     );
+    assert!(
+        layout
+            .captures
+            .iter()
+            .any(|capture| capture.incoming_use_observation == Observation::NeedValue),
+        "recovered closure callee should gain concrete capture-side use pressure"
+    );
 }
 
 #[test]
@@ -949,6 +963,10 @@ fn main(n: U64) -> U64 ( n + 1 )
         helper_body.incoming_use_observation,
         Observation::NoObs,
         "unused helper should stay clean in callee-side incoming use state"
+    );
+    assert!(
+        helper_body.use_observations.is_empty(),
+        "unused helper should stay without added callee-side use observations"
     );
 }
 

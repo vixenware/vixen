@@ -98,12 +98,12 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     seed_body_result_observations(&mut bodies, bridge, &propagated_result_demands);
     seed_kernel_demands(&mut bodies, &mut kernels);
     let propagated_use_demands = seed_first_use_observation_propagation_step(&bodies);
+    seed_use_observations(&mut bodies, bridge);
     apply_one_step_propagated_use_pressure(
         &mut bodies,
         &mut closure_layouts,
         &propagated_use_demands,
     );
-    seed_use_observations(&mut bodies, bridge);
 
     AnalysisResult {
         bodies,
@@ -128,6 +128,15 @@ fn apply_one_step_propagated_use_pressure(
                     && body.incoming_use_observation == Observation::NoObs
                 {
                     body.incoming_use_observation = obs.clone();
+                    let next_use_site = body
+                        .use_observations
+                        .keys()
+                        .map(|id| id.0)
+                        .max()
+                        .map(|max| max + 1)
+                        .unwrap_or(0);
+                    body.use_observations
+                        .insert(UseSiteId(next_use_site), obs.clone());
                 }
             }
             crate::ResultDemandCallee::ClosureLayout(layout_id) => {
@@ -135,6 +144,11 @@ fn apply_one_step_propagated_use_pressure(
                     && layout.incoming_use_observation == Observation::NoObs
                 {
                     layout.incoming_use_observation = obs.clone();
+                    for capture in &mut layout.captures {
+                        if capture.incoming_use_observation == Observation::NoObs {
+                            capture.incoming_use_observation = obs.clone();
+                        }
+                    }
                 }
             }
         }
@@ -644,7 +658,11 @@ fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
 
         let captures = candidates
             .into_iter()
-            .map(|(name, _, source)| CaptureSlot { name, source })
+            .map(|(name, _, source)| CaptureSlot {
+                name,
+                source,
+                incoming_use_observation: Observation::NoObs,
+            })
             .collect();
 
         layouts.push(ClosureEnvLayout {

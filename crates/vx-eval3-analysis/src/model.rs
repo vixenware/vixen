@@ -90,6 +90,7 @@ pub struct KernelEntrypoint {
 pub struct CaptureSlot {
     pub name: String,
     pub source: SourceExpr,
+    pub incoming_use_observation: Observation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
