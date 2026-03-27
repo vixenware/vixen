@@ -31,7 +31,7 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
-fn bridge_to_analysis_marks_exec_boundary_for_build_shaped_source() {
+fn bridge_to_analysis_marks_exec_and_discover_boundaries_for_build_shaped_source() {
     let src = r#"
 fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let class = executor_class("default");
@@ -48,12 +48,21 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
         .validate()
         .expect("build-shaped minimal analysis should validate");
 
+    let has_exec = analysis
+        .runtime_nodes
+        .iter()
+        .any(|node| matches!(node, RuntimeNode::Exec { .. }));
+    let has_discover = analysis
+        .runtime_nodes
+        .iter()
+        .any(|node| matches!(node, RuntimeNode::Discover { .. }));
     assert!(
-        analysis
-            .runtime_nodes
-            .iter()
-            .any(|node| matches!(node, RuntimeNode::Exec { .. })),
+        has_exec,
         "exec call should become an exec runtime boundary node"
+    );
+    assert!(
+        has_discover,
+        "discover call should become a discover runtime boundary node"
     );
 
     let build_body = analysis
@@ -70,6 +79,90 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
             }
         )
     }));
+}
+
+#[test]
+fn bridge_to_analysis_classifies_stabilize_as_shared_keyed_boundary() {
+    let src = r#"
+fn main() -> String (
+  stabilize(() => "w", (w) => w)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis
+        .validate()
+        .expect("stabilize-shaped minimal analysis should validate");
+
+    assert!(
+        analysis
+            .runtime_nodes
+            .iter()
+            .any(|node| matches!(node, RuntimeNode::SharedKeyed { .. })),
+        "stabilize call should become a shared-keyed runtime boundary node"
+    );
+
+    let body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main should be the first top-level body");
+    assert!(body.extracted_nodes.iter().any(|node| {
+        matches!(
+            node.reason,
+            crate::ExtractedNodeReason::RuntimeBoundary {
+                kind: RuntimeBoundaryKind::SharedKeyed
+            }
+        )
+    }));
+
+    let callable_count = body
+        .use_observations
+        .values()
+        .filter(|obs| **obs == Observation::NeedCallable)
+        .count();
+    assert!(
+        callable_count >= 1,
+        "stabilize should seed NeedCallable observations via boundary classification"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_does_not_classify_local_exec_as_runtime_boundary() {
+    let src = r#"
+fn exec(x: U64) -> U64 ( x + 1 )
+
+fn main() -> U64 (
+  exec(41)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis
+        .validate()
+        .expect("local-exec minimal analysis should validate");
+
+    assert!(
+        analysis.runtime_nodes.is_empty(),
+        "local non-stdlib exec should not become a runtime boundary node"
+    );
+
+    let body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("main should be the second top-level body");
+    let callable_count = body
+        .use_observations
+        .values()
+        .filter(|obs| **obs == Observation::NeedCallable)
+        .count();
+    assert_eq!(
+        callable_count, 0,
+        "local non-stdlib exec call should not seed NeedCallable boundary observation"
+    );
 }
 
 #[test]

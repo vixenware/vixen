@@ -16,6 +16,8 @@ pub use bridge::{
     BridgeBody, BridgeExpr, BridgeExprKind, BridgeParam, BridgeResolvedRef, SingleSourceBridge,
 };
 
+mod boundary;
+
 mod bridge_to_analysis;
 pub use bridge_to_analysis::build_minimal_analysis;
 

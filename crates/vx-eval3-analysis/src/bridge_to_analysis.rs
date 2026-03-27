@@ -6,7 +6,7 @@ use crate::{
     AnalysisResult, AnalyzedBody, BridgeBody, BridgeExpr, BridgeExprKind, CaptureSlot,
     ClosureEnvLayout, ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion,
     LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge,
-    SourceExpr, UseSiteId,
+    SourceExpr, UseSiteId, boundary::classify_runtime_boundary,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -29,11 +29,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         .resolved_refs
         .iter()
         .filter_map(|resolved| {
-            let kind = match resolved.name.as_str() {
-                "exec" => RuntimeBoundaryKind::Exec,
-                "discover" => RuntimeBoundaryKind::Discover,
-                _ => return None,
-            };
+            let kind = classify_runtime_boundary(bridge.source_id, resolved)?;
             let source = enclosing_expr_source(resolved.span, &bridge.exprs)?;
             Some((resolved.span, source, kind))
         })
@@ -98,10 +94,10 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
     let mut seeds = Vec::new();
 
     for resolved in &bridge.resolved_refs {
-        let obs = match resolved.name.as_str() {
-            "exec" | "discover" => Observation::NeedCallable,
-            _ => continue,
+        let Some(_kind) = classify_runtime_boundary(bridge.source_id, resolved) else {
+            continue;
         };
+        let obs = Observation::NeedCallable;
         let Some(source) =
             enclosing_expr_source_with_kind(resolved.span, &bridge.exprs, BridgeExprKind::Call)
         else {
