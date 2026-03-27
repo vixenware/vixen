@@ -25,6 +25,7 @@ pub fn canonical_program_a_fixture() -> AnalysisResult {
             callee_targets: BTreeMap::new(),
             callee_local_origins: BTreeMap::new(),
             source_local_call_edges: vec![],
+            callee_closure_layouts: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(0),
                 source: SourceExpr {
@@ -80,6 +81,7 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
             callee_targets: BTreeMap::new(),
             callee_local_origins: BTreeMap::new(),
             source_local_call_edges: vec![],
+            callee_closure_layouts: BTreeMap::new(),
             extracted_nodes: vec![
                 ExtractedNode {
                     id: RuntimeNodeId(10),
@@ -143,6 +145,10 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
         ],
         closure_layouts: vec![ClosureEnvLayout {
             id: LayoutId(10),
+            source: SourceExpr {
+                body: main_body,
+                expr: add_n_expr,
+            },
             captures: vec![CaptureSlot {
                 name: "n".to_owned(),
                 source: SourceExpr {
@@ -170,6 +176,7 @@ pub fn canonical_program_c_fixture() -> AnalysisResult {
             callee_targets: BTreeMap::new(),
             callee_local_origins: BTreeMap::new(),
             source_local_call_edges: vec![],
+            callee_closure_layouts: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(20),
                 source: SourceExpr {
@@ -223,6 +230,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
                 callee_targets: BTreeMap::new(),
                 callee_local_origins: BTreeMap::new(),
                 source_local_call_edges: vec![],
+                callee_closure_layouts: BTreeMap::new(),
                 extracted_nodes: vec![],
                 kernel_entries: vec![KernelEntrypoint {
                     body: apply_body,
@@ -241,6 +249,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
                 callee_targets: BTreeMap::new(),
                 callee_local_origins: BTreeMap::new(),
                 source_local_call_edges: vec![],
+                callee_closure_layouts: BTreeMap::new(),
                 extracted_nodes: vec![ExtractedNode {
                     id: RuntimeNodeId(30),
                     source: SourceExpr {
@@ -308,6 +317,10 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
         }],
         closure_layouts: vec![ClosureEnvLayout {
             id: LayoutId(30),
+            source: SourceExpr {
+                body: main_body,
+                expr: ExprId(40),
+            },
             captures: vec![CaptureSlot {
                 name: "n".to_owned(),
                 source: SourceExpr {
@@ -335,6 +348,7 @@ pub fn build_shaped_exec_fixture() -> AnalysisResult {
             callee_targets: BTreeMap::new(),
             callee_local_origins: BTreeMap::new(),
             source_local_call_edges: vec![],
+            callee_closure_layouts: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(50),
                 source: SourceExpr {

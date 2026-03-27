@@ -699,6 +699,82 @@ fn main(n: U64) -> U64 (
 }
 
 #[test]
+fn bridge_to_analysis_links_recovered_local_closure_origin_to_concrete_layout() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let main_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("main body should exist");
+
+    let has_link = main_body
+        .callee_closure_layouts
+        .iter()
+        .any(|(call_expr, layout_id)| {
+            let Some(origin) = main_body.callee_local_origins.get(call_expr) else {
+                return false;
+            };
+            let Some(layout) = analysis.closure_layouts.iter().find(|l| l.id == *layout_id) else {
+                return false;
+            };
+            *origin == crate::SourceLocalCalleeOrigin::LocalClosure(layout.source.clone())
+        });
+    assert!(
+        has_link,
+        "recoverable local callable origin should link to a concrete closure layout"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_nonrecoverable_local_callable_has_no_closure_layout_link() {
+    let src = r#"
+fn apply(f: Fn(U64) -> U64, n: U64) -> U64 (
+  f(n)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    let apply_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("apply body should exist");
+
+    assert!(
+        apply_body.callee_closure_layouts.is_empty(),
+        "non-recoverable local callable path should remain on generic fallback without layout link"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_callee_closure_layout_links_are_deterministic() {
+    let src = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  add_n(1)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis_a = build_minimal_analysis(&bridge);
+    let analysis_b = build_minimal_analysis(&bridge);
+
+    assert_eq!(
+        analysis_a.bodies[0].callee_closure_layouts, analysis_b.bodies[0].callee_closure_layouts,
+        "callee->closure-layout linkage should be deterministic across repeated runs"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (

@@ -50,7 +50,7 @@ pub enum ExtractedNodeReason {
     RuntimeBoundary { kind: RuntimeBoundaryKind },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceExpr {
     pub body: BodyId,
     pub expr: ExprId,
@@ -95,6 +95,7 @@ pub struct CaptureSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosureEnvLayout {
     pub id: LayoutId,
+    pub source: SourceExpr,
     pub captures: Vec<CaptureSlot>,
 }
 
@@ -160,6 +161,7 @@ pub struct AnalyzedBody {
     pub callee_targets: BTreeMap<ExprId, DefId>,
     pub callee_local_origins: BTreeMap<ExprId, SourceLocalCalleeOrigin>,
     pub source_local_call_edges: Vec<SourceLocalCallEdge>,
+    pub callee_closure_layouts: BTreeMap<ExprId, LayoutId>,
     pub extracted_nodes: Vec<ExtractedNode>,
     pub kernel_entries: Vec<KernelEntrypoint>,
 }

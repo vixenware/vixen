@@ -89,11 +89,12 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
+    let closure_layouts = seed_closure_layouts(bridge);
     seed_callee_targets(&mut bodies, bridge);
     seed_source_local_callee_origins(&mut bodies, bridge);
     seed_source_local_call_edges(&mut bodies);
+    seed_callee_closure_layout_links(&mut bodies, &closure_layouts);
     seed_use_observations(&mut bodies, bridge);
-    let closure_layouts = seed_closure_layouts(bridge);
 
     AnalysisResult {
         bodies,
@@ -177,6 +178,33 @@ fn seed_source_local_call_edges(bodies: &mut [AnalyzedBody]) {
             (edge.call_expr.0, callee_rank)
         });
         body.source_local_call_edges = edges;
+    }
+}
+
+fn seed_callee_closure_layout_links(bodies: &mut [AnalyzedBody], layouts: &[ClosureEnvLayout]) {
+    let layout_by_source = layouts
+        .iter()
+        .map(|layout| (layout.source.clone(), layout.id))
+        .collect::<HashMap<_, _>>();
+
+    for body in bodies {
+        let mut seeds = body
+            .callee_local_origins
+            .iter()
+            .filter_map(|(call_expr, origin)| match origin {
+                crate::SourceLocalCalleeOrigin::LocalClosure(source) => {
+                    Some((*call_expr, *layout_by_source.get(source)?))
+                }
+                crate::SourceLocalCalleeOrigin::TopLevelBody(_)
+                | crate::SourceLocalCalleeOrigin::LocalDef(_) => None,
+            })
+            .collect::<Vec<_>>();
+        seeds.sort_by_key(|(expr, layout)| (expr.0, layout.0));
+        seeds.dedup();
+
+        for (expr, layout) in seeds {
+            body.callee_closure_layouts.insert(expr, layout);
+        }
     }
 }
 
@@ -464,6 +492,10 @@ fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
 
         layouts.push(ClosureEnvLayout {
             id: LayoutId(index as u32),
+            source: SourceExpr {
+                body: body_id,
+                expr: closure_expr.id,
+            },
             captures,
         });
     }
@@ -485,6 +517,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
         callee_targets: BTreeMap::new(),
         callee_local_origins: BTreeMap::new(),
         source_local_call_edges: vec![],
+        callee_closure_layouts: BTreeMap::new(),
         extracted_nodes: vec![],
         kernel_entries: vec![KernelEntrypoint {
             body: body.id,
