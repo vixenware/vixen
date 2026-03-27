@@ -158,8 +158,15 @@ pub struct AnalyzedBody {
     pub result_observation: Observation,
     pub use_observations: BTreeMap<UseSiteId, Observation>,
     pub callee_targets: BTreeMap<ExprId, DefId>,
+    pub callee_local_origins: BTreeMap<ExprId, SourceLocalCalleeOrigin>,
     pub extracted_nodes: Vec<ExtractedNode>,
     pub kernel_entries: Vec<KernelEntrypoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLocalCalleeOrigin {
+    TopLevelBody(BodyId),
+    LocalDef(DefId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

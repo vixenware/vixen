@@ -21,6 +21,7 @@ pub struct BridgeBody {
     pub id: BodyId,
     pub name: String,
     pub span: SourceSpan,
+    pub def_id: Option<DefId>,
     pub params: Vec<BridgeParam>,
 }
 
@@ -165,7 +166,7 @@ impl SingleSourceBridge {
         let type_check = type_check(&file, &resolution, &types);
         let cap_check = check_capabilities(&file, &resolution, &types, &type_check);
 
-        let bodies = collect_bodies(source_id, &file);
+        let bodies = collect_bodies(source_id, &file, &resolution);
         let exprs = collect_exprs(source_id, &file, &bodies);
         let resolved_refs = collect_resolved_refs(&resolution);
         let products = collect_products(source_id, &file, &exprs);
@@ -235,7 +236,11 @@ fn product_fields_for_expr(expr: &Expr) -> Option<Vec<FieldKey>> {
     }
 }
 
-fn collect_bodies(source_id: SourceId, file: &SourceFile) -> Vec<BridgeBody> {
+fn collect_bodies(
+    source_id: SourceId,
+    file: &SourceFile,
+    resolution: &NameResolution,
+) -> Vec<BridgeBody> {
     let mut bodies = Vec::new();
 
     for fn_decl in file.items().filter_map(|item| match item {
@@ -254,10 +259,18 @@ fn collect_bodies(source_id: SourceId, file: &SourceFile) -> Vec<BridgeBody> {
                     })
                 })
                 .collect();
+            let name_span = SourceSpan::new(source_id, name.text_range());
+            let def_id = resolution
+                .scopes
+                .all_definitions_in(source_id)
+                .into_iter()
+                .find(|def| def.kind == DefKind::Function && def.name_span == name_span)
+                .map(|def| def.id);
             bodies.push(BridgeBody {
                 id: body_id,
                 name: name.text().to_owned(),
                 span: SourceSpan::new(source_id, fn_decl.syntax().text_range()),
+                def_id,
                 params,
             });
         }

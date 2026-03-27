@@ -23,6 +23,7 @@ pub fn canonical_program_a_fixture() -> AnalysisResult {
                 (UseSiteId(1), Observation::NeedValue),
             ]),
             callee_targets: BTreeMap::new(),
+            callee_local_origins: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(0),
                 source: SourceExpr {
@@ -76,6 +77,7 @@ pub fn canonical_program_b_fixture() -> AnalysisResult {
                 (UseSiteId(12), Observation::NeedValue),
             ]),
             callee_targets: BTreeMap::new(),
+            callee_local_origins: BTreeMap::new(),
             extracted_nodes: vec![
                 ExtractedNode {
                     id: RuntimeNodeId(10),
@@ -164,6 +166,7 @@ pub fn canonical_program_c_fixture() -> AnalysisResult {
                 (UseSiteId(21), Observation::NeedValue),
             ]),
             callee_targets: BTreeMap::new(),
+            callee_local_origins: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(20),
                 source: SourceExpr {
@@ -215,6 +218,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
                     (UseSiteId(31), Observation::NeedValue),
                 ]),
                 callee_targets: BTreeMap::new(),
+                callee_local_origins: BTreeMap::new(),
                 extracted_nodes: vec![],
                 kernel_entries: vec![KernelEntrypoint {
                     body: apply_body,
@@ -231,6 +235,7 @@ pub fn canonical_program_d_fixture() -> AnalysisResult {
                 result_observation: Observation::NeedValue,
                 use_observations: BTreeMap::from([(UseSiteId(40), Observation::NeedCallable)]),
                 callee_targets: BTreeMap::new(),
+                callee_local_origins: BTreeMap::new(),
                 extracted_nodes: vec![ExtractedNode {
                     id: RuntimeNodeId(30),
                     source: SourceExpr {
@@ -323,6 +328,7 @@ pub fn build_shaped_exec_fixture() -> AnalysisResult {
                 (UseSiteId(51), Observation::NeedValue),
             ]),
             callee_targets: BTreeMap::new(),
+            callee_local_origins: BTreeMap::new(),
             extracted_nodes: vec![ExtractedNode {
                 id: RuntimeNodeId(50),
                 source: SourceExpr {

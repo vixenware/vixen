@@ -90,6 +90,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         bridge,
     );
     seed_callee_targets(&mut bodies, bridge);
+    seed_source_local_callee_origins(&mut bodies, bridge);
     seed_use_observations(&mut bodies, bridge);
     let closure_layouts = seed_closure_layouts(bridge);
 
@@ -99,6 +100,42 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         runtime_nodes,
         closure_layouts,
         frame_layouts: vec![],
+    }
+}
+
+fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge) {
+    let top_level_by_def = bridge
+        .bodies
+        .iter()
+        .filter_map(|body| Some((body.def_id?, body.id)))
+        .collect::<HashMap<_, _>>();
+    let local_binding_by_def = bridge
+        .local_bindings
+        .iter()
+        .map(|binding| (binding.def_id, binding.id))
+        .collect::<HashMap<_, _>>();
+
+    for body in bodies {
+        let seeds = body
+            .callee_targets
+            .iter()
+            .filter_map(|(expr, def_id)| {
+                if let Some(origin_body) = top_level_by_def.get(def_id) {
+                    return Some((
+                        *expr,
+                        crate::SourceLocalCalleeOrigin::TopLevelBody(*origin_body),
+                    ));
+                }
+                if local_binding_by_def.contains_key(def_id) {
+                    return Some((*expr, crate::SourceLocalCalleeOrigin::LocalDef(*def_id)));
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+
+        for (expr, origin) in seeds {
+            body.callee_local_origins.insert(expr, origin);
+        }
     }
 }
 
@@ -405,6 +442,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
         result_observation: Observation::NeedValue,
         use_observations: BTreeMap::new(),
         callee_targets: BTreeMap::new(),
+        callee_local_origins: BTreeMap::new(),
         extracted_nodes: vec![],
         kernel_entries: vec![KernelEntrypoint {
             body: body.id,
