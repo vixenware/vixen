@@ -164,13 +164,14 @@ pub struct AnalyzedBody {
     pub kernel_entries: Vec<KernelEntrypoint>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceLocalCalleeOrigin {
     TopLevelBody(BodyId),
+    LocalClosure(SourceExpr),
     LocalDef(DefId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocalCallEdge {
     pub call_expr: ExprId,
     pub callee: SourceLocalCalleeOrigin,

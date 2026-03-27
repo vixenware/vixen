@@ -556,12 +556,11 @@ fn main(n: U64) -> U64 (
 "#;
 
     let bridge = SingleSourceBridge::from_source_text(src);
-    let expected_local_target = bridge
-        .call_sites
-        .iter()
-        .find(|site| site.kind == crate::BridgeCallSiteKind::LocalCallableBinding)
-        .and_then(|site| site.target)
-        .expect("local callable call site should have a resolved target");
+    let expected_closure_source = bridge
+        .local_closure_inits
+        .first()
+        .map(|init| init.source.clone())
+        .expect("local callable binding should have direct closure init source");
     let analysis = build_minimal_analysis(&bridge);
     let main_body = analysis
         .bodies
@@ -571,9 +570,39 @@ fn main(n: U64) -> U64 (
 
     assert!(
         main_body.callee_local_origins.values().any(|origin| {
+            *origin == crate::SourceLocalCalleeOrigin::LocalClosure(expected_closure_source.clone())
+        }),
+        "local callable call should index recoverable closure-body origin"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_keeps_nonrecoverable_local_callable_on_generic_fallback_origin() {
+    let src = r#"
+fn apply(f: Fn(U64) -> U64, n: U64) -> U64 (
+  f(n)
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let expected_local_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == crate::BridgeCallSiteKind::LocalCallableBinding)
+        .and_then(|site| site.target)
+        .expect("local callable call site should have a resolved target");
+    let analysis = build_minimal_analysis(&bridge);
+    let apply_body = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("apply body should exist");
+
+    assert!(
+        apply_body.callee_local_origins.values().any(|origin| {
             *origin == crate::SourceLocalCalleeOrigin::LocalDef(expected_local_target)
         }),
-        "local callable call should index recoverable source-local origin"
+        "non-recoverable local callable path should stay on generic LocalDef fallback"
     );
 }
 
@@ -632,12 +661,11 @@ fn main(n: U64) -> U64 (
 "#;
 
     let bridge = SingleSourceBridge::from_source_text(src);
-    let expected_local_target = bridge
-        .call_sites
-        .iter()
-        .find(|site| site.kind == crate::BridgeCallSiteKind::LocalCallableBinding)
-        .and_then(|site| site.target)
-        .expect("local callable call site should have a resolved target");
+    let expected_closure_source = bridge
+        .local_closure_inits
+        .first()
+        .map(|init| init.source.clone())
+        .expect("local callable binding should have direct closure init source");
     let analysis = build_minimal_analysis(&bridge);
     let main_body = analysis
         .bodies
@@ -646,7 +674,7 @@ fn main(n: U64) -> U64 (
         .expect("main body should exist");
 
     assert!(main_body.source_local_call_edges.iter().any(|edge| {
-        edge.callee == crate::SourceLocalCalleeOrigin::LocalDef(expected_local_target)
+        edge.callee == crate::SourceLocalCalleeOrigin::LocalClosure(expected_closure_source.clone())
     }));
 }
 

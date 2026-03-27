@@ -8,7 +8,9 @@ use vx_resolve::{
 };
 use vx_types::Ty;
 
-use crate::{BodyId, ExprId, FieldKey, RuntimeBoundaryKind, boundary::classify_runtime_boundary};
+use crate::{
+    BodyId, ExprId, FieldKey, RuntimeBoundaryKind, SourceExpr, boundary::classify_runtime_boundary,
+};
 
 #[derive(Debug, Clone)]
 pub struct BridgeParam {
@@ -85,6 +87,7 @@ pub struct BridgeLocalBinding {
     pub id: BridgeLocalBindingId,
     pub body: BodyId,
     pub name: String,
+    pub name_span: SourceSpan,
     pub kind: BridgeLocalBindingKind,
     pub def_id: DefId,
 }
@@ -94,6 +97,12 @@ pub struct BridgeLocalUse {
     pub body: BodyId,
     pub expr: ExprId,
     pub binding: BridgeLocalBindingId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeLocalClosureInit {
+    pub binding: BridgeLocalBindingId,
+    pub source: SourceExpr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +133,7 @@ pub struct SingleSourceBridge {
     pub binding_products: Vec<BridgeBindingProduct>,
     pub local_bindings: Vec<BridgeLocalBinding>,
     pub local_uses: Vec<BridgeLocalUse>,
+    pub local_closure_inits: Vec<BridgeLocalClosureInit>,
     pub call_sites: Vec<BridgeCallSite>,
     pub expr_types: BTreeMap<ExprId, Ty>,
     pub parse_errors: Vec<SyntaxError>,
@@ -174,6 +184,8 @@ impl SingleSourceBridge {
         let binding_products = collect_binding_products(source_id, &file, &bodies);
         let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
         let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
+        let local_closure_inits =
+            collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
         let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
         let expr_types = collect_expr_types(&exprs, &type_check);
 
@@ -188,6 +200,7 @@ impl SingleSourceBridge {
             binding_products,
             local_bindings,
             local_uses,
+            local_closure_inits,
             call_sites,
             expr_types,
             parse_errors,
@@ -516,10 +529,11 @@ fn collect_local_bindings(
         .into_iter()
         .enumerate()
         .map(
-            |(index, (body, _, name, kind, def_id))| BridgeLocalBinding {
+            |(index, (body, name_span, name, kind, def_id))| BridgeLocalBinding {
                 id: BridgeLocalBindingId(index as u32),
                 body,
                 name,
+                name_span,
                 kind,
                 def_id,
             },
@@ -554,6 +568,53 @@ fn collect_local_uses(
     uses.sort_by_key(|usage| (usage.body.0, usage.expr.0, usage.binding.0));
     uses.dedup();
     uses
+}
+
+fn collect_local_closure_inits(
+    source_id: SourceId,
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
+    local_bindings: &[BridgeLocalBinding],
+    bodies: &[BridgeBody],
+) -> Vec<BridgeLocalClosureInit> {
+    let by_span = expr_id_by_span(exprs);
+
+    let mut inits = file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::LetStmt::cast)
+        .filter_map(|let_stmt| {
+            let name = let_stmt.name()?;
+            let body = body_for_range(let_stmt.syntax().text_range(), bodies)?;
+            let binding = local_bindings
+                .iter()
+                .find(|binding| {
+                    binding.kind == BridgeLocalBindingKind::Let
+                        && binding.body == body
+                        && binding.name == name.text()
+                })
+                .map(|binding| binding.id)?;
+
+            let init_expr = let_stmt.expr()?;
+            if !matches!(init_expr, Expr::Closure(_)) {
+                return None;
+            }
+            let init_span = SourceSpan::new(source_id, init_expr.syntax().text_range());
+            let closure_expr = by_span.get(&init_span).copied()?;
+
+            Some(BridgeLocalClosureInit {
+                binding,
+                source: SourceExpr {
+                    body,
+                    expr: closure_expr,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    inits.sort_by_key(|init| (init.source.body.0, init.binding.0, init.source.expr.0));
+    inits.dedup();
+    inits
 }
 
 fn collect_call_sites(

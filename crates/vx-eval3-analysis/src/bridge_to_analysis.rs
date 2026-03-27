@@ -115,6 +115,11 @@ fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &Single
         .iter()
         .map(|binding| (binding.def_id, binding.id))
         .collect::<HashMap<_, _>>();
+    let local_closure_init_by_binding = bridge
+        .local_closure_inits
+        .iter()
+        .map(|init| (init.binding, init.source.clone()))
+        .collect::<HashMap<_, _>>();
 
     for body in bodies {
         let seeds = body
@@ -125,6 +130,15 @@ fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &Single
                     return Some((
                         *expr,
                         crate::SourceLocalCalleeOrigin::TopLevelBody(*origin_body),
+                    ));
+                }
+                if let Some(binding_id) = local_binding_by_def.get(def_id).copied()
+                    && let Some(closure_source) =
+                        local_closure_init_by_binding.get(&binding_id).cloned()
+                {
+                    return Some((
+                        *expr,
+                        crate::SourceLocalCalleeOrigin::LocalClosure(closure_source),
                     ));
                 }
                 if local_binding_by_def.contains_key(def_id) {
@@ -147,14 +161,17 @@ fn seed_source_local_call_edges(bodies: &mut [AnalyzedBody]) {
             .iter()
             .map(|(call_expr, callee)| crate::SourceLocalCallEdge {
                 call_expr: *call_expr,
-                callee: *callee,
+                callee: callee.clone(),
             })
             .collect::<Vec<_>>();
         edges.sort_by_key(|edge| {
-            let callee_rank = match edge.callee {
+            let callee_rank = match &edge.callee {
                 crate::SourceLocalCalleeOrigin::TopLevelBody(body) => (0u8, body.0, 0u32),
+                crate::SourceLocalCalleeOrigin::LocalClosure(source_expr) => {
+                    (1, source_expr.body.0, source_expr.expr.0)
+                }
                 crate::SourceLocalCalleeOrigin::LocalDef(DefId::Source { source, local }) => {
-                    (1, source.0, local)
+                    (2, source.0, *local)
                 }
             };
             (edge.call_expr.0, callee_rank)
