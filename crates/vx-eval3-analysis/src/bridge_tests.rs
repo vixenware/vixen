@@ -228,6 +228,20 @@ fn main(n: U64) -> U64 ( plus_one(n) )
             .any(|site| site.kind == BridgeCallSiteKind::DirectNamedFunction),
         "plus_one(n) should classify as direct named function call"
     );
+    let call_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == BridgeCallSiteKind::DirectNamedFunction)
+        .and_then(|site| site.target);
+    let plus_one_target = bridge
+        .resolved_refs
+        .iter()
+        .find(|resolved| resolved.name == "plus_one")
+        .and_then(|resolved| resolved.target.as_ref().ok().map(|def| def.id));
+    assert_eq!(
+        call_target, plus_one_target,
+        "direct named call site should carry resolved function target identity"
+    );
 }
 
 #[test]
@@ -246,6 +260,20 @@ fn main(n: U64) -> U64 (
             .iter()
             .any(|site| site.kind == BridgeCallSiteKind::LocalCallableBinding),
         "add_n(1) should classify as local callable binding call"
+    );
+    let call_target = bridge
+        .call_sites
+        .iter()
+        .find(|site| site.kind == BridgeCallSiteKind::LocalCallableBinding)
+        .and_then(|site| site.target);
+    let add_n_target = bridge
+        .local_bindings
+        .iter()
+        .find(|binding| binding.name == "add_n" && binding.kind == BridgeLocalBindingKind::Let)
+        .map(|binding| binding.def_id);
+    assert_eq!(
+        call_target, add_n_target,
+        "local callable call site should carry resolved binding target identity"
     );
 }
 

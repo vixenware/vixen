@@ -108,6 +108,7 @@ pub struct BridgeCallSite {
     pub body: BodyId,
     pub expr: ExprId,
     pub kind: BridgeCallSiteKind,
+    pub target: Option<DefId>,
 }
 
 #[derive(Debug, Clone)]
@@ -590,11 +591,13 @@ fn collect_call_sites(
                 }
                 None => BridgeCallSiteKind::Other,
             };
+            let target = resolved.and_then(|resolved| resolved.target.as_ref().ok().map(|d| d.id));
 
             Some(BridgeCallSite {
                 body,
                 expr: call_expr,
                 kind,
+                target,
             })
         })
         .collect::<Vec<_>>();
