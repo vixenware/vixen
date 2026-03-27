@@ -240,7 +240,7 @@ fn build(params: BuildParams) -> Tree (
   let toolchain = find_clang(default_exec_class());
   let src = @({params.workspace}/src);
   exec [toolchain.clang, @src/main.c, "-o", "main"] where {
-    mounts: %{ @src => src }
+    mounts: %{ src } // sugar for `@src => src`
   }
 )
 ```
@@ -256,18 +256,6 @@ fn build(params: BuildParams) -> Tree (
   let toolchain = find_clang(default_exec_class());
   let src = @({params.workspace}/src);
   exec [toolchain.clang, @src/main.c, "-o", @out/main] where {
-    mounts: %{ @src => src }
-  }
-)
-```
-
-With a bit more sugar:
-
-```vixen
-fn build(params: BuildParams) -> Tree (
-  let toolchain = find_clang(default_exec_class());
-  let src = params.workspace / @src;
-  exec [toolchain.clang, @src/main.c, "-o", @out/main] where {
     mounts: %{ src }
   }
 )
@@ -275,7 +263,7 @@ fn build(params: BuildParams) -> Tree (
 
 ### Local is just another remote
 
-Now that we have declared all our inputs (@src), all our outputs (@out), and
+Now that we have declared all our inputs (`@src`), all our outputs (`@out`), and
 which toolchain to use to run the compilation, that compilation can run anywhere.
 
 Right now, because we used `default_exec_class()`, it's running... wherever
@@ -431,6 +419,31 @@ to duplicate that work just because it was demanded from two places.
 
 That is local reuse inside one build.
 
+```vixen
+fn object_file(class: ExecutorClass, src: Path, name: String) -> Tree (
+  let toolchain = find_clang(class);
+
+  exec [toolchain.clang, "-c", @(src/{name}.c), "-o", @(out/{name}.o)] where {
+    mounts: %{ src }
+  }
+)
+
+fn build(params: BuildParams) -> Tree (
+  let class = default_exec_class();
+  let src = params.workspace / @src;
+
+  let main_o = object_file(class, src, "main");
+  let util_o = object_file(class, src, "util");
+
+  exec [find_clang(class).clang, main_o, util_o, "-o", @out/main]
+)
+```
+
+Here, `find_clang(class)` is reached from three different places: once for each
+compile step, and once for the final link step. But because all three are
+asking for the same computation with the same input, the runtime can share it
+instead of rediscovering Clang each time.
+
 But Vixen also wants reuse across different builds.
 
 If you build the same thing tomorrow, on the same code, with the same inputs,
@@ -469,6 +482,25 @@ For an `exec`, that means things like:
 
 And because Vixen runs processes against a virtual file system, we also get
 some things that are unusually hard in other build systems almost for free.
+
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let src = Tree(params.workspace / @src);
+
+  let has_config =
+    match src.file(@config.h)? (
+      Some { value: _ } => "yes\n",
+      None => "no\n",
+    );
+
+  let plugins = src.glob(@plugins/*.c);
+
+  Tree %{
+    @has-config.txt => Blob(has_config),
+    @plugins => plugins,
+  }
+)
+```
 
 If a computation tried to read a file and that file was absent, that absence is
 itself part of what was observed. If that file appears before the next build,
@@ -509,6 +541,27 @@ interpreter, which is the wrong execution model for this language.
 
 This is also how Vixen can be efficient.
 
+```vixen
+fn build(params: BuildParams) -> Tree (
+  let toolchain = find_clang(default_exec_class());
+  let src = params.workspace / @src;
+
+  let input = @src/main.c;
+  let output = @out/main.o;
+  let args = [
+    toolchain.clang,
+    "-c",
+    input,
+    "-o",
+    output,
+  ];
+
+  exec args where {
+    mounts: %{ src }
+  }
+)
+```
+
 Some parts of a program are just ordinary local computation: building argument
 lists, selecting flags, constructing paths, combining arrays, choosing between
 branches, and so on.
@@ -522,6 +575,12 @@ kernels.
 
 The boundary-crossing parts must remain explicit runtime-managed nodes, because
 they are exactly where Vixen's correctness story lives.
+
+In the example above, everything up to `exec args` is ordinary local
+computation. Constructing `input`, `output`, and `args` should not require
+handing control back to the runtime after every tiny step. The `exec` itself,
+however, is a real boundary, so that is where the runtime has to take over
+again.
 
 So analysis is not an implementation detail bolted on afterward. It is the
 thing that lets Vixen preserve its semantics while still being practical:
