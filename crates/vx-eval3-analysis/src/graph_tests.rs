@@ -74,6 +74,11 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("Vixen Structural Analysis Graph"));
     assert!(html.contains("structural analysis graph"));
     assert!(html.contains("cc-version.vx"));
+    assert!(html.contains("Source Snippet"));
+    assert!(html.contains("Source Path"));
+    assert!(html.contains("Raw JSON"));
+    assert!(html.contains("source_snippet"));
+    assert!(html.contains("host.which(\\\"cc\\\")"));
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");

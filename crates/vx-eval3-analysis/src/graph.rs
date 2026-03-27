@@ -200,7 +200,18 @@ impl AnalysisGraph {
             "  .panel { border-left: 1px solid #cbd5e1; background: #ffffff; padding: 12px; }\n",
         );
         out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 14px; }\n");
-        out.push_str("  .panel pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.35; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }\n");
+        out.push_str("  .detail-card { border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; padding: 10px; margin-bottom: 10px; }\n");
+        out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; }\n");
+        out.push_str("  .detail-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin-bottom: 6px; font-size: 12px; }\n");
+        out.push_str("  .detail-row:last-child { margin-bottom: 0; }\n");
+        out.push_str("  .detail-key { color: #334155; }\n");
+        out.push_str("  .detail-val { color: #0f172a; word-break: break-word; }\n");
+        out.push_str("  .snippet { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
+        out.push_str("  details.raw-json { margin-top: 8px; }\n");
+        out.push_str(
+            "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #1d4ed8; }\n",
+        );
+        out.push_str("  .raw-json-pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.35; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }\n");
         out.push_str("  .legend { margin: 8px 0 0 0; font-size: 12px; color: #334155; }\n");
         out.push_str(
             "  .node rect { fill: #fff; stroke: #475569; stroke-width: 1.2; rx: 8; ry: 8; }\n",
@@ -221,7 +232,7 @@ impl AnalysisGraph {
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div>\n");
         out.push_str(
-            "<aside class=\"panel\"><h2>Selected Item</h2><pre id=\"details\">Select a node or edge.</pre></aside>\n",
+            "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
         );
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
@@ -266,8 +277,70 @@ function el(name, attrs = {}) {
   for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
   return n;
 }
+function htmlEscape(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;");
+}
+function detailRow(key, value) {
+  return `<div class="detail-row"><div class="detail-key">${htmlEscape(key)}</div><div class="detail-val">${htmlEscape(value ?? "")}</div></div>`;
+}
+function formatSpan(metadata) {
+  if (!metadata.span_start || !metadata.span_end) return null;
+  const source = metadata.span_source_id ? `source ${metadata.span_source_id}, ` : "";
+  return `${source}bytes ${metadata.span_start}..${metadata.span_end}`;
+}
+function normalizeMetadata(value) {
+  if (!value || typeof value !== "object") return {};
+  return value;
+}
 function setDetails(value) {
-  details.textContent = JSON.stringify(value, null, 2);
+  const metadata = normalizeMetadata(value.metadata);
+  const kind = value.kind || value.type || "graph";
+  const label = value.label || "";
+  const sourcePath = metadata.source_path || value.source_file || "";
+  const span = formatSpan(metadata);
+  const snippet = metadata.source_snippet || "";
+
+  const baseRows = [
+    detailRow("Type", value.type || "graph"),
+    detailRow("Kind", kind),
+    label ? detailRow("Label", label) : "",
+    value.id ? detailRow("ID", value.id) : "",
+    value.from && value.to ? detailRow("Endpoints", `${value.from} -> ${value.to}`) : "",
+    sourcePath ? detailRow("Source Path", sourcePath) : "",
+    span ? detailRow("Span", span) : "",
+  ].join("");
+
+  const metadataRows = Object.entries(metadata)
+    .filter(([key]) => !["source_path", "source_snippet", "span_source_id", "span_start", "span_end"].includes(key))
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, val]) => detailRow(key, val))
+    .join("");
+
+  const snippetBlock = snippet
+    ? `<div class="detail-card"><div class="detail-title">Source Snippet</div><div class="snippet">${htmlEscape(snippet)}</div></div>`
+    : "";
+
+  const metadataBlock = metadataRows
+    ? `<div class="detail-card"><div class="detail-title">Metadata</div>${metadataRows}</div>`
+    : "";
+
+  details.innerHTML = `
+    <div class="detail-card">
+      <div class="detail-title">Summary</div>
+      ${baseRows}
+      ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
+    </div>
+    ${snippetBlock}
+    ${metadataBlock}
+    <details class="raw-json">
+      <summary>Raw JSON</summary>
+      <pre class="raw-json-pre">${htmlEscape(JSON.stringify(value, null, 2))}</pre>
+    </details>
+  `;
 }
 
 const defs = el("defs");
