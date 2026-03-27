@@ -98,6 +98,32 @@ fn zoo_graph_projection_and_export_are_deterministic_across_repeated_runs() {
     assert_eq!(graph_a.to_standalone_html(), graph_b.to_standalone_html());
 }
 
+#[test]
+fn zoo_tri_platform_png_project_import_graph_smoke() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    assert!(
+        zoo_file.exists(),
+        "expected zoo file to exist at {}",
+        zoo_file.display()
+    );
+
+    let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+    assert!(
+        !graph.nodes.is_empty(),
+        "graph should contain structural nodes"
+    );
+
+    let json = graph.to_json_pretty();
+    assert!(json.contains("tri-platform-png.vx"));
+    assert!(json.contains("zlib-lib.vx"));
+    assert!(json.contains("libpng-lib.vx"));
+    assert!(json.contains("pnggen-app.vx"));
+
+    let html = graph.to_standalone_html();
+    assert!(html.contains("tri-platform-png.vx"));
+    assert!(html.contains("structural analysis graph"));
+}
+
 fn unique_temp_path(filename: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

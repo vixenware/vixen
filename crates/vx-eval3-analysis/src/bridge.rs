@@ -1,6 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    fs, io,
+    path::{Path, PathBuf},
+};
 
-use vx_parser::{AstNode, Expr, Parsed, SourceFile, SyntaxError};
+use vx_parser::{AstNode, Expr, ImportExpr, Parsed, SourceFile, SyntaxError};
 use vx_resolve::{
     DefId, DefKind, Definition, ImportGraph, NameResolution, ResolveError, SourceFileRef, SourceId,
     SourceSpan, TypeCheckResult, check_capabilities, collect_types_for_sources, resolve_in_program,
@@ -125,6 +129,7 @@ pub struct BridgeCallSite {
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
     pub parsed: Parsed<SourceFile>,
+    pub source_paths: BTreeMap<u32, String>,
     pub bodies: Vec<BridgeBody>,
     pub exprs: Vec<BridgeExpr>,
     pub resolved_refs: Vec<BridgeResolvedRef>,
@@ -149,20 +154,7 @@ impl SingleSourceBridge {
         let parse_errors = parsed.errors().to_vec();
         let file = parsed.tree();
 
-        let mut imports = ImportGraph::new();
-        let mut sources = vec![SourceFileRef {
-            id: source_id,
-            file: file.clone(),
-        }];
-        for (index, stdlib) in stdlib_sources().iter().enumerate() {
-            let parsed_stdlib = vx_parser::parse_source_file(stdlib.text);
-            let stdlib_id = SourceId(index as u32 + 1);
-            imports.add_import(source_id, stdlib_id);
-            sources.push(SourceFileRef {
-                id: stdlib_id,
-                file: parsed_stdlib.tree(),
-            });
-        }
+        let (sources, imports, source_paths) = build_program_sources_from_single_file(file.clone());
 
         let resolution = resolve_in_program(
             SourceFileRef {
@@ -192,6 +184,7 @@ impl SingleSourceBridge {
         Self {
             source_id,
             parsed,
+            source_paths,
             bodies,
             exprs,
             resolved_refs,
@@ -209,6 +202,199 @@ impl SingleSourceBridge {
             cap_errors: cap_check.errors,
         }
     }
+
+    pub fn from_entry_file(entry_path: &Path) -> io::Result<Self> {
+        let source_id = SourceId(0);
+        let entry_text = fs::read_to_string(entry_path)?;
+        let parsed = vx_parser::parse_source_file(&entry_text);
+        let parse_errors = parsed.errors().to_vec();
+        let file = parsed.tree();
+
+        let (sources, imports, source_paths) = build_program_sources_from_entry_file(entry_path)?;
+
+        let resolution = resolve_in_program(
+            SourceFileRef {
+                id: source_id,
+                file: file.clone(),
+            },
+            &sources,
+            imports,
+        );
+        let types = collect_types_for_sources(&sources);
+        let type_check = type_check(&file, &resolution, &types);
+        let cap_check = check_capabilities(&file, &resolution, &types, &type_check);
+
+        let bodies = collect_bodies(source_id, &file, &resolution);
+        let exprs = collect_exprs(source_id, &file, &bodies);
+        let resolved_refs = collect_resolved_refs(&resolution);
+        let products = collect_products(source_id, &file, &exprs);
+        let projections = collect_projections(source_id, &file, &exprs);
+        let binding_products = collect_binding_products(source_id, &file, &bodies);
+        let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
+        let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
+        let local_closure_inits =
+            collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
+        let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
+        let expr_types = collect_expr_types(&exprs, &type_check);
+
+        Ok(Self {
+            source_id,
+            parsed,
+            source_paths,
+            bodies,
+            exprs,
+            resolved_refs,
+            products,
+            projections,
+            binding_products,
+            local_bindings,
+            local_uses,
+            local_closure_inits,
+            call_sites,
+            expr_types,
+            parse_errors,
+            resolve_errors: resolution.errors,
+            type_errors: type_check.errors,
+            cap_errors: cap_check.errors,
+        })
+    }
+}
+
+fn build_program_sources_from_single_file(
+    file: SourceFile,
+) -> (Vec<SourceFileRef>, ImportGraph, BTreeMap<u32, String>) {
+    let source_id = SourceId(0);
+    let mut sources = vec![SourceFileRef {
+        id: source_id,
+        file: file.clone(),
+    }];
+    let mut imports = ImportGraph::new();
+    let mut source_paths = BTreeMap::new();
+    source_paths.insert(source_id.0, "<inline-source>".to_owned());
+    let mut next_source_id = 1u32;
+
+    for stdlib in stdlib_sources() {
+        let parsed_stdlib = vx_parser::parse_source_file(stdlib.text);
+        let stdlib_id = SourceId(next_source_id);
+        next_source_id += 1;
+        imports.add_import(source_id, stdlib_id);
+        source_paths.insert(stdlib_id.0, stdlib.logical_path.to_owned());
+        sources.push(SourceFileRef {
+            id: stdlib_id,
+            file: parsed_stdlib.tree(),
+        });
+    }
+
+    (sources, imports, source_paths)
+}
+
+fn build_program_sources_from_entry_file(
+    entry_path: &Path,
+) -> io::Result<(Vec<SourceFileRef>, ImportGraph, BTreeMap<u32, String>)> {
+    let entry_abs = entry_path.canonicalize()?;
+    let mut imports = ImportGraph::new();
+    let mut source_paths = BTreeMap::new();
+    let mut path_to_source = BTreeMap::<PathBuf, SourceId>::new();
+    let mut parsed_by_source = HashMap::<SourceId, Parsed<SourceFile>>::new();
+    let mut queue = VecDeque::<PathBuf>::new();
+    let mut next_source_id = 0u32;
+
+    queue.push_back(entry_abs.clone());
+
+    while let Some(path) = queue.pop_front() {
+        let source_id = if let Some(id) = path_to_source.get(&path) {
+            *id
+        } else {
+            let id = SourceId(next_source_id);
+            next_source_id += 1;
+            path_to_source.insert(path.clone(), id);
+            source_paths.insert(id.0, path.display().to_string());
+            id
+        };
+
+        if parsed_by_source.contains_key(&source_id) {
+            continue;
+        }
+
+        let text = fs::read_to_string(&path)?;
+        let parsed = vx_parser::parse_source_file(&text);
+        let file = parsed.tree();
+
+        let base_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut import_paths = file
+            .syntax()
+            .descendants()
+            .filter_map(ImportExpr::cast)
+            .filter_map(|import| import.path())
+            .filter_map(|raw| resolve_local_import_path(&base_dir, &raw))
+            .collect::<Vec<_>>();
+        import_paths.sort();
+        import_paths.dedup();
+
+        for imported_path in import_paths {
+            let imported_id = if let Some(existing) = path_to_source.get(&imported_path) {
+                *existing
+            } else {
+                let id = SourceId(next_source_id);
+                next_source_id += 1;
+                path_to_source.insert(imported_path.clone(), id);
+                source_paths.insert(id.0, imported_path.display().to_string());
+                queue.push_back(imported_path.clone());
+                id
+            };
+            imports.add_import(source_id, imported_id);
+        }
+
+        parsed_by_source.insert(source_id, parsed);
+    }
+
+    let mut sources = parsed_by_source
+        .iter()
+        .map(|(id, parsed)| SourceFileRef {
+            id: *id,
+            file: parsed.tree(),
+        })
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|source| source.id.0);
+
+    let user_source_ids = sources.iter().map(|source| source.id).collect::<Vec<_>>();
+    for stdlib in stdlib_sources() {
+        let parsed_stdlib = vx_parser::parse_source_file(stdlib.text);
+        let stdlib_id = SourceId(next_source_id);
+        next_source_id += 1;
+        source_paths.insert(stdlib_id.0, stdlib.logical_path.to_owned());
+        for user_id in &user_source_ids {
+            imports.add_import(*user_id, stdlib_id);
+        }
+        sources.push(SourceFileRef {
+            id: stdlib_id,
+            file: parsed_stdlib.tree(),
+        });
+    }
+
+    sources.sort_by_key(|source| source.id.0);
+    Ok((sources, imports, source_paths))
+}
+
+fn resolve_local_import_path(base_dir: &Path, raw: &str) -> Option<PathBuf> {
+    if raw.contains(':') {
+        return None;
+    }
+    let joined = if raw.starts_with('/') {
+        PathBuf::from(raw)
+    } else {
+        base_dir.join(raw)
+    };
+
+    let candidate = if joined.extension().is_some() {
+        joined
+    } else {
+        joined.with_extension("vx")
+    };
+    candidate.canonicalize().ok()
 }
 
 fn parse_field_key(token: &str) -> FieldKey {

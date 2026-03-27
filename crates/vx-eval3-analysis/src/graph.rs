@@ -72,6 +72,7 @@ pub struct GraphEdge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisGraph {
     pub source_file: Option<String>,
+    pub source_files: Vec<(u32, String)>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
 }
@@ -107,6 +108,19 @@ impl AnalysisGraph {
             None => out.push_str("null"),
         }
         out.push_str(",\n");
+        out.push_str("  \"source_files\": [\n");
+        for (index, (source_id, path)) in self.source_files.iter().enumerate() {
+            out.push_str("    { \"source_id\": ");
+            out.push_str(&source_id.to_string());
+            out.push_str(", \"path\": ");
+            push_json_str(&mut out, path);
+            out.push_str(" }");
+            if index + 1 != self.source_files.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
         out.push_str("  \"nodes\": [\n");
         for (index, node) in self.nodes.iter().enumerate() {
             out.push_str("    {\n");
@@ -332,8 +346,8 @@ pub fn graph_from_source_text(text: &str) -> AnalysisGraph {
 }
 
 pub fn graph_from_file(path: &Path) -> std::io::Result<AnalysisGraph> {
+    let bridge = SingleSourceBridge::from_entry_file(path)?;
     let text = fs::read_to_string(path)?;
-    let bridge = SingleSourceBridge::from_source_text(&text);
     let analysis = build_minimal_analysis(&bridge);
     Ok(project_analysis_graph_with_bridge(
         &analysis,
@@ -575,6 +589,7 @@ fn project_analysis_graph_internal(
 
     AnalysisGraph {
         source_file,
+        source_files: context.map_or_else(Vec::new, |ctx| ctx.source_files()),
         nodes,
         edges: edges.into_iter().collect(),
     }
@@ -589,7 +604,7 @@ fn append_body_span_metadata(
         metadata.push(("span_source_id".to_owned(), span.source.0.to_string()));
         metadata.push(("span_start".to_owned(), u32::from(span.start()).to_string()));
         metadata.push(("span_end".to_owned(), u32::from(span.end()).to_string()));
-        if let Some(path) = &context.source_file {
+        if let Some(path) = context.source_path_for_source_id(span.source) {
             metadata.push(("source_path".to_owned(), path.clone()));
         }
     }
@@ -607,12 +622,12 @@ fn append_source_expr_metadata(
             metadata.push(("span_source_id".to_owned(), span.source.0.to_string()));
             metadata.push(("span_start".to_owned(), u32::from(span.start()).to_string()));
             metadata.push(("span_end".to_owned(), u32::from(span.end()).to_string()));
+            if let Some(path) = ctx.source_path_for_source_id(span.source) {
+                metadata.push(("source_path".to_owned(), path.clone()));
+            }
         }
         if let Some(snippet) = ctx.expr_snippet(source.expr) {
             metadata.push(("source_snippet".to_owned(), snippet.to_owned()));
-        }
-        if let Some(path) = &ctx.source_file {
-            metadata.push(("source_path".to_owned(), path.clone()));
         }
     }
 }
@@ -722,6 +737,7 @@ struct BridgeGraphContext<'a> {
     expr_snippets: BTreeMap<ExprId, String>,
     closure_names: BTreeMap<(BodyId, ExprId), String>,
     call_site_kinds: BTreeMap<(BodyId, ExprId), BridgeCallSiteKind>,
+    source_paths: BTreeMap<u32, String>,
     source_file: Option<String>,
     _source_text: Option<&'a str>,
 }
@@ -782,6 +798,11 @@ impl<'a> BridgeGraphContext<'a> {
             .iter()
             .map(|site| ((site.body, site.expr), site.kind))
             .collect::<BTreeMap<_, _>>();
+        let source_paths = bridge
+            .source_paths
+            .iter()
+            .map(|(id, path)| (*id, path.clone()))
+            .collect::<BTreeMap<_, _>>();
 
         Self {
             body_names,
@@ -790,6 +811,7 @@ impl<'a> BridgeGraphContext<'a> {
             expr_snippets,
             closure_names,
             call_site_kinds,
+            source_paths,
             source_file: source_file.map(|path| path.display().to_string()),
             _source_text: source_text,
         }
@@ -828,6 +850,19 @@ impl<'a> BridgeGraphContext<'a> {
         }
         self.expr_snippet(source.expr)
             .map(|snippet| format!("closure `{snippet}`"))
+    }
+
+    fn source_path_for_source_id(&self, source_id: vx_resolve::SourceId) -> Option<&String> {
+        self.source_paths
+            .get(&source_id.0)
+            .or(self.source_file.as_ref())
+    }
+
+    fn source_files(&self) -> Vec<(u32, String)> {
+        self.source_paths
+            .iter()
+            .map(|(id, path)| (*id, path.clone()))
+            .collect()
     }
 }
 
