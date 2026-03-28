@@ -33,6 +33,13 @@ pub use graph::{
     project_analysis_graph_with_bridge,
 };
 
+mod exec_slice;
+pub use exec_slice::{
+    CallableValue, EvalOutcome, ExecSliceError, ExecValue, ExecutableBody, ExecutableProgram,
+    ExecutableRuntimeNode, KernelOp, Operand, ResultSource, SlotId, eval_executable_program,
+    lower_executable_program,
+};
+
 #[cfg(test)]
 mod fixtures;
 
@@ -47,3 +54,6 @@ mod bridge_to_analysis_tests;
 
 #[cfg(test)]
 mod graph_tests;
+
+#[cfg(test)]
+mod exec_slice_tests;
