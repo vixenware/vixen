@@ -869,6 +869,8 @@ function semanticSummaryRows(value, metadata) {
     if (demandWhy) rows.push(detailRow("Demand Why", demandWhy));
     const demandPath = String(metadata.demand_justification_path ?? "");
     if (demandPath) rows.push(detailRow("Demand Path", demandPath));
+    const demandPathModules = String(metadata.demand_justification_path_modules ?? "");
+    if (demandPathModules) rows.push(detailRow("Demand Path (Modules)", demandPathModules));
     const demandEdge = String(metadata.demand_justification_edge ?? "");
     if (demandEdge && demandEdge !== "none") rows.push(detailRow("Demand Edge", demandEdge));
     const sharing = nodeSharingState(value);
@@ -883,6 +885,25 @@ function semanticSummaryRows(value, metadata) {
     rows.push(detailRow("Edge Role", edgeRoleForKind(value.kind).replaceAll("_", " ")));
   }
   return rows.join("");
+}
+function demandPathCardHtml(metadata) {
+  const trace = String(metadata.demand_justification_trace ?? "");
+  if (!trace) return "";
+  const steps = trace
+    .split("|")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (steps.length === 0) return "";
+  const items = steps
+    .map((step, index) => `<li><span class="detail-key">Step ${index + 1}</span><div class="detail-val">${htmlEscape(step)}</div></li>`)
+    .join("");
+  return `
+    <div class="detail-card">
+      <div class="detail-title">Demand Path</div>
+      <div class="semantic-summary">One recovered upstream path to this selection</div>
+      <ul>${items}</ul>
+    </div>
+  `;
 }
 function edgeRoleHistogramForNode(nodeId) {
   const counts = { value_flow: 0, ownership: 0, call: 0, structural: 0 };
@@ -2299,7 +2320,7 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => ["body_name", "runtime_role_summary", "runtime_activity_summary", "runtime_input_summary", "runtime_closure_summary", "runtime_extraction_summary", "sharing_role", "capture_count", "layout_capture_summary", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "demand_justification_status", "demand_justification_summary", "demand_justification_path", "demand_justification_edge", "call_target", "call_kind", "cross_module"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "runtime_activity_summary", "runtime_input_summary", "runtime_closure_summary", "runtime_extraction_summary", "sharing_role", "capture_count", "layout_capture_summary", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "demand_justification_status", "demand_justification_summary", "demand_justification_path", "demand_justification_path_modules", "demand_justification_trace", "demand_justification_edge", "call_target", "call_kind", "cross_module"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => {
       const displayKey =
@@ -2321,6 +2342,8 @@ function setDetails(value) {
         key === "demand_justification_status" ? "Demand Status" :
         key === "demand_justification_summary" ? "Demand Why" :
         key === "demand_justification_path" ? "Demand Path" :
+        key === "demand_justification_path_modules" ? "Demand Path (Modules)" :
+        key === "demand_justification_trace" ? "Demand Trace" :
         key === "demand_justification_edge" ? "Demand Edge" :
         key === "call_target" ? "Call Target" :
         key === "call_kind" ? "Call Kind" :
@@ -2332,6 +2355,7 @@ function setDetails(value) {
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
   const dependencySummary = dependencySummaryHtml(value);
+  const demandPathBlock = demandPathCardHtml(metadata);
   const semanticExplain = semanticNarrative(value);
 
   const snippetBlock = snippet
@@ -2354,6 +2378,7 @@ function setDetails(value) {
       ${semanticExplain ? `<div class="semantic-summary">Why It Matters</div><div class="semantic-explain">${htmlEscape(semanticExplain)}</div>` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
+    ${demandPathBlock}
     ${dependencySummary}
     ${snippetBlock}
     ${metadataBlock}
@@ -3659,6 +3684,7 @@ fn layout_capture_summary(
 #[derive(Debug, Clone)]
 struct DemandPathStep {
     caller: BodyId,
+    callee: BodyId,
     call_expr: ExprId,
     call_kind: String,
     call_target: String,
@@ -3693,6 +3719,27 @@ impl DemandJustificationIndex {
         out.reverse();
         out
     }
+
+    fn steps_to(&self, target: BodyId) -> Vec<DemandPathStep> {
+        if self.entry_bodies.contains(&target) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut cursor = target;
+        let mut guard = BTreeSet::new();
+        while guard.insert(cursor) {
+            let Some(step) = self.parent_step_by_body.get(&cursor).cloned() else {
+                break;
+            };
+            cursor = step.caller;
+            out.push(step);
+            if self.entry_bodies.contains(&cursor) {
+                break;
+            }
+        }
+        out.reverse();
+        out
+    }
 }
 
 fn observation_is_demanded(observation: &crate::Observation) -> bool {
@@ -3703,6 +3750,23 @@ fn body_label_for_justification(body: BodyId, context: Option<&BridgeGraphContex
     context
         .and_then(|ctx| ctx.body_name(body))
         .unwrap_or_else(|| format!("B{}", body.0))
+}
+
+fn body_module_label_for_justification(
+    body: BodyId,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    let body_label = body_label_for_justification(body, context);
+    let module = context
+        .and_then(|ctx| {
+            let source_id = ctx.body_source_id(body)?;
+            let path = ctx.source_path_for_source_id(source_id)?;
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "unknown-source".to_owned());
+    format!("{module}::{body_label}")
 }
 
 fn select_entry_bodies(
@@ -3845,6 +3909,7 @@ fn build_demand_justification_index(
                 callee,
                 DemandPathStep {
                     caller: caller_id,
+                    callee,
                     call_expr: edge.call_expr,
                     call_kind,
                     call_target,
@@ -3866,6 +3931,7 @@ fn append_demand_justification_metadata(
     context: Option<&BridgeGraphContext<'_>>,
 ) {
     let path = justification.path_to(body_id);
+    let path_steps = justification.steps_to(body_id);
     let path_text = if path.is_empty() {
         "none".to_owned()
     } else {
@@ -3873,6 +3939,43 @@ fn append_demand_justification_metadata(
             .map(|id| body_label_for_justification(*id, context))
             .collect::<Vec<_>>()
             .join(" -> ")
+    };
+    let path_module_text = if path.is_empty() {
+        "none".to_owned()
+    } else {
+        path.iter()
+            .map(|id| body_module_label_for_justification(*id, context))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    };
+    let path_trace = if path_steps.is_empty() {
+        if justification.entry_bodies.contains(&body_id) {
+            format!(
+                "entry: {}",
+                body_module_label_for_justification(body_id, context)
+            )
+        } else {
+            "no recoverable call-step trace".to_owned()
+        }
+    } else {
+        path_steps
+            .iter()
+            .map(|step| {
+                let mut text = format!(
+                    "{} --{} {} @E{}--> {}",
+                    body_module_label_for_justification(step.caller, context),
+                    step.call_kind,
+                    step.call_target,
+                    step.call_expr.0,
+                    body_module_label_for_justification(step.callee, context),
+                );
+                if step.cross_module {
+                    text.push_str(" (cross-module)");
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     };
 
     let demanded = observation_is_demanded(observation);
@@ -3897,7 +4000,7 @@ fn append_demand_justification_metadata(
             (
                 "propagated",
                 format!(
-                    "Demand reaches this node via upstream call path `{path_text}`; final recovered caller edge: {edge_text}."
+                    "Demand reaches this node via upstream call path `{path_module_text}`; final recovered caller edge: {edge_text}."
                 ),
                 edge_text,
             )
@@ -3905,7 +4008,7 @@ fn append_demand_justification_metadata(
             (
                 "reachable_but_idle",
                 format!(
-                    "Reachable via upstream call path `{path_text}`, but this node remains idle in the current bounded local-call demand model."
+                    "Reachable via upstream call path `{path_module_text}`, but this node remains idle in the current bounded local-call demand model."
                 ),
                 edge_text,
             )
@@ -3927,6 +4030,11 @@ fn append_demand_justification_metadata(
 
     metadata.push(("demand_justification_status".to_owned(), status.to_owned()));
     metadata.push(("demand_justification_path".to_owned(), path_text));
+    metadata.push((
+        "demand_justification_path_modules".to_owned(),
+        path_module_text,
+    ));
+    metadata.push(("demand_justification_trace".to_owned(), path_trace));
     metadata.push(("demand_justification_edge".to_owned(), edge_text));
     metadata.push(("demand_justification_summary".to_owned(), summary));
 }

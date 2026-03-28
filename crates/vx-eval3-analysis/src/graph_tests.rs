@@ -206,6 +206,9 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("edgeSemanticLabel("));
     assert!(html.contains("edgeDisplayLabel("));
     assert!(html.contains("shouldRenderEdgeLabel("));
+    assert!(html.contains("demandPathCardHtml("));
+    assert!(html.contains("One recovered upstream path to this selection"));
+    assert!(html.contains("demand_justification_trace"));
     assert!(html.contains("hidden-edge-label"));
     assert!(html.contains("nodeDisplayLines("));
     assert!(html.contains("\"Closure Layout\""));
@@ -650,6 +653,12 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             .contains("build_for"),
         "render_png kernel should expose upstream path through build_for"
     );
+    assert!(
+        metadata_value(&render_kernel.metadata, "demand_justification_trace")
+            .unwrap_or("")
+            .contains("tri-platform-png.vx::build_for --direct-call fn render_png"),
+        "render_png kernel should expose concrete final demand step with module context"
+    );
     assert_eq!(
         metadata_value(&render_kernel.metadata, "kernel_local_calls"),
         Some("none")
@@ -708,6 +717,12 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
                     .unwrap_or("")
                     .contains("build -> build_for"),
                 "build_for kernel should expose direct entry-to-callee demand path"
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "demand_justification_path_modules")
+                    .unwrap_or("")
+                    .contains("tri-platform-png.vx::build -> tri-platform-png.vx::build_for"),
+                "build_for kernel should expose module-qualified demand path"
             );
             let local_calls = metadata_value(&kernel.metadata, "kernel_local_calls").unwrap_or("");
             assert!(
@@ -954,6 +969,21 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
                 .unwrap_or("")
                 .contains("cross-module"),
             "imported `{imported_file}` build body should expose cross-module caller cause"
+        );
+        assert!(
+            metadata_value(
+                &imported_build_body.metadata,
+                "demand_justification_path_modules"
+            )
+            .unwrap_or("")
+            .contains(imported_file),
+            "imported `{imported_file}` build body should include module-qualified destination in demand path"
+        );
+        assert!(
+            metadata_value(&imported_build_body.metadata, "demand_justification_trace")
+                .unwrap_or("")
+                .contains("tri-platform-png.vx::build_for"),
+            "imported `{imported_file}` build body should trace back to project entry module calls"
         );
         assert!(
             metadata_value(
