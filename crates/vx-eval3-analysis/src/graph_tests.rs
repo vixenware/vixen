@@ -258,6 +258,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("restoredFromUrl"));
     assert!(html.contains("params.set(\"v\", \"1\")"));
     assert!(html.contains("runtime_role_summary"));
+    assert!(html.contains("runtime_activity_summary"));
+    assert!(html.contains("runtime_input_summary"));
+    assert!(html.contains("runtime_closure_summary"));
+    assert!(html.contains("runtime_extraction_summary"));
     assert!(html.contains("kernel_reason_summary"));
     assert!(html.contains("kernel_local_calls"));
     assert!(html.contains("kernel_extracted_values"));
@@ -418,6 +422,10 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("sharing_role"));
     assert!(html.contains("Runtime Role"));
     assert!(html.contains("kernel_reason_summary"));
+    assert!(html.contains("runtime_activity_summary"));
+    assert!(html.contains("runtime_input_summary"));
+    assert!(html.contains("runtime_closure_summary"));
+    assert!(html.contains("runtime_extraction_summary"));
     assert!(html.contains("kernel_local_calls"));
     assert!(html.contains("kernel_extracted_values"));
     assert!(html.contains("kernel_region_examples"));
@@ -719,6 +727,56 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             "{body_name} body should be demanded in no-main project root propagation"
         );
     }
+}
+
+#[test]
+fn zoo_tri_platform_png_runtime_and_layout_nodes_have_concrete_meaning_metadata() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+
+    let exec_runtime = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == GraphNodeKind::RuntimeBoundary
+                && metadata_value(&node.metadata, "runtime_role") == Some("exec")
+        })
+        .expect("exec runtime boundary should exist");
+    assert_eq!(
+        metadata_value(&exec_runtime.metadata, "runtime_extraction_summary"),
+        Some("host/runtime boundary call")
+    );
+    assert!(
+        metadata_value(&exec_runtime.metadata, "runtime_activity_summary")
+            .unwrap_or("")
+            .contains("boundary-call"),
+        "runtime activity should surface boundary-call semantics"
+    );
+    assert!(
+        metadata_value(&exec_runtime.metadata, "runtime_input_summary")
+            .unwrap_or("")
+            .contains("exec([@(run/"),
+        "runtime input summary should include boundary call expression context"
+    );
+
+    let shared_layout = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == GraphNodeKind::ClosureLayout
+                && metadata_value(&node.metadata, "capture_count") == Some("1")
+        })
+        .expect("closure layout with captured values should exist");
+    assert_eq!(
+        metadata_value(&shared_layout.metadata, "sharing_role"),
+        Some("closure_env")
+    );
+    assert!(
+        metadata_value(&shared_layout.metadata, "layout_capture_summary")
+            .unwrap_or("")
+            .contains("workspace"),
+        "layout capture summary should expose captured value names"
+    );
 }
 
 fn metadata_value<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {

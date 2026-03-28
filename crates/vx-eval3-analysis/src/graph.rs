@@ -2291,14 +2291,19 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "runtime_activity_summary", "runtime_input_summary", "runtime_closure_summary", "runtime_extraction_summary", "sharing_role", "capture_count", "layout_capture_summary", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => {
       const displayKey =
         key === "body_name" ? "Body" :
         key === "runtime_role_summary" ? "Runtime Role" :
+        key === "runtime_activity_summary" ? "Runtime Activity" :
+        key === "runtime_input_summary" ? "Runtime Inputs" :
+        key === "runtime_closure_summary" ? "Closure/Layout Args" :
+        key === "runtime_extraction_summary" ? "Runtime Extraction" :
         key === "sharing_role" ? "Sharing" :
         key === "capture_count" ? "Capture Count" :
+        key === "layout_capture_summary" ? "Captured Values" :
         key === "extracted_reason" ? "Extracted Because" :
         key === "kernel_reason_summary" ? "Kernel Meaning" :
         key === "kernel_local_calls" ? "Local Calls" :
@@ -3020,6 +3025,10 @@ fn project_analysis_graph_internal(
             .get(&runtime_id)
             .copied()
             .unwrap_or("runtime_node");
+        let runtime_activity_summary = runtime_activity_summary(runtime, context);
+        let runtime_input_summary = runtime_input_summary(runtime, context);
+        let runtime_closure_summary = runtime_closure_summary(&source_expr, context);
+        let runtime_extraction_summary = runtime_extraction_summary(extracted_reason);
         let sharing_role = if runtime.boundary_kind() == Some(RuntimeBoundaryKind::SharedKeyed)
             || extracted_reason == "shared_across_uses"
         {
@@ -3036,6 +3045,22 @@ fn project_analysis_graph_internal(
             ("runtime_role".to_owned(), role_slug.to_owned()),
             ("runtime_role_summary".to_owned(), role_summary.to_owned()),
             ("extracted_reason".to_owned(), extracted_reason.to_owned()),
+            (
+                "runtime_activity_summary".to_owned(),
+                runtime_activity_summary.to_owned(),
+            ),
+            (
+                "runtime_input_summary".to_owned(),
+                runtime_input_summary.to_owned(),
+            ),
+            (
+                "runtime_closure_summary".to_owned(),
+                runtime_closure_summary.to_owned(),
+            ),
+            (
+                "runtime_extraction_summary".to_owned(),
+                runtime_extraction_summary.to_owned(),
+            ),
             ("sharing_role".to_owned(), sharing_role.to_owned()),
         ];
         append_source_expr_metadata(&mut metadata, &source_expr, context);
@@ -3067,6 +3092,10 @@ fn project_analysis_graph_internal(
                 layout.captures.len().to_string(),
             ),
             ("closure_origin".to_owned(), closure_label.clone()),
+            (
+                "layout_capture_summary".to_owned(),
+                layout_capture_summary(layout, context),
+            ),
             (
                 "sharing_role".to_owned(),
                 if layout.captures.is_empty() {
@@ -3487,6 +3516,106 @@ fn kernel_region_examples_summary(
     } else {
         format!("{} exprs; {}", kernel.exprs.len(), joined)
     }
+}
+
+fn runtime_activity_summary(
+    runtime: &crate::RuntimeNode,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    let source = runtime_source(runtime);
+    let action = context
+        .and_then(|ctx| ctx.call_site_kind_label(&source))
+        .unwrap_or("expr");
+    let snippet = context
+        .and_then(|ctx| ctx.expr_short_label(&source))
+        .unwrap_or_else(|| format!("B{}:E{}", source.body.0, source.expr.0));
+    format!("{action}: {snippet}")
+}
+
+fn runtime_input_summary(
+    runtime: &crate::RuntimeNode,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    match runtime {
+        crate::RuntimeNode::SharedKeyed { keyed, .. } => {
+            let key = context
+                .and_then(|ctx| ctx.expr_short_label(&keyed.key_expr))
+                .unwrap_or_else(|| "key expr".to_owned());
+            let request = context
+                .and_then(|ctx| ctx.expr_short_label(&keyed.request_expr))
+                .unwrap_or_else(|| "request expr".to_owned());
+            let join = context
+                .and_then(|ctx| ctx.expr_short_label(&keyed.join_expr))
+                .unwrap_or_else(|| "join expr".to_owned());
+            format!("key={key}; request={request}; join={join}")
+        }
+        _ => context
+            .and_then(|ctx| ctx.expr_short_label(&runtime_source(runtime)))
+            .unwrap_or_else(|| "call-site expression".to_owned()),
+    }
+}
+
+fn runtime_closure_summary(
+    source_expr: &SourceExpr,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    let Some(ctx) = context else {
+        return "no closure-layout args".to_owned();
+    };
+    let labels = ctx
+        .boundary_arg_closures
+        .iter()
+        .filter_map(|arg| {
+            if arg.body != source_expr.body || arg.call_expr != source_expr.expr {
+                return None;
+            }
+            ctx.closure_name(&arg.closure_source)
+                .or_else(|| ctx.expr_short_label(&arg.closure_source))
+        })
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        "no closure-layout args".to_owned()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn runtime_extraction_summary(extracted_reason: &str) -> &'static str {
+    match extracted_reason {
+        "runtime_boundary" => "host/runtime boundary call",
+        "shared_across_uses" => "shared across multiple uses",
+        "escapes_as_lazy_result" => "escapes as lazy result",
+        "captured_by_closure_env" => "captured by closure environment",
+        "lazy_product_field" => "lazy product field extraction",
+        _ => "runtime extraction",
+    }
+}
+
+fn layout_capture_summary(
+    layout: &crate::ClosureEnvLayout,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    if layout.captures.is_empty() {
+        return "none".to_owned();
+    }
+    let mut labels = layout
+        .captures
+        .iter()
+        .map(|capture| {
+            if !capture.name.is_empty() {
+                capture.name.clone()
+            } else {
+                context
+                    .and_then(|ctx| ctx.expr_short_label(&capture.source))
+                    .unwrap_or_else(|| {
+                        format!("B{}:E{}", capture.source.body.0, capture.source.expr.0)
+                    })
+            }
+        })
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    labels.join(", ")
 }
 
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
