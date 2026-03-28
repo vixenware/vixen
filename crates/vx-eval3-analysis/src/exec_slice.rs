@@ -292,9 +292,16 @@ pub struct RuntimeSession<'a> {
 
 impl<'a> RuntimeSession<'a> {
     pub fn new(program: &'a ExecutableProgram) -> Result<Self, ExecSliceError> {
+        Self::new_with_entry_args(program, vec![])
+    }
+
+    pub fn new_with_entry_args(
+        program: &'a ExecutableProgram,
+        entry_args: Vec<ExecValue>,
+    ) -> Result<Self, ExecSliceError> {
         let entry_key = BodyMemoKey {
             body: program.entry,
-            args: vec![],
+            args: entry_args,
         };
         let mut machine = RuntimeMachine::new(program);
         machine

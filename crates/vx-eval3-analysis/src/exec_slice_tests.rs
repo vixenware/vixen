@@ -226,3 +226,81 @@ fn main() -> U64 (
         "body memo cell should reach ready state"
     );
 }
+
+#[test]
+fn runtime_session_build_shaped_source_blocks_then_resumes_after_manual_boundary_completion() {
+    let src = r#"
+fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+  exec [cc, "-c", @root/main.c, "-o", @out/main.o] where {
+    observer: (proc, tree) => tree,
+  }
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program(&analysis, &bridge).expect("program should lower");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+
+    let blocked = match session
+        .run_until_blocked()
+        .expect("run should block on runtime boundaries")
+    {
+        crate::EvalRunResult::Blocked(blocked) => blocked,
+        crate::EvalRunResult::Complete(outcome) => {
+            panic!(
+                "expected blocked runtime state for build-shaped source, got complete {:?}",
+                outcome.entry_result
+            )
+        }
+    };
+    assert!(
+        !blocked.blocked_runtime_nodes.is_empty(),
+        "build-shaped source should block on at least one runtime node"
+    );
+    assert!(
+        blocked
+            .wait_events
+            .iter()
+            .any(|event| matches!(event, WaitReason::RuntimeNode(_))),
+        "runtime wait should be observable in blocked session state"
+    );
+
+    for node in &blocked.blocked_runtime_nodes {
+        session
+            .complete_runtime_node(*node, ExecValue::PendingRuntimeBoundaries(vec![*node]))
+            .expect("manual runtime node completion should succeed");
+    }
+
+    let completed = match session
+        .run_until_blocked()
+        .expect("run should complete after manual runtime completion")
+    {
+        crate::EvalRunResult::Complete(outcome) => outcome,
+        crate::EvalRunResult::Blocked(blocked) => {
+            panic!(
+                "expected completion after manual runtime completion, still blocked: {:?}",
+                blocked.blocked_runtime_nodes
+            )
+        }
+    };
+    assert!(
+        matches!(
+            completed.entry_result,
+            ExecValue::PendingRuntimeBoundaries(nodes) if !nodes.is_empty()
+        ),
+        "final result should remain an explicit pending-runtime token shape"
+    );
+}
