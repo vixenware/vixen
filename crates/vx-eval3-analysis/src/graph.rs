@@ -253,6 +253,8 @@ impl AnalysisGraph {
             "  .node rect { fill: #162233; stroke: #4f6b87; stroke-width: 1.2; rx: 8; ry: 8; }\n",
         );
         out.push_str("  .node text { font-size: 12px; fill: #dbe7f3; pointer-events: none; }\n");
+        out.push_str("  .node-badge rect { fill: #0b1420; stroke: #3a5067; stroke-width: 1; rx: 4; ry: 4; }\n");
+        out.push_str("  .node-badge text { font-size: 9px; fill: #c7d6e6; font-weight: 700; pointer-events: none; }\n");
         out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
         out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; pointer-events: none; }\n");
         out.push_str("  .edge-label-hit { pointer-events: auto; cursor: pointer; }\n");
@@ -268,12 +270,33 @@ impl AnalysisGraph {
         out.push_str("  .edge-kind-runtime_boundary_to_closure_layout { stroke: #a6e3a1; stroke-dasharray: 3 3; }\n");
         out.push_str("  .edge-kind-call_to_body { stroke: #89b4fa; }\n");
         out.push_str("  .edge-kind-call_to_closure_layout { stroke: #94e2d5; }\n");
+        out.push_str("  .node-demand-demanded rect { stroke-width: 1.8; }\n");
+        out.push_str(
+            "  .node-demand-demanded .node-badge-demand rect { fill: #19351c; stroke: #5fd277; }\n",
+        );
+        out.push_str("  .node-demand-nondemanded .node-badge-demand rect { fill: #33211f; stroke: #f38ba8; }\n");
+        out.push_str(
+            "  .node-sharing-shared .node-badge-sharing rect { fill: #1f2538; stroke: #89b4fa; }\n",
+        );
+        out.push_str("  .node-sharing-closure_env .node-badge-sharing rect { fill: #1f2f2a; stroke: #94e2d5; }\n");
+        out.push_str("  .node-runtime-role-exec .node-badge-runtime rect { fill: #2f1f35; stroke: #f38ba8; }\n");
+        out.push_str("  .node-runtime-role-discover .node-badge-runtime rect { fill: #1f2a38; stroke: #89b4fa; }\n");
+        out.push_str("  .node-runtime-role-shared_keyed .node-badge-runtime rect { fill: #2d2c1f; stroke: #f9e2af; }\n");
+        out.push_str("  .edge-role-value_flow { stroke-width: 1.9; }\n");
+        out.push_str("  .edge-role-ownership { stroke-dasharray: 5 4; }\n");
+        out.push_str("  .edge-role-call { stroke-dasharray: 2 3; }\n");
+        out.push_str("  .edge-label.edge-role-value_flow { fill: #f9cb9c; }\n");
+        out.push_str("  .edge-label.edge-role-ownership { fill: #a6e3a1; }\n");
+        out.push_str("  .edge-label.edge-role-call { fill: #89dceb; }\n");
         out.push_str("  .dimmed { opacity: 0.18; }\n");
         out.push_str("  .selected { opacity: 1 !important; }\n");
         out.push_str("  .node.selected rect { stroke: #f1f5f9; stroke-width: 2.4; filter: drop-shadow(0 0 4px rgba(241,245,249,0.35)); }\n");
         out.push_str("  .edge.selected { stroke-width: 2.5; filter: drop-shadow(0 0 3px rgba(241,245,249,0.35)); }\n");
         out.push_str("  .edge-label.selected { fill: #f8fafc; font-weight: 700; }\n");
         out.push_str("  .source-lane-band.selected { stroke: #7dd3fc; stroke-width: 1.6; }\n");
+        out.push_str(
+            "  .semantic-summary { margin: 8px 0 0 0; font-size: 12px; color: #8ba5c1; }\n",
+        );
         out.push_str("  .arb-snippet { white-space: pre-wrap; word-break: break-word; }\n");
         out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
         out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
@@ -373,6 +396,92 @@ function hashDeterministic(value) {
     h = (h * 131 + value.charCodeAt(i)) >>> 0;
   }
   return h;
+}
+function metadataMap(entries) {
+  if (!Array.isArray(entries)) return {};
+  return Object.fromEntries(entries);
+}
+function parsePositiveInt(value) {
+  const n = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function observationToDemandState(raw) {
+  const text = String(raw ?? "");
+  if (text.includes("Need")) return "demanded";
+  if (text.includes("NoObs")) return "nondemanded";
+  return "unknown";
+}
+function nodeDemandState(node) {
+  const metadata = metadataMap(node.metadata);
+  if (node.kind === "body") return observationToDemandState(metadata.result_observation);
+  if (node.kind === "kernel") return observationToDemandState(metadata.kernel_result_observation);
+  if (node.kind === "closure_layout") return observationToDemandState(metadata.incoming_use_observation);
+  return "unknown";
+}
+function nodeSharingState(node) {
+  const metadata = metadataMap(node.metadata);
+  const role = String(metadata.sharing_role ?? "");
+  if (role === "shared" || role === "shared_reuse_source") return "shared";
+  if (role === "closure_env") return "closure_env";
+  if (parsePositiveInt(metadata.shared_extracted_node_count) > 0) return "shared";
+  return "local";
+}
+function nodeRuntimeRole(node) {
+  if (node.kind !== "runtime_boundary") return "none";
+  const metadata = metadataMap(node.metadata);
+  const role = String(metadata.runtime_role ?? "");
+  return role || "none";
+}
+function edgeRoleForKind(kind) {
+  if (kind === "runtime_value_dependency") return "value_flow";
+  if (kind === "runtime_boundary_to_closure_layout") return "ownership";
+  if (kind === "call_to_body" || kind === "call_to_closure_layout") return "call";
+  if (kind === "body_to_kernel" || kind === "body_to_runtime_boundary") return "structural";
+  return "structural";
+}
+function edgeSemanticLabel(edge) {
+  const role = edgeRoleForKind(edge.kind);
+  if (role === "value_flow") return `value flow: ${edge.label}`;
+  if (role === "ownership") return "ownership: boundary -> closure layout";
+  if (role === "call") return `source call: ${edge.label}`;
+  if (edge.kind === "body_to_kernel") return "demand edge: body -> kernel";
+  if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
+  return edge.label;
+}
+function semanticSummaryRows(value, metadata) {
+  if (!value || typeof value !== "object") return "";
+  const rows = [];
+  if (value.type === "node") {
+    const demand = nodeDemandState(value);
+    if (demand !== "unknown") rows.push(detailRow("Demand", demand));
+    const sharing = nodeSharingState(value);
+    if (sharing !== "local") rows.push(detailRow("Sharing", sharing));
+    const runtimeRole = nodeRuntimeRole(value);
+    if (runtimeRole !== "none") rows.push(detailRow("Runtime Role", runtimeRole.replaceAll("_", "-")));
+  } else if (value.type === "edge") {
+    rows.push(detailRow("Edge Role", edgeRoleForKind(value.kind).replaceAll("_", " ")));
+  }
+  return rows.join("");
+}
+function addNodeBadges(group, node) {
+  const badges = [];
+  const demand = nodeDemandState(node);
+  if (demand !== "unknown") badges.push({ role: "demand", text: demand === "demanded" ? "demanded" : "idle" });
+  const sharing = nodeSharingState(node);
+  if (sharing !== "local") badges.push({ role: "sharing", text: sharing.replaceAll("_", "-") });
+  const runtimeRole = nodeRuntimeRole(node);
+  if (runtimeRole !== "none") badges.push({ role: "runtime", text: runtimeRole.replaceAll("_", "-") });
+  badges.slice(0, 3).forEach((badge, idx) => {
+    const badgeGroup = el("g", { class: `node-badge node-badge-${badge.role}` });
+    const badgeWidth = Math.max(40, 10 + badge.text.length * 5.4);
+    const x = nodeWidth - badgeWidth - 8;
+    const y = 6 + idx * 14;
+    badgeGroup.appendChild(el("rect", { x, y, width: badgeWidth, height: 12 }));
+    const text = el("text", { x: x + 4, y: y + 9 });
+    text.textContent = badge.text;
+    badgeGroup.appendChild(text);
+    group.appendChild(badgeGroup);
+  });
 }
 
 const grouped = new Map(kindOrder.map((kind) => [kind, []]));
@@ -556,6 +665,8 @@ function selectGraphItem(key, detailsValue, sourceId) {
   setSelectedGraphElements(key);
   selectedSourceId = String(sourceId ?? "");
   setDetails(detailsValue);
+  applySourceFilter(sourceFilterSourceId);
+  if (selectedSourceId) focusSourceLane(selectedSourceId);
 }
 function detailRow(key, value) {
   return `<div class="detail-row"><div class="detail-key">${htmlEscape(key)}</div><div class="detail-val">${htmlEscape(value ?? "")}</div></div>`;
@@ -625,6 +736,7 @@ function setDetails(value) {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => detailRow(key, val))
     .join("");
+  const semanticRows = semanticSummaryRows(value, metadata);
 
   const snippetBlock = snippet
     ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${
@@ -642,6 +754,7 @@ function setDetails(value) {
     <div class="detail-card">
       <div class="detail-title">Summary</div>
       ${baseRows}
+      ${semanticRows ? `<div class="semantic-summary">Semantic View</div>${semanticRows}` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
     ${snippetBlock}
@@ -737,6 +850,8 @@ for (const edge of graph.edges) {
     "marker-end": "url(#arrow)"
   });
   path.classList.add(`edge-kind-${edge.kind}`);
+  const edgeRole = edgeRoleForKind(edge.kind);
+  path.classList.add(`edge-role-${edgeRole}`);
   const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
@@ -752,14 +867,14 @@ for (const edge of graph.edges) {
   const labelOffset = 10 + Math.abs(bucket) * 4;
   const labelX = (x1 + x2) / 2 + nx * labelOffset;
   const labelY = (y1 + y2) / 2 + ny * labelOffset - 3;
-  const label = el("text", { x: labelX, y: labelY, class: "edge-label", "text-anchor": "middle" });
+  const label = el("text", { x: labelX, y: labelY, class: `edge-label edge-role-${edgeRole}`, "text-anchor": "middle" });
   if (edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
     label.classList.add("edge-label-hit");
     label.addEventListener("click", () => selectGraphItem(edgeKey, { type: "edge", ...edge }, edgeSourceId));
   }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
-  label.textContent = edge.label;
+  label.textContent = edgeSemanticLabel(edge);
   svg.appendChild(label);
   registerSelectable(edgeKey, [path, label]);
 }
@@ -769,6 +884,10 @@ for (const node of graph.nodes) {
   if (!p) continue;
   const g = el("g", { class: "node", transform: `translate(${p.x - 98}, ${p.y})` });
   g.classList.add(`node-kind-${node.kind}`);
+  g.classList.add(`node-demand-${nodeDemandState(node)}`);
+  g.classList.add(`node-sharing-${nodeSharingState(node)}`);
+  const runtimeRole = nodeRuntimeRole(node);
+  if (runtimeRole !== "none") g.classList.add(`node-runtime-role-${runtimeRole}`);
   const nodeSourceId = String(node?.metadata?.span_source_id ?? "");
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
@@ -781,6 +900,7 @@ for (const node of graph.nodes) {
 
   const rect = el("rect", { width: 196, height: 54 });
   g.appendChild(rect);
+  addNodeBadges(g, node);
 
   const text = el("text", { x: 10, y: 18 });
   const lines = String(node.label).split("\n").slice(0, 2);
@@ -893,11 +1013,34 @@ fn project_analysis_graph_internal(
 ) -> AnalysisGraph {
     let mut nodes = Vec::new();
     let mut edges = BTreeSet::new();
+    let mut shared_extraction_count_by_body = BTreeMap::new();
+    let mut extracted_reason_by_runtime = BTreeMap::new();
+
+    for body in &analysis.bodies {
+        let mut shared_count = 0usize;
+        for extracted in &body.extracted_nodes {
+            let reason = match &extracted.reason {
+                ExtractedNodeReason::SharedAcrossUses => {
+                    shared_count += 1;
+                    "shared_across_uses"
+                }
+                ExtractedNodeReason::EscapesAsLazyResult => "escapes_as_lazy_result",
+                ExtractedNodeReason::CapturedByClosureEnv { .. } => "captured_by_closure_env",
+                ExtractedNodeReason::LazyProductField { .. } => "lazy_product_field",
+                ExtractedNodeReason::RuntimeBoundary { .. } => "runtime_boundary",
+            };
+            extracted_reason_by_runtime.insert(extracted.id.0, reason);
+        }
+        shared_extraction_count_by_body.insert(body.id, shared_count);
+    }
 
     for body in &analysis.bodies {
         let body_name = context
             .and_then(|ctx| ctx.body_name(body.id))
             .unwrap_or_else(|| format!("body-{}", body.id.0));
+        let shared_count = *shared_extraction_count_by_body
+            .get(&body.id)
+            .unwrap_or(&0usize);
         let mut metadata = vec![
             ("body_id".to_owned(), body.id.0.to_string()),
             (
@@ -907,6 +1050,18 @@ fn project_analysis_graph_internal(
             (
                 "result_observation".to_owned(),
                 format!("{:?}", body.result_observation),
+            ),
+            (
+                "shared_extracted_node_count".to_owned(),
+                shared_count.to_string(),
+            ),
+            (
+                "sharing_role".to_owned(),
+                if shared_count > 0 {
+                    "shared_reuse_source".to_owned()
+                } else {
+                    "local_only".to_owned()
+                },
             ),
         ];
         if let Some(ctx) = context {
@@ -964,12 +1119,39 @@ fn project_analysis_graph_internal(
             .boundary_kind()
             .map(boundary_kind_name)
             .unwrap_or("Lazy");
+        let role_slug = match runtime.boundary_kind() {
+            Some(RuntimeBoundaryKind::Exec) => "exec",
+            Some(RuntimeBoundaryKind::Discover) => "discover",
+            Some(RuntimeBoundaryKind::SharedKeyed) => "shared_keyed",
+            None => "lazy",
+        };
+        let role_summary = match runtime.boundary_kind() {
+            Some(RuntimeBoundaryKind::Exec) => "exec boundary",
+            Some(RuntimeBoundaryKind::Discover) => "discover boundary",
+            Some(RuntimeBoundaryKind::SharedKeyed) => "shared-keyed boundary",
+            None => "lazy extracted node",
+        };
+        let extracted_reason = extracted_reason_by_runtime
+            .get(&runtime_id)
+            .copied()
+            .unwrap_or("runtime_node");
+        let sharing_role = if runtime.boundary_kind() == Some(RuntimeBoundaryKind::SharedKeyed)
+            || extracted_reason == "shared_across_uses"
+        {
+            "shared"
+        } else {
+            "local"
+        };
         let source_note = context
             .and_then(|ctx| ctx.expr_short_label(&source_expr))
             .unwrap_or_else(|| format!("B{}:E{}", source_expr.body.0, source_expr.expr.0));
         let mut metadata = vec![
             ("runtime_id".to_owned(), runtime_id.to_string()),
             ("runtime_kind".to_owned(), boundary.to_owned()),
+            ("runtime_role".to_owned(), role_slug.to_owned()),
+            ("runtime_role_summary".to_owned(), role_summary.to_owned()),
+            ("extracted_reason".to_owned(), extracted_reason.to_owned()),
+            ("sharing_role".to_owned(), sharing_role.to_owned()),
         ];
         append_source_expr_metadata(&mut metadata, &source_expr, context);
         finalize_metadata(&mut metadata);
@@ -977,7 +1159,10 @@ fn project_analysis_graph_internal(
         nodes.push(GraphNode {
             id: runtime_node_id(runtime_id),
             kind: GraphNodeKind::RuntimeBoundary,
-            label: format!("Runtime {} R{}\n{}", boundary, runtime_id, source_note),
+            label: format!(
+                "Runtime R{} [{}]\n{}",
+                runtime_id, role_summary, source_note
+            ),
             metadata,
         });
     }
@@ -997,6 +1182,14 @@ fn project_analysis_graph_internal(
                 layout.captures.len().to_string(),
             ),
             ("closure_origin".to_owned(), closure_label.clone()),
+            (
+                "sharing_role".to_owned(),
+                if layout.captures.is_empty() {
+                    "local".to_owned()
+                } else {
+                    "closure_env".to_owned()
+                },
+            ),
         ];
         append_source_expr_metadata(&mut metadata, &layout.source, context);
         finalize_metadata(&mut metadata);

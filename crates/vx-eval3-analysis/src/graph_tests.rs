@@ -101,6 +101,12 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("focusSourceLane("));
     assert!(html.contains("selectGraphItem("));
     assert!(html.contains(".selected"));
+    assert!(html.contains("node-demand-demanded"));
+    assert!(html.contains("node-sharing-shared"));
+    assert!(html.contains("edge-role-value_flow"));
+    assert!(html.contains("edgeSemanticLabel("));
+    assert!(html.contains("semantic-summary"));
+    assert!(html.contains("runtime_role_summary"));
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
@@ -204,6 +210,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("graph-viewport"));
     assert!(html.contains("Source Registry"));
     assert!(html.contains("focusSourceLane("));
+    assert!(html.contains("node-badge"));
+    assert!(html.contains("sharing_role"));
+    assert!(html.contains("Runtime Role"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
