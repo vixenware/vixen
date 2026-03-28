@@ -312,14 +312,17 @@ impl AnalysisGraph {
             "  .source-inspector .inspector-line.has-mapping { border-left: 2px solid #7dd3fc; }\n",
         );
         out.push_str("  .source-inspector .inspector-line .ln .line-no { min-width: 2.8em; text-align: right; }\n");
-        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger { background: #122131; color: #8bd5ff; border: 1px solid #27415d; border-radius: 999px; min-width: 1.5em; height: 1.5em; padding: 0 4px; font-size: 10px; line-height: 1.3; display: inline-flex; align-items: center; justify-content: center; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger { background: #122131; color: #8bd5ff; border: 1px solid #27415d; border-radius: 999px; min-width: 1.5em; height: 1.5em; padding: 0 4px; font-size: 10px; line-height: 1.3; display: inline-flex; align-items: center; justify-content: center; transition: border-color .12s ease, color .12s ease, background-color .12s ease; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger:hover, .source-inspector .inspector-line .ln .line-map-trigger:focus-visible { border-color: #7dd3fc; color: #c7edff; }\n");
         out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger.multi { color: #f9e2af; border-color: #695628; background: #251f12; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger.active { border-color: #a6e3a1; color: #d7f6d3; background: #1d2a1d; }\n");
         out.push_str("  .source-inspector .inspector-line .code.exact-hit { cursor: pointer; border: 0; background: transparent; padding: 0; margin: 0; width: 100%; text-align: left; font: inherit; color: inherit; }\n");
         out.push_str("  .source-inspector .inspector-line .code.exact-hit:hover, .source-inspector .inspector-line .code.exact-hit:focus-visible { background: rgba(125,211,252,0.08); }\n");
-        out.push_str("  .source-inspector .inspector-line .code .exact-selected-span { background: rgba(166,227,161,0.24); outline: 1px solid rgba(166,227,161,0.75); border-radius: 3px; }\n");
-        out.push_str("  .source-inspector .inspector-choice-pop { position: absolute; z-index: 9; width: min(420px, 62vw); max-height: min(54vh, 420px); overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.35); }\n");
+        out.push_str("  .source-inspector .inspector-line .code .exact-selected-span { background: linear-gradient(180deg, rgba(166,227,161,0.24), rgba(166,227,161,0.16)); border-radius: 2px; box-shadow: inset 0 -1px 0 rgba(166,227,161,0.85); }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop { position: absolute; z-index: 9; width: min(420px, 62vw); max-height: min(54vh, 420px); overflow: auto; border: 1px solid #1f2c3c; border-radius: 8px; background: #0f1724; padding: 6px; box-shadow: 0 10px 26px rgba(0,0,0,0.4); }\n");
         out.push_str("  .source-inspector .inspector-choice-pop .choice-title { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
         out.push_str("  .source-inspector .inspector-choice-pop button { display: block; width: 100%; margin: 3px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #1f2c3c; border-radius: 5px; padding: 3px 6px; font-size: 10px; }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop button.active { border-color: #a6e3a1; box-shadow: 0 0 0 1px rgba(166,227,161,0.26); }\n");
         out.push_str(
             "  .source-inspector .inspector-choice-pop .choice-main { display: block; }\n",
         );
@@ -546,6 +549,8 @@ let inspectorSpanStart = 0;
 let inspectorSpanEnd = 0;
 let inspectorChoiceLine = 0;
 let inspectorLineMappings = new Map();
+let inspectorOutsideDismissHandler = null;
+let inspectorEscapeDismissHandler = null;
 const foldedLaneSourceIds = new Set();
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
@@ -1682,12 +1687,39 @@ function lineRangesForSelectedMapping(rawLine, lineNo, sourceEntry, mapped, sele
     })
     .filter(Boolean);
 }
-function lineMarkerHtml(lineNo, mapped) {
+function lineMarkerHtml(lineNo, mapped, selectedKey, choiceLine) {
   if (!Array.isArray(mapped) || mapped.length === 0) return `<span class="line-no">${lineNo}</span>`;
   const isMulti = mapped.length > 1;
+  const hasSelected = mapped.some((entry) => String(entry.key) === String(selectedKey ?? ""));
+  const isChoiceOpen = Number(choiceLine) === Number(lineNo);
   const text = isMulti ? String(mapped.length) : "●";
   const title = isMulti ? `Choose one of ${mapped.length} mapped items` : `Select mapped ${mapped[0]?.type ?? "item"}`;
-  return `<span class="line-no">${lineNo}</span><button type="button" class="line-map-trigger${isMulti ? " multi" : ""}" data-inspector-line-trigger="${lineNo}" title="${htmlEscape(title)}">${htmlEscape(text)}</button>`;
+  const activeClass = hasSelected || isChoiceOpen ? " active" : "";
+  return `<span class="line-no">${lineNo}</span><button type="button" class="line-map-trigger${isMulti ? " multi" : ""}${activeClass}" data-inspector-line-trigger="${lineNo}" title="${htmlEscape(title)}">${htmlEscape(text)}</button>`;
+}
+function clearInspectorChoiceDismissHandlers() {
+  if (inspectorOutsideDismissHandler) {
+    document.removeEventListener("pointerdown", inspectorOutsideDismissHandler, true);
+    inspectorOutsideDismissHandler = null;
+  }
+  if (inspectorEscapeDismissHandler) {
+    document.removeEventListener("keydown", inspectorEscapeDismissHandler, true);
+    inspectorEscapeDismissHandler = null;
+  }
+}
+function positionInspectorChoicePopup() {
+  if (inspectorChoiceLine <= 0 || !sourceInspector) return;
+  const popup = sourceInspector.querySelector(".inspector-choice-pop");
+  const row = sourceInspector.querySelector(`[data-inspector-line-row="${inspectorChoiceLine}"]`);
+  const linesEl = sourceInspector.querySelector(".inspector-lines");
+  if (!popup || !row || !linesEl) return;
+  const minTop = linesEl.offsetTop + 2;
+  const maxTop = Math.max(minTop, linesEl.offsetTop + linesEl.clientHeight - popup.offsetHeight - 4);
+  const preferredTop = row.offsetTop + row.offsetHeight + 4;
+  const top = Math.max(minTop, Math.min(preferredTop, maxTop));
+  const left = Math.max(8, row.offsetLeft + 6);
+  popup.style.top = `${top}px`;
+  popup.style.left = `${left}px`;
 }
 function renderSourceInspector() {
   if (!sourceInspector) return;
@@ -1734,11 +1766,11 @@ function renderSourceInspector() {
     const code = directMapping
       ? `<button type="button" class="code exact-hit" data-inspector-range-key="${htmlEscape(directMapping.key)}" title="Select mapped ${htmlEscape(directMapping.type)}">${lineHtml}</button>`
       : `<span class="code">${lineHtml}</span>`;
-    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}" data-inspector-line-row="${lineNo}"><span class="ln">${lineMarkerHtml(lineNo, mapped)}</span>${code}</div>`);
+    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}" data-inspector-line-row="${lineNo}"><span class="ln">${lineMarkerHtml(lineNo, mapped, selectedGraphKey, inspectorChoiceLine)}</span>${code}</div>`);
     if (inspectorChoiceLine === lineNo && mapped.length > 1) {
       const choices = mapped
         .slice(0, 12)
-        .map((entry) => `<button type="button" data-inspector-select-key="${htmlEscape(entry.key)}"><span class="choice-main"><span class="kind">${htmlEscape(entry.type)}</span> ${htmlEscape(entry.label)}</span><span class="choice-hint">${htmlEscape(mappingHintText(entry))}</span></button>`)
+        .map((entry) => `<button type="button" class="${String(entry.key) === String(selectedGraphKey) ? "active" : ""}" data-inspector-select-key="${htmlEscape(entry.key)}"><span class="choice-main"><span class="kind">${htmlEscape(entry.type)}</span> ${htmlEscape(entry.label)}</span><span class="choice-hint">${htmlEscape(mappingHintText(entry))}</span></button>`)
         .join("");
       choicePopup = `<div class="inspector-choice-pop"><div class="choice-title">Choose mapping for line ${lineNo}</div>${choices}</div>`;
     }
@@ -1776,14 +1808,32 @@ function renderSourceInspector() {
       persistViewerState(false);
     });
   }
+  positionInspectorChoicePopup();
+  const linesEl = sourceInspector.querySelector(".inspector-lines");
+  if (linesEl && inspectorChoiceLine > 0) {
+    linesEl.addEventListener("scroll", () => positionInspectorChoicePopup(), { passive: true });
+  }
   if (inspectorChoiceLine > 0) {
-    const popup = sourceInspector.querySelector(".inspector-choice-pop");
-    const row = sourceInspector.querySelector(`[data-inspector-line-row="${inspectorChoiceLine}"]`);
-    if (popup && row) {
-      const top = row.offsetTop + row.offsetHeight + 4;
-      popup.style.top = `${Math.max(28, top)}px`;
-      popup.style.left = "8px";
-    }
+    clearInspectorChoiceDismissHandlers();
+    inspectorOutsideDismissHandler = (event) => {
+      if (!sourceInspector || !event?.target) return;
+      if (sourceInspector.contains(event.target)) return;
+      inspectorChoiceLine = 0;
+      clearInspectorChoiceDismissHandlers();
+      renderSourceInspector();
+      persistViewerState(false);
+    };
+    document.addEventListener("pointerdown", inspectorOutsideDismissHandler, { capture: true });
+    inspectorEscapeDismissHandler = (event) => {
+      if (event.key !== "Escape") return;
+      inspectorChoiceLine = 0;
+      clearInspectorChoiceDismissHandlers();
+      renderSourceInspector();
+      persistViewerState(false);
+    };
+    document.addEventListener("keydown", inspectorEscapeDismissHandler, { capture: true });
+  } else {
+    clearInspectorChoiceDismissHandlers();
   }
   const rangeButtons = sourceInspector.querySelectorAll("[data-inspector-range-key]");
   for (const rangeButton of rangeButtons) {

@@ -119,6 +119,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("data-inspector-select-key"));
     assert!(html.contains("inspectorChoiceLine"));
     assert!(html.contains("line-map-trigger"));
+    assert!(html.contains("line-map-trigger.active"));
     assert!(html.contains("data-inspector-range-key"));
     assert!(html.contains("mappingHintText("));
     assert!(html.contains("choice-hint"));
@@ -129,6 +130,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("keepInspectorChoice"));
     assert!(html.contains("keepChoice: true"));
     assert!(html.contains("exact-selected-span"));
+    assert!(html.contains("clearInspectorChoiceDismissHandlers"));
     assert!(!html.contains("button type=\"button\" class=\"span-hit\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
@@ -444,11 +446,13 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("data-inspector-select-key"));
     assert!(html.contains("data-inspector-range-key"));
     assert!(html.contains("line-map-trigger"));
+    assert!(html.contains("line-map-trigger.active"));
     assert!(html.contains("choice-hint"));
     assert!(html.contains("params.get(\"icl\")"));
     assert!(html.contains("params.set(\"icl\""));
     assert!(html.contains("keepInspectorChoice"));
     assert!(html.contains("exact-selected-span"));
+    assert!(html.contains("clearInspectorChoiceDismissHandlers"));
     assert!(!html.contains("button type=\"button\" class=\"span-hit\""));
     assert!(html.contains("edgeDisplayLabel("));
     assert!(html.contains("shouldRenderEdgeLabel("));
