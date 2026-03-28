@@ -1,14 +1,36 @@
 use std::collections::BTreeSet;
 
 use vx_eval3_analysis::{
-    BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,
+    BodyId, ExtractedNodeReason, KernelOp, ResultSource, RuntimeNodeId, SingleSourceBridge,
     SourceLocalCalleeOrigin, build_minimal_analysis, lower_executable_program,
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BodyMemoKey, CellState, EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey, RuntimeSession,
-    WaitReason, eval_executable_program,
+    BodyMemoKey, BoundaryDriver, CellState, EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey,
+    RuntimeSession, WaitReason, eval_executable_program,
 };
+
+struct EchoNodeDriver;
+
+impl BoundaryDriver for EchoNodeDriver {
+    fn resolve_runtime_node(
+        &mut self,
+        node: RuntimeNodeId,
+    ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+        Ok(ExecValue::PendingRuntimeBoundaries(vec![node]))
+    }
+}
+
+struct ConstantIntDriver(i64);
+
+impl BoundaryDriver for ConstantIntDriver {
+    fn resolve_runtime_node(
+        &mut self,
+        _node: RuntimeNodeId,
+    ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+        Ok(ExecValue::Int(self.0))
+    }
+}
 
 fn lower_and_eval(
     src: &str,
@@ -139,23 +161,10 @@ fn main() -> U64 (
         "runtime cells should remain running/pending while blocked"
     );
 
-    for id in &blocked.blocked_runtime_nodes {
-        session
-            .complete_runtime_node(*id, ExecValue::PendingRuntimeBoundaries(vec![*id]))
-            .expect("manual runtime completion should work");
-    }
-    let completed = match session
-        .run_until_blocked()
-        .expect("run should complete after manual runtime completion")
-    {
-        EvalRunResult::Complete(outcome) => outcome,
-        EvalRunResult::Blocked(blocked) => {
-            panic!(
-                "expected completion after runtime completion, still blocked: {:?}",
-                blocked
-            )
-        }
-    };
+    let mut driver = EchoNodeDriver;
+    let completed = session
+        .run_with_driver(&mut driver)
+        .expect("driver-mediated run should complete");
     assert_eq!(
         completed.entry_result,
         ExecValue::PendingRuntimeBoundaries(expected_boundaries.clone())
@@ -234,7 +243,7 @@ fn main() -> U64 (
 }
 
 #[test]
-fn runtime_session_build_shaped_source_blocks_then_resumes_after_manual_boundary_completion() {
+fn runtime_session_build_shaped_source_runs_through_driver_to_concrete_result() {
     let src = r#"
 fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let class = executor_class("default");
@@ -284,30 +293,14 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
         "runtime wait should be observable in blocked session state"
     );
 
-    for node in &blocked.blocked_runtime_nodes {
-        session
-            .complete_runtime_node(*node, ExecValue::PendingRuntimeBoundaries(vec![*node]))
-            .expect("manual runtime node completion should succeed");
-    }
-
-    let completed = match session
-        .run_until_blocked()
-        .expect("run should complete after manual runtime completion")
-    {
-        EvalRunResult::Complete(outcome) => outcome,
-        EvalRunResult::Blocked(blocked) => {
-            panic!(
-                "expected completion after manual runtime completion, still blocked: {:?}",
-                blocked.blocked_runtime_nodes
-            )
-        }
-    };
-    assert!(
-        matches!(
-            completed.entry_result,
-            ExecValue::PendingRuntimeBoundaries(nodes) if !nodes.is_empty()
-        ),
-        "final result should remain an explicit pending-runtime token shape"
+    let mut driver = ConstantIntDriver(17);
+    let completed = session
+        .run_with_driver(&mut driver)
+        .expect("driver-mediated run should complete");
+    assert_eq!(
+        completed.entry_result,
+        ExecValue::Int(17),
+        "driver path should produce a concrete runtime result"
     );
 }
 
@@ -425,36 +418,31 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
             .expect("session should start");
 
     let mut saw_imported_call_boundary = false;
-    let mut saw_runtime_block = false;
     let mut saw_imported_callbody = false;
-    let completed = loop {
-        match session
-            .run_until_blocked()
-            .expect("runtime session should keep progressing")
-        {
-            EvalRunResult::Complete(outcome) => break outcome,
-            EvalRunResult::Blocked(blocked) => {
-                saw_runtime_block = true;
-                assert!(
-                    !blocked.blocked_runtime_nodes.is_empty(),
-                    "blocked session should expose concrete runtime nodes"
-                );
-                for node in &blocked.blocked_runtime_nodes {
-                    if let Some(runtime_node) = program.runtime_nodes.get(node) {
-                        if imported_call_exprs.contains(&runtime_node.source.expr) {
-                            saw_imported_call_boundary = true;
-                        }
-                    }
-                    session
-                        .complete_runtime_node(
-                            *node,
-                            ExecValue::PendingRuntimeBoundaries(vec![*node]),
-                        )
-                        .expect("manual completion should resume session");
-                }
-            }
+    let blocked = match session
+        .run_until_blocked()
+        .expect("runtime session should progress to first boundary")
+    {
+        EvalRunResult::Blocked(blocked) => blocked,
+        EvalRunResult::Complete(outcome) => {
+            panic!(
+                "expected an initial blocked state for boundary-driven runtime, got complete {:?}",
+                outcome.entry_result
+            )
         }
     };
+    let saw_runtime_block = true;
+    for node in &blocked.blocked_runtime_nodes {
+        if let Some(runtime_node) = program.runtime_nodes.get(node)
+            && imported_call_exprs.contains(&runtime_node.source.expr)
+        {
+            saw_imported_call_boundary = true;
+        }
+    }
+    let mut driver = EchoNodeDriver;
+    let completed = session
+        .run_with_driver(&mut driver)
+        .expect("driver-mediated run should complete");
     if let Some(entry_exec_body) = program.bodies.get(&entry_body) {
         saw_imported_callbody = entry_exec_body
             .local_call_dependencies

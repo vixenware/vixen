@@ -96,6 +96,10 @@ pub enum EvalRunResult {
     Blocked(BlockedEval),
 }
 
+pub trait BoundaryDriver {
+    fn resolve_runtime_node(&mut self, node: RuntimeNodeId) -> Result<ExecValue, ExecSliceError>;
+}
+
 pub fn eval_executable_program(program: &ExecutableProgram) -> Result<EvalOutcome, ExecSliceError> {
     let mut session = RuntimeSession::new(program)?;
     match session.run_until_blocked()? {
@@ -105,6 +109,14 @@ pub fn eval_executable_program(program: &ExecutableProgram) -> Result<EvalOutcom
             blocked.blocked_runtime_nodes
         ))),
     }
+}
+
+pub fn eval_executable_program_with_driver<D: BoundaryDriver>(
+    program: &ExecutableProgram,
+    driver: &mut D,
+) -> Result<EvalOutcome, ExecSliceError> {
+    let mut session = RuntimeSession::new(program)?;
+    session.run_with_driver(driver)
 }
 
 pub struct RuntimeSession<'a> {
@@ -150,6 +162,28 @@ impl<'a> RuntimeSession<'a> {
     ) -> Result<(), ExecSliceError> {
         self.machine
             .complete_runtime(RuntimeMemoKey { node }, value)
+    }
+
+    pub fn run_with_driver<D: BoundaryDriver>(
+        &mut self,
+        driver: &mut D,
+    ) -> Result<EvalOutcome, ExecSliceError> {
+        loop {
+            match self.run_until_blocked()? {
+                EvalRunResult::Complete(outcome) => return Ok(outcome),
+                EvalRunResult::Blocked(blocked) => {
+                    if blocked.blocked_runtime_nodes.is_empty() {
+                        return Err(ExecSliceError::InvalidProgram(
+                            "session blocked without runtime nodes".to_owned(),
+                        ));
+                    }
+                    for node in blocked.blocked_runtime_nodes {
+                        let value = driver.resolve_runtime_node(node)?;
+                        self.complete_runtime_node(node, value)?;
+                    }
+                }
+            }
+        }
     }
 }
 
