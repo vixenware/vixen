@@ -240,22 +240,23 @@ impl AnalysisGraph {
         out.push_str("  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
         out.push_str("  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
         out.push_str("  .topbar .top-source { color: #93adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
-        out.push_str("  .layout { display: grid; grid-template-rows: auto minmax(0, auto) auto; gap: 10px; padding: 10px; }\n");
+        out.push_str("  .layout { display: grid; grid-template-rows: auto auto auto; gap: 8px; padding: 8px; }\n");
         out.push_str("  .layout h2 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }\n");
+        out.push_str("  .graph-stage { min-width: 0; }\n");
         out.push_str("  .source-first-row { min-width: 0; }\n");
-        out.push_str("  .controls-row { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto; gap: 8px; align-items: start; }\n");
-        out.push_str("  .controls-row .compact { margin: 0; }\n");
-        out.push_str("  .utility-strip { display: flex; gap: 6px; align-items: flex-start; }\n");
+        out.push_str("  .source-first-row.compact-source-row h2 { margin-bottom: 4px; }\n");
+        out.push_str("  .graph-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 8px; align-items: start; margin: 0 0 6px 0; }\n");
+        out.push_str("  .utility-strip { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }\n");
         out.push_str("  .utility-strip details { position: relative; }\n");
-        out.push_str("  .utility-strip > details > summary { list-style: none; cursor: pointer; background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; }\n");
+        out.push_str("  .utility-strip > details > summary { list-style: none; cursor: pointer; background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 999px; padding: 3px 8px; font-size: 11px; }\n");
         out.push_str(
             "  .utility-strip > details > summary::-webkit-details-marker { display: none; }\n",
         );
         out.push_str("  .aux-pop { position: absolute; top: 30px; right: 0; z-index: 6; min-width: 320px; max-width: min(62vw, 620px); border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 8px; box-shadow: 0 10px 22px rgba(0,0,0,0.35); }\n");
         out.push_str("  .aux-pop h3 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; text-transform: uppercase; letter-spacing: 0.02em; }\n");
-        out.push_str("  @media (max-width: 1100px) { .controls-row { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } }\n");
+        out.push_str("  @media (max-width: 1100px) { .graph-toolbar { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } .utility-strip { justify-content: flex-start; } }\n");
         out.push_str("  .canvas-wrap { padding: 0; overflow: auto; min-width: 0; }\n");
-        out.push_str("  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 10px 6px 10px; }\n");
+        out.push_str("  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 6px 0; }\n");
         out.push_str("  .viewport-toolbar button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
         out.push_str("  .viewport-toolbar button:hover { border-color: #4b647f; }\n");
         out.push_str("  .viewport-toolbar .zoom-status { color: #8ba5c1; font-size: 12px; min-width: 54px; text-align: right; }\n");
@@ -279,12 +280,12 @@ impl AnalysisGraph {
         out.push_str("  .snippet-line:last-child { margin-bottom: 0; }\n");
         out.push_str("  .snippet-ln { color: #647b95; text-align: right; user-select: none; }\n");
         out.push_str("  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
-        out.push_str("  .source-inspector { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .source-inspector { border: 1px solid #243244; border-radius: 8px; background: #0f1724; padding: 6px; margin: 0; font-size: 11px; }\n");
         out.push_str("  .source-inspector .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n");
         out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
-        out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 11px; margin-bottom: 6px; }\n");
-        out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 8px; background: #0b1420; max-height: 320px; overflow: auto; }\n");
-        out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 4.8em minmax(0, 1fr); gap: 8px; padding: 1px 6px; }\n");
+        out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
+        out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 6px; background: #0b1420; max-height: 168px; overflow: auto; }\n");
+        out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 4.4em minmax(0, 1fr); gap: 6px; padding: 0 5px; }\n");
         out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; display: flex; justify-content: flex-end; align-items: center; gap: 6px; }\n");
         out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
         out.push_str(
@@ -299,8 +300,8 @@ impl AnalysisGraph {
         out.push_str("  .source-inspector .inspector-marker { background: #132031; color: #7dd3fc; border: 1px solid #2a3c52; border-radius: 999px; font-size: 10px; padding: 0 6px; min-width: 22px; line-height: 15px; cursor: pointer; }\n");
         out.push_str("  .source-inspector .inspector-line .code.clickable-range { cursor: pointer; outline: 1px dashed rgba(125,211,252,0.28); outline-offset: -1px; border: 0; background: transparent; text-align: left; padding: 0; width: 100%; font: inherit; }\n");
         out.push_str("  .source-inspector .inspector-line .code.clickable-range:hover, .source-inspector .inspector-line .code.clickable-range:focus-visible { background: rgba(125,211,252,0.1); }\n");
-        out.push_str("  .source-inspector .inspector-choice { margin: 2px 6px 6px 6px; padding: 6px; border: 1px solid #243244; border-radius: 8px; background: #101a2a; }\n");
-        out.push_str("  .source-inspector .inspector-choice button { display: block; width: 100%; margin: 4px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 7px; font-size: 11px; }\n");
+        out.push_str("  .source-inspector .inspector-choice { margin: 2px 4px 4px 4px; padding: 4px; border: 1px solid #243244; border-radius: 6px; background: #101a2a; }\n");
+        out.push_str("  .source-inspector .inspector-choice button { display: block; width: 100%; margin: 3px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 6px; font-size: 10px; }\n");
         out.push_str("  .source-inspector .inspector-choice .choice-main { display: block; }\n");
         out.push_str("  .source-inspector .inspector-choice .choice-hint { display: block; color: #8ba5c1; font-size: 10px; margin-top: 2px; }\n");
         out.push_str("  .source-inspector button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
@@ -332,12 +333,14 @@ impl AnalysisGraph {
         );
         out.push_str("  .lane-summary .lane-tools button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .lane-summary button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
-        out.push_str("  .search-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
-        out.push_str("  .search-controls .search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }\n");
-        out.push_str("  .search-controls input { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 5px 7px; font-size: 12px; }\n");
-        out.push_str("  .search-controls button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
-        out.push_str("  .search-controls .search-status { margin-top: 6px; color: #8ba5c1; font-size: 11px; }\n");
-        out.push_str("  .search-controls ul { margin: 8px 0 0 0; padding-left: 0; list-style: none; max-height: 180px; overflow: auto; }\n");
+        out.push_str("  .search-controls.search-strip { border: 1px solid #243244; border-radius: 999px; background: #101a29; padding: 3px; font-size: 11px; position: relative; }\n");
+        out.push_str("  .search-controls.search-strip .search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }\n");
+        out.push_str("  .search-controls.search-strip input { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 999px; padding: 4px 8px; font-size: 11px; }\n");
+        out.push_str("  .search-controls.search-strip button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 999px; padding: 3px 8px; font-size: 11px; cursor: pointer; }\n");
+        out.push_str("  .search-controls .search-status { margin: 4px 2px 0 8px; color: #8ba5c1; font-size: 10px; display: none; }\n");
+        out.push_str("  .search-controls ul { display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; margin: 0; padding: 6px; list-style: none; max-height: 220px; overflow: auto; border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; box-shadow: 0 10px 22px rgba(0,0,0,0.35); z-index: 7; }\n");
+        out.push_str("  .search-controls.search-open .search-status { display: block; }\n");
+        out.push_str("  .search-controls.search-open ul { display: block; }\n");
         out.push_str("  .search-controls li { margin: 4px 0; }\n");
         out.push_str("  .search-controls .search-hit { width: 100%; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 7px; padding: 5px 7px; cursor: pointer; }\n");
         out.push_str("  .search-controls .search-hit.active { border-color: #7dd3fc; box-shadow: 0 0 0 1px rgba(125,211,252,0.24); }\n");
@@ -345,7 +348,7 @@ impl AnalysisGraph {
             "  .search-controls .search-hit .kind { color: #8ba5c1; margin-right: 6px; }\n",
         );
         out.push_str("  .search-controls .search-hit .path { color: #8ba5c1; display: block; margin-top: 2px; font-size: 11px; }\n");
-        out.push_str("  .semantic-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .semantic-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 8px; margin: 0; font-size: 11px; min-width: 280px; }\n");
         out.push_str("  .semantic-controls .control-row { display: grid; grid-template-columns: 92px 1fr; gap: 8px; margin-bottom: 8px; align-items: center; }\n");
         out.push_str("  .semantic-controls .control-row:last-child { margin-bottom: 0; }\n");
         out.push_str("  .semantic-controls label { color: #8ba5c1; }\n");
@@ -360,6 +363,9 @@ impl AnalysisGraph {
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
         );
+        out.push_str("  .semantic-filter-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }\n");
+        out.push_str("  .semantic-filter-chips:empty { display: none; }\n");
+        out.push_str("  .semantic-chip { display: inline-flex; align-items: center; border: 1px solid #2a3c52; border-radius: 999px; padding: 2px 7px; font-size: 10px; color: #c7d6e6; background: #111c2a; }\n");
         out.push_str("  .raw-json-pre { margin-top: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.35; background: #0b1420; color: #c7d6e6; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; }\n");
         out.push_str("  .legend { margin: 0; font-size: 12px; color: #8ba5c1; }\n");
         out.push_str("  .graph-legend { margin: 10px; border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; font-size: 12px; color: #c7d6e6; }\n");
@@ -451,10 +457,9 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div>\n");
         out.push_str("</div>\n");
-        out.push_str("<div class=\"layout\">\n");
-        out.push_str("<section class=\"source-first-row\"><h2>Source Inspector</h2><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
-        out.push_str("<section class=\"controls-row\"><div><h2>Search</h2><div id=\"search-controls\" class=\"search-controls compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search nodes, edges, sources\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div></div><div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div><div class=\"utility-strip\"><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></section>\n");
-        out.push_str("<div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
+        out.push_str("<div class=\"layout graph-first-layout\">\n");
+        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
+        out.push_str("<section class=\"source-first-row compact-source-row\"><h2>Source Strip</h2><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
         out.push_str(
             "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
         );
@@ -485,10 +490,12 @@ const searchQueryInput = document.getElementById("search-query");
 const searchClearButton = document.getElementById("search-clear");
 const searchStatus = document.getElementById("search-status");
 const searchResults = document.getElementById("search-results");
+const searchControls = document.getElementById("search-controls");
 const sourceInspector = document.getElementById("source-inspector");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 const laneSummary = document.getElementById("lane-summary");
+const semanticFilterChips = document.getElementById("semantic-filter-chips");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
 const selectableElements = new Map();
@@ -1378,6 +1385,7 @@ function renderSearchResults() {
     activeSearchResultIndex = -1;
     searchResults.innerHTML = "";
     setSearchStatus("Type to search nodes, edges, and source lanes.");
+    if (searchControls) searchControls.classList.remove("search-open");
     return;
   }
   const tokens = trimmed
@@ -1406,6 +1414,7 @@ function renderSearchResults() {
     .join("");
   searchResults.innerHTML = items;
   setSearchStatus(`${visibleSearchResults.length} result(s)`);
+  if (searchControls) searchControls.classList.add("search-open");
   const buttons = searchResults.querySelectorAll("button[data-search-index]");
   for (const button of buttons) {
     button.addEventListener("click", () => {
@@ -1415,6 +1424,18 @@ function renderSearchResults() {
       activateSearchResult(visibleSearchResults[idx]);
     });
   }
+}
+function renderSemanticFilterChips() {
+  if (!semanticFilterChips) return;
+  const chips = [];
+  if (semanticDemandFilter !== "all") chips.push(`demand:${semanticDemandFilter}`);
+  if (semanticRuntimeRoleFilter !== "all") chips.push(`runtime:${semanticRuntimeRoleFilter}`);
+  if (semanticSharingFilter !== "all") chips.push(`sharing:${semanticSharingFilter}`);
+  if (dependencyFocusEnabled) chips.push(`focus:${dependencyFocusMode}`);
+  if (hideStdlibNoiseEnabled) chips.push("noise-dim:on");
+  semanticFilterChips.innerHTML = chips
+    .map((chip) => `<span class="semantic-chip">${htmlEscape(chip.replaceAll("_", "-"))}</span>`)
+    .join("");
 }
 function setSearchQuery(value, options = {}) {
   searchQuery = String(value ?? "");
@@ -1544,8 +1565,8 @@ function renderSourceInspector() {
   const startLine = inspectorSpanStart > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, inspectorSpanStart) : anchor;
   const spanEndOffset = inspectorSpanEnd > 0 ? Math.max(inspectorSpanStart, inspectorSpanEnd - 1) : inspectorSpanStart;
   const endLine = inspectorSpanEnd > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, spanEndOffset) : startLine;
-  const windowStart = inspectorExpanded ? 1 : Math.max(1, startLine - 12);
-  const windowEnd = inspectorExpanded ? total : Math.min(total, Math.max(endLine + 20, windowStart + 40));
+  const windowStart = inspectorExpanded ? 1 : Math.max(1, startLine - 4);
+  const windowEnd = inspectorExpanded ? total : Math.min(total, Math.max(endLine + 8, windowStart + 14));
   const mappings = sourceGraphMappings(sourceId);
   inspectorLineMappings = new Map();
   for (const mapping of mappings) {
@@ -1832,6 +1853,7 @@ function applyViewerStateFromUrl() {
   renderSearchResults();
   applySourceFilter(state.sourceFilter || "", { skipPersist: true, keepInspectorChoice: true });
   applySemanticFilters();
+  renderSemanticFilterChips();
   setInspectorSelection(inspectorSourceId || state.sourceFilter || "", {}, { skipRender: false, keepChoice: true });
   const hasSelection = Boolean(state.selected);
   if (hasSelection) {
@@ -2210,6 +2232,7 @@ if (filterDemand) {
   filterDemand.addEventListener("change", () => {
     semanticDemandFilter = filterDemand.value || "all";
     applySemanticFilters();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2217,6 +2240,7 @@ if (filterRuntimeRole) {
   filterRuntimeRole.addEventListener("change", () => {
     semanticRuntimeRoleFilter = filterRuntimeRole.value || "all";
     applySemanticFilters();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2224,6 +2248,7 @@ if (filterSharing) {
   filterSharing.addEventListener("change", () => {
     semanticSharingFilter = filterSharing.value || "all";
     applySemanticFilters();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2232,6 +2257,7 @@ if (focusNeighborhoodToggle) {
     dependencyFocusEnabled = Boolean(focusNeighborhoodToggle.checked);
     applyDependencyFocus();
     applyNoiseReduction();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2240,6 +2266,7 @@ if (focusPathMode) {
     dependencyFocusMode = focusPathMode.value || "neighborhood";
     applyDependencyFocus();
     applyNoiseReduction();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2247,6 +2274,7 @@ if (hideStdlibNoiseToggle) {
   hideStdlibNoiseToggle.addEventListener("change", () => {
     hideStdlibNoiseEnabled = Boolean(hideStdlibNoiseToggle.checked);
     applyNoiseReduction();
+    renderSemanticFilterChips();
     persistViewerState(false);
   });
 }
@@ -2270,6 +2298,9 @@ if (copyShareLinkButton) {
   copyShareLinkButton.addEventListener("click", () => copyShareLink());
 }
 if (searchQueryInput) {
+  searchQueryInput.addEventListener("focus", () => {
+    if (searchControls && String(searchQueryInput.value || "").trim() !== "") searchControls.classList.add("search-open");
+  });
   searchQueryInput.addEventListener("input", () => {
     setSearchQuery(searchQueryInput.value || "");
   });
@@ -2307,6 +2338,7 @@ if (searchClearButton) {
   searchClearButton.addEventListener("click", () => {
     if (searchQueryInput) searchQueryInput.value = "";
     setSearchQuery("");
+    if (searchControls) searchControls.classList.remove("search-open");
   });
 }
 window.addEventListener("keydown", (event) => {
@@ -2349,6 +2381,7 @@ window.addEventListener("popstate", () => {
 });
 updateSelectionHistoryButtons();
 applySemanticFilters();
+renderSemanticFilterChips();
 const restoredFromUrl = applyViewerStateFromUrl();
 svg.style.transformOrigin = "0 0";
 svg.style.transform = "scale(1)";

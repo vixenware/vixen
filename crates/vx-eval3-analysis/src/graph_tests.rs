@@ -87,7 +87,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("foldedLaneSourceIds"));
     assert!(html.contains("params.get(\"fold\")"));
     assert!(html.contains("params.set(\"fold\""));
-    assert!(html.contains(">Search<"));
+    assert!(html.contains("search-strip"));
     assert!(html.contains("search-query"));
     assert!(html.contains("search-results"));
     assert!(html.contains("search-clear"));
@@ -96,7 +96,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("activateSearchResult("));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
-    assert!(html.contains("Source Inspector"));
+    assert!(html.contains("Source Strip"));
     assert!(html.contains("source-inspector"));
     assert!(html.contains("source_contents"));
     assert!(html.contains("line_start_offsets"));
@@ -135,8 +135,13 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("a-k {"));
     assert!(html.contains("applySourceFilter("));
     assert!(html.contains("topbar"));
+    assert!(html.contains("graph-first-layout"));
+    assert!(html.contains("graph-stage"));
+    assert!(html.contains("graph-toolbar"));
+    assert!(html.contains("search-strip"));
+    assert!(html.contains("semantic-aux"));
+    assert!(html.contains("semantic-filter-chips"));
     assert!(html.contains("source-first-row"));
-    assert!(html.contains("controls-row"));
     assert!(html.contains("utility-strip"));
     assert!(html.contains("aux-pop"));
     assert!(html.contains("legend-help"));
@@ -217,6 +222,16 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("restoredFromUrl"));
     assert!(html.contains("params.set(\"v\", \"1\")"));
     assert!(html.contains("runtime_role_summary"));
+    let graph_pos = html
+        .find("graph-viewport")
+        .expect("graph viewport marker should exist");
+    let source_pos = html
+        .find("source-inspector")
+        .expect("source strip marker should exist");
+    assert!(
+        graph_pos < source_pos,
+        "graph viewport should appear before source strip in graph-first layout"
+    );
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
@@ -311,8 +326,13 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("sourceFilterSourceId"));
     assert!(html.contains("focused"));
     assert!(html.contains("topbar"));
+    assert!(html.contains("graph-first-layout"));
+    assert!(html.contains("graph-stage"));
+    assert!(html.contains("graph-toolbar"));
+    assert!(html.contains("search-strip"));
+    assert!(html.contains("semantic-aux"));
+    assert!(html.contains("semantic-filter-chips"));
     assert!(html.contains("source-first-row"));
-    assert!(html.contains("controls-row"));
     assert!(html.contains("utility-strip"));
     assert!(html.contains("aux-pop"));
     assert!(html.contains("legend-help"));
@@ -371,7 +391,7 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("ArrowUp"));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
-    assert!(html.contains("Source Inspector"));
+    assert!(html.contains("Source Strip"));
     assert!(html.contains("source_contents"));
     assert!(html.contains("inspector-lines"));
     assert!(html.contains("lineFromByteOffset("));
@@ -399,6 +419,16 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("shouldRenderEdgeLabel("));
     assert!(html.contains("hidden-edge-label"));
     assert!(html.contains("nodeDisplayLines("));
+    let graph_pos = html
+        .find("graph-viewport")
+        .expect("graph viewport marker should exist");
+    let source_pos = html
+        .find("source-inspector")
+        .expect("source strip marker should exist");
+    assert!(
+        graph_pos < source_pos,
+        "graph viewport should appear before source strip in graph-first layout"
+    );
 }
 
 #[test]
