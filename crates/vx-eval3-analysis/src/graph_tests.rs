@@ -617,23 +617,52 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         Some("local calls: 0; runtime-boundary extracts: 2; shared-value extracts: 0")
     );
 
-    for idle_body_name in ["build_for", "build"] {
+    for (body_name, expected_summary) in [
+        (
+            "build_for",
+            "local calls: 1; runtime-boundary extracts: 0; shared-value extracts: 1",
+        ),
+        (
+            "build",
+            "local calls: 3; runtime-boundary extracts: 0; shared-value extracts: 0",
+        ),
+    ] {
         let kernel = graph
             .nodes
             .iter()
             .find(|node| {
                 node.kind == GraphNodeKind::Kernel
-                    && metadata_value(&node.metadata, "body_name") == Some(idle_body_name)
+                    && metadata_value(&node.metadata, "body_name") == Some(body_name)
             })
-            .unwrap_or_else(|| panic!("{idle_body_name} kernel node should exist"));
+            .unwrap_or_else(|| panic!("{body_name} kernel node should exist"));
         assert_eq!(
             metadata_value(&kernel.metadata, "kernel_result_observation"),
-            Some("NoObs")
+            Some("NeedValue")
         );
         let note = metadata_value(&kernel.metadata, "demand_model_note").unwrap_or("");
         assert!(
-            note.contains("truly nondemanded") && note.contains("beyond one-step propagation"),
-            "idle demand note should distinguish true nondemand from model-depth limits"
+            note.contains("bounded local-call demand model") && note.contains("entry-seeded path"),
+            "active demand note should reflect bounded local-call propagation model"
+        );
+        assert_eq!(
+            metadata_value(&kernel.metadata, "kernel_reason_summary"),
+            Some(expected_summary)
+        );
+    }
+
+    for body_name in ["render_png", "build_for", "build"] {
+        let body = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == GraphNodeKind::Body
+                    && metadata_value(&node.metadata, "body_name") == Some(body_name)
+            })
+            .unwrap_or_else(|| panic!("{body_name} body node should exist"));
+        assert_eq!(
+            metadata_value(&body.metadata, "result_observation"),
+            Some("NeedValue"),
+            "{body_name} body should be demanded in no-main project root propagation"
         );
     }
 }

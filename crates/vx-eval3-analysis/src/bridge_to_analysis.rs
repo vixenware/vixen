@@ -123,21 +123,38 @@ fn apply_one_step_local_call_demands(
         }
     }
 
-    let entry_ids = {
-        let mains = bridge
-            .bodies
+    let mains = bridge
+        .bodies
+        .iter()
+        .filter(|body| body.name == "main")
+        .map(|body| body.id)
+        .collect::<Vec<_>>();
+    let use_transitive_local_call_propagation = mains.is_empty();
+    let entry_ids = if !mains.is_empty() {
+        mains
+    } else {
+        let mut incoming = BTreeSet::new();
+        for body in bodies.iter() {
+            for edge in &body.source_local_call_edges {
+                if let crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) = edge.callee {
+                    incoming.insert(callee_body);
+                }
+            }
+        }
+        let mut roots = bodies
             .iter()
-            .filter(|body| body.name == "main")
             .map(|body| body.id)
+            .filter(|body_id| !incoming.contains(body_id))
             .collect::<Vec<_>>();
-        if mains.is_empty() {
+        roots.sort_by_key(|body_id| body_id.0);
+        if roots.is_empty() {
             bridge
                 .bodies
                 .first()
                 .map(|body| vec![body.id])
                 .unwrap_or_default()
         } else {
-            mains
+            roots
         }
     };
     for entry_id in &entry_ids {
@@ -148,14 +165,22 @@ fn apply_one_step_local_call_demands(
 
     let mut demanded_bodies = BTreeSet::new();
     let mut demanded_layouts = BTreeSet::new();
-    for entry_id in entry_ids {
-        let Some(caller) = bodies.iter().find(|body| body.id == entry_id) else {
+    let mut visit_queue = entry_ids;
+    let mut visited = BTreeSet::new();
+    while let Some(caller_id) = visit_queue.pop() {
+        if !visited.insert(caller_id) {
+            continue;
+        }
+        let Some(caller) = bodies.iter().find(|body| body.id == caller_id) else {
             continue;
         };
         for edge in &caller.source_local_call_edges {
             match edge.callee {
                 crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
                     demanded_bodies.insert(callee_body);
+                    if use_transitive_local_call_propagation {
+                        visit_queue.push(callee_body);
+                    }
                 }
                 crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
                     if let Some(layout_id) = caller.callee_closure_layouts.get(&edge.call_expr) {

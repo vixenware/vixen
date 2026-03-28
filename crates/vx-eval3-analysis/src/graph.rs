@@ -839,8 +839,8 @@ function semanticNarrative(value) {
       return "This node is currently demanded, so it contributes to the observed result path in this structural snapshot.";
     }
     if (demand === "nondemanded") {
-      if (String(metadata.demand_model_note ?? "").includes("one-step")) {
-        return "This node is currently idle under the one-step demand model; that can mean true nondemand or missing propagation beyond current modeling depth.";
+      if (String(metadata.demand_model_note ?? "").includes("bounded local-call")) {
+        return "This node is currently idle under the bounded local-call demand model; that can mean true nondemand or propagation that stops before this point.";
       }
       return "This node is currently not demanded; it exists structurally but is not on the active observed path.";
     }
@@ -3371,9 +3371,9 @@ fn kernel_reason_summary(
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
     match observation {
         crate::Observation::NoObs => {
-            "idle in current one-step demand model; may be either truly nondemanded or beyond one-step propagation"
+            "idle in current bounded local-call demand model; may be either truly nondemanded or beyond current propagation depth"
         }
-        _ => "active in current one-step demand model (entry-seeded path)",
+        _ => "active in current bounded local-call demand model (entry-seeded path)",
     }
 }
 
