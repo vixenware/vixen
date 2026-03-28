@@ -391,6 +391,7 @@ let hideStdlibNoiseEnabled = false;
 let dependencyFocusMode = "neighborhood";
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
+let suppressUrlStateUpdate = false;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -988,6 +989,44 @@ function setSelectedGraphElements(key) {
     }
   }
 }
+function readViewerStateFromUrl() {
+  const raw = String(window.location.hash || "").replace(/^#/, "");
+  const params = new URLSearchParams(raw);
+  return {
+    version: params.get("v") || "",
+    selected: params.get("sel") || "",
+    sourceFilter: params.get("sf") || "",
+    demand: params.get("fd") || "all",
+    runtimeRole: params.get("fr") || "all",
+    sharing: params.get("fs") || "all",
+    focus: params.get("focus") === "1",
+    trace: params.get("trace") || "neighborhood",
+    noise: params.get("noise") === "1",
+  };
+}
+function writeViewerStateToUrl(push) {
+  const params = new URLSearchParams();
+  params.set("v", "1");
+  if (selectedGraphKey) params.set("sel", selectedGraphKey);
+  if (sourceFilterSourceId) params.set("sf", sourceFilterSourceId);
+  if (semanticDemandFilter !== "all") params.set("fd", semanticDemandFilter);
+  if (semanticRuntimeRoleFilter !== "all") params.set("fr", semanticRuntimeRoleFilter);
+  if (semanticSharingFilter !== "all") params.set("fs", semanticSharingFilter);
+  if (dependencyFocusEnabled) params.set("focus", "1");
+  if (dependencyFocusMode !== "neighborhood") params.set("trace", dependencyFocusMode);
+  if (hideStdlibNoiseEnabled) params.set("noise", "1");
+  const nextHash = `#${params.toString()}`;
+  if (window.location.hash === nextHash) return;
+  if (push) {
+    window.history.pushState({ vixenViewerState: true }, "", nextHash);
+  } else {
+    window.history.replaceState({ vixenViewerState: true }, "", nextHash);
+  }
+}
+function persistViewerState(push) {
+  if (suppressUrlStateUpdate) return;
+  writeViewerStateToUrl(Boolean(push));
+}
 function updateSelectionHistoryButtons() {
   if (selectionHistoryBack) selectionHistoryBack.disabled = selectionHistoryIndex <= 0;
   if (selectionHistoryForward) selectionHistoryForward.disabled = selectionHistoryIndex === -1 || selectionHistoryIndex >= selectionHistory.length - 1;
@@ -1008,8 +1047,11 @@ function selectGraphItem(key, detailsValue, sourceId, options = {}) {
   selectedSourceId = String(sourceId ?? "");
   if (!options.fromHistory) pushSelectionHistory(key);
   setDetails(detailsValue);
-  applySourceFilter(sourceFilterSourceId);
+  applySourceFilter(sourceFilterSourceId, { skipPersist: true });
   if (selectedSourceId) focusSourceLane(selectedSourceId);
+  if (options.persistUrl !== false) {
+    persistViewerState(Boolean(options.pushUrlHistory));
+  }
 }
 function selectByGraphKey(key, options = {}) {
   if (!key) return;
@@ -1029,6 +1071,34 @@ function selectByGraphKey(key, options = {}) {
     const edgeSourceId = String(edgeEntry.edge?.metadata?.find(([k]) => k === "span_source_id")?.[1] ?? "");
     selectGraphItem(key, { type: "edge", ...edgeEntry.edge }, edgeSourceId, options);
   }
+}
+function applyViewerStateFromUrl() {
+  const state = readViewerStateFromUrl();
+  suppressUrlStateUpdate = true;
+  semanticDemandFilter = state.demand || "all";
+  semanticRuntimeRoleFilter = state.runtimeRole || "all";
+  semanticSharingFilter = state.sharing || "all";
+  dependencyFocusEnabled = Boolean(state.focus);
+  dependencyFocusMode = state.trace || "neighborhood";
+  hideStdlibNoiseEnabled = Boolean(state.noise);
+  if (filterDemand) filterDemand.value = semanticDemandFilter;
+  if (filterRuntimeRole) filterRuntimeRole.value = semanticRuntimeRoleFilter;
+  if (filterSharing) filterSharing.value = semanticSharingFilter;
+  if (focusNeighborhoodToggle) focusNeighborhoodToggle.checked = dependencyFocusEnabled;
+  if (focusPathMode) focusPathMode.value = dependencyFocusMode;
+  if (hideStdlibNoiseToggle) hideStdlibNoiseToggle.checked = hideStdlibNoiseEnabled;
+  applySourceFilter(state.sourceFilter || "", { skipPersist: true });
+  applySemanticFilters();
+  const hasSelection = Boolean(state.selected);
+  if (hasSelection) {
+    selectByGraphKey(state.selected, {
+      fromHistory: true,
+      persistUrl: false,
+      pushUrlHistory: false,
+    });
+  }
+  suppressUrlStateUpdate = false;
+  return hasSelection;
 }
 function detailRow(key, value) {
   return `<div class="detail-row"><div class="detail-key">${htmlEscape(key)}</div><div class="detail-val">${htmlEscape(value ?? "")}</div></div>`;
@@ -1057,7 +1127,7 @@ function highlightSourceInRegistry(sourceId) {
     item.classList.toggle("focused", isMatch && sourceFilterSourceId === String(sourceId));
   }
 }
-function applySourceFilter(sourceId) {
+function applySourceFilter(sourceId, options = {}) {
   sourceFilterSourceId = String(sourceId ?? "");
   for (const entry of sourceBoundElements) {
     const shouldDim =
@@ -1073,6 +1143,7 @@ function applySourceFilter(sourceId) {
   }
   applyDependencyFocus();
   applyNoiseReduction();
+  if (!options.skipPersist) persistViewerState(false);
 }
 function wireDetailTraversal() {
   const nodeButtons = details.querySelectorAll("[data-select-node-id]");
@@ -1080,7 +1151,7 @@ function wireDetailTraversal() {
     button.addEventListener("click", () => {
       const nodeId = button.getAttribute("data-select-node-id") || "";
       if (!nodeId) return;
-      selectByGraphKey(`node:${nodeId}`);
+      selectByGraphKey(`node:${nodeId}`, { pushUrlHistory: true });
     });
   }
   const edgeButtons = details.querySelectorAll("[data-select-edge-key]");
@@ -1088,7 +1159,7 @@ function wireDetailTraversal() {
     button.addEventListener("click", () => {
       const edgeKey = button.getAttribute("data-select-edge-key") || "";
       if (!edgeKey) return;
-      selectByGraphKey(edgeKey);
+      selectByGraphKey(edgeKey, { pushUrlHistory: true });
     });
   }
 }
@@ -1246,7 +1317,7 @@ for (const edge of graph.edges) {
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
   const edgeKey = edgeKeyFor(edge);
-  path.addEventListener("click", () => selectByGraphKey(edgeKey));
+  path.addEventListener("click", () => selectByGraphKey(edgeKey, { pushUrlHistory: true }));
   svg.appendChild(path);
 
   const dx = x2 - x1;
@@ -1261,7 +1332,7 @@ for (const edge of graph.edges) {
   if (edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
     label.classList.add("edge-label-hit");
-    label.addEventListener("click", () => selectByGraphKey(edgeKey));
+    label.addEventListener("click", () => selectByGraphKey(edgeKey, { pushUrlHistory: true }));
   }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
   label.textContent = edgeSemanticLabel(edge);
@@ -1283,7 +1354,7 @@ for (const node of graph.nodes) {
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
   const nodeKey = `node:${node.id}`;
-  g.addEventListener("click", () => selectByGraphKey(nodeKey));
+  g.addEventListener("click", () => selectByGraphKey(nodeKey, { pushUrlHistory: true }));
 
   const rect = el("rect", { width: 196, height: 54 });
   g.appendChild(rect);
@@ -1303,23 +1374,26 @@ for (const node of graph.nodes) {
 }
 
 renderSourceRegistry(graph);
-applySourceFilter("");
+applySourceFilter("", { skipPersist: true });
 if (filterDemand) {
   filterDemand.addEventListener("change", () => {
     semanticDemandFilter = filterDemand.value || "all";
     applySemanticFilters();
+    persistViewerState(false);
   });
 }
 if (filterRuntimeRole) {
   filterRuntimeRole.addEventListener("change", () => {
     semanticRuntimeRoleFilter = filterRuntimeRole.value || "all";
     applySemanticFilters();
+    persistViewerState(false);
   });
 }
 if (filterSharing) {
   filterSharing.addEventListener("change", () => {
     semanticSharingFilter = filterSharing.value || "all";
     applySemanticFilters();
+    persistViewerState(false);
   });
 }
 if (focusNeighborhoodToggle) {
@@ -1327,6 +1401,7 @@ if (focusNeighborhoodToggle) {
     dependencyFocusEnabled = Boolean(focusNeighborhoodToggle.checked);
     applyDependencyFocus();
     applyNoiseReduction();
+    persistViewerState(false);
   });
 }
 if (focusPathMode) {
@@ -1334,12 +1409,14 @@ if (focusPathMode) {
     dependencyFocusMode = focusPathMode.value || "neighborhood";
     applyDependencyFocus();
     applyNoiseReduction();
+    persistViewerState(false);
   });
 }
 if (hideStdlibNoiseToggle) {
   hideStdlibNoiseToggle.addEventListener("change", () => {
     hideStdlibNoiseEnabled = Boolean(hideStdlibNoiseToggle.checked);
     applyNoiseReduction();
+    persistViewerState(false);
   });
 }
 if (selectionHistoryBack) {
@@ -1347,7 +1424,7 @@ if (selectionHistoryBack) {
     if (selectionHistoryIndex <= 0) return;
     selectionHistoryIndex -= 1;
     updateSelectionHistoryButtons();
-    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true });
+    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true, pushUrlHistory: false });
   });
 }
 if (selectionHistoryForward) {
@@ -1355,11 +1432,15 @@ if (selectionHistoryForward) {
     if (selectionHistoryIndex === -1 || selectionHistoryIndex >= selectionHistory.length - 1) return;
     selectionHistoryIndex += 1;
     updateSelectionHistoryButtons();
-    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true });
+    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true, pushUrlHistory: false });
   });
 }
+window.addEventListener("popstate", () => {
+  applyViewerStateFromUrl();
+});
 updateSelectionHistoryButtons();
 applySemanticFilters();
+const restoredFromUrl = applyViewerStateFromUrl();
 svg.style.transformOrigin = "0 0";
 svg.style.transform = "scale(1)";
 updateZoomStatus();
@@ -1398,14 +1479,16 @@ if (graphViewport) {
   graphViewport.addEventListener("pointercancel", endPan);
   graphViewport.addEventListener("pointerleave", endPan);
 }
-setDetails({
-  type: "graph",
-  graph_type: graph.graph_type,
-  source_file: graph.source_file,
-  source_file_count: Array.isArray(graph.source_files) ? graph.source_files.length : 0,
-  node_count: graph.nodes.length,
-  edge_count: graph.edges.length
-});
+if (!restoredFromUrl) {
+  setDetails({
+    type: "graph",
+    graph_type: graph.graph_type,
+    source_file: graph.source_file,
+    source_file_count: Array.isArray(graph.source_files) ? graph.source_files.length : 0,
+    node_count: graph.nodes.length,
+    edge_count: graph.edges.length
+  });
+}
 </script>"##,
         );
         out.push_str("\n</body>\n</html>\n");
