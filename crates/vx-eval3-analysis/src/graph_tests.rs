@@ -211,6 +211,12 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("selectedCausalPathFromKey("));
     assert!(html.contains("edgeMachineId("));
     assert!(html.contains("clientFacts("));
+    assert!(html.contains("\"client\":"));
+    assert!(html.contains("demand_state"));
+    assert!(html.contains("runtime_role"));
+    assert!(html.contains("sharing_state"));
+    assert!(html.contains("kernel_meaning"));
+    assert!(html.contains("source_id"));
     assert!(html.contains("selected_causal_path_node_ids"));
     assert!(html.contains("selected_causal_path_edge_ids"));
     assert!(!html.contains("Demand Path Nodes"));
@@ -661,6 +667,14 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         render_kernel.client.demand_justification_status.as_deref(),
         Some("propagated")
     );
+    assert_eq!(
+        render_kernel.client.demand_state.as_deref(),
+        Some("demanded")
+    );
+    assert_eq!(
+        render_kernel.client.kernel_meaning.as_deref(),
+        Some("local calls: 0; runtime-boundary extracts: 2; shared-value extracts: 0")
+    );
     assert!(
         metadata_value(&render_kernel.metadata, "demand_justification_path")
             .unwrap_or("")
@@ -856,6 +870,8 @@ fn zoo_tri_platform_png_runtime_and_layout_nodes_have_concrete_meaning_metadata(
         metadata_value(&exec_runtime.metadata, "runtime_extraction_summary"),
         Some("host/runtime boundary call")
     );
+    assert_eq!(exec_runtime.client.runtime_role.as_deref(), Some("exec"));
+    assert_eq!(exec_runtime.client.sharing_state.as_deref(), Some("local"));
     assert!(
         metadata_value(&exec_runtime.metadata, "runtime_activity_summary")
             .unwrap_or("")
@@ -1005,6 +1021,21 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
             metadata_value(&imported_build_body.metadata, "result_observation"),
             Some("NeedValue"),
             "imported `{imported_file}` build body should be concretely demanded"
+        );
+        assert_eq!(
+            imported_build_body.client.demand_state.as_deref(),
+            Some("demanded"),
+            "imported `{imported_file}` build body should expose demand state in structured client facts"
+        );
+        assert!(
+            imported_build_body
+                .client
+                .source
+                .as_ref()
+                .and_then(|source| source.source_path.as_deref())
+                .map(|path| path.ends_with(imported_file))
+                .unwrap_or(false),
+            "imported `{imported_file}` build body should expose structured source/provenance path"
         );
         assert!(
             metadata_value(&imported_build_body.metadata, "demand_justification_edge")

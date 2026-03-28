@@ -23,6 +23,19 @@ pub struct GraphNodeClientFacts {
     pub demand_justification_status: Option<String>,
     pub selected_causal_path_node_ids: Vec<String>,
     pub selected_causal_path_edge_ids: Vec<String>,
+    pub demand_state: Option<String>,
+    pub runtime_role: Option<String>,
+    pub sharing_state: Option<String>,
+    pub kernel_meaning: Option<String>,
+    pub source: Option<GraphNodeSourceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct GraphNodeSourceRef {
+    pub source_id: Option<u32>,
+    pub source_path: Option<String>,
+    pub span_start: Option<u32>,
+    pub span_end: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -682,6 +695,9 @@ function observationToDemandState(raw) {
   return "unknown";
 }
 function nodeDemandState(node) {
+  const client = clientFacts(node);
+  const clientState = String(client.demand_state ?? "");
+  if (clientState) return clientState;
   const metadata = metadataMap(node.metadata);
   if (node.kind === "body") return observationToDemandState(metadata.result_observation);
   if (node.kind === "kernel") return observationToDemandState(metadata.kernel_result_observation);
@@ -689,6 +705,11 @@ function nodeDemandState(node) {
   return "unknown";
 }
 function nodeSharingState(node) {
+  const client = clientFacts(node);
+  const clientRole = String(client.sharing_state ?? "");
+  if (clientRole === "shared" || clientRole === "shared_reuse_source") return "shared";
+  if (clientRole === "closure_env") return "closure_env";
+  if (clientRole === "local" || clientRole === "local_only") return "local";
   const metadata = metadataMap(node.metadata);
   const role = String(metadata.sharing_role ?? "");
   if (role === "shared" || role === "shared_reuse_source") return "shared";
@@ -698,6 +719,9 @@ function nodeSharingState(node) {
 }
 function nodeRuntimeRole(node) {
   if (node.kind !== "runtime_boundary") return "none";
+  const client = clientFacts(node);
+  const clientRole = String(client.runtime_role ?? "");
+  if (clientRole) return clientRole;
   const metadata = metadataMap(node.metadata);
   const role = String(metadata.runtime_role ?? "");
   return role || "none";
@@ -766,7 +790,7 @@ function nodeDisplayLines(node) {
     const demandText = demand === "demanded"
       ? "active in model"
       : (demand === "nondemanded" ? "idle in model" : "kernel demand unknown");
-    const reason = compactLabelText(String(metadata.kernel_reason_summary ?? ""), 44);
+    const reason = compactLabelText(String(clientFacts(node).kernel_meaning ?? metadata.kernel_reason_summary ?? ""), 44);
     return [owner ? `Kernel in ${owner}` : "Kernel", reason ? `${demandText} · ${reason}` : demandText];
   }
   if (node.kind === "runtime_boundary") {
@@ -2407,10 +2431,12 @@ function moveDependencyFocus(step) {
 }
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
+  const client = clientFacts(value);
+  const clientSource = client.source && typeof client.source === "object" ? client.source : {};
   const kind = value.kind || value.type || "graph";
   const label = value.type === "node" ? nodeDisplayLines(value).join(" · ") : (value.label || "");
-  const sourcePath = metadata.source_path || value.source_file || "";
-  const sourceId = metadata.span_source_id || "";
+  const sourcePath = metadata.source_path || String(clientSource.source_path ?? "") || value.source_file || "";
+  const sourceId = metadata.span_source_id || (clientSource.source_id != null ? String(clientSource.source_id) : "");
   const sourceSummary = sourceId
     ? sourceLabel(String(sourceId))
     : (sourcePath ? compactLabelText(String(sourcePath).split(/[\\/]/).pop() ?? String(sourcePath), 48) : "");
@@ -3047,6 +3073,7 @@ fn project_analysis_graph_internal(
             append_body_span_metadata(&mut metadata, ctx, body.id);
         }
         finalize_metadata(&mut metadata);
+        let client = enrich_client_facts_from_metadata(client, GraphNodeKind::Body, &metadata);
 
         nodes.push(GraphNode {
             id: body_node_id(body.id),
@@ -3156,6 +3183,7 @@ fn project_analysis_graph_internal(
             append_body_span_metadata(&mut metadata, ctx, kernel.body);
         }
         finalize_metadata(&mut metadata);
+        let client = enrich_client_facts_from_metadata(client, GraphNodeKind::Kernel, &metadata);
 
         nodes.push(GraphNode {
             id: kernel_node_id(kernel.id.0),
@@ -3245,6 +3273,8 @@ fn project_analysis_graph_internal(
         );
         append_source_expr_metadata(&mut metadata, &source_expr, context);
         finalize_metadata(&mut metadata);
+        let client =
+            enrich_client_facts_from_metadata(client, GraphNodeKind::RuntimeBoundary, &metadata);
 
         nodes.push(GraphNode {
             id: runtime_node_id(runtime_id),
@@ -3288,12 +3318,17 @@ fn project_analysis_graph_internal(
         ];
         append_source_expr_metadata(&mut metadata, &layout.source, context);
         finalize_metadata(&mut metadata);
+        let client = enrich_client_facts_from_metadata(
+            GraphNodeClientFacts::default(),
+            GraphNodeKind::ClosureLayout,
+            &metadata,
+        );
 
         nodes.push(GraphNode {
             id: layout_node_id(layout.id.0),
             kind: GraphNodeKind::ClosureLayout,
             label: format!("Layout L{}\n{}", layout.id.0, closure_label),
-            client: GraphNodeClientFacts::default(),
+            client,
             metadata,
         });
     }
@@ -4186,7 +4221,74 @@ fn append_demand_justification_metadata(
         demand_justification_status: Some(status.to_owned()),
         selected_causal_path_node_ids: path.iter().map(|id| body_node_id(*id)).collect(),
         selected_causal_path_edge_ids: edge_ids,
+        demand_state: None,
+        runtime_role: None,
+        sharing_state: None,
+        kernel_meaning: None,
+        source: None,
     }
+}
+
+fn metadata_value<'a>(metadata: &'a GraphMetadata, key: &str) -> Option<&'a str> {
+    metadata
+        .iter()
+        .find_map(|(k, v)| if k == key { Some(v.as_str()) } else { None })
+}
+
+fn parse_u32_metadata(metadata: &GraphMetadata, key: &str) -> Option<u32> {
+    metadata_value(metadata, key)?.parse::<u32>().ok()
+}
+
+fn demand_state_from_observation(observation: &str) -> Option<String> {
+    if observation.contains("Need") {
+        Some("demanded".to_owned())
+    } else if observation.contains("NoObs") {
+        Some("nondemanded".to_owned())
+    } else {
+        None
+    }
+}
+
+fn enrich_client_facts_from_metadata(
+    mut client: GraphNodeClientFacts,
+    kind: GraphNodeKind,
+    metadata: &GraphMetadata,
+) -> GraphNodeClientFacts {
+    if client.demand_justification_status.is_none() {
+        client.demand_justification_status =
+            metadata_value(metadata, "demand_justification_status").map(ToOwned::to_owned);
+    }
+
+    client.demand_state = match kind {
+        GraphNodeKind::Body => {
+            metadata_value(metadata, "result_observation").and_then(demand_state_from_observation)
+        }
+        GraphNodeKind::Kernel => metadata_value(metadata, "kernel_result_observation")
+            .and_then(demand_state_from_observation),
+        GraphNodeKind::ClosureLayout => metadata_value(metadata, "incoming_use_observation")
+            .and_then(demand_state_from_observation),
+        GraphNodeKind::RuntimeBoundary => None,
+    };
+    client.runtime_role = metadata_value(metadata, "runtime_role").map(ToOwned::to_owned);
+    client.sharing_state = metadata_value(metadata, "sharing_role").map(ToOwned::to_owned);
+    client.kernel_meaning =
+        metadata_value(metadata, "kernel_reason_summary").map(ToOwned::to_owned);
+
+    let source_ref = GraphNodeSourceRef {
+        source_id: parse_u32_metadata(metadata, "span_source_id"),
+        source_path: metadata_value(metadata, "source_path").map(ToOwned::to_owned),
+        span_start: parse_u32_metadata(metadata, "span_start"),
+        span_end: parse_u32_metadata(metadata, "span_end"),
+    };
+    if source_ref.source_id.is_some()
+        || source_ref.source_path.is_some()
+        || source_ref.span_start.is_some()
+        || source_ref.span_end.is_some()
+    {
+        client.source = Some(source_ref);
+    }
+
+    client
 }
 
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
@@ -4284,6 +4386,76 @@ fn push_json_node_client_facts(out: &mut String, facts: &GraphNodeClientFacts, i
     out.push_str(": ");
     match &facts.demand_justification_status {
         Some(status) => push_json_str(out, status),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "demand_state");
+    out.push_str(": ");
+    match &facts.demand_state {
+        Some(state) => push_json_str(out, state),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "runtime_role");
+    out.push_str(": ");
+    match &facts.runtime_role {
+        Some(role) => push_json_str(out, role),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "sharing_state");
+    out.push_str(": ");
+    match &facts.sharing_state {
+        Some(role) => push_json_str(out, role),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "kernel_meaning");
+    out.push_str(": ");
+    match &facts.kernel_meaning {
+        Some(text) => push_json_str(out, text),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "source");
+    out.push_str(": ");
+    match &facts.source {
+        Some(source) => {
+            out.push_str("{ ");
+            push_json_str(out, "source_id");
+            out.push_str(": ");
+            match source.source_id {
+                Some(id) => out.push_str(&id.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "source_path");
+            out.push_str(": ");
+            match &source.source_path {
+                Some(path) => push_json_str(out, path),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "span_start");
+            out.push_str(": ");
+            match source.span_start {
+                Some(start) => out.push_str(&start.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "span_end");
+            out.push_str(": ");
+            match source.span_end {
+                Some(end) => out.push_str(&end.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(" }");
+        }
         None => out.push_str("null"),
     }
     out.push_str(",\n");
