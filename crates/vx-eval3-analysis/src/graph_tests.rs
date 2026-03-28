@@ -91,6 +91,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("params.get(\"fold\")"));
     assert!(html.contains("params.set(\"fold\""));
     assert!(html.contains("search-strip"));
+    assert!(html.contains("top-search"));
     assert!(html.contains("search-query"));
     assert!(html.contains("search-results"));
     assert!(html.contains("search-clear"));
@@ -117,7 +118,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("data-inspector-line"));
     assert!(html.contains("data-inspector-select-key"));
     assert!(html.contains("inspectorChoiceLine"));
-    assert!(html.contains("clickable-range"));
+    assert!(html.contains("line-map-trigger"));
     assert!(html.contains("data-inspector-range-key"));
     assert!(html.contains("mappingHintText("));
     assert!(html.contains("choice-hint"));
@@ -127,7 +128,8 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("params.set(\"icl\""));
     assert!(html.contains("keepInspectorChoice"));
     assert!(html.contains("keepChoice: true"));
-    assert!(html.contains("button type=\"button\" class=\"code clickable-range\""));
+    assert!(html.contains("exact-selected-span"));
+    assert!(!html.contains("button type=\"button\" class=\"span-hit\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -197,7 +199,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("matchesNodeSemanticFilters("));
     assert!(html.contains("semanticNarrative("));
     assert!(html.contains("Why It Matters"));
-    assert!(html.contains("Connection Focus"));
+    assert!(!html.contains("Connection Focus"));
     assert!(html.contains("focus-neighborhood-toggle"));
     assert!(html.contains("hide-stdlib-noise-toggle"));
     assert!(html.contains("applyDependencyFocus("));
@@ -243,12 +245,19 @@ fn zoo_cc_version_graph_smoke() {
     let source_pos = html
         .find("<section class=\"source-first-row")
         .expect("source strip section marker should exist");
+    let top_search_pos = html
+        .find("<div class=\"top-search\">")
+        .expect("top search strip should exist");
     let graph_pos = html
         .find("<section class=\"graph-stage\"")
         .expect("graph stage section marker should exist");
     assert!(
         source_pos < graph_pos,
         "source strip should appear before graph viewport in sticky source-first layout"
+    );
+    assert!(
+        top_search_pos < source_pos,
+        "search should live in the top controls, above source/graph split"
     );
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -348,6 +357,7 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("graph-stage"));
     assert!(html.contains("graph-toolbar"));
     assert!(html.contains("search-strip"));
+    assert!(html.contains("top-search"));
     assert!(html.contains("semantic-aux"));
     assert!(html.contains("semantic-filter-chips"));
     assert!(html.contains("compact-source-row { position: sticky;"));
@@ -378,7 +388,7 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("dependency neighborhood"));
     assert!(html.contains("noise-dim"));
     assert!(html.contains("focus-path-mode"));
-    assert!(html.contains("Connection Focus"));
+    assert!(!html.contains("Connection Focus"));
     assert!(html.contains("open node"));
     assert!(html.contains("open edge"));
     assert!(html.contains("selection-nav"));
@@ -433,12 +443,13 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("data-inspector-line"));
     assert!(html.contains("data-inspector-select-key"));
     assert!(html.contains("data-inspector-range-key"));
-    assert!(html.contains("clickable-range"));
+    assert!(html.contains("line-map-trigger"));
     assert!(html.contains("choice-hint"));
     assert!(html.contains("params.get(\"icl\")"));
     assert!(html.contains("params.set(\"icl\""));
     assert!(html.contains("keepInspectorChoice"));
-    assert!(html.contains("button type=\"button\" class=\"code clickable-range\""));
+    assert!(html.contains("exact-selected-span"));
+    assert!(!html.contains("button type=\"button\" class=\"span-hit\""));
     assert!(html.contains("edgeDisplayLabel("));
     assert!(html.contains("shouldRenderEdgeLabel("));
     assert!(html.contains("hidden-edge-label"));
@@ -446,12 +457,19 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     let source_pos = html
         .find("<section class=\"source-first-row")
         .expect("source strip section marker should exist");
+    let top_search_pos = html
+        .find("<div class=\"top-search\">")
+        .expect("top search strip should exist");
     let graph_pos = html
         .find("<section class=\"graph-stage\"")
         .expect("graph stage section marker should exist");
     assert!(
         source_pos < graph_pos,
         "source strip should appear before graph viewport in sticky source-first layout"
+    );
+    assert!(
+        top_search_pos < source_pos,
+        "search should live in the top controls, above source/graph split"
     );
 }
 

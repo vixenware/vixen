@@ -82,6 +82,7 @@ pub struct GraphSourceContent {
     pub source_id: u32,
     pub path: String,
     pub highlighted_lines: Vec<String>,
+    pub raw_lines: Vec<String>,
     pub line_start_offsets: Vec<usize>,
 }
 
@@ -152,6 +153,16 @@ impl AnalysisGraph {
                 out.push_str("        ");
                 push_json_str(&mut out, line);
                 if line_idx + 1 != source.highlighted_lines.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str("      ],\n");
+            out.push_str("      \"raw_lines\": [\n");
+            for (line_idx, line) in source.raw_lines.iter().enumerate() {
+                out.push_str("        ");
+                push_json_str(&mut out, line);
+                if line_idx + 1 != source.raw_lines.len() {
                     out.push(',');
                 }
                 out.push('\n');
@@ -238,7 +249,7 @@ impl AnalysisGraph {
         out.push_str("<style>\n");
         out.push_str("  :root { color-scheme: dark; }\n");
         out.push_str("  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
-        out.push_str("  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
+        out.push_str("  .topbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 520px) auto; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
         out.push_str("  .topbar .top-source { color: #93adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
         out.push_str("  .layout { display: grid; grid-template-rows: minmax(220px, 38vh) minmax(0, 1fr) auto; gap: 8px; padding: 8px; height: calc(100vh - 54px); }\n");
         out.push_str("  .layout h2 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }\n");
@@ -246,7 +257,7 @@ impl AnalysisGraph {
         out.push_str("  .source-first-row { min-width: 0; }\n");
         out.push_str("  .source-first-row.compact-source-row { position: sticky; top: 0; z-index: 8; background: #0f1724; }\n");
         out.push_str("  .source-first-row.compact-source-row h2 { margin-bottom: 4px; }\n");
-        out.push_str("  .graph-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 8px; align-items: start; margin: 0 0 6px 0; }\n");
+        out.push_str("  .graph-toolbar { display: grid; grid-template-columns: 1fr; gap: 6px; align-items: start; margin: 0 0 6px 0; }\n");
         out.push_str("  .utility-strip { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }\n");
         out.push_str("  .utility-strip details { position: relative; }\n");
         out.push_str("  .utility-strip > details > summary { list-style: none; cursor: pointer; background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 999px; padding: 3px 8px; font-size: 11px; }\n");
@@ -255,7 +266,7 @@ impl AnalysisGraph {
         );
         out.push_str("  .aux-pop { position: absolute; top: 30px; right: 0; z-index: 6; min-width: 320px; max-width: min(62vw, 620px); border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 8px; box-shadow: 0 10px 22px rgba(0,0,0,0.35); }\n");
         out.push_str("  .aux-pop h3 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; text-transform: uppercase; letter-spacing: 0.02em; }\n");
-        out.push_str("  @media (max-width: 1100px) { .graph-toolbar { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } .utility-strip { justify-content: flex-start; } }\n");
+        out.push_str("  @media (max-width: 1100px) { .topbar { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } .utility-strip { justify-content: flex-start; } }\n");
         out.push_str(
             "  .canvas-wrap { padding: 0; overflow: hidden; min-width: 0; min-height: 0; }\n",
         );
@@ -300,9 +311,13 @@ impl AnalysisGraph {
         out.push_str(
             "  .source-inspector .inspector-line.has-mapping { border-left: 2px solid #7dd3fc; }\n",
         );
-        out.push_str("  .source-inspector .inspector-line .code.clickable-range { cursor: pointer; outline: 1px dashed rgba(125,211,252,0.28); outline-offset: -1px; border: 0; background: transparent; text-align: left; padding: 0; width: 100%; font: inherit; }\n");
-        out.push_str("  .source-inspector .inspector-line .code.clickable-range:hover, .source-inspector .inspector-line .code.clickable-range:focus-visible { background: rgba(125,211,252,0.1); }\n");
-        out.push_str("  .source-inspector .inspector-choice-pop { position: absolute; top: 30px; right: 6px; z-index: 9; width: min(420px, 62vw); max-height: min(54vh, 420px); overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.35); }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-no { min-width: 2.8em; text-align: right; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger { background: #122131; color: #8bd5ff; border: 1px solid #27415d; border-radius: 999px; min-width: 1.5em; height: 1.5em; padding: 0 4px; font-size: 10px; line-height: 1.3; display: inline-flex; align-items: center; justify-content: center; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln .line-map-trigger.multi { color: #f9e2af; border-color: #695628; background: #251f12; }\n");
+        out.push_str("  .source-inspector .inspector-line .code.exact-hit { cursor: pointer; border: 0; background: transparent; padding: 0; margin: 0; width: 100%; text-align: left; font: inherit; color: inherit; }\n");
+        out.push_str("  .source-inspector .inspector-line .code.exact-hit:hover, .source-inspector .inspector-line .code.exact-hit:focus-visible { background: rgba(125,211,252,0.08); }\n");
+        out.push_str("  .source-inspector .inspector-line .code .exact-selected-span { background: rgba(166,227,161,0.24); outline: 1px solid rgba(166,227,161,0.75); border-radius: 3px; }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop { position: absolute; z-index: 9; width: min(420px, 62vw); max-height: min(54vh, 420px); overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.35); }\n");
         out.push_str("  .source-inspector .inspector-choice-pop .choice-title { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
         out.push_str("  .source-inspector .inspector-choice-pop button { display: block; width: 100%; margin: 3px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #1f2c3c; border-radius: 5px; padding: 3px 6px; font-size: 10px; }\n");
         out.push_str(
@@ -338,6 +353,7 @@ impl AnalysisGraph {
         );
         out.push_str("  .lane-summary .lane-tools button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .lane-summary button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
+        out.push_str("  .top-search { justify-self: stretch; }\n");
         out.push_str("  .search-controls.search-strip { border: 1px solid #243244; border-radius: 999px; background: #101a29; padding: 3px; font-size: 11px; position: relative; }\n");
         out.push_str("  .search-controls.search-strip .search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }\n");
         out.push_str("  .search-controls.search-strip input { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 999px; padding: 4px 8px; font-size: 11px; }\n");
@@ -460,11 +476,12 @@ impl AnalysisGraph {
         out.push_str("<div class=\"top-source\">");
         out.push_str(&escape_html(&source_label));
         out.push_str("</div>\n");
+        out.push_str("<div class=\"top-search\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div></div>\n");
         out.push_str("<div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div>\n");
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout graph-first-layout\">\n");
         out.push_str("<section class=\"source-first-row compact-source-row\"><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
-        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
+        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
         out.push_str(
             "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
         );
@@ -1560,6 +1577,118 @@ function mappingHintText(mapping) {
   }
   return "";
 }
+const utf8Encoder = new TextEncoder();
+function utf8ByteLength(text) {
+  return utf8Encoder.encode(String(text ?? "")).length;
+}
+function byteOffsetToCodeUnitIndex(text, byteOffset) {
+  const raw = String(text ?? "");
+  const target = Math.max(0, Number.parseInt(String(byteOffset ?? 0), 10) || 0);
+  let used = 0;
+  let idx = 0;
+  for (const ch of raw) {
+    const bytes = utf8Encoder.encode(ch).length;
+    if (used + bytes > target) break;
+    used += bytes;
+    idx += ch.length;
+  }
+  return idx;
+}
+function renderHighlightedLineWithRanges(highlightedHtml, ranges) {
+  const html = String(highlightedHtml ?? "");
+  if (!Array.isArray(ranges) || ranges.length === 0 || !html) return html || "&nbsp;";
+  const ordered = ranges
+    .filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end) && range.end > range.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  if (ordered.length === 0) return html || "&nbsp;";
+  let merged = [];
+  for (const range of ordered) {
+    if (merged.length === 0 || range.start > merged[merged.length - 1].end) {
+      merged.push({ start: range.start, end: range.end });
+      continue;
+    }
+    merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, range.end);
+  }
+  let rangeIdx = 0;
+  let inMark = false;
+  let plainPos = 0;
+  let i = 0;
+  let out = "";
+  while (i < html.length) {
+    while (rangeIdx < merged.length && plainPos >= merged[rangeIdx].end) {
+      if (inMark) {
+        out += "</span>";
+        inMark = false;
+      }
+      rangeIdx++;
+    }
+    const currentRange = rangeIdx < merged.length ? merged[rangeIdx] : null;
+    if (html[i] === "<") {
+      const tagEnd = html.indexOf(">", i);
+      if (tagEnd === -1) {
+        out += html.slice(i);
+        break;
+      }
+      out += html.slice(i, tagEnd + 1);
+      i = tagEnd + 1;
+      continue;
+    }
+    if (currentRange && plainPos >= currentRange.start && !inMark) {
+      out += "<span class=\"exact-selected-span\">";
+      inMark = true;
+    }
+    if (html[i] === "&") {
+      const entityEnd = html.indexOf(";", i + 1);
+      if (entityEnd !== -1) {
+        out += html.slice(i, entityEnd + 1);
+        i = entityEnd + 1;
+      } else {
+        out += html[i];
+        i += 1;
+      }
+    } else {
+      out += html[i];
+      i += 1;
+    }
+    plainPos += 1;
+    while (rangeIdx < merged.length && plainPos >= merged[rangeIdx].end) {
+      if (inMark) {
+        out += "</span>";
+        inMark = false;
+      }
+      rangeIdx++;
+    }
+  }
+  if (inMark) out += "</span>";
+  return out || "&nbsp;";
+}
+function lineRangesForSelectedMapping(rawLine, lineNo, sourceEntry, mapped, selectedKey) {
+  if (!selectedKey) return [];
+  const text = String(rawLine ?? "");
+  const lineStarts = Array.isArray(sourceEntry?.line_start_offsets) ? sourceEntry.line_start_offsets : [];
+  const lineStart = Number(lineStarts[lineNo - 1] ?? 0);
+  const lineEnd = lineStart + utf8ByteLength(text);
+  return mapped
+    .filter((entry) => String(entry.key) === String(selectedKey))
+    .map((entry) => {
+      const start = Math.max(Number(entry.start ?? lineStart), lineStart);
+      const end = Math.min(Number(entry.end ?? lineEnd), lineEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+      const startIdx = byteOffsetToCodeUnitIndex(text, start - lineStart);
+      let endIdx = byteOffsetToCodeUnitIndex(text, end - lineStart);
+      if (endIdx <= startIdx) endIdx = Math.min(text.length, startIdx + 1);
+      if (endIdx <= startIdx) return null;
+      return { start: startIdx, end: endIdx };
+    })
+    .filter(Boolean);
+}
+function lineMarkerHtml(lineNo, mapped) {
+  if (!Array.isArray(mapped) || mapped.length === 0) return `<span class="line-no">${lineNo}</span>`;
+  const isMulti = mapped.length > 1;
+  const text = isMulti ? String(mapped.length) : "●";
+  const title = isMulti ? `Choose one of ${mapped.length} mapped items` : `Select mapped ${mapped[0]?.type ?? "item"}`;
+  return `<span class="line-no">${lineNo}</span><button type="button" class="line-map-trigger${isMulti ? " multi" : ""}" data-inspector-line-trigger="${lineNo}" title="${htmlEscape(title)}">${htmlEscape(text)}</button>`;
+}
 function renderSourceInspector() {
   if (!sourceInspector) return;
   const sourceId = String(inspectorSourceId || sourceFilterSourceId || selectedSourceId || "");
@@ -1573,7 +1702,8 @@ function renderSourceInspector() {
     return;
   }
   const lines = Array.isArray(sourceEntry.highlighted_lines) ? sourceEntry.highlighted_lines : [];
-  const total = lines.length;
+  const rawLines = Array.isArray(sourceEntry.raw_lines) ? sourceEntry.raw_lines : [];
+  const total = Math.max(lines.length, rawLines.length);
   const anchor = inspectorAnchorLine > 0 ? inspectorAnchorLine : 1;
   const startLine = inspectorSpanStart > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, inspectorSpanStart) : anchor;
   const spanEndOffset = inspectorSpanEnd > 0 ? Math.max(inspectorSpanStart, inspectorSpanEnd - 1) : inspectorSpanStart;
@@ -1593,19 +1723,18 @@ function renderSourceInspector() {
   const rows = [];
   let choicePopup = "";
   for (let lineNo = windowStart; lineNo <= windowEnd; lineNo++) {
-    const html = lines[lineNo - 1] ?? "";
+    const rawLine = rawLines[lineNo - 1] ?? "";
+    const highlightedLine = lines[lineNo - 1] ?? htmlEscape(rawLine);
     const inSpan = inspectorSpanStart > 0 && lineNo >= startLine && lineNo <= endLine;
     const isAnchor = lineNo === anchor;
     const mapped = inspectorLineMappings.get(lineNo) ?? [];
-    const directMapping = mapped.find((entry) => entry.startLine === lineNo && entry.endLine === lineNo)
-      || (mapped.length === 1 ? mapped[0] : null);
-    const multiMapping = mapped.length > 1;
+    const selectedRanges = lineRangesForSelectedMapping(rawLine, lineNo, sourceEntry, mapped, selectedGraphKey);
+    const lineHtml = renderHighlightedLineWithRanges(highlightedLine, selectedRanges);
+    const directMapping = mapped.length === 1 ? mapped[0] : null;
     const code = directMapping
-      ? `<button type="button" class="code clickable-range" data-inspector-range-key="${htmlEscape(directMapping.key)}" title="Select mapped ${htmlEscape(directMapping.type)}">${html || "&nbsp;"}</button>`
-      : (multiMapping
-        ? `<button type="button" class="code clickable-range" data-inspector-line="${lineNo}" title="Choose mapped item">${html || "&nbsp;"}</button>`
-        : `<span class="code">${html || "&nbsp;"}</span>`);
-    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}"><span class="ln">${lineNo}</span>${code}</div>`);
+      ? `<button type="button" class="code exact-hit" data-inspector-range-key="${htmlEscape(directMapping.key)}" title="Select mapped ${htmlEscape(directMapping.type)}">${lineHtml}</button>`
+      : `<span class="code">${lineHtml}</span>`;
+    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}" data-inspector-line-row="${lineNo}"><span class="ln">${lineMarkerHtml(lineNo, mapped)}</span>${code}</div>`);
     if (inspectorChoiceLine === lineNo && mapped.length > 1) {
       const choices = mapped
         .slice(0, 12)
@@ -1615,17 +1744,11 @@ function renderSourceInspector() {
     }
   }
   const path = sourceEntry.path ? String(sourceEntry.path) : sourceLabel(sourceId);
-  const spanMeta = inspectorSpanStart > 0
-    ? (startLine === endLine
-      ? `line ${startLine}`
-      : `lines ${startLine}-${endLine}`)
-    : `lines ${windowStart}-${windowEnd} of ${total}`;
   sourceInspector.innerHTML = `
     <div class="inspector-head">
       <div class="inspector-file">${htmlEscape(path)}</div>
       <button id="source-inspector-toggle" type="button">${inspectorExpanded ? "collapse context" : "expand file"}</button>
     </div>
-    <div class="inspector-meta">${htmlEscape(spanMeta)}</div>
     <div class="inspector-lines arb-code" data-arb-theme="dark">${rows.join("")}</div>
     ${choicePopup}
   `;
@@ -1637,10 +1760,10 @@ function renderSourceInspector() {
       persistViewerState(false);
     });
   }
-  const multiLineButtons = sourceInspector.querySelectorAll("button[data-inspector-line]");
-  for (const lineButton of multiLineButtons) {
+  const lineTriggers = sourceInspector.querySelectorAll("button[data-inspector-line-trigger]");
+  for (const lineButton of lineTriggers) {
     lineButton.addEventListener("click", () => {
-      const lineNo = Number.parseInt(String(lineButton.getAttribute("data-inspector-line") ?? ""), 10);
+      const lineNo = Number.parseInt(String(lineButton.getAttribute("data-inspector-line-trigger") ?? ""), 10);
       if (!Number.isFinite(lineNo) || lineNo <= 0) return;
       const mapped = inspectorLineMappings.get(lineNo) ?? [];
       if (mapped.length === 0) return;
@@ -1652,6 +1775,15 @@ function renderSourceInspector() {
       renderSourceInspector();
       persistViewerState(false);
     });
+  }
+  if (inspectorChoiceLine > 0) {
+    const popup = sourceInspector.querySelector(".inspector-choice-pop");
+    const row = sourceInspector.querySelector(`[data-inspector-line-row="${inspectorChoiceLine}"]`);
+    if (popup && row) {
+      const top = row.offsetTop + row.offsetHeight + 4;
+      popup.style.top = `${Math.max(28, top)}px`;
+      popup.style.left = "8px";
+    }
   }
   const rangeButtons = sourceInspector.querySelectorAll("[data-inspector-range-key]");
   for (const rangeButton of rangeButtons) {
@@ -2016,7 +2148,6 @@ function setDetails(value) {
     })
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
-  const connectionRows = connectionSummaryRows(value);
   const dependencySummary = dependencySummaryHtml(value);
   const semanticExplain = semanticNarrative(value);
 
@@ -2037,7 +2168,6 @@ function setDetails(value) {
       <div class="detail-title">Summary</div>
       ${baseRows}
       ${semanticRows ? `<div class="semantic-summary">Semantic View</div>${semanticRows}` : ""}
-      ${connectionRows ? `<div class="semantic-summary">Connection Focus</div>${connectionRows}` : ""}
       ${semanticExplain ? `<div class="semantic-summary">Why It Matters</div><div class="semantic-explain">${htmlEscape(semanticExplain)}</div>` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
@@ -3246,6 +3376,7 @@ impl<'a> BridgeGraphContext<'a> {
                     source_id: *id,
                     path: path.clone(),
                     highlighted_lines: lines,
+                    raw_lines: text.split('\n').map(ToOwned::to_owned).collect(),
                     line_start_offsets: line_start_offsets(text),
                 })
             })
