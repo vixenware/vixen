@@ -192,47 +192,33 @@ impl SingleSourceBridge {
         let type_check = type_check(&file, &resolution, &types);
         let cap_check = check_capabilities(&file, &resolution, &types, &type_check);
 
-        let bodies = collect_bodies(source_id, &file, &resolution);
-        let exprs = collect_exprs(source_id, &file, &bodies);
         let resolved_refs = collect_resolved_refs(&resolution);
-        let products = collect_products(source_id, &file, &exprs);
-        let projections = collect_projections(source_id, &file, &exprs);
-        let binding_products = collect_binding_products(source_id, &file, &bodies);
-        let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
-        let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
-        let local_closure_inits =
-            collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
-        let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
-        let (boundary_arg_bindings, boundary_arg_closures, local_boundary_inits) =
-            collect_boundary_call_links(
-                source_id,
-                &file,
-                &exprs,
-                &resolved_refs,
-                &local_bindings,
-                &local_closure_inits,
-                &call_sites,
-            );
-        let expr_types = collect_expr_types(&exprs, &type_check);
+        let collected = collect_project_bridge_data(
+            &sources,
+            &source_paths,
+            &resolution,
+            &type_check,
+            &resolved_refs,
+        );
 
         Self {
             source_id,
             parsed,
             source_paths,
-            bodies,
-            exprs,
+            bodies: collected.bodies,
+            exprs: collected.exprs,
             resolved_refs,
-            products,
-            projections,
-            binding_products,
-            local_bindings,
-            local_uses,
-            local_closure_inits,
-            call_sites,
-            boundary_arg_bindings,
-            boundary_arg_closures,
-            local_boundary_inits,
-            expr_types,
+            products: collected.products,
+            projections: collected.projections,
+            binding_products: collected.binding_products,
+            local_bindings: collected.local_bindings,
+            local_uses: collected.local_uses,
+            local_closure_inits: collected.local_closure_inits,
+            call_sites: collected.call_sites,
+            boundary_arg_bindings: collected.boundary_arg_bindings,
+            boundary_arg_closures: collected.boundary_arg_closures,
+            local_boundary_inits: collected.local_boundary_inits,
+            expr_types: collected.expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
             type_errors: type_check.errors,
@@ -261,47 +247,33 @@ impl SingleSourceBridge {
         let type_check = type_check(&file, &resolution, &types);
         let cap_check = check_capabilities(&file, &resolution, &types, &type_check);
 
-        let bodies = collect_bodies(source_id, &file, &resolution);
-        let exprs = collect_exprs(source_id, &file, &bodies);
         let resolved_refs = collect_resolved_refs(&resolution);
-        let products = collect_products(source_id, &file, &exprs);
-        let projections = collect_projections(source_id, &file, &exprs);
-        let binding_products = collect_binding_products(source_id, &file, &bodies);
-        let local_bindings = collect_local_bindings(source_id, &resolution, &bodies);
-        let local_uses = collect_local_uses(&resolution, &exprs, &local_bindings);
-        let local_closure_inits =
-            collect_local_closure_inits(source_id, &file, &exprs, &local_bindings, &bodies);
-        let call_sites = collect_call_sites(source_id, &file, &exprs, &resolved_refs);
-        let (boundary_arg_bindings, boundary_arg_closures, local_boundary_inits) =
-            collect_boundary_call_links(
-                source_id,
-                &file,
-                &exprs,
-                &resolved_refs,
-                &local_bindings,
-                &local_closure_inits,
-                &call_sites,
-            );
-        let expr_types = collect_expr_types(&exprs, &type_check);
+        let collected = collect_project_bridge_data(
+            &sources,
+            &source_paths,
+            &resolution,
+            &type_check,
+            &resolved_refs,
+        );
 
         Ok(Self {
             source_id,
             parsed,
             source_paths,
-            bodies,
-            exprs,
+            bodies: collected.bodies,
+            exprs: collected.exprs,
             resolved_refs,
-            products,
-            projections,
-            binding_products,
-            local_bindings,
-            local_uses,
-            local_closure_inits,
-            call_sites,
-            boundary_arg_bindings,
-            boundary_arg_closures,
-            local_boundary_inits,
-            expr_types,
+            products: collected.products,
+            projections: collected.projections,
+            binding_products: collected.binding_products,
+            local_bindings: collected.local_bindings,
+            local_uses: collected.local_uses,
+            local_closure_inits: collected.local_closure_inits,
+            call_sites: collected.call_sites,
+            boundary_arg_bindings: collected.boundary_arg_bindings,
+            boundary_arg_closures: collected.boundary_arg_closures,
+            local_boundary_inits: collected.local_boundary_inits,
+            expr_types: collected.expr_types,
             parse_errors,
             resolve_errors: resolution.errors,
             type_errors: type_check.errors,
@@ -445,6 +417,200 @@ fn resolve_local_import_path(base_dir: &Path, raw: &str) -> Option<PathBuf> {
         joined.with_extension("vx")
     };
     candidate.canonicalize().ok()
+}
+
+#[derive(Default)]
+struct CollectedBridgeData {
+    bodies: Vec<BridgeBody>,
+    exprs: Vec<BridgeExpr>,
+    products: Vec<BridgeProduct>,
+    projections: Vec<BridgeProjection>,
+    binding_products: Vec<BridgeBindingProduct>,
+    local_bindings: Vec<BridgeLocalBinding>,
+    local_uses: Vec<BridgeLocalUse>,
+    local_closure_inits: Vec<BridgeLocalClosureInit>,
+    call_sites: Vec<BridgeCallSite>,
+    boundary_arg_bindings: Vec<BridgeBoundaryArgBinding>,
+    boundary_arg_closures: Vec<BridgeBoundaryArgClosure>,
+    local_boundary_inits: Vec<BridgeLocalBoundaryInit>,
+    expr_types: BTreeMap<ExprId, Ty>,
+}
+
+fn is_stdlib_source_path(path: &str) -> bool {
+    stdlib_sources()
+        .iter()
+        .any(|stdlib| stdlib.logical_path == path)
+}
+
+fn collect_project_bridge_data(
+    sources: &[SourceFileRef],
+    source_paths: &BTreeMap<u32, String>,
+    resolution: &NameResolution,
+    type_check: &TypeCheckResult,
+    resolved_refs: &[BridgeResolvedRef],
+) -> CollectedBridgeData {
+    let mut collected = CollectedBridgeData::default();
+    let mut user_sources = sources
+        .iter()
+        .filter(|source| {
+            source_paths
+                .get(&source.id.0)
+                .map(|path| !is_stdlib_source_path(path))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    user_sources.sort_by_key(|source| source.id.0);
+
+    for source in user_sources {
+        let source_id = source.id;
+        let file = source.file.clone();
+
+        let local_bodies = collect_bodies(source_id, &file, resolution);
+        let local_exprs = collect_exprs(source_id, &file, &local_bodies);
+        let local_products = collect_products(source_id, &file, &local_exprs);
+        let local_projections = collect_projections(source_id, &file, &local_exprs);
+        let local_binding_products = collect_binding_products(source_id, &file, &local_bodies);
+        let local_bindings = collect_local_bindings(source_id, resolution, &local_bodies);
+        let local_uses = collect_local_uses(resolution, &local_exprs, &local_bindings);
+        let local_closure_inits = collect_local_closure_inits(
+            source_id,
+            &file,
+            &local_exprs,
+            &local_bindings,
+            &local_bodies,
+        );
+        let local_call_sites = collect_call_sites(source_id, &file, &local_exprs, resolved_refs);
+        let (local_boundary_arg_bindings, local_boundary_arg_closures, local_boundary_inits) =
+            collect_boundary_call_links(
+                source_id,
+                &file,
+                &local_exprs,
+                resolved_refs,
+                &local_bindings,
+                &local_closure_inits,
+                &local_call_sites,
+            );
+        let local_expr_types = collect_expr_types(&local_exprs, type_check);
+
+        let body_offset = collected.bodies.len() as u32;
+        let expr_offset = collected.exprs.len() as u32;
+        let binding_offset = collected.local_bindings.len() as u32;
+
+        let body_map = local_bodies
+            .iter()
+            .map(|body| (body.id, BodyId(body.id.0 + body_offset)))
+            .collect::<HashMap<_, _>>();
+        let expr_map = local_exprs
+            .iter()
+            .map(|expr| (expr.id, ExprId(expr.id.0 + expr_offset)))
+            .collect::<HashMap<_, _>>();
+        let binding_map = local_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.id,
+                    BridgeLocalBindingId(binding.id.0 + binding_offset),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        collected
+            .bodies
+            .extend(local_bodies.into_iter().map(|mut body| {
+                body.id = body_map[&body.id];
+                body
+            }));
+        collected
+            .exprs
+            .extend(local_exprs.into_iter().map(|mut expr| {
+                expr.id = expr_map[&expr.id];
+                expr.body = expr.body.and_then(|body| body_map.get(&body).copied());
+                expr
+            }));
+        collected
+            .products
+            .extend(local_products.into_iter().map(|mut product| {
+                product.expr = expr_map[&product.expr];
+                product.body = body_map[&product.body];
+                product
+            }));
+        collected
+            .projections
+            .extend(local_projections.into_iter().map(|mut projection| {
+                projection.expr = expr_map[&projection.expr];
+                projection.base = expr_map[&projection.base];
+                projection.body = body_map[&projection.body];
+                projection
+            }));
+        collected
+            .binding_products
+            .extend(local_binding_products.into_iter().map(|mut product| {
+                product.body = body_map[&product.body];
+                product
+            }));
+        collected
+            .local_bindings
+            .extend(local_bindings.into_iter().map(|mut binding| {
+                binding.id = binding_map[&binding.id];
+                binding.body = body_map[&binding.body];
+                binding
+            }));
+        collected
+            .local_uses
+            .extend(local_uses.into_iter().map(|mut usage| {
+                usage.body = body_map[&usage.body];
+                usage.expr = expr_map[&usage.expr];
+                usage.binding = binding_map[&usage.binding];
+                usage
+            }));
+        collected
+            .local_closure_inits
+            .extend(local_closure_inits.into_iter().map(|mut init| {
+                init.binding = binding_map[&init.binding];
+                init.source.body = body_map[&init.source.body];
+                init.source.expr = expr_map[&init.source.expr];
+                init
+            }));
+        collected
+            .call_sites
+            .extend(local_call_sites.into_iter().map(|mut site| {
+                site.body = body_map[&site.body];
+                site.expr = expr_map[&site.expr];
+                site
+            }));
+        collected
+            .boundary_arg_bindings
+            .extend(local_boundary_arg_bindings.into_iter().map(|mut arg| {
+                arg.body = body_map[&arg.body];
+                arg.call_expr = expr_map[&arg.call_expr];
+                arg.binding = binding_map[&arg.binding];
+                arg
+            }));
+        collected
+            .boundary_arg_closures
+            .extend(local_boundary_arg_closures.into_iter().map(|mut arg| {
+                arg.body = body_map[&arg.body];
+                arg.call_expr = expr_map[&arg.call_expr];
+                arg.closure_source.body = body_map[&arg.closure_source.body];
+                arg.closure_source.expr = expr_map[&arg.closure_source.expr];
+                arg
+            }));
+        collected
+            .local_boundary_inits
+            .extend(local_boundary_inits.into_iter().map(|mut init| {
+                init.body = body_map[&init.body];
+                init.binding = binding_map[&init.binding];
+                init.call_expr = expr_map[&init.call_expr];
+                init
+            }));
+        collected.expr_types.extend(
+            local_expr_types
+                .into_iter()
+                .map(|(expr_id, ty)| (expr_map[&expr_id], ty)),
+        );
+    }
+
+    collected
 }
 
 fn parse_field_key(token: &str) -> FieldKey {
@@ -702,7 +868,7 @@ fn enclosing_expr_source(span: SourceSpan, exprs: &[BridgeExpr]) -> Option<(Body
         .iter()
         .filter_map(|expr| {
             let body = expr.body?;
-            if expr.span.range.contains_range(span.range) {
+            if expr.span.source == span.source && expr.span.range.contains_range(span.range) {
                 let len = u32::from(expr.span.range.end()) - u32::from(expr.span.range.start());
                 Some((len, body, expr.id))
             } else {
@@ -878,7 +1044,10 @@ fn collect_call_sites(
 
             let resolved = resolved_refs
                 .iter()
-                .filter(|resolved| callee_span.range.contains_range(resolved.span.range))
+                .filter(|resolved| {
+                    resolved.span.source == callee_span.source
+                        && callee_span.range.contains_range(resolved.span.range)
+                })
                 .min_by_key(|resolved| {
                     let classified_kind = if let Some(boundary_kind) =
                         classify_runtime_boundary(source_id, resolved)
@@ -1020,7 +1189,10 @@ fn collect_boundary_call_links(
             let arg_span = SourceSpan::new(source_id, arg_expr.syntax().text_range());
             let mut bindings_for_arg = resolved_refs
                 .iter()
-                .filter(|resolved| arg_span.range.contains_range(resolved.span.range))
+                .filter(|resolved| {
+                    resolved.span.source == arg_span.source
+                        && arg_span.range.contains_range(resolved.span.range)
+                })
                 .filter_map(|resolved| {
                     let def = resolved.target.as_ref().ok()?;
                     local_binding_by_def.get(&def.id).copied()

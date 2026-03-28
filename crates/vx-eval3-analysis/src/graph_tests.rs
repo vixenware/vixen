@@ -779,6 +779,107 @@ fn zoo_tri_platform_png_runtime_and_layout_nodes_have_concrete_meaning_metadata(
     );
 }
 
+#[test]
+fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+
+    let body_source_paths = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Body)
+        .filter_map(|node| metadata_value(&node.metadata, "source_path"))
+        .collect::<Vec<_>>();
+    assert!(
+        body_source_paths
+            .iter()
+            .any(|path| path.ends_with("/zlib-lib.vx")),
+        "zlib module should contribute body nodes"
+    );
+    assert!(
+        body_source_paths
+            .iter()
+            .any(|path| path.ends_with("/libpng-lib.vx")),
+        "libpng module should contribute body nodes"
+    );
+    assert!(
+        body_source_paths
+            .iter()
+            .any(|path| path.ends_with("/pnggen-app.vx")),
+        "pnggen module should contribute body nodes"
+    );
+
+    let kernel_source_paths = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Kernel)
+        .filter_map(|node| metadata_value(&node.metadata, "source_path"))
+        .collect::<Vec<_>>();
+    assert!(
+        kernel_source_paths
+            .iter()
+            .any(|path| path.ends_with("/zlib-lib.vx")),
+        "zlib module should contribute kernel nodes"
+    );
+    assert!(
+        kernel_source_paths
+            .iter()
+            .any(|path| path.ends_with("/libpng-lib.vx")),
+        "libpng module should contribute kernel nodes"
+    );
+    assert!(
+        kernel_source_paths
+            .iter()
+            .any(|path| path.ends_with("/pnggen-app.vx")),
+        "pnggen module should contribute kernel nodes"
+    );
+
+    let cross_module_call_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == GraphEdgeKind::CallToBody)
+        .filter(|edge| metadata_value(&edge.metadata, "cross_module") == Some("true"))
+        .collect::<Vec<_>>();
+    assert!(
+        !cross_module_call_edges.is_empty()
+            || graph
+                .edges
+                .iter()
+                .any(|edge| edge.kind == GraphEdgeKind::BodyToRuntimeBoundary),
+        "imported project modules should contribute either recoverable cross-module calls or runtime-boundary structural edges"
+    );
+
+    let member_call_structural_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == GraphEdgeKind::BodyToKernel)
+        .collect::<Vec<_>>();
+    assert!(
+        member_call_structural_edges.iter().any(|edge| {
+            metadata_value(&edge.metadata, "source_snippet")
+                .map(|snippet| snippet.contains("zlib.build("))
+                .unwrap_or(false)
+        }),
+        "zlib.build member call should be inspectable as structural relationship"
+    );
+    assert!(
+        member_call_structural_edges.iter().any(|edge| {
+            metadata_value(&edge.metadata, "source_snippet")
+                .map(|snippet| snippet.contains("libpng.build("))
+                .unwrap_or(false)
+        }),
+        "libpng.build member call should be inspectable as structural relationship"
+    );
+    assert!(
+        member_call_structural_edges.iter().any(|edge| {
+            metadata_value(&edge.metadata, "source_snippet")
+                .map(|snippet| snippet.contains("pnggen.build(") || snippet.contains("let app"))
+                .unwrap_or(false)
+        }),
+        "pnggen.build member call should be inspectable as structural relationship"
+    );
+}
+
 fn metadata_value<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {
     metadata
         .iter()
