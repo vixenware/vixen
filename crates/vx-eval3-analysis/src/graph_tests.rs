@@ -141,6 +141,14 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("selection-history-forward"));
     assert!(html.contains("updateSelectionHistoryButtons("));
     assert!(html.contains("pushSelectionHistory("));
+    assert!(html.contains("copy-share-link"));
+    assert!(html.contains("copyShareLink("));
+    assert!(html.contains("share-link-status"));
+    assert!(html.contains("navigator.clipboard.writeText"));
+    assert!(html.contains("moveDependencyFocus("));
+    assert!(html.contains("keydown"));
+    assert!(html.contains("ArrowLeft"));
+    assert!(html.contains("ArrowRight"));
     assert!(html.contains("readViewerStateFromUrl("));
     assert!(html.contains("writeViewerStateToUrl("));
     assert!(html.contains("persistViewerState("));
@@ -265,6 +273,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("open node"));
     assert!(html.contains("open edge"));
     assert!(html.contains("selection-nav"));
+    assert!(html.contains("copy link"));
+    assert!(html.contains("link copied"));
+    assert!(html.contains("moveDependencyFocus("));
     assert!(html.contains("sf"));
     assert!(html.contains("trace"));
     assert!(html.contains("noise"));

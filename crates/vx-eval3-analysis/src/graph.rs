@@ -244,6 +244,7 @@ impl AnalysisGraph {
         out.push_str("  .selection-nav { display: flex; gap: 8px; margin-bottom: 10px; }\n");
         out.push_str("  .selection-nav button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
         out.push_str("  .selection-nav button:disabled { opacity: 0.4; cursor: default; }\n");
+        out.push_str("  .selection-nav .share-status { color: #8ba5c1; font-size: 11px; align-self: center; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
@@ -349,7 +350,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button></div><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -371,6 +372,8 @@ const focusPathMode = document.getElementById("focus-path-mode");
 const hideStdlibNoiseToggle = document.getElementById("hide-stdlib-noise-toggle");
 const selectionHistoryBack = document.getElementById("selection-history-back");
 const selectionHistoryForward = document.getElementById("selection-history-forward");
+const copyShareLinkButton = document.getElementById("copy-share-link");
+const shareLinkStatus = document.getElementById("share-link-status");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
@@ -392,6 +395,7 @@ let dependencyFocusMode = "neighborhood";
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
 let suppressUrlStateUpdate = false;
+let dependencyJumpIndex = -1;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -1027,6 +1031,26 @@ function persistViewerState(push) {
   if (suppressUrlStateUpdate) return;
   writeViewerStateToUrl(Boolean(push));
 }
+function setShareStatus(text) {
+  if (!shareLinkStatus) return;
+  shareLinkStatus.textContent = text || "";
+}
+function copyShareLink() {
+  persistViewerState(false);
+  const url = window.location.href;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url)
+      .then(() => setShareStatus("link copied"))
+      .catch(() => setShareStatus("copy failed"));
+    return;
+  }
+  try {
+    window.prompt("Copy link", url);
+    setShareStatus("link ready");
+  } catch (_error) {
+    setShareStatus("copy unavailable");
+  }
+}
 function updateSelectionHistoryButtons() {
   if (selectionHistoryBack) selectionHistoryBack.disabled = selectionHistoryIndex <= 0;
   if (selectionHistoryForward) selectionHistoryForward.disabled = selectionHistoryIndex === -1 || selectionHistoryIndex >= selectionHistory.length - 1;
@@ -1045,6 +1069,7 @@ function pushSelectionHistory(key) {
 function selectGraphItem(key, detailsValue, sourceId, options = {}) {
   setSelectedGraphElements(key);
   selectedSourceId = String(sourceId ?? "");
+  dependencyJumpIndex = -1;
   if (!options.fromHistory) pushSelectionHistory(key);
   setDetails(detailsValue);
   applySourceFilter(sourceFilterSourceId, { skipPersist: true });
@@ -1162,6 +1187,15 @@ function wireDetailTraversal() {
       selectByGraphKey(edgeKey, { pushUrlHistory: true });
     });
   }
+}
+function moveDependencyFocus(step) {
+  const buttons = Array.from(
+    details.querySelectorAll("[data-select-node-id], [data-select-edge-key]")
+  );
+  if (buttons.length === 0) return;
+  dependencyJumpIndex = (dependencyJumpIndex + step + buttons.length) % buttons.length;
+  const target = buttons[dependencyJumpIndex];
+  if (target && typeof target.click === "function") target.click();
 }
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
@@ -1435,6 +1469,38 @@ if (selectionHistoryForward) {
     selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true, pushUrlHistory: false });
   });
 }
+if (copyShareLinkButton) {
+  copyShareLinkButton.addEventListener("click", () => copyShareLink());
+}
+window.addEventListener("keydown", (event) => {
+  const target = event.target;
+  const editing =
+    (target instanceof HTMLInputElement) ||
+    (target instanceof HTMLTextAreaElement) ||
+    (target instanceof HTMLSelectElement) ||
+    (target && target.isContentEditable);
+  if (editing) return;
+  if (event.altKey && event.key === "ArrowLeft") {
+    event.preventDefault();
+    if (selectionHistoryBack) selectionHistoryBack.click();
+    return;
+  }
+  if (event.altKey && event.key === "ArrowRight") {
+    event.preventDefault();
+    if (selectionHistoryForward) selectionHistoryForward.click();
+    return;
+  }
+  if (event.key === "j") {
+    event.preventDefault();
+    moveDependencyFocus(1);
+    return;
+  }
+  if (event.key === "k") {
+    event.preventDefault();
+    moveDependencyFocus(-1);
+    return;
+  }
+});
 window.addEventListener("popstate", () => {
   applyViewerStateFromUrl();
 });
