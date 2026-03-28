@@ -87,6 +87,15 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("foldedLaneSourceIds"));
     assert!(html.contains("params.get(\"fold\")"));
     assert!(html.contains("params.set(\"fold\""));
+    assert!(html.contains(">Search<"));
+    assert!(html.contains("search-query"));
+    assert!(html.contains("search-results"));
+    assert!(html.contains("search-clear"));
+    assert!(html.contains("buildSearchEntries("));
+    assert!(html.contains("renderSearchResults("));
+    assert!(html.contains("activateSearchResult("));
+    assert!(html.contains("params.get(\"q\")"));
+    assert!(html.contains("params.set(\"q\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -299,6 +308,15 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("applyLaneFolding("));
     assert!(html.contains("params.get(\"fold\")"));
     assert!(html.contains("params.set(\"fold\""));
+    assert!(html.contains("search-query"));
+    assert!(html.contains("search-results"));
+    assert!(html.contains("Search graph"));
+    assert!(html.contains("setSearchQuery("));
+    assert!(html.contains("activateSearchResult("));
+    assert!(html.contains("ArrowDown"));
+    assert!(html.contains("ArrowUp"));
+    assert!(html.contains("params.get(\"q\")"));
+    assert!(html.contains("params.set(\"q\""));
 }
 
 #[test]

@@ -255,6 +255,19 @@ impl AnalysisGraph {
         );
         out.push_str("  .lane-summary .lane-tools button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .lane-summary button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
+        out.push_str("  .search-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .search-controls .search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }\n");
+        out.push_str("  .search-controls input { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 5px 7px; font-size: 12px; }\n");
+        out.push_str("  .search-controls button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
+        out.push_str("  .search-controls .search-status { margin-top: 6px; color: #8ba5c1; font-size: 11px; }\n");
+        out.push_str("  .search-controls ul { margin: 8px 0 0 0; padding-left: 0; list-style: none; max-height: 180px; overflow: auto; }\n");
+        out.push_str("  .search-controls li { margin: 4px 0; }\n");
+        out.push_str("  .search-controls .search-hit { width: 100%; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 7px; padding: 5px 7px; cursor: pointer; }\n");
+        out.push_str("  .search-controls .search-hit.active { border-color: #7dd3fc; box-shadow: 0 0 0 1px rgba(125,211,252,0.24); }\n");
+        out.push_str(
+            "  .search-controls .search-hit .kind { color: #8ba5c1; margin-right: 6px; }\n",
+        );
+        out.push_str("  .search-controls .search-hit .path { color: #8ba5c1; display: block; margin-top: 2px; font-size: 11px; }\n");
         out.push_str("  .semantic-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .semantic-controls .control-row { display: grid; grid-template-columns: 92px 1fr; gap: 8px; margin-bottom: 8px; align-items: center; }\n");
         out.push_str("  .semantic-controls .control-row:last-child { margin-bottom: 0; }\n");
@@ -374,7 +387,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Lane Summary</h2><div id=\"lane-summary\" class=\"lane-summary\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Lane Summary</h2><div id=\"lane-summary\" class=\"lane-summary\"></div><h2>Search</h2><div id=\"search-controls\" class=\"search-controls\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search nodes, edges, sources\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -398,6 +411,10 @@ const selectionHistoryBack = document.getElementById("selection-history-back");
 const selectionHistoryForward = document.getElementById("selection-history-forward");
 const copyShareLinkButton = document.getElementById("copy-share-link");
 const shareLinkStatus = document.getElementById("share-link-status");
+const searchQueryInput = document.getElementById("search-query");
+const searchClearButton = document.getElementById("search-clear");
+const searchStatus = document.getElementById("search-status");
+const searchResults = document.getElementById("search-results");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 const laneSummary = document.getElementById("lane-summary");
@@ -419,6 +436,9 @@ let semanticSharingFilter = "all";
 let dependencyFocusEnabled = false;
 let hideStdlibNoiseEnabled = false;
 let dependencyFocusMode = "neighborhood";
+let searchQuery = "";
+let activeSearchResultIndex = -1;
+let visibleSearchResults = [];
 const foldedLaneSourceIds = new Set();
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
@@ -983,6 +1003,78 @@ function shouldAutoFoldLane(sourceId) {
   if (!stats.isStdlib) return false;
   return laneOrder.length >= 6 || graph.nodes.length >= 40;
 }
+function searchText(value) {
+  return String(value ?? "").toLowerCase();
+}
+function metadataText(metadata) {
+  const map = metadataMap(metadata);
+  return Object.entries(map)
+    .map(([key, value]) => `${key}:${String(value ?? "")}`)
+    .join(" ");
+}
+function buildSearchEntries() {
+  const entries = [];
+  for (const node of graph.nodes) {
+    const sourceId = sourceIdForNode(node);
+    const sourcePath = sourcePathById(sourceId);
+    entries.push({
+      type: "node",
+      key: `node:${node.id}`,
+      sourceId,
+      label: nodeShortLabel(node.id),
+      path: sourcePath,
+      haystack: searchText([
+        node.id,
+        node.label,
+        node.kind,
+        sourceLabel(sourceId),
+        sourcePath,
+        metadataText(node.metadata),
+      ].join(" ")),
+    });
+  }
+  for (const edge of graph.edges) {
+    const sourceId = sourceIdForEdge(edge);
+    const sourcePath = sourcePathById(sourceId);
+    entries.push({
+      type: "edge",
+      key: edgeKeyFor(edge),
+      sourceId,
+      label: edgeSemanticLabel(edge),
+      path: sourcePath,
+      haystack: searchText([
+        edge.kind,
+        edge.label,
+        edge.from,
+        edge.to,
+        edgeSemanticLabel(edge),
+        sourceLabel(sourceId),
+        sourcePath,
+        metadataText(edge.metadata),
+      ].join(" ")),
+    });
+  }
+  for (const sourceId of laneOrder) {
+    const path = sourcePathById(sourceId);
+    const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+    const label = sourceId === "unmapped" ? "source unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
+    entries.push({
+      type: "source",
+      key: `source:${sourceId}`,
+      sourceId,
+      label,
+      path,
+      haystack: searchText([
+        label,
+        path,
+        laneHintFor(sourceId),
+        `body ${stats.nodeStats.body} kernel ${stats.nodeStats.kernel} runtime ${stats.nodeStats.runtime_boundary} layout ${stats.nodeStats.closure_layout}`,
+      ].join(" ")),
+    });
+  }
+  return entries.sort((a, b) => `${a.type}|${a.label}|${a.key}`.localeCompare(`${b.type}|${b.label}|${b.key}`));
+}
+const searchEntries = buildSearchEntries();
 
 const laneHeightBySource = new Map();
 for (const sourceId of laneOrder) {
@@ -1091,6 +1183,82 @@ function registerSelectable(key, elements) {
   if (list.length === 0) return;
   selectableElements.set(key, list);
 }
+function setSearchStatus(text) {
+  if (!searchStatus) return;
+  searchStatus.textContent = text || "";
+}
+function activateSearchResult(entry) {
+  if (!entry) return;
+  if (entry.type === "node" || entry.type === "edge") {
+    selectByGraphKey(entry.key, { pushUrlHistory: true });
+    return;
+  }
+  if (entry.type === "source") {
+    const sourceId = entry.sourceId || "";
+    applySourceFilter(sourceId);
+    if (sourceId) focusSourceLane(sourceId);
+  }
+}
+function setActiveSearchResultIndex(index) {
+  if (!searchResults) return;
+  const next = Math.max(-1, Math.min(index, visibleSearchResults.length - 1));
+  activeSearchResultIndex = next;
+  const buttons = searchResults.querySelectorAll("button.search-hit");
+  buttons.forEach((button, idx) => {
+    button.classList.toggle("active", idx === activeSearchResultIndex);
+  });
+}
+function renderSearchResults() {
+  if (!searchResults) return;
+  const trimmed = String(searchQuery || "").trim();
+  if (trimmed === "") {
+    visibleSearchResults = [];
+    activeSearchResultIndex = -1;
+    searchResults.innerHTML = "";
+    setSearchStatus("Type to search nodes, edges, and source lanes.");
+    return;
+  }
+  const tokens = trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  visibleSearchResults = searchEntries
+    .filter((entry) => tokens.every((token) => entry.haystack.includes(token)))
+    .slice(0, 40);
+  if (visibleSearchResults.length === 0) {
+    activeSearchResultIndex = -1;
+    searchResults.innerHTML = "";
+    setSearchStatus("No matches.");
+    return;
+  }
+  if (activeSearchResultIndex >= visibleSearchResults.length) {
+    activeSearchResultIndex = -1;
+  }
+  const items = visibleSearchResults
+    .map((entry, idx) => {
+      const label = htmlEscape(entry.label);
+      const kind = htmlEscape(entry.type);
+      const path = entry.path ? `<span class="path">${htmlEscape(entry.path)}</span>` : "";
+      return `<li><button type="button" class="search-hit${idx === activeSearchResultIndex ? " active" : ""}" data-search-index="${idx}"><span class="kind">${kind}</span>${label}${path}</button></li>`;
+    })
+    .join("");
+  searchResults.innerHTML = items;
+  setSearchStatus(`${visibleSearchResults.length} result(s)`);
+  const buttons = searchResults.querySelectorAll("button[data-search-index]");
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      const idx = Number.parseInt(String(button.getAttribute("data-search-index") ?? ""), 10);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= visibleSearchResults.length) return;
+      setActiveSearchResultIndex(idx);
+      activateSearchResult(visibleSearchResults[idx]);
+    });
+  }
+}
+function setSearchQuery(value, options = {}) {
+  searchQuery = String(value ?? "");
+  renderSearchResults();
+  if (!options.skipPersist) persistViewerState(false);
+}
 function updateZoomStatus() {
   zoomStatus.textContent = `${Math.round(viewportScale * 100)}%`;
 }
@@ -1154,6 +1322,7 @@ function readViewerStateFromUrl() {
     trace: params.get("trace") || "neighborhood",
     noise: params.get("noise") === "1",
     folded: params.get("fold") || "",
+    query: params.get("q") || "",
   };
 }
 function writeViewerStateToUrl(push) {
@@ -1169,6 +1338,7 @@ function writeViewerStateToUrl(push) {
   if (hideStdlibNoiseEnabled) params.set("noise", "1");
   const folded = sortedFoldedLaneIds();
   if (folded.length > 0) params.set("fold", folded.join(","));
+  if (searchQuery.trim() !== "") params.set("q", searchQuery.trim());
   const nextHash = `#${params.toString()}`;
   if (window.location.hash === nextHash) return;
   if (push) {
@@ -1259,6 +1429,7 @@ function applyViewerStateFromUrl() {
   dependencyFocusEnabled = Boolean(state.focus);
   dependencyFocusMode = state.trace || "neighborhood";
   hideStdlibNoiseEnabled = Boolean(state.noise);
+  searchQuery = String(state.query || "");
   foldedLaneSourceIds.clear();
   const foldedList = String(state.folded || "")
     .split(",")
@@ -1271,6 +1442,8 @@ function applyViewerStateFromUrl() {
   if (focusNeighborhoodToggle) focusNeighborhoodToggle.checked = dependencyFocusEnabled;
   if (focusPathMode) focusPathMode.value = dependencyFocusMode;
   if (hideStdlibNoiseToggle) hideStdlibNoiseToggle.checked = hideStdlibNoiseEnabled;
+  if (searchQueryInput) searchQueryInput.value = searchQuery;
+  renderSearchResults();
   applySourceFilter(state.sourceFilter || "", { skipPersist: true });
   applySemanticFilters();
   const hasSelection = Boolean(state.selected);
@@ -1693,6 +1866,46 @@ if (selectionHistoryForward) {
 if (copyShareLinkButton) {
   copyShareLinkButton.addEventListener("click", () => copyShareLink());
 }
+if (searchQueryInput) {
+  searchQueryInput.addEventListener("input", () => {
+    setSearchQuery(searchQueryInput.value || "");
+  });
+  searchQueryInput.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (visibleSearchResults.length === 0) return;
+      setActiveSearchResultIndex((activeSearchResultIndex + 1) % visibleSearchResults.length);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (visibleSearchResults.length === 0) return;
+      const next = activeSearchResultIndex <= 0 ? visibleSearchResults.length - 1 : activeSearchResultIndex - 1;
+      setActiveSearchResultIndex(next);
+      return;
+    }
+    if (event.key === "Enter") {
+      if (visibleSearchResults.length === 0) return;
+      event.preventDefault();
+      const idx = activeSearchResultIndex >= 0 ? activeSearchResultIndex : 0;
+      setActiveSearchResultIndex(idx);
+      activateSearchResult(visibleSearchResults[idx]);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      searchQueryInput.value = "";
+      setSearchQuery("");
+      return;
+    }
+  });
+}
+if (searchClearButton) {
+  searchClearButton.addEventListener("click", () => {
+    if (searchQueryInput) searchQueryInput.value = "";
+    setSearchQuery("");
+  });
+}
 window.addEventListener("keydown", (event) => {
   const target = event.target;
   const editing =
@@ -1719,6 +1932,12 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "k") {
     event.preventDefault();
     moveDependencyFocus(-1);
+    return;
+  }
+  if (event.key === "/" && searchQueryInput) {
+    event.preventDefault();
+    searchQueryInput.focus();
+    searchQueryInput.select();
     return;
   }
 });
