@@ -10,6 +10,7 @@ use vx_eval3_analysis::{
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecValue {
     Int(i64),
+    String(String),
     Pair(Box<ExecValue>, Box<ExecValue>),
     Callable(CallableValue),
     LazyPoison(String),

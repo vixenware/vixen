@@ -516,8 +516,7 @@ impl BoundaryDriver for CcVersionDriver {
                     "discover request should include closure identity and unresolved class binding input"
                 );
                 self.saw_discover_query = true;
-                let discovered_tool =
-                    ExecValue::Pair(Box::new(ExecValue::Int(99)), Box::new(ExecValue::Int(2)));
+                let discovered_tool = ExecValue::String("cc".to_owned());
                 self.discovered_tool = Some(discovered_tool.clone());
                 Ok(discovered_tool)
             }
@@ -536,6 +535,7 @@ impl BoundaryDriver for CcVersionDriver {
                     .discovered_tool
                     .clone()
                     .expect("discover should run before exec and produce concrete tool value");
+                let expected_tool_for_argv = expected_tool.clone();
                 let argv = req
                     .inputs
                     .positional_inputs
@@ -548,7 +548,7 @@ impl BoundaryDriver for CcVersionDriver {
                 let saw_tool_arg = argv.iter().any(|input| {
                     matches!(
                         input,
-                        BoundaryPositionalInputValue::RuntimeValue { value, .. } if *value == expected_tool
+                        BoundaryPositionalInputValue::RuntimeValue { value, .. } if *value == expected_tool_for_argv
                     )
                 });
                 let saw_version_flag = argv.iter().any(|input| match input {
@@ -560,10 +560,16 @@ impl BoundaryDriver for CcVersionDriver {
                     "exec request should carry concrete discovered tool plus --version literal"
                 );
                 self.saw_exec_argv_shape = true;
-                let stdout_fingerprint = 20260328;
+                let stdout = format!(
+                    "{} (deterministic-mini-host) version 1.0.0",
+                    match expected_tool {
+                        ExecValue::String(ref tool) => tool.clone(),
+                        _ => "unknown".to_owned(),
+                    }
+                );
                 let value = ExecValue::Pair(
                     Box::new(ExecValue::Int(0)),
-                    Box::new(ExecValue::Int(stdout_fingerprint)),
+                    Box::new(ExecValue::String(stdout)),
                 );
                 self.last_exec_value = Some(value.clone());
                 Ok(value)
