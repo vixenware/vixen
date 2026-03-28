@@ -114,6 +114,16 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("matchesNodeSemanticFilters("));
     assert!(html.contains("semanticNarrative("));
     assert!(html.contains("Why It Matters"));
+    assert!(html.contains("Connection Focus"));
+    assert!(html.contains("focus-neighborhood-toggle"));
+    assert!(html.contains("hide-stdlib-noise-toggle"));
+    assert!(html.contains("applyDependencyFocus("));
+    assert!(html.contains("selectedNeighborhoodFromKey("));
+    assert!(html.contains("applyNoiseReduction("));
+    assert!(html.contains("isStdlibSourceId("));
+    assert!(html.contains("focus-primary"));
+    assert!(html.contains("focus-neighbor"));
+    assert!(html.contains("dim-focus"));
     assert!(html.contains("runtime_role_summary"));
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -223,6 +233,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("Runtime Role"));
     assert!(html.contains("hidden-semantic"));
     assert!(html.contains("semantic-controls"));
+    assert!(html.contains("dim stdlib-heavy sources"));
+    assert!(html.contains("dependency neighborhood"));
+    assert!(html.contains("noise-dim"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {

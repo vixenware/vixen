@@ -233,6 +233,8 @@ impl AnalysisGraph {
         out.push_str("  .semantic-controls .control-row:last-child { margin-bottom: 0; }\n");
         out.push_str("  .semantic-controls label { color: #8ba5c1; }\n");
         out.push_str("  .semantic-controls select { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 6px; font-size: 12px; }\n");
+        out.push_str("  .semantic-controls .check { display: flex; align-items: center; gap: 8px; color: #c7d6e6; }\n");
+        out.push_str("  .semantic-controls input[type=\"checkbox\"] { accent-color: #7dd3fc; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
@@ -294,6 +296,14 @@ impl AnalysisGraph {
         out.push_str("  .edge-label.edge-role-ownership { fill: #a6e3a1; }\n");
         out.push_str("  .edge-label.edge-role-call { fill: #89dceb; }\n");
         out.push_str("  .dimmed { opacity: 0.18; }\n");
+        out.push_str("  .dim-focus { opacity: 0.07; }\n");
+        out.push_str("  .focus-neighbor { opacity: 0.93; }\n");
+        out.push_str("  .focus-primary { opacity: 1; }\n");
+        out.push_str("  .node.focus-neighbor rect { stroke-width: 1.9; }\n");
+        out.push_str("  .edge.focus-neighbor { stroke-width: 1.9; }\n");
+        out.push_str("  .node.focus-primary rect { stroke-width: 2.5; }\n");
+        out.push_str("  .edge.focus-primary { stroke-width: 2.6; }\n");
+        out.push_str("  .noise-dim { opacity: 0.12; }\n");
         out.push_str("  .hidden-semantic { display: none; }\n");
         out.push_str("  .selected { opacity: 1 !important; }\n");
         out.push_str("  .node.selected rect { stroke: #f1f5f9; stroke-width: 2.4; filter: drop-shadow(0 0 4px rgba(241,245,249,0.35)); }\n");
@@ -330,7 +340,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -347,12 +357,15 @@ const zoomStatus = document.getElementById("zoom-status");
 const filterDemand = document.getElementById("filter-demand");
 const filterRuntimeRole = document.getElementById("filter-runtime-role");
 const filterSharing = document.getElementById("filter-sharing");
+const focusNeighborhoodToggle = document.getElementById("focus-neighborhood-toggle");
+const hideStdlibNoiseToggle = document.getElementById("hide-stdlib-noise-toggle");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
 const selectableElements = new Map();
 const laneRectsBySource = new Map();
+const laneLabelsBySource = new Map();
 const nodeElementsById = new Map();
 const edgeElements = [];
 let selectedGraphKey = "";
@@ -361,6 +374,8 @@ let viewportScale = 1;
 let semanticDemandFilter = "all";
 let semanticRuntimeRoleFilter = "all";
 let semanticSharingFilter = "all";
+let dependencyFocusEnabled = false;
+let hideStdlibNoiseEnabled = false;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -386,6 +401,10 @@ function sourcePathById(sourceId) {
   if (!Array.isArray(graph.source_files)) return "";
   const item = graph.source_files.find((f) => String(f.source_id) === String(sourceId));
   return item?.path ? String(item.path) : "";
+}
+function isStdlibSourceId(sourceId) {
+  const path = String(sourcePathById(sourceId) || "").toLowerCase();
+  return path.includes("/stdlib/") || path.includes("stdlib/") || path.includes("vixen-stdlib");
 }
 function sourceLabel(sourceId) {
   if (sourceId === "unmapped") return "unmapped";
@@ -514,6 +533,39 @@ function semanticSummaryRows(value, metadata) {
   }
   return rows.join("");
 }
+function edgeRoleHistogramForNode(nodeId) {
+  const counts = { value_flow: 0, ownership: 0, call: 0, structural: 0 };
+  for (const edge of graph.edges) {
+    if (edge.from !== nodeId && edge.to !== nodeId) continue;
+    const role = edgeRoleForKind(edge.kind);
+    if (counts[role] !== undefined) counts[role] += 1;
+  }
+  return counts;
+}
+function connectionSummaryRows(value) {
+  if (!value || typeof value !== "object") return "";
+  if (value.type === "node" && value.id) {
+    const incoming = graph.edges.filter((edge) => edge.to === value.id).length;
+    const outgoing = graph.edges.filter((edge) => edge.from === value.id).length;
+    const roleCounts = edgeRoleHistogramForNode(value.id);
+    return [
+      detailRow("Incoming", incoming),
+      detailRow("Outgoing", outgoing),
+      detailRow(
+        "Edge Mix",
+        `value ${roleCounts.value_flow}, ownership ${roleCounts.ownership}, call ${roleCounts.call}, structural ${roleCounts.structural}`
+      ),
+    ].join("");
+  }
+  if (value.type === "edge" && value.from && value.to) {
+    return [
+      detailRow("From", value.from),
+      detailRow("To", value.to),
+      detailRow("Role Meaning", edgeSemanticLabel(value)),
+    ].join("");
+  }
+  return "";
+}
 function matchesNodeSemanticFilters(node) {
   const demand = nodeDemandState(node);
   const sharing = nodeSharingState(node);
@@ -534,6 +586,109 @@ function applySemanticFilters() {
     const visible = visibleNodeIds.has(entry.edge.from) && visibleNodeIds.has(entry.edge.to);
     entry.path.classList.toggle("hidden-semantic", !visible);
     entry.label.classList.toggle("hidden-semantic", !visible);
+  }
+  applyDependencyFocus();
+  applyNoiseReduction();
+}
+function selectedNeighborhoodFromKey(key) {
+  if (!key) return null;
+  const primaryNodes = new Set();
+  const primaryEdges = new Set();
+  const neighborNodes = new Set();
+  const neighborEdges = new Set();
+  if (key.startsWith("node:")) {
+    const nodeId = key.slice(5);
+    primaryNodes.add(nodeId);
+    for (const entry of edgeElements) {
+      if (entry.edge.from === nodeId || entry.edge.to === nodeId) {
+        neighborEdges.add(entry.key);
+        neighborNodes.add(entry.edge.from);
+        neighborNodes.add(entry.edge.to);
+      }
+    }
+    neighborNodes.delete(nodeId);
+  } else if (key.startsWith("edge:")) {
+    const edgeEntry = edgeElements.find((entry) => entry.key === key);
+    if (!edgeEntry) return null;
+    primaryEdges.add(key);
+    primaryNodes.add(edgeEntry.edge.from);
+    primaryNodes.add(edgeEntry.edge.to);
+    for (const entry of edgeElements) {
+      if (entry.key === key) continue;
+      if (
+        entry.edge.from === edgeEntry.edge.from ||
+        entry.edge.to === edgeEntry.edge.from ||
+        entry.edge.from === edgeEntry.edge.to ||
+        entry.edge.to === edgeEntry.edge.to
+      ) {
+        neighborEdges.add(entry.key);
+      }
+    }
+  } else {
+    return null;
+  }
+  return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
+}
+function applyDependencyFocus() {
+  for (const entry of edgeElements) {
+    entry.path.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
+    entry.label.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
+  }
+  for (const entry of nodeElementsById.values()) {
+    entry.element.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
+  }
+  if (!dependencyFocusEnabled) return;
+  const neighborhood = selectedNeighborhoodFromKey(selectedGraphKey);
+  if (!neighborhood) return;
+  for (const [nodeId, entry] of nodeElementsById.entries()) {
+    if (neighborhood.primaryNodes.has(nodeId)) {
+      entry.element.classList.add("focus-primary");
+    } else if (neighborhood.neighborNodes.has(nodeId)) {
+      entry.element.classList.add("focus-neighbor");
+    } else {
+      entry.element.classList.add("dim-focus");
+    }
+  }
+  for (const entry of edgeElements) {
+    const isPrimary = neighborhood.primaryEdges.has(entry.key);
+    const isNeighbor = neighborhood.neighborEdges.has(entry.key);
+    if (isPrimary) {
+      entry.path.classList.add("focus-primary");
+      entry.label.classList.add("focus-primary");
+    } else if (isNeighbor) {
+      entry.path.classList.add("focus-neighbor");
+      entry.label.classList.add("focus-neighbor");
+    } else {
+      entry.path.classList.add("dim-focus");
+      entry.label.classList.add("dim-focus");
+    }
+  }
+}
+function applyNoiseReduction() {
+  for (const entry of nodeElementsById.values()) {
+    const sourceId = String(entry.node?.metadata?.span_source_id ?? "");
+    const lowInterest = hideStdlibNoiseEnabled && sourceId !== "" && isStdlibSourceId(sourceId);
+    entry.element.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+  }
+  for (const entry of edgeElements) {
+    const sourceId = String(entry.edge?.metadata?.span_source_id ?? "");
+    const lowInterest = hideStdlibNoiseEnabled && sourceId !== "" && isStdlibSourceId(sourceId);
+    entry.path.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+    entry.label.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+  }
+  for (const [sourceId, rect] of laneRectsBySource.entries()) {
+    const lowInterest = hideStdlibNoiseEnabled && isStdlibSourceId(sourceId);
+    rect.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+  }
+  for (const [sourceId, label] of laneLabelsBySource.entries()) {
+    const lowInterest = hideStdlibNoiseEnabled && isStdlibSourceId(sourceId);
+    label.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+  }
+  const items = sourceRegistry.querySelectorAll("li[data-source-id]");
+  for (const item of items) {
+    const sourceId = String(item.dataset.sourceId ?? "");
+    const lowInterest = hideStdlibNoiseEnabled && isStdlibSourceId(sourceId);
+    item.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
   }
 }
 function addNodeBadges(group, node) {
@@ -782,6 +937,8 @@ function applySourceFilter(sourceId) {
   for (const item of items) {
     item.classList.toggle("focused", sourceFilterSourceId !== "" && item.dataset.sourceId === sourceFilterSourceId);
   }
+  applyDependencyFocus();
+  applyNoiseReduction();
 }
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
@@ -810,6 +967,7 @@ function setDetails(value) {
     .map(([key, val]) => detailRow(key, val))
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
+  const connectionRows = connectionSummaryRows(value);
   const semanticExplain = semanticNarrative(value);
 
   const snippetBlock = snippet
@@ -829,6 +987,7 @@ function setDetails(value) {
       <div class="detail-title">Summary</div>
       ${baseRows}
       ${semanticRows ? `<div class="semantic-summary">Semantic View</div>${semanticRows}` : ""}
+      ${connectionRows ? `<div class="semantic-summary">Connection Focus</div>${connectionRows}` : ""}
       ${semanticExplain ? `<div class="semantic-summary">Why It Matters</div><div class="semantic-explain">${htmlEscape(semanticExplain)}</div>` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
@@ -892,6 +1051,7 @@ laneOrder.forEach((sourceId, idx) => {
   laneLayer.appendChild(laneRect);
   const laneText = el("text", { x: 24, y: laneStart + 16, class: "source-lane-label" });
   laneText.textContent = sourceId === "unmapped" ? "source: unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
+  laneLabelsBySource.set(String(sourceId), laneText);
   laneLayer.appendChild(laneText);
 });
 svg.appendChild(laneLayer);
@@ -952,7 +1112,7 @@ for (const edge of graph.edges) {
   label.textContent = edgeSemanticLabel(edge);
   svg.appendChild(label);
   registerSelectable(edgeKey, [path, label]);
-  edgeElements.push({ edge, path, label });
+  edgeElements.push({ key: edgeKey, edge, path, label });
 }
 
 for (const node of graph.nodes) {
@@ -1009,6 +1169,19 @@ if (filterSharing) {
   filterSharing.addEventListener("change", () => {
     semanticSharingFilter = filterSharing.value || "all";
     applySemanticFilters();
+  });
+}
+if (focusNeighborhoodToggle) {
+  focusNeighborhoodToggle.addEventListener("change", () => {
+    dependencyFocusEnabled = Boolean(focusNeighborhoodToggle.checked);
+    applyDependencyFocus();
+    applyNoiseReduction();
+  });
+}
+if (hideStdlibNoiseToggle) {
+  hideStdlibNoiseToggle.addEventListener("change", () => {
+    hideStdlibNoiseEnabled = Boolean(hideStdlibNoiseToggle.checked);
+    applyNoiseReduction();
   });
 }
 applySemanticFilters();
