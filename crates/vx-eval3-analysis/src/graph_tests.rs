@@ -72,8 +72,13 @@ fn zoo_cc_version_graph_smoke() {
 
     let html = graph.to_standalone_html();
     assert!(html.contains("Vixen Structural Analysis Graph"));
+    assert!(html.contains("rel=\"icon\" type=\"image/svg+xml\""));
+    assert!(html.contains("data:image/svg+xml,"));
     assert!(html.contains("structural analysis graph"));
     assert!(html.contains("cc-version.vx"));
+    assert!(html.contains("\"source_registry\": ["));
+    assert!(html.contains("\"client\": {"));
+    assert!(html.contains("\"lane_order\": ["));
     assert!(html.contains("Source Snippet"));
     assert!(html.contains("detailRow(\"Source\""));
     assert!(html.contains("detailRow(\"Location\""));
@@ -223,6 +228,16 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("call_target"));
     assert!(html.contains("selected_causal_path_node_ids"));
     assert!(html.contains("selected_causal_path_edge_ids"));
+    assert!(html.contains("semantic_role"));
+    assert!(html.contains("source_registry"));
+    assert!(html.contains("graphClient"));
+    assert!(html.contains("graph.client"));
+    assert!(
+        html.contains(
+            "totalNodes: registry ? Number(registry.node_count ?? totalNodes) : totalNodes"
+        )
+    );
+    assert!(html.contains("nodeStats[node.kind] !== undefined) nodeStats[node.kind] += 1"));
     assert!(!html.contains("Demand Path Nodes"));
     assert!(!html.contains("detailRow(\"Demand Path Nodes\""));
     assert!(!html.contains("Demand Path Edges"));
@@ -914,6 +929,42 @@ fn zoo_tri_platform_png_runtime_and_layout_nodes_have_concrete_meaning_metadata(
 fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls() {
     let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
     let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+
+    assert!(
+        !graph.source_registry.is_empty(),
+        "project-backed graph should expose structured source registry entries"
+    );
+    assert!(
+        !graph.client.lane_order.is_empty(),
+        "project-backed graph should expose structured graph-level lane order"
+    );
+    assert!(
+        graph
+            .client
+            .lane_order
+            .iter()
+            .any(|lane| lane == "unmapped"),
+        "lane-order client contract should include `unmapped` lane sentinel deterministically"
+    );
+    for imported_file in ["zlib-lib.vx", "libpng-lib.vx", "pnggen-app.vx"] {
+        let entry = graph
+            .source_registry
+            .iter()
+            .find(|entry| entry.path.ends_with(imported_file))
+            .unwrap_or_else(|| panic!("source registry should include `{imported_file}`"));
+        assert!(
+            entry.node_count > 0,
+            "source registry `{imported_file}` should expose deterministic node counts"
+        );
+        assert!(
+            graph
+                .client
+                .lane_order
+                .iter()
+                .any(|lane| lane == &entry.source_id.to_string()),
+            "lane-order client contract should include source id for `{imported_file}`"
+        );
+    }
 
     let body_source_paths = graph
         .nodes

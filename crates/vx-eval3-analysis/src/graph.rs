@@ -117,13 +117,29 @@ pub struct GraphSourceContent {
     pub line_start_offsets: Vec<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GraphSourceRegistryEntry {
+    pub source_id: u32,
+    pub path: String,
+    pub is_stdlib: bool,
+    pub node_count: usize,
+    pub edge_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisGraph {
     pub source_file: Option<String>,
+    pub client: GraphClientFacts,
     pub source_files: Vec<(u32, String)>,
+    pub source_registry: Vec<GraphSourceRegistryEntry>,
     pub source_contents: Vec<GraphSourceContent>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GraphClientFacts {
+    pub lane_order: Vec<String>,
 }
 
 impl AnalysisGraph {
@@ -157,6 +173,9 @@ impl AnalysisGraph {
             None => out.push_str("null"),
         }
         out.push_str(",\n");
+        out.push_str("  \"client\": ");
+        push_json_graph_client_facts(&mut out, &self.client, 2);
+        out.push_str(",\n");
         out.push_str("  \"source_files\": [\n");
         for (index, (source_id, path)) in self.source_files.iter().enumerate() {
             out.push_str("    { \"source_id\": ");
@@ -165,6 +184,25 @@ impl AnalysisGraph {
             push_json_str(&mut out, path);
             out.push_str(" }");
             if index + 1 != self.source_files.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+        out.push_str("  \"source_registry\": [\n");
+        for (index, source) in self.source_registry.iter().enumerate() {
+            out.push_str("    { \"source_id\": ");
+            out.push_str(&source.source_id.to_string());
+            out.push_str(", \"path\": ");
+            push_json_str(&mut out, &source.path);
+            out.push_str(", \"is_stdlib\": ");
+            out.push_str(if source.is_stdlib { "true" } else { "false" });
+            out.push_str(", \"node_count\": ");
+            out.push_str(&source.node_count.to_string());
+            out.push_str(", \"edge_count\": ");
+            out.push_str(&source.edge_count.to_string());
+            out.push_str(" }");
+            if index + 1 != self.source_registry.len() {
                 out.push(',');
             }
             out.push('\n');
@@ -283,6 +321,7 @@ impl AnalysisGraph {
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n",
         );
         out.push_str("<title>Vixen Structural Analysis Graph</title>\n");
+        out.push_str("<link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb86b'/%3E%3Cstop offset='1' stop-color='%23ff6b3d'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%230f1724'/%3E%3Cpath d='M12 20l10-9 6 12 4-9 9 6 11-9-5 16c2 3 3 7 3 11 0 13-10 22-24 22S2 51 2 38c0-6 2-13 10-18z' fill='url(%23g)'/%3E%3Cpath d='M23 40l9 6 9-6' stroke='%230f1724' stroke-width='4' stroke-linecap='round' fill='none'/%3E%3Ccircle cx='24' cy='33' r='3' fill='%230f1724'/%3E%3Ccircle cx='40' cy='33' r='3' fill='%230f1724'/%3E%3C/svg%3E\" />\n");
         out.push_str("<style>\n");
         out.push_str("  :root { color-scheme: dark; }\n");
         out.push_str("  body { margin: 0; height: 100vh; overflow: hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
@@ -644,21 +683,28 @@ const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 const sourceContentById = new Map(
   (Array.isArray(graph.source_contents) ? graph.source_contents : []).map((entry) => [String(entry.source_id), entry])
 );
+const sourceRegistryEntries = Array.isArray(graph.source_registry) ? graph.source_registry : [];
+const sourceRegistryById = new Map(sourceRegistryEntries.map((entry) => [String(entry.source_id), entry]));
+const graphClient = graph.client && typeof graph.client === "object" ? graph.client : {};
 const sourceGraphMappingsBySource = new Map();
 
 function sourceIdForNode(node) {
-  const sourceId = node?.metadata?.span_source_id;
+  const client = clientFacts(node);
+  const source = client.source && typeof client.source === "object" ? client.source : {};
+  const sourceId = source.source_id ?? node?.metadata?.span_source_id;
   return sourceId === undefined || sourceId === null || String(sourceId) === "" ? "unmapped" : String(sourceId);
 }
 function nodeSortKey(node) {
   return `${String(node.kind)}|${String(sourceIdForNode(node))}|${String(node.id)}`;
 }
 function sourcePathById(sourceId) {
-  if (!Array.isArray(graph.source_files)) return "";
-  const item = graph.source_files.find((f) => String(f.source_id) === String(sourceId));
+  const item = sourceRegistryEntries.find((f) => String(f.source_id) === String(sourceId))
+    || (Array.isArray(graph.source_files) ? graph.source_files.find((f) => String(f.source_id) === String(sourceId)) : null);
   return item?.path ? String(item.path) : "";
 }
 function isStdlibSourceId(sourceId) {
+  const registry = sourceRegistryById.get(String(sourceId));
+  if (registry && typeof registry.is_stdlib === "boolean") return registry.is_stdlib;
   const path = String(sourcePathById(sourceId) || "").toLowerCase();
   return path.includes("/stdlib/") || path.includes("stdlib/") || path.includes("vixen-stdlib");
 }
@@ -1349,18 +1395,25 @@ for (const kind of kindOrder) {
   grouped.get(kind).sort((a, b) => nodeSortKey(a).localeCompare(nodeSortKey(b)));
 }
 
-const declaredSourceFiles = Array.isArray(graph.source_files) ? graph.source_files : [];
+const declaredSourceFiles = sourceRegistryEntries.length > 0
+  ? sourceRegistryEntries.map((entry) => ({ source_id: entry.source_id, path: entry.path }))
+  : (Array.isArray(graph.source_files) ? graph.source_files : []);
 const declaredSourceIds = declaredSourceFiles
   .slice()
   .sort((a, b) => (a.source_id - b.source_id) || String(a.path).localeCompare(String(b.path)))
   .map((f) => String(f.source_id));
 const discoveredSourceIds = Array.from(new Set(graph.nodes.map((node) => sourceIdForNode(node))));
-const laneOrder = [
-  ...declaredSourceIds,
-  ...discoveredSourceIds
-    .filter((sourceId) => !declaredSourceIds.includes(sourceId))
-    .sort((a, b) => String(a).localeCompare(String(b))),
-];
+const clientLaneOrder = Array.isArray(graphClient.lane_order)
+  ? graphClient.lane_order.map((value) => String(value))
+  : [];
+const laneOrder = clientLaneOrder.length > 0
+  ? clientLaneOrder
+  : [
+      ...declaredSourceIds,
+      ...discoveredSourceIds
+        .filter((sourceId) => !declaredSourceIds.includes(sourceId))
+        .sort((a, b) => String(a).localeCompare(String(b))),
+    ];
 if (!laneOrder.includes("unmapped")) laneOrder.push("unmapped");
 
 function sourceIdForEdge(edge) {
@@ -1374,6 +1427,7 @@ function sourceIdForEdge(edge) {
   return sourceId === undefined || sourceId === null || String(sourceId) === "" ? "" : String(sourceId);
 }
 function laneStatsFor(sourceId) {
+  const registry = sourceRegistryEntries.find((entry) => String(entry.source_id) === String(sourceId));
   const nodeStats = {
     body: 0,
     kernel: 0,
@@ -1393,10 +1447,10 @@ function laneStatsFor(sourceId) {
   }
   return {
     sourceId,
-    totalNodes,
-    totalEdges,
+    totalNodes: registry ? Number(registry.node_count ?? totalNodes) : totalNodes,
+    totalEdges: registry ? Number(registry.edge_count ?? totalEdges) : totalEdges,
     nodeStats,
-    isStdlib: isStdlibSourceId(sourceId),
+    isStdlib: registry ? Boolean(registry.is_stdlib) : isStdlibSourceId(sourceId),
   };
 }
 const laneStatsBySource = new Map(laneOrder.map((sourceId) => [sourceId, laneStatsFor(sourceId)]));
@@ -2554,7 +2608,9 @@ function setDetails(value) {
   setInspectorSelection(sourceId, metadata);
 }
 function renderSourceRegistry(graph) {
-  const files = Array.isArray(graph.source_files) ? graph.source_files : [];
+  const files = sourceRegistryEntries.length > 0
+    ? sourceRegistryEntries
+    : (Array.isArray(graph.source_files) ? graph.source_files : []);
   if (files.length === 0) {
     sourceRegistry.innerHTML = `<div>No source registry for this graph.</div>`;
     sourceRegistryItemsBySource.clear();
@@ -2563,7 +2619,12 @@ function renderSourceRegistry(graph) {
   const list = files
     .slice()
     .sort((a, b) => (a.source_id - b.source_id) || String(a.path).localeCompare(String(b.path)))
-    .map((file) => `<li data-source-id="${htmlEscape(file.source_id)}"><strong>${htmlEscape(file.source_id)}</strong>: ${htmlEscape(file.path)}</li>`)
+    .map((file) => {
+      const nodeCount = Number(file.node_count ?? 0);
+      const edgeCount = Number(file.edge_count ?? 0);
+      const counts = sourceRegistryEntries.length > 0 ? ` · nodes ${nodeCount}, edges ${edgeCount}` : "";
+      return `<li data-source-id="${htmlEscape(file.source_id)}"><strong>${htmlEscape(file.source_id)}</strong>: ${htmlEscape(file.path)}${counts}</li>`;
+    })
     .join("");
   sourceRegistry.innerHTML = `
     <div>This graph includes ${files.length} source file(s).</div>
@@ -2966,7 +3027,9 @@ if (!restoredFromUrl) {
     type: "graph",
     graph_type: graph.graph_type,
     source_file: graph.source_file,
-    source_file_count: Array.isArray(graph.source_files) ? graph.source_files.length : 0,
+    source_file_count: Array.isArray(graph.source_registry) && graph.source_registry.length > 0
+      ? graph.source_registry.length
+      : (Array.isArray(graph.source_files) ? graph.source_files.length : 0),
     node_count: graph.nodes.length,
     edge_count: graph.edges.length
   });
@@ -3607,13 +3670,76 @@ fn project_analysis_graph_internal(
     }
 
     nodes.sort_by_key(|node| (node.kind, node.id.clone(), node.label.clone()));
+    let edges = edges.into_iter().collect::<Vec<_>>();
+
+    let mut node_count_by_source = BTreeMap::<u32, usize>::new();
+    for node in &nodes {
+        if let Some(source_id) = node
+            .client
+            .source
+            .as_ref()
+            .and_then(|source| source.source_id)
+        {
+            *node_count_by_source.entry(source_id).or_insert(0) += 1;
+        }
+    }
+    let mut edge_count_by_source = BTreeMap::<u32, usize>::new();
+    for edge in &edges {
+        if let Some(source_id) = edge
+            .client
+            .source
+            .as_ref()
+            .and_then(|source| source.source_id)
+        {
+            *edge_count_by_source.entry(source_id).or_insert(0) += 1;
+        }
+    }
+    let source_registry = context.map_or_else(Vec::new, |ctx| {
+        let mut entries = ctx
+            .source_files()
+            .into_iter()
+            .map(|(source_id, path)| GraphSourceRegistryEntry {
+                source_id,
+                is_stdlib: source_path_is_stdlib(&path),
+                node_count: *node_count_by_source.get(&source_id).unwrap_or(&0usize),
+                edge_count: *edge_count_by_source.get(&source_id).unwrap_or(&0usize),
+                path,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| (entry.source_id, entry.path.clone()));
+        entries
+    });
+    let mut lane_order = source_registry
+        .iter()
+        .map(|entry| entry.source_id.to_string())
+        .collect::<Vec<_>>();
+    let mut discovered_source_ids = nodes
+        .iter()
+        .filter_map(|node| {
+            node.client
+                .source
+                .as_ref()
+                .and_then(|source| source.source_id)
+        })
+        .map(|id| id.to_string())
+        .collect::<BTreeSet<_>>();
+    for declared in &lane_order {
+        discovered_source_ids.remove(declared);
+    }
+    lane_order.extend(discovered_source_ids.into_iter());
+    if !lane_order.iter().any(|id| id == "unmapped") {
+        lane_order.push("unmapped".to_owned());
+    }
+    let client = GraphClientFacts { lane_order };
 
     AnalysisGraph {
         source_file,
+        client,
         source_files: context.map_or_else(Vec::new, |ctx| ctx.source_files()),
+        source_registry,
         source_contents: context.map_or_else(Vec::new, |ctx| ctx.source_contents()),
         nodes,
-        edges: edges.into_iter().collect(),
+        edges,
     }
 }
 
@@ -4381,6 +4507,11 @@ fn enrich_edge_client_facts_from_metadata(
     }
 }
 
+fn source_path_is_stdlib(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/stdlib/") || lower.contains("stdlib/") || lower.contains("vixen-stdlib")
+}
+
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
     match observation {
         crate::Observation::NoObs => {
@@ -4641,6 +4772,24 @@ fn push_json_edge_client_facts(out: &mut String, facts: &GraphEdgeClientFacts, i
         None => out.push_str("null"),
     }
     out.push('\n');
+    out.push_str(&pad);
+    out.push('}');
+}
+
+fn push_json_graph_client_facts(out: &mut String, facts: &GraphClientFacts, indent: usize) {
+    let pad = " ".repeat(indent);
+    let pad_inner = " ".repeat(indent + 2);
+    out.push_str("{\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "lane_order");
+    out.push_str(": [");
+    for (index, value) in facts.lane_order.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        push_json_str(out, value);
+    }
+    out.push_str("]\n");
     out.push_str(&pad);
     out.push('}');
 }
