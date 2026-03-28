@@ -274,8 +274,8 @@ impl AnalysisGraph {
         out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
         out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 11px; margin-bottom: 6px; }\n");
         out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 8px; background: #0b1420; max-height: 320px; overflow: auto; }\n");
-        out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 3.2em minmax(0, 1fr); gap: 8px; padding: 1px 6px; }\n");
-        out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; }\n");
+        out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 4.8em minmax(0, 1fr); gap: 8px; padding: 1px 6px; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; display: flex; justify-content: flex-end; align-items: center; gap: 6px; }\n");
         out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
         out.push_str(
             "  .source-inspector .inspector-line.in-span { background: rgba(125,211,252,0.12); }\n",
@@ -283,6 +283,12 @@ impl AnalysisGraph {
         out.push_str(
             "  .source-inspector .inspector-line.anchor { background: rgba(166,227,161,0.14); }\n",
         );
+        out.push_str(
+            "  .source-inspector .inspector-line.has-mapping { border-left: 2px solid #7dd3fc; }\n",
+        );
+        out.push_str("  .source-inspector .inspector-marker { background: #132031; color: #7dd3fc; border: 1px solid #2a3c52; border-radius: 999px; font-size: 10px; padding: 0 6px; min-width: 18px; line-height: 15px; cursor: pointer; }\n");
+        out.push_str("  .source-inspector .inspector-choice { margin: 2px 6px 6px 6px; padding: 6px; border: 1px solid #243244; border-radius: 8px; background: #101a2a; }\n");
+        out.push_str("  .source-inspector .inspector-choice button { display: block; width: 100%; margin: 4px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 7px; font-size: 11px; }\n");
         out.push_str("  .source-inspector button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .source-registry { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
@@ -493,6 +499,8 @@ let inspectorExpanded = false;
 let inspectorAnchorLine = 0;
 let inspectorSpanStart = 0;
 let inspectorSpanEnd = 0;
+let inspectorChoiceLine = 0;
+let inspectorLineMappings = new Map();
 const foldedLaneSourceIds = new Set();
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
@@ -515,6 +523,7 @@ const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 const sourceContentById = new Map(
   (Array.isArray(graph.source_contents) ? graph.source_contents : []).map((entry) => [String(entry.source_id), entry])
 );
+const sourceGraphMappingsBySource = new Map();
 
 function sourceIdForNode(node) {
   const sourceId = node?.metadata?.span_source_id;
@@ -1335,6 +1344,7 @@ function setInspectorSelection(sourceId, metadata = {}, options = {}) {
   inspectorSourceId = String(sourceId || sourceFilterSourceId || selectedSourceId || "");
   inspectorSpanStart = Number.parseInt(String(metadata?.span_start ?? ""), 10) || 0;
   inspectorSpanEnd = Number.parseInt(String(metadata?.span_end ?? ""), 10) || 0;
+  inspectorChoiceLine = 0;
   const sourceEntry = sourceContentById.get(inspectorSourceId);
   if (sourceEntry) {
     inspectorAnchorLine = lineFromByteOffset(sourceEntry.line_start_offsets, inspectorSpanStart);
@@ -1342,6 +1352,66 @@ function setInspectorSelection(sourceId, metadata = {}, options = {}) {
     inspectorAnchorLine = 0;
   }
   if (!options.skipRender) renderSourceInspector();
+}
+function sourceGraphMappings(sourceId) {
+  const key = String(sourceId || "");
+  if (sourceGraphMappingsBySource.has(key)) return sourceGraphMappingsBySource.get(key);
+  const sourceEntry = sourceContentById.get(key);
+  if (!sourceEntry) {
+    sourceGraphMappingsBySource.set(key, []);
+    return [];
+  }
+  const mappings = [];
+  for (const node of graph.nodes) {
+    const metadata = metadataMap(node.metadata);
+    const nodeSourceId = String(metadata.span_source_id ?? "");
+    if (nodeSourceId !== key) continue;
+    const start = Number.parseInt(String(metadata.span_start ?? ""), 10);
+    const end = Number.parseInt(String(metadata.span_end ?? ""), 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const startLine = lineFromByteOffset(sourceEntry.line_start_offsets, start);
+    const endLine = lineFromByteOffset(sourceEntry.line_start_offsets, Math.max(start, end - 1));
+    mappings.push({
+      type: "node",
+      key: `node:${node.id}`,
+      label: nodeShortLabel(node.id),
+      startLine,
+      endLine,
+      start,
+      end,
+    });
+  }
+  for (const edge of graph.edges) {
+    const metadata = metadataMap(edge.metadata);
+    const edgeSourceId = String(metadata.span_source_id ?? "");
+    if (edgeSourceId !== key) continue;
+    const start = Number.parseInt(String(metadata.span_start ?? ""), 10);
+    const end = Number.parseInt(String(metadata.span_end ?? ""), 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const startLine = lineFromByteOffset(sourceEntry.line_start_offsets, start);
+    const endLine = lineFromByteOffset(sourceEntry.line_start_offsets, Math.max(start, end - 1));
+    mappings.push({
+      type: "edge",
+      key: edgeKeyFor(edge),
+      label: edgeSemanticLabel(edge),
+      startLine,
+      endLine,
+      start,
+      end,
+    });
+  }
+  mappings.sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    if (a.end !== b.end) return a.end - b.end;
+    return String(a.key).localeCompare(String(b.key));
+  });
+  sourceGraphMappingsBySource.set(key, mappings);
+  return mappings;
+}
+function activateInspectorMapping(mapping) {
+  if (!mapping || !mapping.key) return;
+  inspectorChoiceLine = 0;
+  selectByGraphKey(String(mapping.key), { pushUrlHistory: true });
 }
 function renderSourceInspector() {
   if (!sourceInspector) return;
@@ -1363,12 +1433,33 @@ function renderSourceInspector() {
   const endLine = inspectorSpanEnd > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, spanEndOffset) : startLine;
   const windowStart = inspectorExpanded ? 1 : Math.max(1, startLine - 12);
   const windowEnd = inspectorExpanded ? total : Math.min(total, Math.max(endLine + 20, windowStart + 40));
+  const mappings = sourceGraphMappings(sourceId);
+  inspectorLineMappings = new Map();
+  for (const mapping of mappings) {
+    const first = Math.max(windowStart, mapping.startLine);
+    const last = Math.min(windowEnd, mapping.endLine);
+    for (let lineNo = first; lineNo <= last; lineNo++) {
+      if (!inspectorLineMappings.has(lineNo)) inspectorLineMappings.set(lineNo, []);
+      inspectorLineMappings.get(lineNo).push(mapping);
+    }
+  }
   const rows = [];
   for (let lineNo = windowStart; lineNo <= windowEnd; lineNo++) {
     const html = lines[lineNo - 1] ?? "";
     const inSpan = inspectorSpanStart > 0 && lineNo >= startLine && lineNo <= endLine;
     const isAnchor = lineNo === anchor;
-    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}"><span class="ln">${lineNo}</span><span class="code">${html || "&nbsp;"}</span></div>`);
+    const mapped = inspectorLineMappings.get(lineNo) ?? [];
+    const marker = mapped.length > 0
+      ? `<button type="button" class="inspector-marker" data-inspector-line="${lineNo}" title="Jump to mapped graph item(s)">${mapped.length}</button>`
+      : "";
+    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}"><span class="ln">${lineNo}${marker}</span><span class="code">${html || "&nbsp;"}</span></div>`);
+    if (inspectorChoiceLine === lineNo && mapped.length > 1) {
+      const choices = mapped
+        .slice(0, 12)
+        .map((entry) => `<button type="button" data-inspector-select-key="${htmlEscape(entry.key)}"><span class="kind">${htmlEscape(entry.type)}</span> ${htmlEscape(entry.label)}</button>`)
+        .join("");
+      rows.push(`<div class="inspector-choice">line ${lineNo} has ${mapped.length} mapped items.${choices}</div>`);
+    }
   }
   const path = sourceEntry.path ? String(sourceEntry.path) : sourceLabel(sourceId);
   const spanMeta = inspectorSpanStart > 0
@@ -1388,6 +1479,31 @@ function renderSourceInspector() {
       inspectorExpanded = !inspectorExpanded;
       renderSourceInspector();
       persistViewerState(false);
+    });
+  }
+  const markers = sourceInspector.querySelectorAll("button[data-inspector-line]");
+  for (const marker of markers) {
+    marker.addEventListener("click", () => {
+      const lineNo = Number.parseInt(String(marker.getAttribute("data-inspector-line") ?? ""), 10);
+      if (!Number.isFinite(lineNo) || lineNo <= 0) return;
+      const mapped = inspectorLineMappings.get(lineNo) ?? [];
+      if (mapped.length === 0) return;
+      if (mapped.length === 1) {
+        activateInspectorMapping(mapped[0]);
+        return;
+      }
+      inspectorChoiceLine = inspectorChoiceLine === lineNo ? 0 : lineNo;
+      renderSourceInspector();
+    });
+  }
+  const choiceButtons = sourceInspector.querySelectorAll("button[data-inspector-select-key]");
+  for (const button of choiceButtons) {
+    button.addEventListener("click", () => {
+      const key = String(button.getAttribute("data-inspector-select-key") ?? "");
+      if (!key) return;
+      const selected = mappings.find((entry) => String(entry.key) === key);
+      if (!selected) return;
+      activateInspectorMapping(selected);
     });
   }
 }

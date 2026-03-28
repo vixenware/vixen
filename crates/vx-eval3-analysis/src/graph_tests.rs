@@ -107,6 +107,12 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("params.set(\"isrc\""));
     assert!(html.contains("params.get(\"ix\")"));
     assert!(html.contains("params.set(\"ix\""));
+    assert!(html.contains("inspector-marker"));
+    assert!(html.contains("sourceGraphMappings("));
+    assert!(html.contains("activateInspectorMapping("));
+    assert!(html.contains("data-inspector-line"));
+    assert!(html.contains("data-inspector-select-key"));
+    assert!(html.contains("inspectorChoiceLine"));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -343,6 +349,12 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("params.set(\"isrc\""));
     assert!(html.contains("params.get(\"ix\")"));
     assert!(html.contains("params.set(\"ix\""));
+    assert!(html.contains("inspector-marker"));
+    assert!(html.contains("inspector-choice"));
+    assert!(html.contains("sourceGraphMappings("));
+    assert!(html.contains("activateInspectorMapping("));
+    assert!(html.contains("data-inspector-line"));
+    assert!(html.contains("data-inspector-select-key"));
 }
 
 #[test]
