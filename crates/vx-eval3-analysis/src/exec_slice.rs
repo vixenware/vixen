@@ -129,6 +129,16 @@ pub fn lower_executable_program(
     let fn_by_body = body_nodes_by_id(bridge)?;
     let runtime_nodes = executable_runtime_nodes(analysis);
     let mut bodies = BTreeMap::new();
+    let lowerable_bodies = analysis
+        .bodies
+        .iter()
+        .map(|body| body.id)
+        .collect::<BTreeSet<_>>();
+    let body_source_by_id = bridge
+        .bodies
+        .iter()
+        .map(|body| (body.id, body.span.source))
+        .collect::<HashMap<_, _>>();
 
     for analyzed in &analysis.bodies {
         let runtime_boundary_extractions = runtime_pending_for_body(analysis, analyzed.id);
@@ -158,6 +168,10 @@ pub fn lower_executable_program(
             bridge,
             &expr_nodes,
             entry_expr,
+            *body_source_by_id.get(&analyzed.id).ok_or_else(|| {
+                UnsupportedShape(format!("missing source id for body {}", analyzed.id.0))
+            })?,
+            &lowerable_bodies,
         )?
         .lower()?;
 
@@ -183,25 +197,96 @@ pub fn lower_executable_program(
     })
 }
 
+pub fn lower_executable_program_for_entry_body(
+    analysis: &AnalysisResult,
+    bridge: &SingleSourceBridge,
+    entry: BodyId,
+) -> Result<ExecutableProgram, ExecSliceError> {
+    let expr_nodes = expr_nodes_by_id(bridge);
+    let fn_by_body = body_nodes_by_id(bridge)?;
+    let runtime_nodes = executable_runtime_nodes(analysis);
+    let mut bodies = BTreeMap::new();
+    let lowerable_bodies = reachable_body_slice(analysis, entry);
+    let body_source_by_id = bridge
+        .bodies
+        .iter()
+        .map(|body| (body.id, body.span.source))
+        .collect::<HashMap<_, _>>();
+
+    for analyzed in analysis
+        .bodies
+        .iter()
+        .filter(|body| lowerable_bodies.contains(&body.id))
+    {
+        let runtime_boundary_extractions = runtime_pending_for_body(analysis, analyzed.id);
+        let kernel = analyzed
+            .kernel_entries
+            .first()
+            .map(|entry| entry.kernel)
+            .ok_or_else(|| {
+                UnsupportedShape(format!("body {} has no kernel entry", analyzed.id.0))
+            })?;
+
+        let fn_decl = fn_by_body.get(&analyzed.id).ok_or_else(|| {
+            UnsupportedShape(format!("no AST function for body {}", analyzed.id.0))
+        })?;
+        let entry_expr = analyzed
+            .kernel_entries
+            .first()
+            .map(|entry| entry.source.expr)
+            .ok_or_else(|| {
+                UnsupportedShape(format!("body {} has no kernel entry", analyzed.id.0))
+            })?;
+
+        let lowered = BodyLowering::new(
+            analyzed.id,
+            analyzed,
+            fn_decl.clone(),
+            bridge,
+            &expr_nodes,
+            entry_expr,
+            *body_source_by_id.get(&analyzed.id).ok_or_else(|| {
+                UnsupportedShape(format!("missing source id for body {}", analyzed.id.0))
+            })?,
+            &lowerable_bodies,
+        )?
+        .lower()?;
+
+        bodies.insert(
+            analyzed.id,
+            ExecutableBody {
+                id: analyzed.id,
+                kernel,
+                params: lowered.params,
+                ops: lowered.ops,
+                result_source: ResultSource::Slot(lowered.result),
+                runtime_boundary_extractions,
+                local_call_dependencies: lowered.local_call_dependencies,
+            },
+        );
+    }
+
+    Ok(ExecutableProgram {
+        entry,
+        bodies,
+        runtime_nodes,
+    })
+}
+
 fn expr_nodes_by_id(bridge: &SingleSourceBridge) -> HashMap<ExprId, Expr> {
     let mut span_to_expr = HashMap::<SourceSpan, ExprId>::new();
     for expr in &bridge.exprs {
-        if expr.span.source == bridge.source_id {
-            span_to_expr.insert(expr.span, expr.id);
-        }
+        span_to_expr.insert(expr.span, expr.id);
     }
 
     let mut by_id = HashMap::new();
-    for expr in bridge
-        .parsed
-        .tree()
-        .syntax()
-        .descendants()
-        .filter_map(Expr::cast)
-    {
-        let span = SourceSpan::new(bridge.source_id, expr.syntax().text_range());
-        if let Some(expr_id) = span_to_expr.get(&span).copied() {
-            by_id.insert(expr_id, expr);
+    for (source_id, file) in &bridge.source_files {
+        for expr in file.syntax().descendants().filter_map(Expr::cast) {
+            let span =
+                SourceSpan::new(vx_resolve::SourceId(*source_id), expr.syntax().text_range());
+            if let Some(expr_id) = span_to_expr.get(&span).copied() {
+                by_id.insert(expr_id, expr);
+            }
         }
     }
     by_id
@@ -212,21 +297,24 @@ fn body_nodes_by_id(
 ) -> Result<HashMap<BodyId, FnDecl>, ExecSliceError> {
     let mut body_by_span = HashMap::<SourceSpan, BodyId>::new();
     for body in &bridge.bodies {
-        if body.span.source == bridge.source_id {
-            body_by_span.insert(body.span, body.id);
-        }
+        body_by_span.insert(body.span, body.id);
     }
 
     let mut fn_by_body = HashMap::new();
-    for item in bridge.parsed.tree().items() {
-        let vx_parser::Item::FnDecl(fn_decl) = item else {
-            continue;
-        };
-        let span = SourceSpan::new(bridge.source_id, fn_decl.syntax().text_range());
-        let Some(body_id) = body_by_span.get(&span).copied() else {
-            continue;
-        };
-        fn_by_body.insert(body_id, fn_decl);
+    for (source_id, file) in &bridge.source_files {
+        for item in file.items() {
+            let vx_parser::Item::FnDecl(fn_decl) = item else {
+                continue;
+            };
+            let span = SourceSpan::new(
+                vx_resolve::SourceId(*source_id),
+                fn_decl.syntax().text_range(),
+            );
+            let Some(body_id) = body_by_span.get(&span).copied() else {
+                continue;
+            };
+            fn_by_body.insert(body_id, fn_decl);
+        }
     }
 
     if fn_by_body.is_empty() {
@@ -235,6 +323,30 @@ fn body_nodes_by_id(
         ));
     }
     Ok(fn_by_body)
+}
+
+fn reachable_body_slice(analysis: &AnalysisResult, entry: BodyId) -> BTreeSet<BodyId> {
+    let mut reachable = BTreeSet::new();
+    let mut queue = vec![entry];
+
+    while let Some(body_id) = queue.pop() {
+        if !reachable.insert(body_id) {
+            continue;
+        }
+        let Some(body) = analysis.bodies.iter().find(|body| body.id == body_id) else {
+            continue;
+        };
+        for edge in &body.source_local_call_edges {
+            let SourceLocalCalleeOrigin::TopLevelBody(callee) = edge.callee else {
+                continue;
+            };
+            if !reachable.contains(&callee) {
+                queue.push(callee);
+            }
+        }
+    }
+
+    reachable
 }
 
 fn executable_runtime_nodes(
@@ -324,6 +436,7 @@ struct LoweredBody {
 
 struct BodyLowering<'a> {
     body: BodyId,
+    body_source_id: vx_resolve::SourceId,
     analyzed: &'a AnalyzedBody,
     bridge: &'a SingleSourceBridge,
     expr_nodes: &'a HashMap<ExprId, Expr>,
@@ -332,6 +445,7 @@ struct BodyLowering<'a> {
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
+    lowerable_bodies: BTreeSet<BodyId>,
     params: Vec<SlotId>,
     next_slot: u32,
     ops: Vec<KernelOp>,
@@ -349,6 +463,8 @@ impl<'a> BodyLowering<'a> {
         bridge: &'a SingleSourceBridge,
         expr_nodes: &'a HashMap<ExprId, Expr>,
         entry_expr: ExprId,
+        body_source_id: vx_resolve::SourceId,
+        lowerable_bodies: &BTreeSet<BodyId>,
     ) -> Result<Self, ExecSliceError> {
         let body_bindings = bridge
             .local_bindings
@@ -391,7 +507,7 @@ impl<'a> BodyLowering<'a> {
                 let Stmt::Let(let_stmt) = stmt else {
                     continue;
                 };
-                let stmt_span = SourceSpan::new(bridge.source_id, let_stmt.syntax().text_range());
+                let stmt_span = SourceSpan::new(body_source_id, let_stmt.syntax().text_range());
                 let Some(binding_id) = let_bindings
                     .iter()
                     .filter(|binding| !assigned.contains(&binding.id))
@@ -406,7 +522,7 @@ impl<'a> BodyLowering<'a> {
                 let Some(expr) = let_stmt.expr() else {
                     continue;
                 };
-                let span = SourceSpan::new(bridge.source_id, expr.syntax().text_range());
+                let span = SourceSpan::new(body_source_id, expr.syntax().text_range());
                 let Some(expr_id) = bridge
                     .exprs
                     .iter()
@@ -429,7 +545,6 @@ impl<'a> BodyLowering<'a> {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
             }
         }
-
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
         for extracted in &analyzed.extracted_nodes {
             if let crate::ExtractedNodeReason::LazyProductField {
@@ -445,6 +560,7 @@ impl<'a> BodyLowering<'a> {
 
         Ok(Self {
             body,
+            body_source_id,
             analyzed,
             bridge,
             expr_nodes,
@@ -453,6 +569,7 @@ impl<'a> BodyLowering<'a> {
             binding_initializers,
             slot_by_binding,
             runtime_node_by_expr,
+            lowerable_bodies: lowerable_bodies.clone(),
             params,
             next_slot,
             ops: vec![],
@@ -489,7 +606,7 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn expr_id(&self, expr: &Expr) -> Option<ExprId> {
-        let span = SourceSpan::new(self.bridge.source_id, expr.syntax().text_range());
+        let span = SourceSpan::new(self.body_source_id, expr.syntax().text_range());
         self.bridge
             .exprs
             .iter()
@@ -819,6 +936,12 @@ impl<'a> BodyLowering<'a> {
                 if let Some(origin) = self.analyzed.callee_local_origins.get(&expr_id) {
                     match origin {
                         SourceLocalCalleeOrigin::TopLevelBody(callee) => {
+                            if !self.lowerable_bodies.contains(callee) {
+                                return Err(UnsupportedShape(format!(
+                                    "top-level callee body {} outside lowered body set",
+                                    callee.0
+                                )));
+                            }
                             self.local_call_dependencies.insert(*callee);
                             let dst = self.alloc_temp();
                             self.ops.push(KernelOp::CallBody {

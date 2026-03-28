@@ -150,6 +150,7 @@ pub struct BridgeLocalBoundaryInit {
 pub struct SingleSourceBridge {
     pub source_id: SourceId,
     pub parsed: Parsed<SourceFile>,
+    pub source_files: BTreeMap<u32, SourceFile>,
     pub source_paths: BTreeMap<u32, String>,
     pub bodies: Vec<BridgeBody>,
     pub exprs: Vec<BridgeExpr>,
@@ -179,6 +180,10 @@ impl SingleSourceBridge {
         let file = parsed.tree();
 
         let (sources, imports, source_paths) = build_program_sources_from_single_file(file.clone());
+        let source_files = sources
+            .iter()
+            .map(|source| (source.id.0, source.file.clone()))
+            .collect::<BTreeMap<_, _>>();
 
         let resolution = resolve_in_program(
             SourceFileRef {
@@ -204,6 +209,7 @@ impl SingleSourceBridge {
         Self {
             source_id,
             parsed,
+            source_files,
             source_paths,
             bodies: collected.bodies,
             exprs: collected.exprs,
@@ -234,6 +240,10 @@ impl SingleSourceBridge {
         let file = parsed.tree();
 
         let (sources, imports, source_paths) = build_program_sources_from_entry_file(entry_path)?;
+        let source_files = sources
+            .iter()
+            .map(|source| (source.id.0, source.file.clone()))
+            .collect::<BTreeMap<_, _>>();
 
         let resolution = resolve_in_program(
             SourceFileRef {
@@ -259,6 +269,7 @@ impl SingleSourceBridge {
         Ok(Self {
             source_id,
             parsed,
+            source_files,
             source_paths,
             bodies: collected.bodies,
             exprs: collected.exprs,

@@ -36,7 +36,7 @@ pub use graph::{
 mod exec_slice;
 pub use exec_slice::{
     ExecSliceError, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode, KernelOp, Operand,
-    ResultSource, SlotId, lower_executable_program,
+    ResultSource, SlotId, lower_executable_program, lower_executable_program_for_entry_body,
 };
 
 #[cfg(test)]

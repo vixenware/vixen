@@ -13,5 +13,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vx-eval3-analysis = { path = "../vx-eval3-analysis" }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
