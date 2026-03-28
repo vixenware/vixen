@@ -1,7 +1,7 @@
 use crate::{
     BodyId, BodyMemoKey, CellState, ExecValue, KernelOp, ResultSource, RuntimeMemoKey,
-    SingleSourceBridge, WaitReason, build_minimal_analysis, eval_executable_program,
-    lower_executable_program,
+    RuntimeSession, SingleSourceBridge, WaitReason, build_minimal_analysis,
+    eval_executable_program, lower_executable_program,
 };
 
 fn lower_and_eval(
@@ -69,7 +69,11 @@ fn main() -> U64 (
 )
 "#;
 
-    let (analysis, program, outcome) = lower_and_eval(src);
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program(&analysis, &bridge).expect("program should lower");
+
     let entry_body = program
         .bodies
         .get(&program.entry)
@@ -100,23 +104,55 @@ fn main() -> U64 (
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        outcome.entry_result,
-        ExecValue::PendingRuntimeBoundaries(expected_boundaries.clone())
-    );
+    let mut session = RuntimeSession::new(&program).expect("session should start");
+    let blocked = match session
+        .run_until_blocked()
+        .expect("run should reach blocked state")
+    {
+        crate::EvalRunResult::Blocked(blocked) => blocked,
+        crate::EvalRunResult::Complete(outcome) => {
+            panic!(
+                "expected blocked runtime state, got complete {:?}",
+                outcome.entry_result
+            )
+        }
+    };
+    assert_eq!(blocked.blocked_runtime_nodes, expected_boundaries);
     assert!(
-        outcome
+        blocked
             .wait_events
             .iter()
             .any(|event| matches!(event, WaitReason::RuntimeNode(_))),
         "runtime await should produce explicit runtime wait events"
     );
     assert!(
-        expected_boundaries.iter().all(|id| matches!(
-            outcome.runtime_cells.get(&RuntimeMemoKey { node: *id }),
-            Some(CellState::Ready(ExecValue::PendingRuntimeBoundaries(_)))
+        blocked.blocked_runtime_nodes.iter().all(|id| matches!(
+            blocked.runtime_cells.get(&RuntimeMemoKey { node: *id }),
+            Some(CellState::Running { .. })
         )),
-        "runtime cells should record pending-token completion through the runtime wait path"
+        "runtime cells should remain running/pending while blocked"
+    );
+
+    for id in &blocked.blocked_runtime_nodes {
+        session
+            .complete_runtime_node(*id, ExecValue::PendingRuntimeBoundaries(vec![*id]))
+            .expect("manual runtime completion should work");
+    }
+    let completed = match session
+        .run_until_blocked()
+        .expect("run should complete after manual runtime completion")
+    {
+        crate::EvalRunResult::Complete(outcome) => outcome,
+        crate::EvalRunResult::Blocked(blocked) => {
+            panic!(
+                "expected completion after runtime completion, still blocked: {:?}",
+                blocked
+            )
+        }
+    };
+    assert_eq!(
+        completed.entry_result,
+        ExecValue::PendingRuntimeBoundaries(expected_boundaries.clone())
     );
 }
 

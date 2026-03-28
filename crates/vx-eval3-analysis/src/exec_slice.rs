@@ -184,6 +184,22 @@ pub struct EvalOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedEval {
+    pub blocked_runtime_nodes: Vec<RuntimeNodeId>,
+    pub body_cells: BTreeMap<BodyMemoKey, CellState>,
+    pub runtime_cells: BTreeMap<RuntimeMemoKey, CellState>,
+    pub wait_events: Vec<WaitReason>,
+    pub call_counts: BTreeMap<(BodyId, ExprId), usize>,
+    pub body_eval_counts: BTreeMap<BodyMemoKey, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalRunResult {
+    Complete(EvalOutcome),
+    Blocked(BlockedEval),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecSliceError {
     UnsupportedShape(String),
     MissingBody(BodyId),
@@ -259,29 +275,53 @@ pub fn lower_executable_program(
 }
 
 pub fn eval_executable_program(program: &ExecutableProgram) -> Result<EvalOutcome, ExecSliceError> {
-    let mut runtime = RuntimeMachine::new(program);
-    let entry_key = BodyMemoKey {
-        body: program.entry,
-        args: vec![],
-    };
-    let entry = runtime.demand_body(entry_key, None)?;
-    let body_results = runtime
-        .body_cells
-        .iter()
-        .filter_map(|(key, state)| match state {
-            CellState::Ready(value) => Some((key.body, value.clone())),
-            CellState::Empty | CellState::Running { .. } | CellState::Poison(_) => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    Ok(EvalOutcome {
-        entry_result: entry,
-        body_results,
-        call_counts: runtime.call_counts,
-        body_cells: runtime.body_cells,
-        runtime_cells: runtime.runtime_cells,
-        wait_events: runtime.wait_events,
-        body_eval_counts: runtime.body_eval_counts,
-    })
+    let mut session = RuntimeSession::new(program)?;
+    match session.run_until_blocked()? {
+        EvalRunResult::Complete(outcome) => Ok(outcome),
+        EvalRunResult::Blocked(blocked) => Err(ExecSliceError::TypeMismatch(format!(
+            "evaluation blocked on runtime nodes {:?}",
+            blocked.blocked_runtime_nodes
+        ))),
+    }
+}
+
+pub struct RuntimeSession<'a> {
+    machine: RuntimeMachine<'a>,
+    entry_key: BodyMemoKey,
+}
+
+impl<'a> RuntimeSession<'a> {
+    pub fn new(program: &'a ExecutableProgram) -> Result<Self, ExecSliceError> {
+        let entry_key = BodyMemoKey {
+            body: program.entry,
+            args: vec![],
+        };
+        let mut machine = RuntimeMachine::new(program);
+        machine
+            .body_cells
+            .insert(entry_key.clone(), CellState::Empty);
+        machine.start_body_frame(entry_key.clone())?;
+        Ok(Self { machine, entry_key })
+    }
+
+    pub fn run_until_blocked(&mut self) -> Result<EvalRunResult, ExecSliceError> {
+        self.machine.run_scheduler()?;
+        if let Some(CellState::Ready(entry)) = self.machine.body_cells.get(&self.entry_key) {
+            return Ok(EvalRunResult::Complete(
+                self.machine.complete_outcome(entry.clone()),
+            ));
+        }
+        Ok(EvalRunResult::Blocked(self.machine.blocked_outcome()))
+    }
+
+    pub fn complete_runtime_node(
+        &mut self,
+        node: RuntimeNodeId,
+        value: ExecValue,
+    ) -> Result<(), ExecSliceError> {
+        self.machine
+            .complete_runtime(RuntimeMemoKey { node }, value)
+    }
 }
 
 struct RuntimeMachine<'a> {
@@ -314,38 +354,6 @@ impl<'a> RuntimeMachine<'a> {
             call_counts: BTreeMap::new(),
             wait_events: vec![],
             body_eval_counts: BTreeMap::new(),
-        }
-    }
-
-    fn demand_body(
-        &mut self,
-        key: BodyMemoKey,
-        waiter: Option<FrameId>,
-    ) -> Result<ExecValue, ExecSliceError> {
-        match self.body_cells.get_mut(&key) {
-            Some(CellState::Ready(value)) => return Ok(value.clone()),
-            Some(CellState::Running { waiters }) => {
-                if let Some(waiter) = waiter {
-                    waiters.push(waiter);
-                }
-            }
-            Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err.clone())),
-            Some(CellState::Empty) => {
-                self.start_body_frame(key.clone())?;
-            }
-            None => {
-                self.body_cells.insert(key.clone(), CellState::Empty);
-                self.start_body_frame(key.clone())?;
-            }
-        }
-
-        self.run_scheduler()?;
-        match self.body_cells.get(&key) {
-            Some(CellState::Ready(value)) => Ok(value.clone()),
-            Some(CellState::Running { .. }) | Some(CellState::Empty) | None => Err(
-                ExecSliceError::TypeMismatch(format!("body {} did not resolve", key.body.0)),
-            ),
-            Some(CellState::Poison(err)) => Err(ExecSliceError::TypeMismatch(err.clone())),
         }
     }
 
@@ -383,6 +391,47 @@ impl<'a> RuntimeMachine<'a> {
         self.frame_owner.insert(frame_id, key);
         self.ready_frames.push_back(frame_id);
         Ok(())
+    }
+
+    fn complete_outcome(&self, entry_result: ExecValue) -> EvalOutcome {
+        let body_results = self
+            .body_cells
+            .iter()
+            .filter_map(|(key, state)| match state {
+                CellState::Ready(value) => Some((key.body, value.clone())),
+                CellState::Empty | CellState::Running { .. } | CellState::Poison(_) => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        EvalOutcome {
+            entry_result,
+            body_results,
+            call_counts: self.call_counts.clone(),
+            body_cells: self.body_cells.clone(),
+            runtime_cells: self.runtime_cells.clone(),
+            wait_events: self.wait_events.clone(),
+            body_eval_counts: self.body_eval_counts.clone(),
+        }
+    }
+
+    fn blocked_outcome(&self) -> BlockedEval {
+        let mut blocked_runtime_nodes = self
+            .runtime_cells
+            .iter()
+            .filter_map(|(key, state)| match state {
+                CellState::Running { .. } => Some(key.node),
+                CellState::Empty | CellState::Ready(_) | CellState::Poison(_) => None,
+            })
+            .collect::<Vec<_>>();
+        blocked_runtime_nodes.sort_by_key(|id| id.0);
+        blocked_runtime_nodes.dedup();
+        BlockedEval {
+            blocked_runtime_nodes,
+            body_cells: self.body_cells.clone(),
+            runtime_cells: self.runtime_cells.clone(),
+            wait_events: self.wait_events.clone(),
+            call_counts: self.call_counts.clone(),
+            body_eval_counts: self.body_eval_counts.clone(),
+        }
     }
 
     fn run_scheduler(&mut self) -> Result<(), ExecSliceError> {
@@ -554,8 +603,6 @@ impl<'a> RuntimeMachine<'a> {
                     });
                     self.wait_events.push(wait);
                     self.suspend_on_runtime(frame, runtime_key.clone())?;
-                    let pending = ExecValue::PendingRuntimeBoundaries(vec![node]);
-                    self.complete_runtime(runtime_key, pending)?;
                 }
             }
         }
