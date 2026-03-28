@@ -212,6 +212,10 @@ impl AnalysisGraph {
         out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; color: #dbe7f3; }\n");
         out.push_str("  .detail-card ul { margin: 6px 0 0 18px; padding: 0; }\n");
         out.push_str("  .detail-card li { margin: 4px 0; color: #c7d6e6; }\n");
+        out.push_str(
+            "  .dep-item { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }\n",
+        );
+        out.push_str("  .dep-jump { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .detail-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin-bottom: 6px; font-size: 12px; }\n");
         out.push_str("  .detail-row:last-child { margin-bottom: 0; }\n");
         out.push_str("  .detail-key { color: #8ba5c1; }\n");
@@ -237,6 +241,9 @@ impl AnalysisGraph {
         out.push_str("  .semantic-controls select { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 6px; font-size: 12px; }\n");
         out.push_str("  .semantic-controls .check { display: flex; align-items: center; gap: 8px; color: #c7d6e6; }\n");
         out.push_str("  .semantic-controls input[type=\"checkbox\"] { accent-color: #7dd3fc; }\n");
+        out.push_str("  .selection-nav { display: flex; gap: 8px; margin-bottom: 10px; }\n");
+        out.push_str("  .selection-nav button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
+        out.push_str("  .selection-nav button:disabled { opacity: 0.4; cursor: default; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
@@ -342,7 +349,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button></div><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -362,6 +369,8 @@ const filterSharing = document.getElementById("filter-sharing");
 const focusNeighborhoodToggle = document.getElementById("focus-neighborhood-toggle");
 const focusPathMode = document.getElementById("focus-path-mode");
 const hideStdlibNoiseToggle = document.getElementById("hide-stdlib-noise-toggle");
+const selectionHistoryBack = document.getElementById("selection-history-back");
+const selectionHistoryForward = document.getElementById("selection-history-forward");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
@@ -380,6 +389,8 @@ let semanticSharingFilter = "all";
 let dependencyFocusEnabled = false;
 let hideStdlibNoiseEnabled = false;
 let dependencyFocusMode = "neighborhood";
+const selectionHistory = [];
+let selectionHistoryIndex = -1;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -488,6 +499,9 @@ function edgeSemanticLabel(edge) {
   if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
   return edge.label;
 }
+function edgeKeyFor(edge) {
+  return `edge:${edge.from}->${edge.to}:${edge.kind}:${edge.label}`;
+}
 function nodeShortLabel(nodeId) {
   const node = nodeById.get(nodeId);
   if (!node) return nodeId;
@@ -516,12 +530,12 @@ function dependencySummaryHtml(value) {
   const incomingItems = incoming.length === 0
     ? `<li>None</li>`
     : incoming
-        .map((edge) => `<li><strong>${htmlEscape(nodeShortLabel(edge.from))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</li>`)
+        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.from)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.from))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
         .join("");
   const outgoingItems = outgoing.length === 0
     ? `<li>None</li>`
     : outgoing
-        .map((edge) => `<li><strong>${htmlEscape(nodeShortLabel(edge.to))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</li>`)
+        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.to)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.to))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
         .join("");
   return `
     <div class="detail-card">
@@ -974,12 +988,47 @@ function setSelectedGraphElements(key) {
     }
   }
 }
-function selectGraphItem(key, detailsValue, sourceId) {
+function updateSelectionHistoryButtons() {
+  if (selectionHistoryBack) selectionHistoryBack.disabled = selectionHistoryIndex <= 0;
+  if (selectionHistoryForward) selectionHistoryForward.disabled = selectionHistoryIndex === -1 || selectionHistoryIndex >= selectionHistory.length - 1;
+}
+function pushSelectionHistory(key) {
+  if (!key) return;
+  if (selectionHistoryIndex >= 0 && selectionHistory[selectionHistoryIndex] === key) {
+    updateSelectionHistoryButtons();
+    return;
+  }
+  selectionHistory.splice(selectionHistoryIndex + 1);
+  selectionHistory.push(key);
+  selectionHistoryIndex = selectionHistory.length - 1;
+  updateSelectionHistoryButtons();
+}
+function selectGraphItem(key, detailsValue, sourceId, options = {}) {
   setSelectedGraphElements(key);
   selectedSourceId = String(sourceId ?? "");
+  if (!options.fromHistory) pushSelectionHistory(key);
   setDetails(detailsValue);
   applySourceFilter(sourceFilterSourceId);
   if (selectedSourceId) focusSourceLane(selectedSourceId);
+}
+function selectByGraphKey(key, options = {}) {
+  if (!key) return;
+  if (key.startsWith("node:")) {
+    const nodeId = key.slice(5);
+    const node = nodeById.get(nodeId);
+    if (!node) return;
+    const nodeSourceId = String(node?.metadata?.find(([k]) => k === "span_source_id")?.[1] ?? "");
+    selectGraphItem(key, { type: "node", ...node }, nodeSourceId, options);
+    const p = positions.get(node.id);
+    if (p) scrollViewportTo(p.x, p.y + nodeHeight / 2);
+    return;
+  }
+  if (key.startsWith("edge:")) {
+    const edgeEntry = edgeElements.find((entry) => entry.key === key);
+    if (!edgeEntry) return;
+    const edgeSourceId = String(edgeEntry.edge?.metadata?.find(([k]) => k === "span_source_id")?.[1] ?? "");
+    selectGraphItem(key, { type: "edge", ...edgeEntry.edge }, edgeSourceId, options);
+  }
 }
 function detailRow(key, value) {
   return `<div class="detail-row"><div class="detail-key">${htmlEscape(key)}</div><div class="detail-val">${htmlEscape(value ?? "")}</div></div>`;
@@ -1024,6 +1073,24 @@ function applySourceFilter(sourceId) {
   }
   applyDependencyFocus();
   applyNoiseReduction();
+}
+function wireDetailTraversal() {
+  const nodeButtons = details.querySelectorAll("[data-select-node-id]");
+  for (const button of nodeButtons) {
+    button.addEventListener("click", () => {
+      const nodeId = button.getAttribute("data-select-node-id") || "";
+      if (!nodeId) return;
+      selectByGraphKey(`node:${nodeId}`);
+    });
+  }
+  const edgeButtons = details.querySelectorAll("[data-select-edge-key]");
+  for (const button of edgeButtons) {
+    button.addEventListener("click", () => {
+      const edgeKey = button.getAttribute("data-select-edge-key") || "";
+      if (!edgeKey) return;
+      selectByGraphKey(edgeKey);
+    });
+  }
 }
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
@@ -1085,6 +1152,7 @@ function setDetails(value) {
       <pre class="raw-json-pre">${htmlEscape(JSON.stringify(value, null, 2))}</pre>
     </details>
   `;
+  wireDetailTraversal();
   highlightSourceInRegistry(sourceId);
   if (sourceFilterSourceId === "") {
     applySourceFilter(sourceId);
@@ -1177,8 +1245,8 @@ for (const edge of graph.edges) {
   const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
-  const edgeKey = `edge:${edge.from}->${edge.to}:${edge.kind}:${edge.label}`;
-  path.addEventListener("click", () => selectGraphItem(edgeKey, { type: "edge", ...edge }, edgeSourceId));
+  const edgeKey = edgeKeyFor(edge);
+  path.addEventListener("click", () => selectByGraphKey(edgeKey));
   svg.appendChild(path);
 
   const dx = x2 - x1;
@@ -1193,7 +1261,7 @@ for (const edge of graph.edges) {
   if (edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
     label.classList.add("edge-label-hit");
-    label.addEventListener("click", () => selectGraphItem(edgeKey, { type: "edge", ...edge }, edgeSourceId));
+    label.addEventListener("click", () => selectByGraphKey(edgeKey));
   }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
   label.textContent = edgeSemanticLabel(edge);
@@ -1215,11 +1283,7 @@ for (const node of graph.nodes) {
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
   const nodeKey = `node:${node.id}`;
-  g.addEventListener("click", () => {
-    selectGraphItem(nodeKey, { type: "node", ...node }, nodeSourceId);
-    const p = positions.get(node.id);
-    if (p) scrollViewportTo(p.x, p.y + nodeHeight / 2);
-  });
+  g.addEventListener("click", () => selectByGraphKey(nodeKey));
 
   const rect = el("rect", { width: 196, height: 54 });
   g.appendChild(rect);
@@ -1278,6 +1342,23 @@ if (hideStdlibNoiseToggle) {
     applyNoiseReduction();
   });
 }
+if (selectionHistoryBack) {
+  selectionHistoryBack.addEventListener("click", () => {
+    if (selectionHistoryIndex <= 0) return;
+    selectionHistoryIndex -= 1;
+    updateSelectionHistoryButtons();
+    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true });
+  });
+}
+if (selectionHistoryForward) {
+  selectionHistoryForward.addEventListener("click", () => {
+    if (selectionHistoryIndex === -1 || selectionHistoryIndex >= selectionHistory.length - 1) return;
+    selectionHistoryIndex += 1;
+    updateSelectionHistoryButtons();
+    selectByGraphKey(selectionHistory[selectionHistoryIndex], { fromHistory: true });
+  });
+}
+updateSelectionHistoryButtons();
 applySemanticFilters();
 svg.style.transformOrigin = "0 0";
 svg.style.transform = "scale(1)";

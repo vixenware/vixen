@@ -133,6 +133,14 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("upstream path"));
     assert!(html.contains("downstream path"));
     assert!(html.contains("Why This Edge Exists"));
+    assert!(html.contains("data-select-node-id"));
+    assert!(html.contains("data-select-edge-key"));
+    assert!(html.contains("wireDetailTraversal("));
+    assert!(html.contains("selectByGraphKey("));
+    assert!(html.contains("selection-history-back"));
+    assert!(html.contains("selection-history-forward"));
+    assert!(html.contains("updateSelectionHistoryButtons("));
+    assert!(html.contains("pushSelectionHistory("));
     assert!(html.contains("runtime_role_summary"));
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -247,6 +255,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("noise-dim"));
     assert!(html.contains("focus-path-mode"));
     assert!(html.contains("Connection Focus"));
+    assert!(html.contains("open node"));
+    assert!(html.contains("open edge"));
+    assert!(html.contains("selection-nav"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
