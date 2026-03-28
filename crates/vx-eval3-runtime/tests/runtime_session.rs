@@ -567,10 +567,10 @@ impl BoundaryDriver for CcVersionDriver {
                         _ => "unknown".to_owned(),
                     }
                 );
-                let value = ExecValue::Pair(
-                    Box::new(ExecValue::Int(0)),
-                    Box::new(ExecValue::String(stdout)),
-                );
+                let value = ExecValue::ProcessResult {
+                    exit_code: 0,
+                    stdout,
+                };
                 self.last_exec_value = Some(value.clone());
                 Ok(value)
             }
@@ -670,6 +670,20 @@ fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
     assert!(
         driver.saw_exec_argv_shape,
         "exec request should carry argv-like concrete inputs"
+    );
+    assert!(
+        matches!(
+            outcome.entry_result,
+            ExecValue::ProcessResult {
+                exit_code: _,
+                stdout: _
+            }
+        ),
+        "cc-version mini-host result should be typed process output, not tuple/pair sentinel"
+    );
+    assert!(
+        !matches!(outcome.entry_result, ExecValue::Pair(_, _)),
+        "cc-version mini-host must not regress to Pair(Int, String) output"
     );
     assert_eq!(
         outcome.entry_result,

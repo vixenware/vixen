@@ -11,6 +11,7 @@ use vx_eval3_analysis::{
 pub enum ExecValue {
     Int(i64),
     String(String),
+    ProcessResult { exit_code: i64, stdout: String },
     Pair(Box<ExecValue>, Box<ExecValue>),
     Callable(CallableValue),
     LazyPoison(String),
