@@ -106,6 +106,14 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("edge-role-value_flow"));
     assert!(html.contains("edgeSemanticLabel("));
     assert!(html.contains("semantic-summary"));
+    assert!(html.contains("Semantic Filters"));
+    assert!(html.contains("filter-demand"));
+    assert!(html.contains("filter-runtime-role"));
+    assert!(html.contains("filter-sharing"));
+    assert!(html.contains("applySemanticFilters("));
+    assert!(html.contains("matchesNodeSemanticFilters("));
+    assert!(html.contains("semanticNarrative("));
+    assert!(html.contains("Why It Matters"));
     assert!(html.contains("runtime_role_summary"));
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -213,6 +221,8 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("node-badge"));
     assert!(html.contains("sharing_role"));
     assert!(html.contains("Runtime Role"));
+    assert!(html.contains("hidden-semantic"));
+    assert!(html.contains("semantic-controls"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {

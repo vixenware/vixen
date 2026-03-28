@@ -228,6 +228,11 @@ impl AnalysisGraph {
         );
         out.push_str("  .source-registry li.active { color: #7dd3fc; font-weight: 600; }\n");
         out.push_str("  .source-registry li.focused { color: #a5f3fc; font-weight: 700; }\n");
+        out.push_str("  .semantic-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .semantic-controls .control-row { display: grid; grid-template-columns: 92px 1fr; gap: 8px; margin-bottom: 8px; align-items: center; }\n");
+        out.push_str("  .semantic-controls .control-row:last-child { margin-bottom: 0; }\n");
+        out.push_str("  .semantic-controls label { color: #8ba5c1; }\n");
+        out.push_str("  .semantic-controls select { background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 6px; font-size: 12px; }\n");
         out.push_str("  details.raw-json { margin-top: 8px; }\n");
         out.push_str(
             "  details.raw-json > summary { cursor: pointer; font-size: 12px; color: #7dd3fc; }\n",
@@ -289,6 +294,7 @@ impl AnalysisGraph {
         out.push_str("  .edge-label.edge-role-ownership { fill: #a6e3a1; }\n");
         out.push_str("  .edge-label.edge-role-call { fill: #89dceb; }\n");
         out.push_str("  .dimmed { opacity: 0.18; }\n");
+        out.push_str("  .hidden-semantic { display: none; }\n");
         out.push_str("  .selected { opacity: 1 !important; }\n");
         out.push_str("  .node.selected rect { stroke: #f1f5f9; stroke-width: 2.4; filter: drop-shadow(0 0 4px rgba(241,245,249,0.35)); }\n");
         out.push_str("  .edge.selected { stroke-width: 2.5; filter: drop-shadow(0 0 3px rgba(241,245,249,0.35)); }\n");
@@ -297,6 +303,7 @@ impl AnalysisGraph {
         out.push_str(
             "  .semantic-summary { margin: 8px 0 0 0; font-size: 12px; color: #8ba5c1; }\n",
         );
+        out.push_str("  .semantic-explain { margin: 6px 0 0 0; font-size: 12px; line-height: 1.4; color: #c7d6e6; }\n");
         out.push_str("  .arb-snippet { white-space: pre-wrap; word-break: break-word; }\n");
         out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
         out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
@@ -323,7 +330,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -337,20 +344,29 @@ const zoomInButton = document.getElementById("zoom-in");
 const zoomOutButton = document.getElementById("zoom-out");
 const zoomResetButton = document.getElementById("zoom-reset");
 const zoomStatus = document.getElementById("zoom-status");
+const filterDemand = document.getElementById("filter-demand");
+const filterRuntimeRole = document.getElementById("filter-runtime-role");
+const filterSharing = document.getElementById("filter-sharing");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
 const selectableElements = new Map();
 const laneRectsBySource = new Map();
+const nodeElementsById = new Map();
+const edgeElements = [];
 let selectedGraphKey = "";
 let selectedSourceId = "";
 let viewportScale = 1;
+let semanticDemandFilter = "all";
+let semanticRuntimeRoleFilter = "all";
+let semanticSharingFilter = "all";
 
 const nodeWidth = 196;
 const nodeHeight = 54;
 const yStart = 64;
 const nodeSpacing = 72;
+const denseGraph = graph.nodes.length >= 48;
 const kindOrder = ["body", "kernel", "runtime_boundary", "closure_layout"];
 const columns = {
   body: 120,
@@ -448,6 +464,41 @@ function edgeSemanticLabel(edge) {
   if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
   return edge.label;
 }
+function semanticNarrative(value) {
+  if (!value || typeof value !== "object") return "";
+  if (value.type === "node") {
+    const demand = nodeDemandState(value);
+    const sharing = nodeSharingState(value);
+    const runtimeRole = nodeRuntimeRole(value);
+    if (runtimeRole !== "none") {
+      const roleText = runtimeRole.replaceAll("_", "-");
+      return `This runtime boundary acts as ${roleText}; it marks host/runtime interaction, and upstream demand determines whether it becomes active work.`;
+    }
+    if (sharing === "shared") {
+      return demand === "demanded"
+        ? "This node is both demanded and shared, so it is likely a key reuse point that feeds multiple consumers."
+        : "This node is shared across uses, but currently not demanded; it remains available for reuse without being on the active path.";
+    }
+    if (sharing === "closure_env") {
+      return "This closure layout carries captured values; demand here indicates call-sites are pulling data through the closure environment.";
+    }
+    if (demand === "demanded") {
+      return "This node is currently demanded, so it contributes to the observed result path in this structural snapshot.";
+    }
+    if (demand === "nondemanded") {
+      return "This node is currently not demanded; it exists structurally but is not on the active observed path.";
+    }
+    return "This node contributes structural context; semantic demand/sharing markers are not available for this node kind.";
+  }
+  if (value.type === "edge") {
+    const role = edgeRoleForKind(value.kind);
+    if (role === "value_flow") return "This edge carries runtime value/data flow between boundary nodes.";
+    if (role === "ownership") return "This edge shows runtime ownership of a closure layout argument.";
+    if (role === "call") return "This edge links a source-local call-site to its resolved callee body/layout.";
+    return "This edge shows structural extraction or demand linkage in the current analysis graph.";
+  }
+  return "Use filters and selection to focus semantic demand, sharing, and runtime role signals.";
+}
 function semanticSummaryRows(value, metadata) {
   if (!value || typeof value !== "object") return "";
   const rows = [];
@@ -463,15 +514,37 @@ function semanticSummaryRows(value, metadata) {
   }
   return rows.join("");
 }
+function matchesNodeSemanticFilters(node) {
+  const demand = nodeDemandState(node);
+  const sharing = nodeSharingState(node);
+  const runtimeRole = nodeRuntimeRole(node);
+  if (semanticDemandFilter !== "all" && demand !== semanticDemandFilter) return false;
+  if (semanticRuntimeRoleFilter !== "all" && runtimeRole !== semanticRuntimeRoleFilter) return false;
+  if (semanticSharingFilter !== "all" && sharing !== semanticSharingFilter) return false;
+  return true;
+}
+function applySemanticFilters() {
+  const visibleNodeIds = new Set();
+  for (const [nodeId, entry] of nodeElementsById.entries()) {
+    const visible = matchesNodeSemanticFilters(entry.node);
+    entry.element.classList.toggle("hidden-semantic", !visible);
+    if (visible) visibleNodeIds.add(nodeId);
+  }
+  for (const entry of edgeElements) {
+    const visible = visibleNodeIds.has(entry.edge.from) && visibleNodeIds.has(entry.edge.to);
+    entry.path.classList.toggle("hidden-semantic", !visible);
+    entry.label.classList.toggle("hidden-semantic", !visible);
+  }
+}
 function addNodeBadges(group, node) {
   const badges = [];
   const demand = nodeDemandState(node);
-  if (demand !== "unknown") badges.push({ role: "demand", text: demand === "demanded" ? "demanded" : "idle" });
+  if (demand !== "unknown") badges.push({ role: "demand", text: denseGraph ? (demand === "demanded" ? "D+" : "D-") : (demand === "demanded" ? "demanded" : "idle") });
   const sharing = nodeSharingState(node);
-  if (sharing !== "local") badges.push({ role: "sharing", text: sharing.replaceAll("_", "-") });
+  if (sharing !== "local") badges.push({ role: "sharing", text: denseGraph ? (sharing === "shared" ? "S" : "C") : sharing.replaceAll("_", "-") });
   const runtimeRole = nodeRuntimeRole(node);
-  if (runtimeRole !== "none") badges.push({ role: "runtime", text: runtimeRole.replaceAll("_", "-") });
-  badges.slice(0, 3).forEach((badge, idx) => {
+  if (runtimeRole !== "none") badges.push({ role: "runtime", text: denseGraph ? runtimeRole.slice(0, 2).toUpperCase() : runtimeRole.replaceAll("_", "-") });
+  badges.slice(0, denseGraph ? 2 : 3).forEach((badge, idx) => {
     const badgeGroup = el("g", { class: `node-badge node-badge-${badge.role}` });
     const badgeWidth = Math.max(40, 10 + badge.text.length * 5.4);
     const x = nodeWidth - badgeWidth - 8;
@@ -737,6 +810,7 @@ function setDetails(value) {
     .map(([key, val]) => detailRow(key, val))
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
+  const semanticExplain = semanticNarrative(value);
 
   const snippetBlock = snippet
     ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${
@@ -755,6 +829,7 @@ function setDetails(value) {
       <div class="detail-title">Summary</div>
       ${baseRows}
       ${semanticRows ? `<div class="semantic-summary">Semantic View</div>${semanticRows}` : ""}
+      ${semanticExplain ? `<div class="semantic-summary">Why It Matters</div><div class="semantic-explain">${htmlEscape(semanticExplain)}</div>` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
     ${snippetBlock}
@@ -877,6 +952,7 @@ for (const edge of graph.edges) {
   label.textContent = edgeSemanticLabel(edge);
   svg.appendChild(label);
   registerSelectable(edgeKey, [path, label]);
+  edgeElements.push({ edge, path, label });
 }
 
 for (const node of graph.nodes) {
@@ -912,10 +988,30 @@ for (const node of graph.nodes) {
   g.appendChild(text);
   svg.appendChild(g);
   registerSelectable(nodeKey, [g]);
+  nodeElementsById.set(node.id, { node, element: g });
 }
 
 renderSourceRegistry(graph);
 applySourceFilter("");
+if (filterDemand) {
+  filterDemand.addEventListener("change", () => {
+    semanticDemandFilter = filterDemand.value || "all";
+    applySemanticFilters();
+  });
+}
+if (filterRuntimeRole) {
+  filterRuntimeRole.addEventListener("change", () => {
+    semanticRuntimeRoleFilter = filterRuntimeRole.value || "all";
+    applySemanticFilters();
+  });
+}
+if (filterSharing) {
+  filterSharing.addEventListener("change", () => {
+    semanticSharingFilter = filterSharing.value || "all";
+    applySemanticFilters();
+  });
+}
+applySemanticFilters();
 svg.style.transformOrigin = "0 0";
 svg.style.transform = "scale(1)";
 updateZoomStatus();
