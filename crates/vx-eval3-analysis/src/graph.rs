@@ -2873,6 +2873,10 @@ fn project_analysis_graph_internal(
                     "local_only".to_owned()
                 },
             ),
+            (
+                "demand_model_note".to_owned(),
+                demand_model_note(&body.result_observation).to_owned(),
+            ),
         ];
         if let Some(ctx) = context {
             metadata.push(("body_name".to_owned(), body_name.clone()));
@@ -2922,11 +2926,6 @@ fn project_analysis_graph_internal(
             runtime_extract_count,
             shared_extract_count,
         );
-        let demand_model_note = if kernel.result_obs == crate::Observation::NoObs {
-            "idle in current one-step demand model"
-        } else {
-            "active in current one-step demand model"
-        };
         let mut metadata = vec![
             ("kernel_id".to_owned(), kernel.id.0.to_string()),
             ("body_id".to_owned(), kernel.body.0.to_string()),
@@ -2938,7 +2937,10 @@ fn project_analysis_graph_internal(
                 "kernel_reason_summary".to_owned(),
                 kernel_reason_summary.to_owned(),
             ),
-            ("demand_model_note".to_owned(), demand_model_note.to_owned()),
+            (
+                "demand_model_note".to_owned(),
+                demand_model_note(&kernel.result_obs).to_owned(),
+            ),
             (
                 "source_local_call_count".to_owned(),
                 source_local_call_count.to_string(),
@@ -3361,36 +3363,17 @@ fn kernel_reason_summary(
     runtime_extract_count: usize,
     shared_extract_count: usize,
 ) -> String {
-    let mut segments = Vec::new();
-    if source_local_call_count > 0 {
-        segments.push(format!(
-            "{} call{} kept local",
-            source_local_call_count,
-            if source_local_call_count == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ));
-    }
-    if runtime_extract_count > 0 {
-        segments.push(format!(
-            "{} runtime boundary extract{}",
-            runtime_extract_count,
-            if runtime_extract_count == 1 { "" } else { "s" }
-        ));
-    }
-    if shared_extract_count > 0 {
-        segments.push(format!(
-            "{} shared value extract{}",
-            shared_extract_count,
-            if shared_extract_count == 1 { "" } else { "s" }
-        ));
-    }
-    if segments.is_empty() {
-        "local orchestration retained in kernel".to_owned()
-    } else {
-        segments.join("; ")
+    format!(
+        "local calls: {source_local_call_count}; runtime-boundary extracts: {runtime_extract_count}; shared-value extracts: {shared_extract_count}"
+    )
+}
+
+fn demand_model_note(observation: &crate::Observation) -> &'static str {
+    match observation {
+        crate::Observation::NoObs => {
+            "idle in current one-step demand model; may be either truly nondemanded or beyond one-step propagation"
+        }
+        _ => "active in current one-step demand model (entry-seeded path)",
     }
 }
 

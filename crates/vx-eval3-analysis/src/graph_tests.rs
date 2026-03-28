@@ -528,6 +528,122 @@ fn zoo_tri_platform_png_projection_and_export_are_deterministic_across_repeated_
     assert_eq!(graph_a.to_standalone_html(), graph_b.to_standalone_html());
 }
 
+#[test]
+fn zoo_tri_platform_png_graph_has_meaningful_member_call_structure() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+
+    let member_call_kernel_edge = graph.edges.iter().find(|edge| {
+        edge.kind == GraphEdgeKind::BodyToKernel
+            && metadata_value(&edge.metadata, "source_snippet")
+                .map(|snippet| {
+                    snippet.contains("zlib.build(")
+                        && snippet.contains("libpng.build(")
+                        && (snippet.contains("pnggen.build(") || snippet.contains("let app"))
+                })
+                .unwrap_or(false)
+    });
+    assert!(
+        member_call_kernel_edge.is_some(),
+        "expected structural member-call chain (zlib/libpng/pnggen) in build_for kernel source snippet"
+    );
+    let runtime_boundary_extract_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == GraphEdgeKind::BodyToRuntimeBoundary)
+        .count();
+    assert!(
+        runtime_boundary_extract_edges >= 2,
+        "expected runtime-boundary extractions to remain explicit in project-backed graph"
+    );
+
+    let call_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == GraphEdgeKind::CallToBody)
+        .collect::<Vec<_>>();
+    assert!(
+        call_edges.iter().any(|edge| {
+            metadata_value(&edge.metadata, "call_target") == Some("fn render_png")
+                && metadata_value(&edge.metadata, "call_kind") == Some("direct-call")
+        }),
+        "expected a direct local call edge targeting render_png"
+    );
+    assert!(
+        call_edges
+            .iter()
+            .filter(|edge| metadata_value(&edge.metadata, "call_target") == Some("fn build_for"))
+            .count()
+            >= 2,
+        "expected both direct and closure-mapped local call edges targeting build_for"
+    );
+    assert!(
+        call_edges.iter().any(|edge| {
+            metadata_value(&edge.metadata, "source_snippet")
+                .map(|snippet| {
+                    snippet.contains("config.platforms(env)")
+                        && snippet.contains("build_for(workspace")
+                })
+                .unwrap_or(false)
+        }),
+        "expected build -> build_for edge derived from member-call traversal in map closure"
+    );
+}
+
+#[test]
+fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    let graph = graph_from_file(&zoo_file).expect("project graph projection should succeed");
+
+    let render_kernel = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == GraphNodeKind::Kernel
+                && metadata_value(&node.metadata, "body_name") == Some("render_png")
+        })
+        .expect("render_png kernel node should exist");
+    assert_eq!(
+        metadata_value(&render_kernel.metadata, "kernel_result_observation"),
+        Some("NeedValue")
+    );
+    assert!(
+        metadata_value(&render_kernel.metadata, "demand_model_note")
+            .unwrap_or("")
+            .contains("entry-seeded path")
+    );
+    assert_eq!(
+        metadata_value(&render_kernel.metadata, "kernel_reason_summary"),
+        Some("local calls: 0; runtime-boundary extracts: 2; shared-value extracts: 0")
+    );
+
+    for idle_body_name in ["build_for", "build"] {
+        let kernel = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == GraphNodeKind::Kernel
+                    && metadata_value(&node.metadata, "body_name") == Some(idle_body_name)
+            })
+            .unwrap_or_else(|| panic!("{idle_body_name} kernel node should exist"));
+        assert_eq!(
+            metadata_value(&kernel.metadata, "kernel_result_observation"),
+            Some("NoObs")
+        );
+        let note = metadata_value(&kernel.metadata, "demand_model_note").unwrap_or("");
+        assert!(
+            note.contains("truly nondemanded") && note.contains("beyond one-step propagation"),
+            "idle demand note should distinguish true nondemand from model-depth limits"
+        );
+    }
+}
+
+fn metadata_value<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    metadata
+        .iter()
+        .find_map(|(k, v)| if k == key { Some(v.as_str()) } else { None })
+}
+
 fn unique_temp_path(filename: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
