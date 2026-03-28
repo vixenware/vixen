@@ -210,8 +210,9 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("selectedCausalPathFromValue("));
     assert!(html.contains("selectedCausalPathFromKey("));
     assert!(html.contains("edgeMachineId("));
-    assert!(html.contains("demand_justification_node_ids"));
-    assert!(html.contains("demand_justification_edge_ids"));
+    assert!(html.contains("clientFacts("));
+    assert!(html.contains("selected_causal_path_node_ids"));
+    assert!(html.contains("selected_causal_path_edge_ids"));
     assert!(!html.contains("Demand Path Nodes"));
     assert!(!html.contains("detailRow(\"Demand Path Nodes\""));
     assert!(!html.contains("Demand Path Edges"));
@@ -656,6 +657,10 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         metadata_value(&render_kernel.metadata, "demand_justification_status"),
         Some("propagated")
     );
+    assert_eq!(
+        render_kernel.client.demand_justification_status.as_deref(),
+        Some("propagated")
+    );
     assert!(
         metadata_value(&render_kernel.metadata, "demand_justification_path")
             .unwrap_or("")
@@ -663,21 +668,27 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         "render_png kernel should expose upstream path through build_for"
     );
     assert!(
-        metadata_value(&render_kernel.metadata, "demand_justification_node_ids")
-            .unwrap_or("")
-            .contains("body_b"),
+        render_kernel
+            .client
+            .selected_causal_path_node_ids
+            .iter()
+            .any(|id| id.starts_with("body_b")),
         "render_png kernel should include machine-readable body-node path IDs"
     );
     assert!(
-        metadata_value(&render_kernel.metadata, "demand_justification_edge_ids")
-            .unwrap_or("")
-            .contains("call_to_body:"),
+        render_kernel
+            .client
+            .selected_causal_path_edge_ids
+            .iter()
+            .any(|id| id.starts_with("call_to_body:")),
         "render_png kernel should include machine-readable path edge IDs"
     );
     assert!(
-        metadata_value(&render_kernel.metadata, "demand_justification_edge_ids")
-            .unwrap_or("")
-            .contains("body_to_kernel:"),
+        render_kernel
+            .client
+            .selected_causal_path_edge_ids
+            .iter()
+            .any(|id| id.starts_with("body_to_kernel:")),
         "kernel demand path contract should include owning body->kernel link ID"
     );
     assert!(
@@ -752,9 +763,7 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
                 "build_for kernel should expose module-qualified demand path"
             );
             assert!(
-                metadata_value(&kernel.metadata, "demand_justification_node_ids")
-                    .unwrap_or("")
-                    .contains("->"),
+                kernel.client.selected_causal_path_node_ids.len() >= 2,
                 "build_for kernel should include multi-step machine-readable path nodes"
             );
             let local_calls = metadata_value(&kernel.metadata, "kernel_local_calls").unwrap_or("");
@@ -1013,21 +1022,19 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
             "imported `{imported_file}` build body should include module-qualified destination in demand path"
         );
         assert!(
-            metadata_value(
-                &imported_build_body.metadata,
-                "demand_justification_node_ids"
-            )
-            .unwrap_or("")
-            .contains("body_b"),
+            imported_build_body
+                .client
+                .selected_causal_path_node_ids
+                .iter()
+                .any(|id| id.starts_with("body_b")),
             "imported `{imported_file}` build body should include machine-readable path node IDs"
         );
         assert!(
-            metadata_value(
-                &imported_build_body.metadata,
-                "demand_justification_edge_ids"
-            )
-            .unwrap_or("")
-            .contains("call_to_body:"),
+            imported_build_body
+                .client
+                .selected_causal_path_edge_ids
+                .iter()
+                .any(|id| id.starts_with("call_to_body:")),
             "imported `{imported_file}` build body should include machine-readable path edge IDs"
         );
         assert!(

@@ -18,6 +18,13 @@ use crate::{
 
 pub type GraphMetadata = Vec<(String, String)>;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct GraphNodeClientFacts {
+    pub demand_justification_status: Option<String>,
+    pub selected_causal_path_node_ids: Vec<String>,
+    pub selected_causal_path_edge_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GraphNodeKind {
     Body,
@@ -42,6 +49,7 @@ pub struct GraphNode {
     pub id: String,
     pub kind: GraphNodeKind,
     pub label: String,
+    pub client: GraphNodeClientFacts,
     pub metadata: GraphMetadata,
 }
 
@@ -194,6 +202,9 @@ impl AnalysisGraph {
             out.push_str(",\n");
             out.push_str("      \"label\": ");
             push_json_str(&mut out, &node.label);
+            out.push_str(",\n");
+            out.push_str("      \"client\": ");
+            push_json_node_client_facts(&mut out, &node.client, 6);
             out.push_str(",\n");
             out.push_str("      \"metadata\": ");
             push_json_metadata(&mut out, &node.metadata, 6);
@@ -656,6 +667,10 @@ function metadataMap(entries) {
   if (entries && typeof entries === "object") return entries;
   return {};
 }
+function clientFacts(value) {
+  if (value && value.client && typeof value.client === "object") return value.client;
+  return {};
+}
 function parsePositiveInt(value) {
   const n = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -1106,12 +1121,17 @@ function selectedCausalPathFromValue(value) {
     return `${edge.kind}:${edge.from}->${edge.to}`;
   }
   const metadata = metadataMap(value.metadata);
-  const nodePathRaw = String(metadata.demand_justification_node_ids ?? "");
-  if (!nodePathRaw) return null;
-  const pathNodeIds = nodePathRaw
-    .split("->")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0 && nodeElementsById.has(part));
+  const client = clientFacts(value);
+  const pathNodeIdsFromClient = Array.isArray(client.selected_causal_path_node_ids)
+    ? client.selected_causal_path_node_ids.map((item) => String(item)).filter((item) => item.length > 0)
+    : [];
+  const pathNodeIds = (pathNodeIdsFromClient.length > 0
+    ? pathNodeIdsFromClient
+    : String(metadata.demand_justification_node_ids ?? "")
+        .split("->")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+  ).filter((part) => nodeElementsById.has(part));
   if (pathNodeIds.length === 0) return null;
 
   const primaryNodes = new Set(pathNodeIds);
@@ -1119,11 +1139,16 @@ function selectedCausalPathFromValue(value) {
   const primaryEdges = new Set();
   const neighborNodes = new Set();
   const neighborEdges = new Set();
-  const edgePathRaw = String(metadata.demand_justification_edge_ids ?? "");
-  const pathEdgeIds = edgePathRaw
-    .split("|")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+  const pathEdgeIdsFromClient = Array.isArray(client.selected_causal_path_edge_ids)
+    ? client.selected_causal_path_edge_ids.map((item) => String(item)).filter((item) => item.length > 0)
+    : [];
+  const pathEdgeIds = (pathEdgeIdsFromClient.length > 0
+    ? pathEdgeIdsFromClient
+    : String(metadata.demand_justification_edge_ids ?? "")
+        .split("|")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+  );
   if (pathEdgeIds.length > 0) {
     for (const edgeId of pathEdgeIds) {
       const edgeEntry = edgeElements
@@ -3008,7 +3033,7 @@ fn project_analysis_graph_internal(
                 demand_model_note(&body.result_observation).to_owned(),
             ),
         ];
-        append_demand_justification_metadata(
+        let client = append_demand_justification_metadata(
             &mut metadata,
             &demand_justification,
             body.id,
@@ -3030,6 +3055,7 @@ fn project_analysis_graph_internal(
                 "Body {} (B{})\nresult={:?}",
                 body_name, body.id.0, body.result_observation
             ),
+            client,
             metadata,
         });
     }
@@ -3108,7 +3134,7 @@ fn project_analysis_graph_internal(
                 shared_extract_count.to_string(),
             ),
         ];
-        append_demand_justification_metadata(
+        let client = append_demand_justification_metadata(
             &mut metadata,
             &demand_justification,
             kernel.body,
@@ -3138,6 +3164,7 @@ fn project_analysis_graph_internal(
                 "Kernel K{} in {} (B{})\n{}",
                 kernel.id.0, owner_name, kernel.body.0, kernel_reason_summary
             ),
+            client,
             metadata,
         });
     }
@@ -3207,7 +3234,7 @@ fn project_analysis_graph_internal(
             .get(&source_expr.body)
             .map(|body| &body.result_observation)
             .unwrap_or(&crate::Observation::NoObs);
-        append_demand_justification_metadata(
+        let client = append_demand_justification_metadata(
             &mut metadata,
             &demand_justification,
             source_expr.body,
@@ -3226,6 +3253,7 @@ fn project_analysis_graph_internal(
                 "Runtime R{} [{}]\n{}",
                 runtime_id, role_summary, source_note
             ),
+            client,
             metadata,
         });
     }
@@ -3265,6 +3293,7 @@ fn project_analysis_graph_internal(
             id: layout_node_id(layout.id.0),
             kind: GraphNodeKind::ClosureLayout,
             label: format!("Layout L{}\n{}", layout.id.0, closure_label),
+            client: GraphNodeClientFacts::default(),
             metadata,
         });
     }
@@ -4021,7 +4050,7 @@ fn append_demand_justification_metadata(
     selected_node_id: &str,
     selected_kind: GraphNodeKind,
     context: Option<&BridgeGraphContext<'_>>,
-) {
+) -> GraphNodeClientFacts {
     let path = justification.path_to(body_id);
     let path_steps = justification.steps_to(body_id);
     let path_text = if path.is_empty() {
@@ -4147,23 +4176,17 @@ fn append_demand_justification_metadata(
     }
     metadata.push(("demand_justification_path".to_owned(), path_text));
     metadata.push((
-        "demand_justification_node_ids".to_owned(),
-        path.iter()
-            .map(|id| body_node_id(*id))
-            .collect::<Vec<_>>()
-            .join(" -> "),
-    ));
-    metadata.push((
-        "demand_justification_edge_ids".to_owned(),
-        edge_ids.join(" | "),
-    ));
-    metadata.push((
         "demand_justification_path_modules".to_owned(),
         path_module_text,
     ));
     metadata.push(("demand_justification_trace".to_owned(), path_trace));
     metadata.push(("demand_justification_edge".to_owned(), edge_text));
     metadata.push(("demand_justification_summary".to_owned(), summary));
+    GraphNodeClientFacts {
+        demand_justification_status: Some(status.to_owned()),
+        selected_causal_path_node_ids: path.iter().map(|id| body_node_id(*id)).collect(),
+        selected_causal_path_edge_ids: edge_ids,
+    }
 }
 
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
@@ -4248,6 +4271,42 @@ fn push_json_metadata(out: &mut String, metadata: &GraphMetadata, indent: usize)
         }
         out.push('\n');
     }
+    out.push_str(&pad);
+    out.push('}');
+}
+
+fn push_json_node_client_facts(out: &mut String, facts: &GraphNodeClientFacts, indent: usize) {
+    let pad = " ".repeat(indent);
+    let pad_inner = " ".repeat(indent + 2);
+    out.push_str("{\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "demand_justification_status");
+    out.push_str(": ");
+    match &facts.demand_justification_status {
+        Some(status) => push_json_str(out, status),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "selected_causal_path_node_ids");
+    out.push_str(": [");
+    for (index, node_id) in facts.selected_causal_path_node_ids.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        push_json_str(out, node_id);
+    }
+    out.push_str("],\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "selected_causal_path_edge_ids");
+    out.push_str(": [");
+    for (index, edge_id) in facts.selected_causal_path_edge_ids.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        push_json_str(out, edge_id);
+    }
+    out.push_str("]\n");
     out.push_str(&pad);
     out.push('}');
 }
