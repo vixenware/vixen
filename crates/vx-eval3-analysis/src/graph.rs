@@ -210,6 +210,8 @@ impl AnalysisGraph {
         out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 14px; color: #dbe7f3; }\n");
         out.push_str("  .detail-card { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 10px; }\n");
         out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; color: #dbe7f3; }\n");
+        out.push_str("  .detail-card ul { margin: 6px 0 0 18px; padding: 0; }\n");
+        out.push_str("  .detail-card li { margin: 4px 0; color: #c7d6e6; }\n");
         out.push_str("  .detail-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin-bottom: 6px; font-size: 12px; }\n");
         out.push_str("  .detail-row:last-child { margin-bottom: 0; }\n");
         out.push_str("  .detail-key { color: #8ba5c1; }\n");
@@ -340,7 +342,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -358,6 +360,7 @@ const filterDemand = document.getElementById("filter-demand");
 const filterRuntimeRole = document.getElementById("filter-runtime-role");
 const filterSharing = document.getElementById("filter-sharing");
 const focusNeighborhoodToggle = document.getElementById("focus-neighborhood-toggle");
+const focusPathMode = document.getElementById("focus-path-mode");
 const hideStdlibNoiseToggle = document.getElementById("hide-stdlib-noise-toggle");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
@@ -376,6 +379,7 @@ let semanticRuntimeRoleFilter = "all";
 let semanticSharingFilter = "all";
 let dependencyFocusEnabled = false;
 let hideStdlibNoiseEnabled = false;
+let dependencyFocusMode = "neighborhood";
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -389,6 +393,7 @@ const columns = {
   runtime_boundary: 680,
   closure_layout: 960,
 };
+const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
 function sourceIdForNode(node) {
   const sourceId = node?.metadata?.span_source_id;
@@ -483,6 +488,51 @@ function edgeSemanticLabel(edge) {
   if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
   return edge.label;
 }
+function nodeShortLabel(nodeId) {
+  const node = nodeById.get(nodeId);
+  if (!node) return nodeId;
+  const firstLine = String(node.label || node.id).split("\n")[0];
+  return firstLine.length > 84 ? `${firstLine.slice(0, 81)}...` : firstLine;
+}
+function edgeWhyText(edge) {
+  const role = edgeRoleForKind(edge.kind);
+  if (role === "value_flow") return "A runtime value from the source boundary feeds the destination boundary.";
+  if (role === "ownership") return "The runtime boundary owns or carries a closure-layout argument needed for execution.";
+  if (role === "call") return "A source-local call-site resolved this dependency between caller and callee.";
+  if (edge.kind === "body_to_kernel") return "Kernel execution demand is seeded from its owning body.";
+  if (edge.kind === "body_to_runtime_boundary") return "The body extracts a runtime boundary node from the source expression.";
+  return "This edge preserves a structural dependency in the projected analysis graph.";
+}
+function dependencySummaryHtml(value) {
+  if (!value || value.type !== "node" || !value.id) return "";
+  const incoming = graph.edges
+    .filter((edge) => edge.to === value.id)
+    .slice()
+    .sort((a, b) => `${a.kind}|${a.from}|${a.label}`.localeCompare(`${b.kind}|${b.from}|${b.label}`));
+  const outgoing = graph.edges
+    .filter((edge) => edge.from === value.id)
+    .slice()
+    .sort((a, b) => `${a.kind}|${a.to}|${a.label}`.localeCompare(`${b.kind}|${b.to}|${b.label}`));
+  const incomingItems = incoming.length === 0
+    ? `<li>None</li>`
+    : incoming
+        .map((edge) => `<li><strong>${htmlEscape(nodeShortLabel(edge.from))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</li>`)
+        .join("");
+  const outgoingItems = outgoing.length === 0
+    ? `<li>None</li>`
+    : outgoing
+        .map((edge) => `<li><strong>${htmlEscape(nodeShortLabel(edge.to))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</li>`)
+        .join("");
+  return `
+    <div class="detail-card">
+      <div class="detail-title">Dependency Summary</div>
+      <div class="semantic-summary">What this node depends on</div>
+      <ul>${incomingItems}</ul>
+      <div class="semantic-summary">What depends on this node</div>
+      <ul>${outgoingItems}</ul>
+    </div>
+  `;
+}
 function semanticNarrative(value) {
   if (!value || typeof value !== "object") return "";
   if (value.type === "node") {
@@ -562,6 +612,7 @@ function connectionSummaryRows(value) {
       detailRow("From", value.from),
       detailRow("To", value.to),
       detailRow("Role Meaning", edgeSemanticLabel(value)),
+      detailRow("Why This Edge Exists", edgeWhyText(value)),
     ].join("");
   }
   return "";
@@ -629,6 +680,31 @@ function selectedNeighborhoodFromKey(key) {
   }
   return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
 }
+function selectedTraceFromNode(nodeId, mode) {
+  const primaryNodes = new Set([nodeId]);
+  const primaryEdges = new Set();
+  const neighborNodes = new Set();
+  const neighborEdges = new Set();
+  const queue = [nodeId];
+  const visitedNodes = new Set([nodeId]);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const entry of edgeElements) {
+      const next =
+        mode === "upstream"
+          ? (entry.edge.to === current ? entry.edge.from : null)
+          : (entry.edge.from === current ? entry.edge.to : null);
+      if (!next) continue;
+      neighborEdges.add(entry.key);
+      if (!visitedNodes.has(next)) {
+        visitedNodes.add(next);
+        queue.push(next);
+      }
+      if (next !== nodeId) neighborNodes.add(next);
+    }
+  }
+  return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
+}
 function applyDependencyFocus() {
   for (const entry of edgeElements) {
     entry.path.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
@@ -638,7 +714,16 @@ function applyDependencyFocus() {
     entry.element.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
   }
   if (!dependencyFocusEnabled) return;
-  const neighborhood = selectedNeighborhoodFromKey(selectedGraphKey);
+  let neighborhood = selectedNeighborhoodFromKey(selectedGraphKey);
+  if (
+    dependencyFocusMode !== "neighborhood" &&
+    selectedGraphKey.startsWith("node:")
+  ) {
+    neighborhood = selectedTraceFromNode(
+      selectedGraphKey.slice(5),
+      dependencyFocusMode
+    );
+  }
   if (!neighborhood) return;
   for (const [nodeId, entry] of nodeElementsById.entries()) {
     if (neighborhood.primaryNodes.has(nodeId)) {
@@ -968,6 +1053,7 @@ function setDetails(value) {
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
   const connectionRows = connectionSummaryRows(value);
+  const dependencySummary = dependencySummaryHtml(value);
   const semanticExplain = semanticNarrative(value);
 
   const snippetBlock = snippet
@@ -991,6 +1077,7 @@ function setDetails(value) {
       ${semanticExplain ? `<div class="semantic-summary">Why It Matters</div><div class="semantic-explain">${htmlEscape(semanticExplain)}</div>` : ""}
       ${!label && !sourcePath && !span ? `<div class="detail-row"><div class="detail-key">Info</div><div class="detail-val">Select a node or edge.</div></div>` : ""}
     </div>
+    ${dependencySummary}
     ${snippetBlock}
     ${metadataBlock}
     <details class="raw-json">
@@ -1174,6 +1261,13 @@ if (filterSharing) {
 if (focusNeighborhoodToggle) {
   focusNeighborhoodToggle.addEventListener("change", () => {
     dependencyFocusEnabled = Boolean(focusNeighborhoodToggle.checked);
+    applyDependencyFocus();
+    applyNoiseReduction();
+  });
+}
+if (focusPathMode) {
+  focusPathMode.addEventListener("change", () => {
+    dependencyFocusMode = focusPathMode.value || "neighborhood";
     applyDependencyFocus();
     applyNoiseReduction();
   });

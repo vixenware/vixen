@@ -124,6 +124,15 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("focus-primary"));
     assert!(html.contains("focus-neighbor"));
     assert!(html.contains("dim-focus"));
+    assert!(html.contains("dependencySummaryHtml("));
+    assert!(html.contains("Dependency Summary"));
+    assert!(html.contains("What this node depends on"));
+    assert!(html.contains("What depends on this node"));
+    assert!(html.contains("selectedTraceFromNode("));
+    assert!(html.contains("focus-path-mode"));
+    assert!(html.contains("upstream path"));
+    assert!(html.contains("downstream path"));
+    assert!(html.contains("Why This Edge Exists"));
     assert!(html.contains("runtime_role_summary"));
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -236,6 +245,8 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("dim stdlib-heavy sources"));
     assert!(html.contains("dependency neighborhood"));
     assert!(html.contains("noise-dim"));
+    assert!(html.contains("focus-path-mode"));
+    assert!(html.contains("Connection Focus"));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
