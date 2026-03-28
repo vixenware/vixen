@@ -8,7 +8,7 @@ use std::{
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{Config, GrammarStore, Highlighter, HtmlFormat};
 use arborium_theme::{builtin as arborium_builtin_theme, highlights as arborium_highlights};
-use vx_resolve::SourceSpan;
+use vx_resolve::{DefId, DefKind, SourceSpan};
 
 use crate::{
     AnalysisResult, BodyId, BridgeCallSiteKind, BridgeLocalBindingId, ExprId, ExtractedNodeReason,
@@ -671,9 +671,16 @@ function edgeRoleForKind(kind) {
 }
 function edgeSemanticLabel(edge) {
   const role = edgeRoleForKind(edge.kind);
+  const metadata = metadataMap(edge.metadata);
   if (role === "value_flow") return `value flow: ${edge.label}`;
   if (role === "ownership") return "ownership: boundary -> closure layout";
-  if (role === "call") return `source call: ${edge.label}`;
+  if (role === "call") {
+    const target = String(metadata.call_target ?? "");
+    const kind = String(metadata.call_kind ?? "");
+    if (target && kind) return `${kind}: ${target}`;
+    if (target) return `source call: ${target}`;
+    return `source call: ${edge.label}`;
+  }
   if (edge.kind === "body_to_kernel") return "demand edge: body -> kernel";
   if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
   return edge.label;
@@ -708,14 +715,19 @@ function nodeDisplayLines(node) {
   if (node.kind === "body") {
     const name = compactLabelText(String(metadata.body_name ?? ""), 38);
     const demand = nodeDemandState(node);
-    const demandText = demand === "demanded" ? "active result" : (demand === "nondemanded" ? "idle result" : "result state unknown");
+    const demandText = demand === "demanded"
+      ? "active result path"
+      : (demand === "nondemanded" ? "idle in current demand model" : "result demand unknown");
     return [name ? `Body: ${name}` : "Body", demandText];
   }
   if (node.kind === "kernel") {
     const owner = compactLabelText(String(metadata.body_name ?? ""), 38);
     const demand = nodeDemandState(node);
-    const demandText = demand === "demanded" ? "active kernel" : (demand === "nondemanded" ? "idle kernel" : "kernel state unknown");
-    return [owner ? `Kernel in ${owner}` : "Kernel", demandText];
+    const demandText = demand === "demanded"
+      ? "active in model"
+      : (demand === "nondemanded" ? "idle in model" : "kernel demand unknown");
+    const reason = compactLabelText(String(metadata.kernel_reason_summary ?? ""), 44);
+    return [owner ? `Kernel in ${owner}` : "Kernel", reason ? `${demandText} · ${reason}` : demandText];
   }
   if (node.kind === "runtime_boundary") {
     const role = compactLabelText(String(metadata.runtime_role_summary ?? "runtime boundary"), 44);
@@ -782,6 +794,7 @@ function dependencySummaryHtml(value) {
 function semanticNarrative(value) {
   if (!value || typeof value !== "object") return "";
   if (value.type === "node") {
+    const metadata = metadataMap(value.metadata);
     const demand = nodeDemandState(value);
     const sharing = nodeSharingState(value);
     const runtimeRole = nodeRuntimeRole(value);
@@ -801,6 +814,9 @@ function semanticNarrative(value) {
       return "This node is currently demanded, so it contributes to the observed result path in this structural snapshot.";
     }
     if (demand === "nondemanded") {
+      if (String(metadata.demand_model_note ?? "").includes("one-step")) {
+        return "This node is currently idle under the one-step demand model; that can mean true nondemand or missing propagation beyond current modeling depth.";
+      }
       return "This node is currently not demanded; it exists structurally but is not on the active observed path.";
     }
     return "This node contributes structural context; semantic demand/sharing markers are not available for this node kind.";
@@ -820,10 +836,16 @@ function semanticSummaryRows(value, metadata) {
   if (value.type === "node") {
     const demand = nodeDemandState(value);
     if (demand !== "unknown") rows.push(detailRow("Demand", demand));
+    const demandModel = String(metadata.demand_model_note ?? "");
+    if (demandModel) rows.push(detailRow("Demand Model", demandModel));
     const sharing = nodeSharingState(value);
     if (sharing !== "local") rows.push(detailRow("Sharing", sharing));
     const runtimeRole = nodeRuntimeRole(value);
     if (runtimeRole !== "none") rows.push(detailRow("Runtime Role", runtimeRole.replaceAll("_", "-")));
+    if (value.kind === "kernel") {
+      const reason = String(metadata.kernel_reason_summary ?? "");
+      if (reason) rows.push(detailRow("Kernel Meaning", reason));
+    }
   } else if (value.type === "edge") {
     rows.push(detailRow("Edge Role", edgeRoleForKind(value.kind).replaceAll("_", " ")));
   }
@@ -2192,7 +2214,7 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name", "kernel_reason_summary", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => {
       const displayKey =
@@ -2201,6 +2223,11 @@ function setDetails(value) {
         key === "sharing_role" ? "Sharing" :
         key === "capture_count" ? "Capture Count" :
         key === "extracted_reason" ? "Extracted Because" :
+        key === "kernel_reason_summary" ? "Kernel Meaning" :
+        key === "demand_model_note" ? "Demand Model" :
+        key === "call_target" ? "Call Target" :
+        key === "call_kind" ? "Call Kind" :
+        key === "cross_module" ? "Cross Module" :
         key === "binding_name" ? "Binding" :
         key;
       return detailRow(displayKey, val);
@@ -2713,6 +2740,11 @@ fn project_analysis_graph_internal(
 ) -> AnalysisGraph {
     let mut nodes = Vec::new();
     let mut edges = BTreeSet::new();
+    let body_by_id = analysis
+        .bodies
+        .iter()
+        .map(|body| (body.id, body))
+        .collect::<BTreeMap<_, _>>();
     let mut shared_extraction_count_by_body = BTreeMap::new();
     let mut extracted_reason_by_runtime = BTreeMap::new();
 
@@ -2785,6 +2817,38 @@ fn project_analysis_graph_internal(
         let owner_name = context
             .and_then(|ctx| ctx.body_name(kernel.body))
             .unwrap_or_else(|| format!("B{}", kernel.body.0));
+        let owner_body = body_by_id.get(&kernel.body).copied();
+        let runtime_extract_count = owner_body
+            .map(|body| {
+                body.extracted_nodes
+                    .iter()
+                    .filter(|node| {
+                        matches!(node.reason, ExtractedNodeReason::RuntimeBoundary { .. })
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let shared_extract_count = owner_body
+            .map(|body| {
+                body.extracted_nodes
+                    .iter()
+                    .filter(|node| matches!(node.reason, ExtractedNodeReason::SharedAcrossUses))
+                    .count()
+            })
+            .unwrap_or(0);
+        let source_local_call_count = owner_body
+            .map(|body| body.source_local_call_edges.len())
+            .unwrap_or(0);
+        let kernel_reason_summary = kernel_reason_summary(
+            source_local_call_count,
+            runtime_extract_count,
+            shared_extract_count,
+        );
+        let demand_model_note = if kernel.result_obs == crate::Observation::NoObs {
+            "idle in current one-step demand model"
+        } else {
+            "active in current one-step demand model"
+        };
         let mut metadata = vec![
             ("kernel_id".to_owned(), kernel.id.0.to_string()),
             ("body_id".to_owned(), kernel.body.0.to_string()),
@@ -2792,7 +2856,30 @@ fn project_analysis_graph_internal(
                 "kernel_result_observation".to_owned(),
                 format!("{:?}", kernel.result_obs),
             ),
+            (
+                "kernel_reason_summary".to_owned(),
+                kernel_reason_summary.to_owned(),
+            ),
+            ("demand_model_note".to_owned(), demand_model_note.to_owned()),
+            (
+                "source_local_call_count".to_owned(),
+                source_local_call_count.to_string(),
+            ),
+            (
+                "runtime_extract_count".to_owned(),
+                runtime_extract_count.to_string(),
+            ),
+            (
+                "shared_extract_count".to_owned(),
+                shared_extract_count.to_string(),
+            ),
         ];
+        if let Some(ctx) = context {
+            metadata.push((
+                "kernel_source_expr_count".to_owned(),
+                ctx.body_expr_count(kernel.body).to_string(),
+            ));
+        }
         if let Some(_ctx) = context {
             metadata.push(("body_name".to_owned(), owner_name.clone()));
         }
@@ -2805,8 +2892,8 @@ fn project_analysis_graph_internal(
             id: kernel_node_id(kernel.id.0),
             kind: GraphNodeKind::Kernel,
             label: format!(
-                "Kernel K{} in {} (B{})\nresult={:?}",
-                kernel.id.0, owner_name, kernel.body.0, kernel.result_obs
+                "Kernel K{} in {} (B{})\n{}",
+                kernel.id.0, owner_name, kernel.body.0, kernel_reason_summary
             ),
             metadata,
         });
@@ -2952,26 +3039,41 @@ fn project_analysis_graph_internal(
                     let target_name = context
                         .and_then(|ctx| ctx.body_name(target))
                         .unwrap_or_else(|| format!("B{}", target.0));
+                    let call_source = SourceExpr {
+                        body: body.id,
+                        expr: call_edge.call_expr,
+                    };
+                    let call_kind = context
+                        .and_then(|ctx| ctx.call_site_kind_label(&call_source))
+                        .unwrap_or("call")
+                        .to_owned();
+                    let call_target = context
+                        .and_then(|ctx| ctx.call_target_label(&call_source))
+                        .unwrap_or_else(|| target_name.clone());
                     let mut metadata = vec![
                         ("caller_body_id".to_owned(), body.id.0.to_string()),
                         ("call_expr".to_owned(), call_edge.call_expr.0.to_string()),
                         ("callee_body_id".to_owned(), target.0.to_string()),
                         ("callee_body_name".to_owned(), target_name.clone()),
+                        ("call_kind".to_owned(), call_kind),
+                        ("call_target".to_owned(), call_target.clone()),
                     ];
-                    append_source_expr_metadata(
-                        &mut metadata,
-                        &SourceExpr {
-                            body: body.id,
-                            expr: call_edge.call_expr,
-                        },
-                        context,
-                    );
+                    if let Some(ctx) = context {
+                        if let (Some(caller_sid), Some(callee_sid)) =
+                            (ctx.body_source_id(body.id), ctx.body_source_id(target))
+                        {
+                            if caller_sid != callee_sid {
+                                metadata.push(("cross_module".to_owned(), "true".to_owned()));
+                            }
+                        }
+                    }
+                    append_source_expr_metadata(&mut metadata, &call_source, context);
                     finalize_metadata(&mut metadata);
                     edges.insert(GraphEdge {
                         from: from.clone(),
                         to: body_node_id(target),
                         kind: GraphEdgeKind::CallToBody,
-                        label: format!("call E{} -> {}", call_edge.call_expr.0, target_name),
+                        label: format!("call {}", call_target),
                         metadata,
                     });
                 }
@@ -3176,6 +3278,44 @@ fn boundary_kind_name(kind: RuntimeBoundaryKind) -> &'static str {
     }
 }
 
+fn kernel_reason_summary(
+    source_local_call_count: usize,
+    runtime_extract_count: usize,
+    shared_extract_count: usize,
+) -> String {
+    let mut segments = Vec::new();
+    if source_local_call_count > 0 {
+        segments.push(format!(
+            "{} call{} kept local",
+            source_local_call_count,
+            if source_local_call_count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if runtime_extract_count > 0 {
+        segments.push(format!(
+            "{} runtime boundary extract{}",
+            runtime_extract_count,
+            if runtime_extract_count == 1 { "" } else { "s" }
+        ));
+    }
+    if shared_extract_count > 0 {
+        segments.push(format!(
+            "{} shared value extract{}",
+            shared_extract_count,
+            if shared_extract_count == 1 { "" } else { "s" }
+        ));
+    }
+    if segments.is_empty() {
+        "local orchestration retained in kernel".to_owned()
+    } else {
+        segments.join("; ")
+    }
+}
+
 fn finalize_metadata(metadata: &mut GraphMetadata) {
     metadata.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     metadata.dedup();
@@ -3183,6 +3323,12 @@ fn finalize_metadata(metadata: &mut GraphMetadata) {
 
 fn body_node_id(id: BodyId) -> String {
     format!("body_b{}", id.0)
+}
+
+fn def_id_key(id: DefId) -> (u32, u32) {
+    match id {
+        DefId::Source { source, local } => (source.0, local),
+    }
 }
 
 fn kernel_node_id(id: u32) -> String {
@@ -3259,12 +3405,15 @@ fn escape_html(input: &str) -> String {
 #[derive(Debug, Clone)]
 struct BridgeGraphContext<'a> {
     body_names: BTreeMap<BodyId, String>,
+    body_expr_counts: BTreeMap<BodyId, usize>,
     binding_names: BTreeMap<BridgeLocalBindingId, String>,
     body_spans: BTreeMap<BodyId, SourceSpan>,
     expr_spans: BTreeMap<ExprId, SourceSpan>,
     expr_snippets: BTreeMap<ExprId, String>,
     closure_names: BTreeMap<(BodyId, ExprId), String>,
     call_site_kinds: BTreeMap<(BodyId, ExprId), BridgeCallSiteKind>,
+    call_site_targets: BTreeMap<(BodyId, ExprId), DefId>,
+    def_labels: BTreeMap<(u32, u32), String>,
     boundary_arg_bindings: Vec<crate::BridgeBoundaryArgBinding>,
     boundary_arg_closures: Vec<crate::BridgeBoundaryArgClosure>,
     local_boundary_inits: Vec<crate::BridgeLocalBoundaryInit>,
@@ -3285,6 +3434,12 @@ impl<'a> BridgeGraphContext<'a> {
             .iter()
             .map(|body| (body.id, body.name.clone()))
             .collect::<BTreeMap<_, _>>();
+        let mut body_expr_counts = BTreeMap::new();
+        for expr in &bridge.exprs {
+            if let Some(body) = expr.body {
+                *body_expr_counts.entry(body).or_insert(0) += 1;
+            }
+        }
         let binding_names = bridge
             .local_bindings
             .iter()
@@ -3335,6 +3490,34 @@ impl<'a> BridgeGraphContext<'a> {
             .iter()
             .map(|site| ((site.body, site.expr), site.kind))
             .collect::<BTreeMap<_, _>>();
+        let call_site_targets = bridge
+            .call_sites
+            .iter()
+            .filter_map(|site| Some(((site.body, site.expr), site.target?)))
+            .collect::<BTreeMap<_, _>>();
+        let def_labels = bridge
+            .resolved_refs
+            .iter()
+            .filter_map(|resolved| resolved.target.as_ref().ok())
+            .map(|definition| {
+                let kind = match definition.kind {
+                    DefKind::Function => "fn",
+                    DefKind::Namespace => "namespace",
+                    DefKind::Struct => "struct",
+                    DefKind::Enum => "enum",
+                    DefKind::Newtype => "newtype",
+                    DefKind::TypeAlias => "type",
+                    DefKind::Binding => "let",
+                    DefKind::Parameter => "param",
+                    DefKind::Variant => "variant",
+                    DefKind::Field => "field",
+                };
+                (
+                    def_id_key(definition.id),
+                    format!("{kind} {}", definition.name),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let source_paths = bridge
             .source_paths
             .iter()
@@ -3360,12 +3543,15 @@ impl<'a> BridgeGraphContext<'a> {
 
         Self {
             body_names,
+            body_expr_counts,
             binding_names,
             body_spans,
             expr_spans,
             expr_snippets,
             closure_names,
             call_site_kinds,
+            call_site_targets,
+            def_labels,
             boundary_arg_bindings: bridge.boundary_arg_bindings.clone(),
             boundary_arg_closures: bridge.boundary_arg_closures.clone(),
             local_boundary_inits: bridge.local_boundary_inits.clone(),
@@ -3378,6 +3564,14 @@ impl<'a> BridgeGraphContext<'a> {
 
     fn body_name(&self, body: BodyId) -> Option<String> {
         self.body_names.get(&body).cloned()
+    }
+
+    fn body_expr_count(&self, body: BodyId) -> usize {
+        self.body_expr_counts.get(&body).copied().unwrap_or(0)
+    }
+
+    fn body_source_id(&self, body: BodyId) -> Option<vx_resolve::SourceId> {
+        self.body_spans.get(&body).map(|span| span.source)
     }
 
     fn body_span(&self, body: BodyId) -> Option<SourceSpan> {
@@ -3394,13 +3588,38 @@ impl<'a> BridgeGraphContext<'a> {
 
     fn expr_short_label(&self, source: &SourceExpr) -> Option<String> {
         let snippet = self.expr_snippet(source.expr)?;
-        let call_kind = self
+        let call_kind = self.call_site_kind_label(source).unwrap_or("expr");
+        Some(format!("{call_kind}: {snippet}"))
+    }
+
+    fn call_site_kind_label(&self, source: &SourceExpr) -> Option<&'static str> {
+        let kind = self
             .call_site_kinds
             .get(&(source.body, source.expr))
-            .copied()
-            .map(call_site_kind_name)
-            .unwrap_or("expr");
-        Some(format!("{call_kind}: {snippet}"))
+            .copied()?;
+        match kind {
+            BridgeCallSiteKind::Other
+                if self
+                    .call_site_targets
+                    .contains_key(&(source.body, source.expr)) =>
+            {
+                Some("resolved-call")
+            }
+            other => Some(call_site_kind_name(other)),
+        }
+    }
+
+    fn call_target_label(&self, source: &SourceExpr) -> Option<String> {
+        let target = self
+            .call_site_targets
+            .get(&(source.body, source.expr))
+            .copied()?;
+        if let Some(name) = self.def_labels.get(&def_id_key(target)) {
+            return Some(name.clone());
+        }
+        match target {
+            DefId::Source { source, local } => Some(format!("def {}:{}", source.0, local)),
+        }
     }
 
     fn closure_name(&self, source: &SourceExpr) -> Option<String> {

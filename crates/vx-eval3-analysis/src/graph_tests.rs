@@ -248,6 +248,8 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("restoredFromUrl"));
     assert!(html.contains("params.set(\"v\", \"1\")"));
     assert!(html.contains("runtime_role_summary"));
+    assert!(html.contains("kernel_reason_summary"));
+    assert!(html.contains("demand_model_note"));
     let source_pos = html
         .find("<section class=\"source-first-row")
         .expect("source strip section marker should exist");
@@ -392,6 +394,10 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("node-badge"));
     assert!(html.contains("sharing_role"));
     assert!(html.contains("Runtime Role"));
+    assert!(html.contains("kernel_reason_summary"));
+    assert!(html.contains("demand_model_note"));
+    assert!(html.contains("call_target"));
+    assert!(html.contains("cross_module"));
     assert!(html.contains("hidden-semantic"));
     assert!(html.contains("semantic-controls"));
     assert!(html.contains("dim stdlib-heavy sources"));

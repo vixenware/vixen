@@ -452,7 +452,11 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
             | crate::BridgeCallSiteKind::StdlibBoundary(_) => {
                 seeds.push((site.body, site.expr, Observation::NeedCallable));
             }
-            crate::BridgeCallSiteKind::Other => {}
+            crate::BridgeCallSiteKind::Other => {
+                if site.target.is_some() {
+                    seeds.push((site.body, site.expr, Observation::NeedCallable));
+                }
+            }
         }
     }
 
@@ -499,12 +503,9 @@ fn seed_callee_targets(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge)
             let target = site.target?;
             match site.kind {
                 crate::BridgeCallSiteKind::DirectNamedFunction
-                | crate::BridgeCallSiteKind::LocalCallableBinding => {
-                    Some((site.body, site.expr, target))
-                }
-                crate::BridgeCallSiteKind::StdlibBoundary(_) | crate::BridgeCallSiteKind::Other => {
-                    None
-                }
+                | crate::BridgeCallSiteKind::LocalCallableBinding
+                | crate::BridgeCallSiteKind::Other => Some((site.body, site.expr, target)),
+                crate::BridgeCallSiteKind::StdlibBoundary(_) => None,
             }
         })
         .collect::<Vec<_>>();

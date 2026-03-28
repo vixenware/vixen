@@ -880,14 +880,9 @@ fn collect_call_sites(
                 .iter()
                 .filter(|resolved| callee_span.range.contains_range(resolved.span.range))
                 .min_by_key(|resolved| {
-                    let len = u32::from(resolved.span.range.end())
-                        - u32::from(resolved.span.range.start());
-                    (len, u32::from(resolved.span.range.start()))
-                });
-
-            let kind = match resolved {
-                Some(resolved) => {
-                    if let Some(boundary_kind) = classify_runtime_boundary(source_id, resolved) {
+                    let classified_kind = if let Some(boundary_kind) =
+                        classify_runtime_boundary(source_id, resolved)
+                    {
                         BridgeCallSiteKind::StdlibBoundary(boundary_kind)
                     } else {
                         match resolved.target.as_ref().ok().map(|target| target.kind) {
@@ -897,9 +892,32 @@ fn collect_call_sites(
                             }
                             _ => BridgeCallSiteKind::Other,
                         }
+                    };
+                    let kind_rank = match classified_kind {
+                        BridgeCallSiteKind::DirectNamedFunction => 0u8,
+                        BridgeCallSiteKind::LocalCallableBinding => 1,
+                        BridgeCallSiteKind::StdlibBoundary(_) => 2,
+                        BridgeCallSiteKind::Other => 10,
+                    };
+                    let len = u32::from(resolved.span.range.end())
+                        - u32::from(resolved.span.range.start());
+                    (kind_rank, len, u32::from(resolved.span.range.start()))
+                });
+
+            let kind = if let Some(resolved) = resolved {
+                if let Some(boundary_kind) = classify_runtime_boundary(source_id, resolved) {
+                    BridgeCallSiteKind::StdlibBoundary(boundary_kind)
+                } else {
+                    match resolved.target.as_ref().ok().map(|target| target.kind) {
+                        Some(DefKind::Function) => BridgeCallSiteKind::DirectNamedFunction,
+                        Some(DefKind::Binding) | Some(DefKind::Parameter) => {
+                            BridgeCallSiteKind::LocalCallableBinding
+                        }
+                        _ => BridgeCallSiteKind::Other,
                     }
                 }
-                None => BridgeCallSiteKind::Other,
+            } else {
+                BridgeCallSiteKind::Other
             };
             let target = resolved.and_then(|resolved| resolved.target.as_ref().ok().map(|d| d.id));
 
