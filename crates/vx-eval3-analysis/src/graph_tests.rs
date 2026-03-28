@@ -96,6 +96,17 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("activateSearchResult("));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
+    assert!(html.contains("Source Inspector"));
+    assert!(html.contains("source-inspector"));
+    assert!(html.contains("source_contents"));
+    assert!(html.contains("line_start_offsets"));
+    assert!(html.contains("setInspectorSelection("));
+    assert!(html.contains("renderSourceInspector("));
+    assert!(html.contains("inspector-line"));
+    assert!(html.contains("params.get(\"isrc\")"));
+    assert!(html.contains("params.set(\"isrc\""));
+    assert!(html.contains("params.get(\"ix\")"));
+    assert!(html.contains("params.set(\"ix\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -317,6 +328,17 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("ArrowUp"));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
+    assert!(html.contains("Source Inspector"));
+    assert!(html.contains("source_contents"));
+    assert!(html.contains("inspector-lines"));
+    assert!(html.contains("lineFromByteOffset("));
+    assert!(html.contains("inspectorSpanStart"));
+    assert!(html.contains("inspectorSpanEnd"));
+    assert!(html.contains("source-inspector-toggle"));
+    assert!(html.contains("params.get(\"isrc\")"));
+    assert!(html.contains("params.set(\"isrc\""));
+    assert!(html.contains("params.get(\"ix\")"));
+    assert!(html.contains("params.set(\"ix\""));
 }
 
 #[test]

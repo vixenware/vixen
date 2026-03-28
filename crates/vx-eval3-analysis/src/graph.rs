@@ -76,10 +76,19 @@ pub struct GraphEdge {
     pub metadata: GraphMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GraphSourceContent {
+    pub source_id: u32,
+    pub path: String,
+    pub highlighted_lines: Vec<String>,
+    pub line_start_offsets: Vec<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisGraph {
     pub source_file: Option<String>,
     pub source_files: Vec<(u32, String)>,
+    pub source_contents: Vec<GraphSourceContent>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
 }
@@ -123,6 +132,40 @@ impl AnalysisGraph {
             push_json_str(&mut out, path);
             out.push_str(" }");
             if index + 1 != self.source_files.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+        out.push_str("  \"source_contents\": [\n");
+        for (index, source) in self.source_contents.iter().enumerate() {
+            out.push_str("    {\n");
+            out.push_str("      \"source_id\": ");
+            out.push_str(&source.source_id.to_string());
+            out.push_str(",\n");
+            out.push_str("      \"path\": ");
+            push_json_str(&mut out, &source.path);
+            out.push_str(",\n");
+            out.push_str("      \"highlighted_lines\": [\n");
+            for (line_idx, line) in source.highlighted_lines.iter().enumerate() {
+                out.push_str("        ");
+                push_json_str(&mut out, line);
+                if line_idx + 1 != source.highlighted_lines.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str("      ],\n");
+            out.push_str("      \"line_start_offsets\": [");
+            for (offset_idx, offset) in source.line_start_offsets.iter().enumerate() {
+                if offset_idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&offset.to_string());
+            }
+            out.push_str("]\n");
+            out.push_str("    }");
+            if index + 1 != self.source_contents.len() {
                 out.push(',');
             }
             out.push('\n');
@@ -227,6 +270,21 @@ impl AnalysisGraph {
         out.push_str(
             "  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; }\n",
         );
+        out.push_str("  .source-inspector { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .source-inspector .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n");
+        out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
+        out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 11px; margin-bottom: 6px; }\n");
+        out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 8px; background: #0b1420; max-height: 320px; overflow: auto; }\n");
+        out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 3.2em minmax(0, 1fr); gap: 8px; padding: 1px 6px; }\n");
+        out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; }\n");
+        out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; }\n");
+        out.push_str(
+            "  .source-inspector .inspector-line.in-span { background: rgba(125,211,252,0.12); }\n",
+        );
+        out.push_str(
+            "  .source-inspector .inspector-line.anchor { background: rgba(166,227,161,0.14); }\n",
+        );
+        out.push_str("  .source-inspector button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .source-registry { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
         out.push_str(
@@ -387,7 +445,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Lane Summary</h2><div id=\"lane-summary\" class=\"lane-summary\"></div><h2>Search</h2><div id=\"search-controls\" class=\"search-controls\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search nodes, edges, sources\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Lane Summary</h2><div id=\"lane-summary\" class=\"lane-summary\"></div><h2>Search</h2><div id=\"search-controls\" class=\"search-controls\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search nodes, edges, sources\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><h2>Source Inspector</h2><div id=\"source-inspector\" class=\"source-inspector\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -415,6 +473,7 @@ const searchQueryInput = document.getElementById("search-query");
 const searchClearButton = document.getElementById("search-clear");
 const searchStatus = document.getElementById("search-status");
 const searchResults = document.getElementById("search-results");
+const sourceInspector = document.getElementById("source-inspector");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 const laneSummary = document.getElementById("lane-summary");
@@ -439,6 +498,11 @@ let dependencyFocusMode = "neighborhood";
 let searchQuery = "";
 let activeSearchResultIndex = -1;
 let visibleSearchResults = [];
+let inspectorSourceId = "";
+let inspectorExpanded = false;
+let inspectorAnchorLine = 0;
+let inspectorSpanStart = 0;
+let inspectorSpanEnd = 0;
 const foldedLaneSourceIds = new Set();
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
@@ -458,6 +522,9 @@ const columns = {
   closure_layout: 960,
 };
 const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+const sourceContentById = new Map(
+  (Array.isArray(graph.source_contents) ? graph.source_contents : []).map((entry) => [String(entry.source_id), entry])
+);
 
 function sourceIdForNode(node) {
   const sourceId = node?.metadata?.span_source_id;
@@ -1259,6 +1326,81 @@ function setSearchQuery(value, options = {}) {
   renderSearchResults();
   if (!options.skipPersist) persistViewerState(false);
 }
+function lineFromByteOffset(offsets, byteOffset) {
+  if (!Array.isArray(offsets) || offsets.length === 0) return 1;
+  const target = Math.max(0, Number.parseInt(String(byteOffset ?? 0), 10) || 0);
+  let lo = 0;
+  let hi = offsets.length - 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (offsets[mid] <= target) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return Math.max(1, hi + 1);
+}
+function setInspectorSelection(sourceId, metadata = {}, options = {}) {
+  inspectorSourceId = String(sourceId || sourceFilterSourceId || selectedSourceId || "");
+  inspectorSpanStart = Number.parseInt(String(metadata?.span_start ?? ""), 10) || 0;
+  inspectorSpanEnd = Number.parseInt(String(metadata?.span_end ?? ""), 10) || 0;
+  const sourceEntry = sourceContentById.get(inspectorSourceId);
+  if (sourceEntry) {
+    inspectorAnchorLine = lineFromByteOffset(sourceEntry.line_start_offsets, inspectorSpanStart);
+  } else {
+    inspectorAnchorLine = 0;
+  }
+  if (!options.skipRender) renderSourceInspector();
+}
+function renderSourceInspector() {
+  if (!sourceInspector) return;
+  const sourceId = String(inspectorSourceId || sourceFilterSourceId || selectedSourceId || "");
+  if (!sourceId) {
+    sourceInspector.innerHTML = `<div>Select a node, edge, source lane, or search result to inspect source context.</div>`;
+    return;
+  }
+  const sourceEntry = sourceContentById.get(sourceId);
+  if (!sourceEntry) {
+    sourceInspector.innerHTML = `<div>No embedded source content available for source ${htmlEscape(sourceId)}.</div>`;
+    return;
+  }
+  const lines = Array.isArray(sourceEntry.highlighted_lines) ? sourceEntry.highlighted_lines : [];
+  const total = lines.length;
+  const anchor = inspectorAnchorLine > 0 ? inspectorAnchorLine : 1;
+  const startLine = inspectorSpanStart > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, inspectorSpanStart) : anchor;
+  const spanEndOffset = inspectorSpanEnd > 0 ? Math.max(inspectorSpanStart, inspectorSpanEnd - 1) : inspectorSpanStart;
+  const endLine = inspectorSpanEnd > 0 ? lineFromByteOffset(sourceEntry.line_start_offsets, spanEndOffset) : startLine;
+  const windowStart = inspectorExpanded ? 1 : Math.max(1, startLine - 12);
+  const windowEnd = inspectorExpanded ? total : Math.min(total, Math.max(endLine + 20, windowStart + 40));
+  const rows = [];
+  for (let lineNo = windowStart; lineNo <= windowEnd; lineNo++) {
+    const html = lines[lineNo - 1] ?? "";
+    const inSpan = inspectorSpanStart > 0 && lineNo >= startLine && lineNo <= endLine;
+    const isAnchor = lineNo === anchor;
+    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}"><span class="ln">${lineNo}</span><span class="code">${html || "&nbsp;"}</span></div>`);
+  }
+  const path = sourceEntry.path ? String(sourceEntry.path) : sourceLabel(sourceId);
+  const spanMeta = inspectorSpanStart > 0
+    ? `span bytes ${inspectorSpanStart}..${inspectorSpanEnd > 0 ? inspectorSpanEnd : inspectorSpanStart} (lines ${startLine}-${endLine})`
+    : `showing lines ${windowStart}-${windowEnd} of ${total}`;
+  sourceInspector.innerHTML = `
+    <div class="inspector-head">
+      <div class="inspector-file">${htmlEscape(path)}</div>
+      <button id="source-inspector-toggle" type="button">${inspectorExpanded ? "collapse context" : "expand file"}</button>
+    </div>
+    <div class="inspector-meta">source ${htmlEscape(sourceId)} · ${htmlEscape(spanMeta)}</div>
+    <div class="inspector-lines">${rows.join("")}</div>
+  `;
+  const toggle = sourceInspector.querySelector("#source-inspector-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      inspectorExpanded = !inspectorExpanded;
+      renderSourceInspector();
+      persistViewerState(false);
+    });
+  }
+}
 function updateZoomStatus() {
   zoomStatus.textContent = `${Math.round(viewportScale * 100)}%`;
 }
@@ -1323,6 +1465,8 @@ function readViewerStateFromUrl() {
     noise: params.get("noise") === "1",
     folded: params.get("fold") || "",
     query: params.get("q") || "",
+    inspectorSource: params.get("isrc") || "",
+    inspectorExpanded: params.get("ix") === "1",
   };
 }
 function writeViewerStateToUrl(push) {
@@ -1339,6 +1483,8 @@ function writeViewerStateToUrl(push) {
   const folded = sortedFoldedLaneIds();
   if (folded.length > 0) params.set("fold", folded.join(","));
   if (searchQuery.trim() !== "") params.set("q", searchQuery.trim());
+  if (inspectorSourceId) params.set("isrc", inspectorSourceId);
+  if (inspectorExpanded) params.set("ix", "1");
   const nextHash = `#${params.toString()}`;
   if (window.location.hash === nextHash) return;
   if (push) {
@@ -1430,6 +1576,8 @@ function applyViewerStateFromUrl() {
   dependencyFocusMode = state.trace || "neighborhood";
   hideStdlibNoiseEnabled = Boolean(state.noise);
   searchQuery = String(state.query || "");
+  inspectorSourceId = String(state.inspectorSource || "");
+  inspectorExpanded = Boolean(state.inspectorExpanded);
   foldedLaneSourceIds.clear();
   const foldedList = String(state.folded || "")
     .split(",")
@@ -1446,6 +1594,7 @@ function applyViewerStateFromUrl() {
   renderSearchResults();
   applySourceFilter(state.sourceFilter || "", { skipPersist: true });
   applySemanticFilters();
+  setInspectorSelection(inspectorSourceId || state.sourceFilter || "", {}, { skipRender: false });
   const hasSelection = Boolean(state.selected);
   if (hasSelection) {
     selectByGraphKey(state.selected, {
@@ -1501,6 +1650,13 @@ function applySourceFilter(sourceId, options = {}) {
   }
   applyDependencyFocus();
   applyNoiseReduction();
+  if (sourceFilterSourceId) {
+    setInspectorSelection(sourceFilterSourceId, {});
+  } else if (!selectedGraphKey) {
+    setInspectorSelection("", {});
+  } else {
+    renderSourceInspector();
+  }
   if (!options.skipPersist) persistViewerState(false);
 }
 function wireDetailTraversal() {
@@ -1595,6 +1751,7 @@ function setDetails(value) {
   if (sourceFilterSourceId === "") {
     applySourceFilter(sourceId);
   }
+  setInspectorSelection(sourceId, metadata);
 }
 function renderSourceRegistry(graph) {
   const files = Array.isArray(graph.source_files) ? graph.source_files : [];
@@ -2446,6 +2603,7 @@ fn project_analysis_graph_internal(
     AnalysisGraph {
         source_file,
         source_files: context.map_or_else(Vec::new, |ctx| ctx.source_files()),
+        source_contents: context.map_or_else(Vec::new, |ctx| ctx.source_contents()),
         nodes,
         edges: edges.into_iter().collect(),
     }
@@ -2601,6 +2759,7 @@ struct BridgeGraphContext<'a> {
     boundary_arg_closures: Vec<crate::BridgeBoundaryArgClosure>,
     local_boundary_inits: Vec<crate::BridgeLocalBoundaryInit>,
     source_paths: BTreeMap<u32, String>,
+    source_text_by_id: BTreeMap<u32, String>,
     source_file: Option<String>,
     _source_text: Option<&'a str>,
 }
@@ -2671,6 +2830,23 @@ impl<'a> BridgeGraphContext<'a> {
             .iter()
             .map(|(id, path)| (*id, path.clone()))
             .collect::<BTreeMap<_, _>>();
+        let mut source_text_by_id = BTreeMap::new();
+        if let Some(text) = source_text {
+            source_text_by_id.insert(bridge.source_id.0, text.to_owned());
+        }
+        for (id, path) in &source_paths {
+            if source_text_by_id.contains_key(id) {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(path) {
+                source_text_by_id.insert(*id, text);
+                continue;
+            }
+            let disk_path = vx_resolve::source_disk_path(path);
+            if let Ok(text) = fs::read_to_string(disk_path) {
+                source_text_by_id.insert(*id, text);
+            }
+        }
 
         Self {
             body_names,
@@ -2684,6 +2860,7 @@ impl<'a> BridgeGraphContext<'a> {
             boundary_arg_closures: bridge.boundary_arg_closures.clone(),
             local_boundary_inits: bridge.local_boundary_inits.clone(),
             source_paths,
+            source_text_by_id,
             source_file: source_file.map(|path| path.display().to_string()),
             _source_text: source_text,
         }
@@ -2737,6 +2914,24 @@ impl<'a> BridgeGraphContext<'a> {
             .collect()
     }
 
+    fn source_contents(&self) -> Vec<GraphSourceContent> {
+        self.source_paths
+            .iter()
+            .filter_map(|(id, path)| {
+                let text = self.source_text_by_id.get(id)?;
+                let highlighted =
+                    highlight_vixen_snippet_html(text).unwrap_or_else(|| escape_html(text));
+                let lines = split_highlighted_html_lines(&highlighted);
+                Some(GraphSourceContent {
+                    source_id: *id,
+                    path: path.clone(),
+                    highlighted_lines: lines,
+                    line_start_offsets: line_start_offsets(text),
+                })
+            })
+            .collect()
+    }
+
     fn binding_name(&self, binding: BridgeLocalBindingId) -> Option<&str> {
         self.binding_names.get(&binding).map(String::as_str)
     }
@@ -2766,6 +2961,89 @@ fn snippet_for_span(source_text: &str, span: SourceSpan) -> Option<String> {
         } else {
             Some(format!("{shortened}…"))
         }
+    }
+}
+
+fn line_start_offsets(source_text: &str) -> Vec<usize> {
+    let mut offsets = vec![0usize];
+    for (index, ch) in source_text.char_indices() {
+        if ch == '\n' {
+            offsets.push(index + 1);
+        }
+    }
+    offsets
+}
+
+fn split_highlighted_html_lines(html: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut open_spans: Vec<String> = Vec::new();
+    let mut rest = html;
+
+    while !rest.is_empty() {
+        if let Some(tag_start) = rest.find('<') {
+            let text = &rest[..tag_start];
+            for ch in text.chars() {
+                if ch == '\n' {
+                    for _ in &open_spans {
+                        current.push_str("</span>");
+                    }
+                    lines.push(std::mem::take(&mut current));
+                    for span in &open_spans {
+                        current.push_str(span);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            rest = &rest[tag_start..];
+
+            if rest.starts_with("</span>") {
+                current.push_str("</span>");
+                open_spans.pop();
+                rest = &rest["</span>".len()..];
+            } else if rest.starts_with("<span") {
+                if let Some(end) = rest.find('>') {
+                    let tag = &rest[..end + 1];
+                    current.push_str(tag);
+                    open_spans.push(tag.to_owned());
+                    rest = &rest[end + 1..];
+                } else {
+                    break;
+                }
+            } else {
+                current.push('<');
+                rest = &rest[1..];
+            }
+        } else {
+            for ch in rest.chars() {
+                if ch == '\n' {
+                    for _ in &open_spans {
+                        current.push_str("</span>");
+                    }
+                    lines.push(std::mem::take(&mut current));
+                    for span in &open_spans {
+                        current.push_str(span);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            break;
+        }
+    }
+
+    if !current.is_empty() {
+        for _ in &open_spans {
+            current.push_str("</span>");
+        }
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
     }
 }
 
