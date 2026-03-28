@@ -4047,6 +4047,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-eval3-runtime"
+version = "0.1.0"
+dependencies = [
+ "vx-eval3-analysis",
+]
+
+[[package]]
 name = "vx-fskit"
 version = "0.1.0"
 dependencies = [

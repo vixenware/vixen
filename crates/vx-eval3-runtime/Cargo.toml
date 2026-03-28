@@ -1,0 +1,17 @@
+[package]
+name = "vx-eval3-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+vx-eval3-analysis = { path = "../vx-eval3-analysis" }
+
+[lints]
+workspace = true

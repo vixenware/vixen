@@ -35,10 +35,8 @@ pub use graph::{
 
 mod exec_slice;
 pub use exec_slice::{
-    BlockedEval, BodyMemoKey, CallableValue, CellState, Continuation, EvalOutcome, EvalRunResult,
-    ExecSliceError, ExecValue, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode, Frame,
-    FrameId, KernelOp, Operand, ResultSource, RuntimeMemoKey, RuntimeSession, SlotId, SlotValue,
-    WaitReason, eval_executable_program, lower_executable_program,
+    ExecSliceError, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode, KernelOp, Operand,
+    ResultSource, SlotId, lower_executable_program,
 };
 
 #[cfg(test)]
@@ -55,6 +53,3 @@ mod bridge_to_analysis_tests;
 
 #[cfg(test)]
 mod graph_tests;
-
-#[cfg(test)]
-mod exec_slice_tests;
