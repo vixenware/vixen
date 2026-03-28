@@ -113,6 +113,15 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("data-inspector-line"));
     assert!(html.contains("data-inspector-select-key"));
     assert!(html.contains("inspectorChoiceLine"));
+    assert!(html.contains("clickable-range"));
+    assert!(html.contains("data-inspector-range-key"));
+    assert!(html.contains("mappingHintText("));
+    assert!(html.contains("choice-hint"));
+    assert!(html.contains("params.get(\"icl\")"));
+    assert!(html.contains("params.set(\"icl\""));
+    assert!(html.contains("keepInspectorChoice"));
+    assert!(html.contains("keepChoice: true"));
+    assert!(html.contains("button type=\"button\" class=\"code clickable-range\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -125,7 +134,11 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains(".arb-code[data-arb-theme=\"dark\"]"));
     assert!(html.contains("a-k {"));
     assert!(html.contains("applySourceFilter("));
-    assert!(html.contains("position: sticky"));
+    assert!(html.contains("topbar"));
+    assert!(html.contains("source-first-row"));
+    assert!(html.contains("controls-row"));
+    assert!(html.contains("demoted-panel"));
+    assert!(html.contains("legend-help"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-body"));
     assert!(html.contains("edge-kind-runtime_value_dependency"));
@@ -290,7 +303,11 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("data-source-id"));
     assert!(html.contains("sourceFilterSourceId"));
     assert!(html.contains("focused"));
-    assert!(html.contains("position: sticky"));
+    assert!(html.contains("topbar"));
+    assert!(html.contains("source-first-row"));
+    assert!(html.contains("controls-row"));
+    assert!(html.contains("demoted-panel"));
+    assert!(html.contains("legend-help"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-runtime_boundary"));
     assert!(html.contains("edge-kind-body_to_runtime_boundary"));
@@ -355,6 +372,13 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("activateInspectorMapping("));
     assert!(html.contains("data-inspector-line"));
     assert!(html.contains("data-inspector-select-key"));
+    assert!(html.contains("data-inspector-range-key"));
+    assert!(html.contains("clickable-range"));
+    assert!(html.contains("choice-hint"));
+    assert!(html.contains("params.get(\"icl\")"));
+    assert!(html.contains("params.set(\"icl\""));
+    assert!(html.contains("keepInspectorChoice"));
+    assert!(html.contains("button type=\"button\" class=\"code clickable-range\""));
 }
 
 #[test]
