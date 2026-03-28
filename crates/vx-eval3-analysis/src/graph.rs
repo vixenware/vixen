@@ -197,10 +197,15 @@ impl AnalysisGraph {
         out.push_str("  .header { padding: 16px 20px; border-bottom: 1px solid #243244; background: linear-gradient(90deg, #162233, #111b2a); }\n");
         out.push_str("  .title { margin: 0 0 6px 0; font-size: 18px; color: #f1f5f9; }\n");
         out.push_str("  .sub { margin: 0; color: #93adc8; font-size: 13px; }\n");
-        out.push_str("  .layout { display: grid; grid-template-columns: 1fr 380px; min-height: calc(100vh - 84px); }\n");
-        out.push_str("  .canvas-wrap { padding: 10px; overflow: auto; }\n");
+        out.push_str("  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: calc(100vh - 84px); align-items: start; }\n");
+        out.push_str("  .canvas-wrap { padding: 10px; overflow: auto; min-width: 0; }\n");
+        out.push_str("  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 10px 6px 10px; }\n");
+        out.push_str("  .viewport-toolbar button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
+        out.push_str("  .viewport-toolbar button:hover { border-color: #4b647f; }\n");
+        out.push_str("  .viewport-toolbar .zoom-status { color: #8ba5c1; font-size: 12px; min-width: 54px; text-align: right; }\n");
+        out.push_str("  .graph-viewport { overflow: auto; border: 1px solid #243244; border-radius: 10px; background: #0b1420; }\n");
         out.push_str(
-            "  .panel { border-left: 1px solid #243244; background: #121d2b; padding: 12px; }\n",
+            "  .panel { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; border-left: 1px solid #243244; background: #121d2b; padding: 12px; }\n",
         );
         out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 14px; color: #dbe7f3; }\n");
         out.push_str("  .detail-card { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 10px; }\n");
@@ -264,6 +269,11 @@ impl AnalysisGraph {
         out.push_str("  .edge-kind-call_to_body { stroke: #89b4fa; }\n");
         out.push_str("  .edge-kind-call_to_closure_layout { stroke: #94e2d5; }\n");
         out.push_str("  .dimmed { opacity: 0.18; }\n");
+        out.push_str("  .selected { opacity: 1 !important; }\n");
+        out.push_str("  .node.selected rect { stroke: #f1f5f9; stroke-width: 2.4; filter: drop-shadow(0 0 4px rgba(241,245,249,0.35)); }\n");
+        out.push_str("  .edge.selected { stroke-width: 2.5; filter: drop-shadow(0 0 3px rgba(241,245,249,0.35)); }\n");
+        out.push_str("  .edge-label.selected { fill: #f8fafc; font-weight: 700; }\n");
+        out.push_str("  .source-lane-band.selected { stroke: #7dd3fc; stroke-width: 1.6; }\n");
         out.push_str("  .arb-snippet { white-space: pre-wrap; word-break: break-word; }\n");
         out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
         out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
@@ -289,7 +299,7 @@ impl AnalysisGraph {
         );
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
-        out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div>\n");
+        out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
         out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Selected Item</h2><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
@@ -299,10 +309,20 @@ impl AnalysisGraph {
             r##"<script>
 const graph = JSON.parse(document.getElementById("graph-json").textContent);
 const svg = document.getElementById("graph-svg");
+const graphViewport = document.getElementById("graph-viewport");
+const zoomInButton = document.getElementById("zoom-in");
+const zoomOutButton = document.getElementById("zoom-out");
+const zoomResetButton = document.getElementById("zoom-reset");
+const zoomStatus = document.getElementById("zoom-status");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
+const selectableElements = new Map();
+const laneRectsBySource = new Map();
+let selectedGraphKey = "";
+let selectedSourceId = "";
+let viewportScale = 1;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -480,6 +500,63 @@ function htmlEscape(value) {
     .replaceAll(">", "&gt;")
     .replaceAll("\"", "&quot;");
 }
+function registerSelectable(key, elements) {
+  const list = elements.filter(Boolean);
+  if (list.length === 0) return;
+  selectableElements.set(key, list);
+}
+function updateZoomStatus() {
+  zoomStatus.textContent = `${Math.round(viewportScale * 100)}%`;
+}
+function setViewportScale(nextScale, anchorClientX, anchorClientY) {
+  const clamped = Math.max(0.45, Math.min(2.2, nextScale));
+  const before = viewportScale;
+  viewportScale = clamped;
+  svg.style.transformOrigin = "0 0";
+  svg.style.transform = `scale(${viewportScale})`;
+  updateZoomStatus();
+  if (!graphViewport || before === viewportScale) return;
+  if (Number.isFinite(anchorClientX) && Number.isFinite(anchorClientY)) {
+    const viewportRect = graphViewport.getBoundingClientRect();
+    const ox = anchorClientX - viewportRect.left + graphViewport.scrollLeft;
+    const oy = anchorClientY - viewportRect.top + graphViewport.scrollTop;
+    const ratio = viewportScale / before;
+    graphViewport.scrollLeft = ox * ratio - (anchorClientX - viewportRect.left);
+    graphViewport.scrollTop = oy * ratio - (anchorClientY - viewportRect.top);
+  }
+}
+function zoomBy(factor) {
+  const rect = graphViewport.getBoundingClientRect();
+  setViewportScale(viewportScale * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+function scrollViewportTo(x, y) {
+  const targetLeft = Math.max(0, x * viewportScale - graphViewport.clientWidth * 0.42);
+  const targetTop = Math.max(0, y * viewportScale - graphViewport.clientHeight * 0.32);
+  graphViewport.scrollTo({ left: targetLeft, top: targetTop, behavior: "smooth" });
+}
+function focusSourceLane(sourceId) {
+  const laneStart = laneYStartBySource.get(String(sourceId));
+  if (laneStart === undefined) return;
+  const laneHeight = laneHeightBySource.get(String(sourceId)) ?? 128;
+  scrollViewportTo(columns.kernel, laneStart + laneHeight / 2);
+  for (const [id, rect] of laneRectsBySource.entries()) {
+    rect.classList.toggle("selected", id === String(sourceId));
+  }
+}
+function setSelectedGraphElements(key) {
+  selectedGraphKey = key || "";
+  for (const [entryKey, elements] of selectableElements.entries()) {
+    const selected = selectedGraphKey !== "" && entryKey === selectedGraphKey;
+    for (const element of elements) {
+      element.classList.toggle("selected", selected);
+    }
+  }
+}
+function selectGraphItem(key, detailsValue, sourceId) {
+  setSelectedGraphElements(key);
+  selectedSourceId = String(sourceId ?? "");
+  setDetails(detailsValue);
+}
 function detailRow(key, value) {
   return `<div class="detail-row"><div class="detail-key">${htmlEscape(key)}</div><div class="detail-val">${htmlEscape(value ?? "")}</div></div>`;
 }
@@ -513,7 +590,8 @@ function applySourceFilter(sourceId) {
     const shouldDim =
       sourceFilterSourceId !== "" &&
       entry.sourceId !== "" &&
-      entry.sourceId !== sourceFilterSourceId;
+      entry.sourceId !== sourceFilterSourceId &&
+      entry.sourceId !== selectedSourceId;
     entry.el.classList.toggle("dimmed", shouldDim);
   }
   const items = sourceRegistry.querySelectorAll("li[data-source-id]");
@@ -598,6 +676,9 @@ function renderSourceRegistry(graph) {
     item.addEventListener("click", () => {
       const next = item.dataset.sourceId === sourceFilterSourceId ? "" : item.dataset.sourceId;
       applySourceFilter(next);
+      if (next) {
+        focusSourceLane(next);
+      }
     });
   }
 }
@@ -619,6 +700,7 @@ laneOrder.forEach((sourceId, idx) => {
     height: laneHeight,
     class: `source-lane-band${idx % 2 === 1 ? " alt" : ""}`
   });
+  laneRectsBySource.set(String(sourceId), laneRect);
   laneLayer.appendChild(laneRect);
   const laneText = el("text", { x: 24, y: laneStart + 16, class: "source-lane-label" });
   laneText.textContent = sourceId === "unmapped" ? "source: unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
@@ -658,7 +740,8 @@ for (const edge of graph.edges) {
   const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
-  path.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
+  const edgeKey = `edge:${edge.from}->${edge.to}:${edge.kind}:${edge.label}`;
+  path.addEventListener("click", () => selectGraphItem(edgeKey, { type: "edge", ...edge }, edgeSourceId));
   svg.appendChild(path);
 
   const dx = x2 - x1;
@@ -673,11 +756,12 @@ for (const edge of graph.edges) {
   if (edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
     label.classList.add("edge-label-hit");
-    label.addEventListener("click", () => setDetails({ type: "edge", ...edge }));
+    label.addEventListener("click", () => selectGraphItem(edgeKey, { type: "edge", ...edge }, edgeSourceId));
   }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
   label.textContent = edge.label;
   svg.appendChild(label);
+  registerSelectable(edgeKey, [path, label]);
 }
 
 for (const node of graph.nodes) {
@@ -688,7 +772,12 @@ for (const node of graph.nodes) {
   const nodeSourceId = String(node?.metadata?.span_source_id ?? "");
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
-  g.addEventListener("click", () => setDetails({ type: "node", ...node }));
+  const nodeKey = `node:${node.id}`;
+  g.addEventListener("click", () => {
+    selectGraphItem(nodeKey, { type: "node", ...node }, nodeSourceId);
+    const p = positions.get(node.id);
+    if (p) scrollViewportTo(p.x, p.y + nodeHeight / 2);
+  });
 
   const rect = el("rect", { width: 196, height: 54 });
   g.appendChild(rect);
@@ -702,10 +791,49 @@ for (const node of graph.nodes) {
   });
   g.appendChild(text);
   svg.appendChild(g);
+  registerSelectable(nodeKey, [g]);
 }
 
 renderSourceRegistry(graph);
 applySourceFilter("");
+svg.style.transformOrigin = "0 0";
+svg.style.transform = "scale(1)";
+updateZoomStatus();
+if (zoomInButton) zoomInButton.addEventListener("click", () => zoomBy(1.15));
+if (zoomOutButton) zoomOutButton.addEventListener("click", () => zoomBy(1 / 1.15));
+if (zoomResetButton) zoomResetButton.addEventListener("click", () => setViewportScale(1));
+if (graphViewport) {
+  graphViewport.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? 1.08 : 1 / 1.08;
+    setViewportScale(viewportScale * factor, event.clientX, event.clientY);
+  }, { passive: false });
+  let isPanning = false;
+  let panLastX = 0;
+  let panLastY = 0;
+  graphViewport.addEventListener("pointerdown", (event) => {
+    if (event.button !== 1) return;
+    isPanning = true;
+    panLastX = event.clientX;
+    panLastY = event.clientY;
+    graphViewport.style.cursor = "grabbing";
+  });
+  graphViewport.addEventListener("pointermove", (event) => {
+    if (!isPanning) return;
+    graphViewport.scrollLeft -= event.clientX - panLastX;
+    graphViewport.scrollTop -= event.clientY - panLastY;
+    panLastX = event.clientX;
+    panLastY = event.clientY;
+  });
+  const endPan = () => {
+    isPanning = false;
+    graphViewport.style.cursor = "";
+  };
+  graphViewport.addEventListener("pointerup", endPan);
+  graphViewport.addEventListener("pointercancel", endPan);
+  graphViewport.addEventListener("pointerleave", endPan);
+}
 setDetails({
   type: "graph",
   graph_type: graph.graph_type,
@@ -812,6 +940,9 @@ fn project_analysis_graph_internal(
         ];
         if let Some(_ctx) = context {
             metadata.push(("body_name".to_owned(), owner_name.clone()));
+        }
+        if let Some(ctx) = context {
+            append_body_span_metadata(&mut metadata, ctx, kernel.body);
         }
         finalize_metadata(&mut metadata);
 
@@ -1398,15 +1529,16 @@ fn snippet_for_span(source_text: &str, span: SourceSpan) -> Option<String> {
     let start: usize = u32::from(span.start()) as usize;
     let end: usize = u32::from(span.end()) as usize;
     let slice = source_text.get(start..end)?;
-    let normalized = slice.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
+    let trimmed = slice.trim();
+    if trimmed.is_empty() {
         None
     } else {
         let max = 96;
-        if normalized.len() <= max {
-            Some(normalized)
+        let shortened: String = trimmed.chars().take(max).collect();
+        if trimmed.chars().count() <= max {
+            Some(trimmed.to_owned())
         } else {
-            Some(format!("{}…", &normalized[..max]))
+            Some(format!("{shortened}…"))
         }
     }
 }

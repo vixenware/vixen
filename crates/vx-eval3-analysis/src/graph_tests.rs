@@ -85,6 +85,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("source_snippet_highlighted_html"));
     assert!(html.contains("arb-snippet"));
     assert!(html.contains("applySourceFilter("));
+    assert!(html.contains("position: sticky"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-body"));
     assert!(html.contains("edge-kind-runtime_value_dependency"));
@@ -92,6 +93,14 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("source-lane-label"));
     assert!(html.contains("barycenterForNode"));
     assert!(html.contains("laneOrder"));
+    assert!(html.contains("graph viewport controls"));
+    assert!(html.contains("zoom-in"));
+    assert!(html.contains("zoom-out"));
+    assert!(html.contains("zoom-reset"));
+    assert!(html.contains("setViewportScale("));
+    assert!(html.contains("focusSourceLane("));
+    assert!(html.contains("selectGraphItem("));
+    assert!(html.contains(".selected"));
 
     let output = unique_temp_path("cc-version-graph.html");
     export_graph_html_from_file(&zoo_file, &output).expect("html export should succeed");
@@ -159,6 +168,14 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
         !graph.nodes.is_empty(),
         "graph should contain structural nodes"
     );
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == GraphNodeKind::Kernel)
+            .all(|node| node.metadata.iter().any(|(k, _)| k == "span_source_id")),
+        "project-backed kernel nodes should carry source provenance"
+    );
 
     let json = graph.to_json_pretty();
     assert!(json.contains("tri-platform-png.vx"));
@@ -177,12 +194,16 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("data-source-id"));
     assert!(html.contains("sourceFilterSourceId"));
     assert!(html.contains("focused"));
+    assert!(html.contains("position: sticky"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-runtime_boundary"));
     assert!(html.contains("edge-kind-body_to_runtime_boundary"));
     assert!(html.contains("source-lane-band"));
     assert!(html.contains("source lanes"));
     assert!(html.contains("source-lane-label"));
+    assert!(html.contains("graph-viewport"));
+    assert!(html.contains("Source Registry"));
+    assert!(html.contains("focusSourceLane("));
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {
