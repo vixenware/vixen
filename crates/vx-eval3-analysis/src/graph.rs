@@ -1091,6 +1091,56 @@ function selectedTraceFromNode(nodeId, mode) {
   }
   return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
 }
+function selectedCausalPathFromValue(value) {
+  if (!value || value.type !== "node") return null;
+  const metadata = metadataMap(value.metadata);
+  const nodePathRaw = String(metadata.demand_justification_node_ids ?? "");
+  if (!nodePathRaw) return null;
+  const pathNodeIds = nodePathRaw
+    .split("->")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && nodeElementsById.has(part));
+  if (pathNodeIds.length === 0) return null;
+
+  const primaryNodes = new Set(pathNodeIds);
+  if (value.id) primaryNodes.add(String(value.id));
+  const primaryEdges = new Set();
+  const neighborNodes = new Set();
+  const neighborEdges = new Set();
+
+  for (let i = 0; i + 1 < pathNodeIds.length; i++) {
+    const from = pathNodeIds[i];
+    const to = pathNodeIds[i + 1];
+    const candidates = edgeElements
+      .filter((entry) => entry.edge.from === from && entry.edge.to === to && entry.edge.kind === "call_to_body")
+      .slice()
+      .sort((a, b) => a.key.localeCompare(b.key));
+    if (candidates.length > 0) primaryEdges.add(candidates[0].key);
+  }
+
+  const finalBody = pathNodeIds[pathNodeIds.length - 1];
+  if (value.kind === "kernel" && value.id) {
+    const link = edgeElements.find(
+      (entry) => entry.edge.kind === "body_to_kernel" && entry.edge.from === finalBody && entry.edge.to === value.id
+    );
+    if (link) primaryEdges.add(link.key);
+  }
+  if (value.kind === "runtime_boundary" && value.id) {
+    const link = edgeElements.find(
+      (entry) => entry.edge.kind === "body_to_runtime_boundary" && entry.edge.from === finalBody && entry.edge.to === value.id
+    );
+    if (link) primaryEdges.add(link.key);
+  }
+
+  return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
+}
+function selectedCausalPathFromKey(key) {
+  if (!key || !key.startsWith("node:")) return null;
+  const nodeId = key.slice(5);
+  const entry = nodeElementsById.get(nodeId);
+  if (!entry) return null;
+  return selectedCausalPathFromValue({ type: "node", ...entry.node });
+}
 function applyDependencyFocus() {
   for (const entry of edgeElements) {
     entry.path.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
@@ -1099,16 +1149,23 @@ function applyDependencyFocus() {
   for (const entry of nodeElementsById.values()) {
     entry.element.classList.remove("focus-primary", "focus-neighbor", "dim-focus");
   }
-  if (!dependencyFocusEnabled) return;
-  let neighborhood = selectedNeighborhoodFromKey(selectedGraphKey);
+  let neighborhood = null;
+  if (!dependencyFocusEnabled) {
+    neighborhood = selectedCausalPathFromKey(selectedGraphKey);
+    if (!neighborhood) return;
+  } else {
+    neighborhood = selectedNeighborhoodFromKey(selectedGraphKey);
+  }
   if (
     dependencyFocusMode !== "neighborhood" &&
     selectedGraphKey.startsWith("node:")
   ) {
-    neighborhood = selectedTraceFromNode(
-      selectedGraphKey.slice(5),
-      dependencyFocusMode
-    );
+    neighborhood =
+      selectedCausalPathFromKey(selectedGraphKey) ||
+      selectedTraceFromNode(
+        selectedGraphKey.slice(5),
+        dependencyFocusMode
+      );
   }
   if (!neighborhood) return;
   for (const [nodeId, entry] of nodeElementsById.entries()) {
@@ -4030,6 +4087,13 @@ fn append_demand_justification_metadata(
 
     metadata.push(("demand_justification_status".to_owned(), status.to_owned()));
     metadata.push(("demand_justification_path".to_owned(), path_text));
+    metadata.push((
+        "demand_justification_node_ids".to_owned(),
+        path.iter()
+            .map(|id| body_node_id(*id))
+            .collect::<Vec<_>>()
+            .join(" -> "),
+    ));
     metadata.push((
         "demand_justification_path_modules".to_owned(),
         path_module_text,

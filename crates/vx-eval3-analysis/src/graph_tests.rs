@@ -207,6 +207,11 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("edgeDisplayLabel("));
     assert!(html.contains("shouldRenderEdgeLabel("));
     assert!(html.contains("demandPathCardHtml("));
+    assert!(html.contains("selectedCausalPathFromValue("));
+    assert!(html.contains("selectedCausalPathFromKey("));
+    assert!(html.contains("demand_justification_node_ids"));
+    assert!(!html.contains("Demand Path Nodes"));
+    assert!(!html.contains("detailRow(\"Demand Path Nodes\""));
     assert!(html.contains("One recovered upstream path to this selection"));
     assert!(html.contains("demand_justification_trace"));
     assert!(html.contains("hidden-edge-label"));
@@ -654,6 +659,12 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         "render_png kernel should expose upstream path through build_for"
     );
     assert!(
+        metadata_value(&render_kernel.metadata, "demand_justification_node_ids")
+            .unwrap_or("")
+            .contains("body_b"),
+        "render_png kernel should include machine-readable body-node path IDs"
+    );
+    assert!(
         metadata_value(&render_kernel.metadata, "demand_justification_trace")
             .unwrap_or("")
             .contains("tri-platform-png.vx::build_for --direct-call fn render_png"),
@@ -723,6 +734,12 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
                     .unwrap_or("")
                     .contains("tri-platform-png.vx::build -> tri-platform-png.vx::build_for"),
                 "build_for kernel should expose module-qualified demand path"
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "demand_justification_node_ids")
+                    .unwrap_or("")
+                    .contains("->"),
+                "build_for kernel should include multi-step machine-readable path nodes"
             );
             let local_calls = metadata_value(&kernel.metadata, "kernel_local_calls").unwrap_or("");
             assert!(
@@ -978,6 +995,15 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
             .unwrap_or("")
             .contains(imported_file),
             "imported `{imported_file}` build body should include module-qualified destination in demand path"
+        );
+        assert!(
+            metadata_value(
+                &imported_build_body.metadata,
+                "demand_justification_node_ids"
+            )
+            .unwrap_or("")
+            .contains("body_b"),
+            "imported `{imported_file}` build body should include machine-readable path node IDs"
         );
         assert!(
             metadata_value(&imported_build_body.metadata, "demand_justification_trace")
