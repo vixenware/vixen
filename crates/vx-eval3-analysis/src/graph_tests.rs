@@ -209,9 +209,13 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("demandPathCardHtml("));
     assert!(html.contains("selectedCausalPathFromValue("));
     assert!(html.contains("selectedCausalPathFromKey("));
+    assert!(html.contains("edgeMachineId("));
     assert!(html.contains("demand_justification_node_ids"));
+    assert!(html.contains("demand_justification_edge_ids"));
     assert!(!html.contains("Demand Path Nodes"));
     assert!(!html.contains("detailRow(\"Demand Path Nodes\""));
+    assert!(!html.contains("Demand Path Edges"));
+    assert!(!html.contains("detailRow(\"Demand Path Edges\""));
     assert!(html.contains("One recovered upstream path to this selection"));
     assert!(html.contains("demand_justification_trace"));
     assert!(html.contains("hidden-edge-label"));
@@ -665,6 +669,18 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         "render_png kernel should include machine-readable body-node path IDs"
     );
     assert!(
+        metadata_value(&render_kernel.metadata, "demand_justification_edge_ids")
+            .unwrap_or("")
+            .contains("call_to_body:"),
+        "render_png kernel should include machine-readable path edge IDs"
+    );
+    assert!(
+        metadata_value(&render_kernel.metadata, "demand_justification_edge_ids")
+            .unwrap_or("")
+            .contains("body_to_kernel:"),
+        "kernel demand path contract should include owning body->kernel link ID"
+    );
+    assert!(
         metadata_value(&render_kernel.metadata, "demand_justification_trace")
             .unwrap_or("")
             .contains("tri-platform-png.vx::build_for --direct-call fn render_png"),
@@ -1004,6 +1020,15 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
             .unwrap_or("")
             .contains("body_b"),
             "imported `{imported_file}` build body should include machine-readable path node IDs"
+        );
+        assert!(
+            metadata_value(
+                &imported_build_body.metadata,
+                "demand_justification_edge_ids"
+            )
+            .unwrap_or("")
+            .contains("call_to_body:"),
+            "imported `{imported_file}` build body should include machine-readable path edge IDs"
         );
         assert!(
             metadata_value(&imported_build_body.metadata, "demand_justification_trace")

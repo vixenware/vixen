@@ -1093,6 +1093,18 @@ function selectedTraceFromNode(nodeId, mode) {
 }
 function selectedCausalPathFromValue(value) {
   if (!value || value.type !== "node") return null;
+  function edgeMachineId(entry) {
+    const edge = entry.edge;
+    const metadata = metadataMap(edge.metadata);
+    if (edge.kind === "call_to_body") {
+      const callExpr = String(metadata.call_expr ?? "");
+      if (callExpr) return `call_to_body:${edge.from}->${edge.to}:expr${callExpr}`;
+      return `call_to_body:${edge.from}->${edge.to}`;
+    }
+    if (edge.kind === "body_to_kernel") return `body_to_kernel:${edge.from}->${edge.to}`;
+    if (edge.kind === "body_to_runtime_boundary") return `body_to_runtime_boundary:${edge.from}->${edge.to}`;
+    return `${edge.kind}:${edge.from}->${edge.to}`;
+  }
   const metadata = metadataMap(value.metadata);
   const nodePathRaw = String(metadata.demand_justification_node_ids ?? "");
   if (!nodePathRaw) return null;
@@ -1107,6 +1119,21 @@ function selectedCausalPathFromValue(value) {
   const primaryEdges = new Set();
   const neighborNodes = new Set();
   const neighborEdges = new Set();
+  const edgePathRaw = String(metadata.demand_justification_edge_ids ?? "");
+  const pathEdgeIds = edgePathRaw
+    .split("|")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (pathEdgeIds.length > 0) {
+    for (const edgeId of pathEdgeIds) {
+      const edgeEntry = edgeElements
+        .filter((entry) => edgeMachineId(entry) === edgeId)
+        .slice()
+        .sort((a, b) => a.key.localeCompare(b.key))[0];
+      if (edgeEntry) primaryEdges.add(edgeEntry.key);
+    }
+    return { primaryNodes, primaryEdges, neighborNodes, neighborEdges };
+  }
 
   for (let i = 0; i + 1 < pathNodeIds.length; i++) {
     const from = pathNodeIds[i];
@@ -2986,6 +3013,8 @@ fn project_analysis_graph_internal(
             &demand_justification,
             body.id,
             &body.result_observation,
+            &body_node_id(body.id),
+            GraphNodeKind::Body,
             context,
         );
         if let Some(ctx) = context {
@@ -3084,6 +3113,8 @@ fn project_analysis_graph_internal(
             &demand_justification,
             kernel.body,
             &kernel.result_obs,
+            &kernel_node_id(kernel.id.0),
+            GraphNodeKind::Kernel,
             context,
         );
         if let Some(ctx) = context {
@@ -3181,6 +3212,8 @@ fn project_analysis_graph_internal(
             &demand_justification,
             source_expr.body,
             owner_observation,
+            &runtime_node_id(runtime_id),
+            GraphNodeKind::RuntimeBoundary,
             context,
         );
         append_source_expr_metadata(&mut metadata, &source_expr, context);
@@ -3985,6 +4018,8 @@ fn append_demand_justification_metadata(
     justification: &DemandJustificationIndex,
     body_id: BodyId,
     observation: &crate::Observation,
+    selected_node_id: &str,
+    selected_kind: GraphNodeKind,
     context: Option<&BridgeGraphContext<'_>>,
 ) {
     let path = justification.path_to(body_id);
@@ -4086,6 +4121,30 @@ fn append_demand_justification_metadata(
     };
 
     metadata.push(("demand_justification_status".to_owned(), status.to_owned()));
+    let mut edge_ids = path_steps
+        .iter()
+        .map(|step| {
+            format!(
+                "call_to_body:{}->{}:expr{}",
+                body_node_id(step.caller),
+                body_node_id(step.callee),
+                step.call_expr.0
+            )
+        })
+        .collect::<Vec<_>>();
+    match selected_kind {
+        GraphNodeKind::Kernel => edge_ids.push(format!(
+            "body_to_kernel:{}->{}",
+            body_node_id(body_id),
+            selected_node_id
+        )),
+        GraphNodeKind::RuntimeBoundary => edge_ids.push(format!(
+            "body_to_runtime_boundary:{}->{}",
+            body_node_id(body_id),
+            selected_node_id
+        )),
+        GraphNodeKind::Body | GraphNodeKind::ClosureLayout => {}
+    }
     metadata.push(("demand_justification_path".to_owned(), path_text));
     metadata.push((
         "demand_justification_node_ids".to_owned(),
@@ -4093,6 +4152,10 @@ fn append_demand_justification_metadata(
             .map(|id| body_node_id(*id))
             .collect::<Vec<_>>()
             .join(" -> "),
+    ));
+    metadata.push((
+        "demand_justification_edge_ids".to_owned(),
+        edge_ids.join(" | "),
     ));
     metadata.push((
         "demand_justification_path_modules".to_owned(),
