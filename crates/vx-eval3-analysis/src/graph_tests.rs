@@ -113,7 +113,11 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains(".source-registry li.active"));
     assert!(html.contains("snippet-line"));
     assert!(html.contains("source_snippet_highlighted_html"));
-    assert!(html.contains("arb-snippet"));
+    assert!(html.contains("arb-code"));
+    assert!(html.contains("data-arb-theme=\"dark\""));
+    assert!(html.contains(".arb-code[data-arb-theme=\"light\"]"));
+    assert!(html.contains(".arb-code[data-arb-theme=\"dark\"]"));
+    assert!(html.contains("a-k {"));
     assert!(html.contains("applySourceFilter("));
     assert!(html.contains("position: sticky"));
     assert!(html.contains("Graph Legend"));

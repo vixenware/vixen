@@ -7,6 +7,7 @@ use std::{
 
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{Config, GrammarStore, Highlighter, HtmlFormat};
+use arborium_theme::{builtin as arborium_builtin_theme, highlights as arborium_highlights};
 use vx_resolve::SourceSpan;
 
 use crate::{
@@ -263,13 +264,11 @@ impl AnalysisGraph {
         out.push_str("  .detail-row:last-child { margin-bottom: 0; }\n");
         out.push_str("  .detail-key { color: #8ba5c1; }\n");
         out.push_str("  .detail-val { color: #e2e8f0; word-break: break-word; }\n");
-        out.push_str("  .snippet { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: #0b1420; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
+        out.push_str("  .snippet { font-size: 12px; background: #0b1420; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 8px; padding: 8px; margin-top: 6px; }\n");
         out.push_str("  .snippet-line { display: grid; grid-template-columns: 2.4em 1fr; gap: 10px; margin-bottom: 2px; }\n");
         out.push_str("  .snippet-line:last-child { margin-bottom: 0; }\n");
         out.push_str("  .snippet-ln { color: #647b95; text-align: right; user-select: none; }\n");
-        out.push_str(
-            "  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; }\n",
-        );
+        out.push_str("  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
         out.push_str("  .source-inspector { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .source-inspector .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n");
         out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
@@ -277,7 +276,7 @@ impl AnalysisGraph {
         out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 8px; background: #0b1420; max-height: 320px; overflow: auto; }\n");
         out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 3.2em minmax(0, 1fr); gap: 8px; padding: 1px 6px; }\n");
         out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; }\n");
-        out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; }\n");
+        out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
         out.push_str(
             "  .source-inspector .inspector-line.in-span { background: rgba(125,211,252,0.12); }\n",
         );
@@ -419,20 +418,11 @@ impl AnalysisGraph {
             "  .semantic-summary { margin: 8px 0 0 0; font-size: 12px; color: #8ba5c1; }\n",
         );
         out.push_str("  .semantic-explain { margin: 6px 0 0 0; font-size: 12px; line-height: 1.4; color: #c7d6e6; }\n");
-        out.push_str("  .arb-snippet { white-space: pre-wrap; word-break: break-word; }\n");
-        out.push_str("  .arb-snippet .arb-keyword { color: #f38ba8; }\n");
-        out.push_str("  .arb-snippet .arb-function { color: #89b4fa; }\n");
-        out.push_str("  .arb-snippet .arb-string { color: #a6e3a1; }\n");
-        out.push_str("  .arb-snippet .arb-comment { color: #6c7f95; }\n");
-        out.push_str("  .arb-snippet .arb-type { color: #f9e2af; }\n");
-        out.push_str("  .arb-snippet .arb-variable { color: #cdd6f4; }\n");
-        out.push_str("  .arb-snippet .arb-constant { color: #fab387; }\n");
-        out.push_str("  .arb-snippet .arb-number { color: #fab387; }\n");
-        out.push_str("  .arb-snippet .arb-property { color: #94e2d5; }\n");
-        out.push_str("  .arb-snippet .arb-operator { color: #89dceb; }\n");
-        out.push_str("  .arb-snippet .arb-punctuation { color: #bac2de; }\n");
-        out.push_str("  .arb-snippet .arb-tag { color: #f38ba8; }\n");
-        out.push_str("  .arb-snippet .arb-attribute { color: #89b4fa; }\n");
+        out.push_str("  .arb-code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; line-height: 1.45; }\n");
+        out.push_str("  .snippet.arb-code { white-space: pre-wrap; word-break: break-word; }\n");
+        out.push_str("  .source-inspector .inspector-lines.arb-code { white-space: normal; }\n");
+        out.push_str("  .arb-code[data-arb-theme=\"base\"] { color: inherit; background: transparent; --bg: transparent; --surface: transparent; --fg: currentColor; --accent: currentColor; --muted: currentColor; }\n");
+        out.push_str(&arborium_theme_css());
         out.push_str("</style>\n</head>\n<body>\n");
         out.push_str("<div class=\"header\">\n");
         out.push_str("<h1 class=\"title\">Vixen Structural Analysis Graph</h1>\n");
@@ -1390,7 +1380,7 @@ function renderSourceInspector() {
       <button id="source-inspector-toggle" type="button">${inspectorExpanded ? "collapse context" : "expand file"}</button>
     </div>
     <div class="inspector-meta">source ${htmlEscape(sourceId)} · ${htmlEscape(spanMeta)}</div>
-    <div class="inspector-lines">${rows.join("")}</div>
+    <div class="inspector-lines arb-code" data-arb-theme="dark">${rows.join("")}</div>
   `;
   const toggle = sourceInspector.querySelector("#source-inspector-toggle");
   if (toggle) {
@@ -1720,7 +1710,7 @@ function setDetails(value) {
   const snippetBlock = snippet
     ? `<div class="detail-card"><div class="detail-title">Source Snippet</div>${
         snippetHighlighted
-          ? `<div class="snippet arb-snippet">${snippetHighlighted}</div>`
+          ? `<div class="snippet arb-code" data-arb-theme="dark">${snippetHighlighted}</div>`
           : renderSnippet(snippet)
       }</div>`
     : "";
@@ -2977,66 +2967,36 @@ fn line_start_offsets(source_text: &str) -> Vec<usize> {
 fn split_highlighted_html_lines(html: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut open_spans: Vec<String> = Vec::new();
+    let mut open_tags: Vec<(String, String)> = Vec::new();
     let mut rest = html;
 
     while !rest.is_empty() {
         if let Some(tag_start) = rest.find('<') {
             let text = &rest[..tag_start];
-            for ch in text.chars() {
-                if ch == '\n' {
-                    for _ in &open_spans {
-                        current.push_str("</span>");
-                    }
-                    lines.push(std::mem::take(&mut current));
-                    for span in &open_spans {
-                        current.push_str(span);
-                    }
-                } else {
-                    current.push(ch);
-                }
-            }
+            push_highlighted_text_lines(text, &mut current, &mut lines, &open_tags);
             rest = &rest[tag_start..];
 
-            if rest.starts_with("</span>") {
-                current.push_str("</span>");
-                open_spans.pop();
-                rest = &rest["</span>".len()..];
-            } else if rest.starts_with("<span") {
-                if let Some(end) = rest.find('>') {
-                    let tag = &rest[..end + 1];
-                    current.push_str(tag);
-                    open_spans.push(tag.to_owned());
-                    rest = &rest[end + 1..];
-                } else {
-                    break;
+            if let Some(end) = rest.find('>') {
+                let tag = &rest[..end + 1];
+                current.push_str(tag);
+                if let Some(closing_tag) = closing_tag_for_opening_html_tag(tag) {
+                    open_tags.push((tag.to_owned(), closing_tag));
+                } else if is_closing_html_tag(tag) {
+                    open_tags.pop();
                 }
+                rest = &rest[end + 1..];
             } else {
-                current.push('<');
-                rest = &rest[1..];
+                current.push_str(rest);
+                break;
             }
         } else {
-            for ch in rest.chars() {
-                if ch == '\n' {
-                    for _ in &open_spans {
-                        current.push_str("</span>");
-                    }
-                    lines.push(std::mem::take(&mut current));
-                    for span in &open_spans {
-                        current.push_str(span);
-                    }
-                } else {
-                    current.push(ch);
-                }
-            }
+            push_highlighted_text_lines(rest, &mut current, &mut lines, &open_tags);
             break;
         }
     }
 
     if !current.is_empty() {
-        for _ in &open_spans {
-            current.push_str("</span>");
-        }
+        close_open_highlight_tags(&mut current, &open_tags);
         lines.push(current);
     }
 
@@ -3044,6 +3004,61 @@ fn split_highlighted_html_lines(html: &str) -> Vec<String> {
         vec![String::new()]
     } else {
         lines
+    }
+}
+
+fn push_highlighted_text_lines(
+    text: &str,
+    current: &mut String,
+    lines: &mut Vec<String>,
+    open_tags: &[(String, String)],
+) {
+    for ch in text.chars() {
+        if ch == '\n' {
+            close_open_highlight_tags(current, open_tags);
+            lines.push(std::mem::take(current));
+            reopen_highlight_tags(current, open_tags);
+        } else {
+            current.push(ch);
+        }
+    }
+}
+
+fn close_open_highlight_tags(current: &mut String, open_tags: &[(String, String)]) {
+    for (_, closing_tag) in open_tags.iter().rev() {
+        current.push_str(closing_tag);
+    }
+}
+
+fn reopen_highlight_tags(current: &mut String, open_tags: &[(String, String)]) {
+    for (opening_tag, _) in open_tags {
+        current.push_str(opening_tag);
+    }
+}
+
+fn is_closing_html_tag(tag: &str) -> bool {
+    tag.trim_start().starts_with("</")
+}
+
+fn closing_tag_for_opening_html_tag(tag: &str) -> Option<String> {
+    let trimmed = tag.trim();
+    if !trimmed.starts_with('<')
+        || trimmed.starts_with("</")
+        || trimmed.starts_with("<!")
+        || trimmed.ends_with("/>")
+    {
+        return None;
+    }
+    let tag_name = trimmed
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+        .next()?;
+    if tag_name.is_empty() {
+        None
+    } else {
+        Some(format!("</{tag_name}>"))
     }
 }
 
@@ -3067,7 +3082,7 @@ impl SnippetHighlighter {
         store.insert("vixen", grammar.clone());
         store.insert("vx", grammar);
         let config = Config {
-            html_format: HtmlFormat::ClassNamesWithPrefix("arb".to_owned()),
+            html_format: HtmlFormat::CustomElements,
             ..Config::default()
         };
 
@@ -3090,4 +3105,49 @@ fn highlight_vixen_snippet_html(snippet: &str) -> Option<String> {
     let mut guard = cell.lock().ok()?;
     let highlighter = guard.as_mut()?;
     highlighter.highlight_vixen(snippet)
+}
+
+fn arborium_theme_css() -> String {
+    let mut css = String::new();
+    css.push_str(&prefix_simple_css_rules(
+        ".arb-code",
+        &arborium_highlights::css_inheritance_rules(),
+    ));
+    css.push_str(
+        &arborium_builtin_theme::catppuccin_latte().to_css(".arb-code[data-arb-theme=\"light\"]"),
+    );
+    css.push('\n');
+    css.push_str(
+        &arborium_builtin_theme::catppuccin_mocha().to_css(".arb-code[data-arb-theme=\"dark\"]"),
+    );
+    css.push('\n');
+    css
+}
+
+fn prefix_simple_css_rules(prefix: &str, css: &str) -> String {
+    let mut out = String::new();
+    let mut lines = css
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+
+    for trimmed in lines {
+        if let Some((selectors, rest)) = trimmed.split_once('{') {
+            let prefixed = selectors
+                .split(',')
+                .map(|selector| format!("{prefix} {}", selector.trim()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&prefixed);
+            out.push_str(" {");
+            out.push_str(rest.trim_start());
+            out.push('\n');
+        } else {
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+    out
 }

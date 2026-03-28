@@ -4025,6 +4025,7 @@ name = "vx-eval3-analysis"
 version = "0.1.0"
 dependencies = [
  "arborium",
+ "arborium-theme",
  "tree-sitter-vixen",
  "vx-parser",
  "vx-resolve",

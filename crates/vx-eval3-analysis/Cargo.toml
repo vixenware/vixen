@@ -12,6 +12,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 arborium = { workspace = true }
+arborium-theme = { workspace = true }
 vx-parser = { workspace = true }
 vx-resolve = { workspace = true }
 vx-types = { workspace = true }
