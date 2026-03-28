@@ -2291,7 +2291,7 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name", "kernel_reason_summary", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => {
       const displayKey =
@@ -2301,6 +2301,9 @@ function setDetails(value) {
         key === "capture_count" ? "Capture Count" :
         key === "extracted_reason" ? "Extracted Because" :
         key === "kernel_reason_summary" ? "Kernel Meaning" :
+        key === "kernel_local_calls" ? "Local Calls" :
+        key === "kernel_extracted_values" ? "Extracted Values" :
+        key === "kernel_region_examples" ? "Kernel Region" :
         key === "demand_model_note" ? "Demand Model" :
         key === "call_target" ? "Call Target" :
         key === "call_kind" ? "Call Kind" :
@@ -2921,6 +2924,9 @@ fn project_analysis_graph_internal(
         let source_local_call_count = owner_body
             .map(|body| body.source_local_call_edges.len())
             .unwrap_or(0);
+        let kernel_local_calls = kernel_local_call_summary(owner_body, kernel.body, context);
+        let kernel_extracted_values = kernel_extracted_values_summary(owner_body);
+        let kernel_region_examples = kernel_region_examples_summary(kernel, context);
         let kernel_reason_summary = kernel_reason_summary(
             source_local_call_count,
             runtime_extract_count,
@@ -2936,6 +2942,18 @@ fn project_analysis_graph_internal(
             (
                 "kernel_reason_summary".to_owned(),
                 kernel_reason_summary.to_owned(),
+            ),
+            (
+                "kernel_local_calls".to_owned(),
+                kernel_local_calls.to_owned(),
+            ),
+            (
+                "kernel_extracted_values".to_owned(),
+                kernel_extracted_values.to_owned(),
+            ),
+            (
+                "kernel_region_examples".to_owned(),
+                kernel_region_examples.to_owned(),
             ),
             (
                 "demand_model_note".to_owned(),
@@ -3366,6 +3384,109 @@ fn kernel_reason_summary(
     format!(
         "local calls: {source_local_call_count}; runtime-boundary extracts: {runtime_extract_count}; shared-value extracts: {shared_extract_count}"
     )
+}
+
+fn kernel_local_call_summary(
+    owner_body: Option<&crate::AnalyzedBody>,
+    body_id: BodyId,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    let Some(body) = owner_body else {
+        return "none".to_owned();
+    };
+    let mut labels = body
+        .source_local_call_edges
+        .iter()
+        .map(|edge| {
+            let call_source = SourceExpr {
+                body: body_id,
+                expr: edge.call_expr,
+            };
+            context
+                .and_then(|ctx| ctx.call_target_label(&call_source))
+                .unwrap_or_else(|| format!("expr E{}", edge.call_expr.0))
+        })
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        "none".to_owned()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn kernel_extracted_values_summary(owner_body: Option<&crate::AnalyzedBody>) -> String {
+    let Some(body) = owner_body else {
+        return "none".to_owned();
+    };
+    let mut runtime = 0usize;
+    let mut shared = 0usize;
+    let mut closure = 0usize;
+    let mut lazy = 0usize;
+    for extracted in &body.extracted_nodes {
+        match extracted.reason {
+            ExtractedNodeReason::RuntimeBoundary { .. } => runtime += 1,
+            ExtractedNodeReason::SharedAcrossUses => shared += 1,
+            ExtractedNodeReason::CapturedByClosureEnv { .. } => closure += 1,
+            ExtractedNodeReason::LazyProductField { .. } => lazy += 1,
+            ExtractedNodeReason::EscapesAsLazyResult => lazy += 1,
+        }
+    }
+    let mut segments = Vec::new();
+    if runtime > 0 {
+        segments.push(format!("runtime boundaries: {runtime}"));
+    }
+    if shared > 0 {
+        segments.push(format!("shared values: {shared}"));
+    }
+    if closure > 0 {
+        segments.push(format!("closure captures: {closure}"));
+    }
+    if lazy > 0 {
+        segments.push(format!("lazy product fields: {lazy}"));
+    }
+    if segments.is_empty() {
+        "none".to_owned()
+    } else {
+        segments.join("; ")
+    }
+}
+
+fn kernel_region_examples_summary(
+    kernel: &crate::KernelRegion,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> String {
+    let Some(ctx) = context else {
+        return format!("{} exprs", kernel.exprs.len());
+    };
+    let mut examples = kernel
+        .exprs
+        .iter()
+        .filter_map(|expr| {
+            let source = SourceExpr {
+                body: kernel.body,
+                expr: *expr,
+            };
+            ctx.expr_short_label(&source).and_then(|snippet| {
+                let trimmed = snippet.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    examples.retain(|value| value != "{…}");
+    examples.sort();
+    examples.dedup();
+    let joined = examples.into_iter().take(3).collect::<Vec<_>>().join(" | ");
+    if joined.is_empty() {
+        format!("{} exprs", kernel.exprs.len())
+    } else {
+        format!("{} exprs; {}", kernel.exprs.len(), joined)
+    }
 }
 
 fn demand_model_note(observation: &crate::Observation) -> &'static str {

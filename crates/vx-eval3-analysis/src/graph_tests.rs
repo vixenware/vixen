@@ -259,6 +259,9 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("params.set(\"v\", \"1\")"));
     assert!(html.contains("runtime_role_summary"));
     assert!(html.contains("kernel_reason_summary"));
+    assert!(html.contains("kernel_local_calls"));
+    assert!(html.contains("kernel_extracted_values"));
+    assert!(html.contains("kernel_region_examples"));
     assert!(html.contains("demand_model_note"));
     let source_pos = html
         .find("<section class=\"source-first-row")
@@ -415,6 +418,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("sharing_role"));
     assert!(html.contains("Runtime Role"));
     assert!(html.contains("kernel_reason_summary"));
+    assert!(html.contains("kernel_local_calls"));
+    assert!(html.contains("kernel_extracted_values"));
+    assert!(html.contains("kernel_region_examples"));
     assert!(html.contains("demand_model_note"));
     assert!(html.contains("call_target"));
     assert!(html.contains("cross_module"));
@@ -616,6 +622,20 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         metadata_value(&render_kernel.metadata, "kernel_reason_summary"),
         Some("local calls: 0; runtime-boundary extracts: 2; shared-value extracts: 0")
     );
+    assert_eq!(
+        metadata_value(&render_kernel.metadata, "kernel_local_calls"),
+        Some("none")
+    );
+    assert_eq!(
+        metadata_value(&render_kernel.metadata, "kernel_extracted_values"),
+        Some("runtime boundaries: 2")
+    );
+    assert!(
+        metadata_value(&render_kernel.metadata, "kernel_region_examples")
+            .unwrap_or("")
+            .contains("exec([@(run/"),
+        "render_png kernel region examples should include exec expression context"
+    );
 
     for (body_name, expected_summary) in [
         (
@@ -648,6 +668,40 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             metadata_value(&kernel.metadata, "kernel_reason_summary"),
             Some(expected_summary)
         );
+        if body_name == "build_for" {
+            assert_eq!(
+                metadata_value(&kernel.metadata, "kernel_local_calls"),
+                Some("fn render_png")
+            );
+            assert_eq!(
+                metadata_value(&kernel.metadata, "kernel_extracted_values"),
+                Some("shared values: 1")
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "kernel_region_examples")
+                    .unwrap_or("")
+                    .contains("render_png(class, app)"),
+                "build_for kernel region examples should include local direct call context"
+            );
+        }
+        if body_name == "build" {
+            assert!(
+                metadata_value(&kernel.metadata, "kernel_local_calls")
+                    .unwrap_or("")
+                    .contains("fn build_for"),
+                "build kernel local call summary should include build_for"
+            );
+            assert_eq!(
+                metadata_value(&kernel.metadata, "kernel_extracted_values"),
+                Some("none")
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "kernel_region_examples")
+                    .unwrap_or("")
+                    .contains("config.platforms(env)"),
+                "build kernel region examples should include platform iteration expression"
+            );
+        }
     }
 
     for body_name in ["render_png", "build_for", "build"] {
