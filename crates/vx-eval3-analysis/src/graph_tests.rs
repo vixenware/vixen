@@ -137,8 +137,11 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("topbar"));
     assert!(html.contains("source-first-row"));
     assert!(html.contains("controls-row"));
-    assert!(html.contains("demoted-panel"));
+    assert!(html.contains("utility-strip"));
+    assert!(html.contains("aux-pop"));
     assert!(html.contains("legend-help"));
+    assert!(html.contains("sources-aux"));
+    assert!(html.contains("lanes-aux"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-body"));
     assert!(html.contains("edge-kind-runtime_value_dependency"));
@@ -306,8 +309,11 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("topbar"));
     assert!(html.contains("source-first-row"));
     assert!(html.contains("controls-row"));
-    assert!(html.contains("demoted-panel"));
+    assert!(html.contains("utility-strip"));
+    assert!(html.contains("aux-pop"));
     assert!(html.contains("legend-help"));
+    assert!(html.contains("sources-aux"));
+    assert!(html.contains("lanes-aux"));
     assert!(html.contains("Graph Legend"));
     assert!(html.contains("node-kind-runtime_boundary"));
     assert!(html.contains("edge-kind-body_to_runtime_boundary"));
