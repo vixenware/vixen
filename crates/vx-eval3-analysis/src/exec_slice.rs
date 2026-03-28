@@ -130,15 +130,28 @@ pub enum KernelOp {
         dst: SlotId,
         source: SourceExpr,
         node: RuntimeNodeId,
-        input_bindings: Vec<RuntimeBoundaryInputBinding>,
-        input_closures: Vec<SourceExpr>,
+        positional_inputs: Vec<RuntimeBoundaryInputSpec>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeBoundaryInputBinding {
-    pub binding: BridgeLocalBindingId,
-    pub slot: SlotId,
+pub enum RuntimeBoundaryInputSpec {
+    Binding {
+        binding: BridgeLocalBindingId,
+        slot: SlotId,
+    },
+    UnresolvedBinding {
+        binding: BridgeLocalBindingId,
+    },
+    IntLiteral(i64),
+    StringLiteral(String),
+    Closure {
+        source: SourceExpr,
+    },
+    Array(Vec<RuntimeBoundaryInputSpec>),
+    OpaqueExpr {
+        source: SourceExpr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,8 +552,6 @@ struct BodyLowering<'a> {
     use_binding_by_expr: HashMap<ExprId, BridgeLocalBindingId>,
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
-    boundary_arg_bindings_by_call: HashMap<ExprId, Vec<BridgeLocalBindingId>>,
-    boundary_arg_closures_by_call: HashMap<ExprId, Vec<SourceExpr>>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
     lowerable_bodies: BTreeSet<BodyId>,
     params: Vec<SlotId>,
@@ -642,36 +653,6 @@ impl<'a> BodyLowering<'a> {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
             }
         }
-        let mut boundary_arg_bindings_by_call = HashMap::<ExprId, Vec<BridgeLocalBindingId>>::new();
-        for arg in bridge
-            .boundary_arg_bindings
-            .iter()
-            .filter(|arg| arg.body == body)
-        {
-            boundary_arg_bindings_by_call
-                .entry(arg.call_expr)
-                .or_default()
-                .push(arg.binding);
-        }
-        for bindings in boundary_arg_bindings_by_call.values_mut() {
-            bindings.sort_by_key(|binding| binding.0);
-            bindings.dedup();
-        }
-        let mut boundary_arg_closures_by_call = HashMap::<ExprId, Vec<SourceExpr>>::new();
-        for closure in bridge
-            .boundary_arg_closures
-            .iter()
-            .filter(|closure| closure.body == body)
-        {
-            boundary_arg_closures_by_call
-                .entry(closure.call_expr)
-                .or_default()
-                .push(closure.closure_source.clone());
-        }
-        for closures in boundary_arg_closures_by_call.values_mut() {
-            closures.sort_by_key(|source| (source.body.0, source.expr.0));
-            closures.dedup();
-        }
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
         for extracted in &analyzed.extracted_nodes {
             if let crate::ExtractedNodeReason::LazyProductField {
@@ -695,8 +676,6 @@ impl<'a> BodyLowering<'a> {
             use_binding_by_expr,
             binding_initializers,
             slot_by_binding,
-            boundary_arg_bindings_by_call,
-            boundary_arg_closures_by_call,
             runtime_node_by_expr,
             lowerable_bodies: lowerable_bodies.clone(),
             params,
@@ -1040,33 +1019,17 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Call(call) => {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
-                    let mut input_bindings = Vec::new();
-                    for binding in self
-                        .boundary_arg_bindings_by_call
-                        .get(&expr_id)
-                        .cloned()
-                        .unwrap_or_default()
-                    {
-                        match self.materialize_binding(binding) {
-                            Ok(slot) => {
-                                input_bindings.push(RuntimeBoundaryInputBinding { binding, slot })
-                            }
-                            Err(UnsupportedShape(_)) => {}
-                            Err(err) => return Err(err),
-                        }
-                    }
-                    let input_closures = self
-                        .boundary_arg_closures_by_call
-                        .get(&expr_id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let positional_inputs = call
+                        .positional_args()
+                        .into_iter()
+                        .map(|arg| self.runtime_input_spec_for_expr(&arg))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let dst = self.alloc_temp();
                     self.ops.push(KernelOp::AwaitRuntime {
                         dst,
                         source: self.source_for(expr_id),
                         node,
-                        input_bindings,
-                        input_closures,
+                        positional_inputs,
                     });
                     self.awaited_runtime_nodes.insert(node);
                     return Ok(Operand::Slot(dst));
@@ -1136,6 +1099,85 @@ impl<'a> BodyLowering<'a> {
             ))),
         }
     }
+
+    fn runtime_input_spec_for_expr(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<RuntimeBoundaryInputSpec, ExecSliceError> {
+        if let Expr::NameRef(_) = expr
+            && let Some(expr_id) = self.expr_id(expr)
+            && let Some(binding) = self.use_binding_by_expr.get(&expr_id).copied()
+        {
+            return match self.materialize_binding(binding) {
+                Ok(slot) => Ok(RuntimeBoundaryInputSpec::Binding { binding, slot }),
+                Err(UnsupportedShape(_)) => {
+                    Ok(RuntimeBoundaryInputSpec::UnresolvedBinding { binding })
+                }
+                Err(err) => Err(err),
+            };
+        }
+
+        if let Expr::Literal(literal) = expr
+            && let Some(token) = literal.token()
+        {
+            return match token.kind() {
+                SyntaxKind::INT => {
+                    let value =
+                        token.text().replace('_', "").parse::<i64>().map_err(|_| {
+                            UnsupportedShape(format!("invalid int `{}`", token.text()))
+                        })?;
+                    Ok(RuntimeBoundaryInputSpec::IntLiteral(value))
+                }
+                SyntaxKind::STRING => Ok(RuntimeBoundaryInputSpec::StringLiteral(
+                    normalize_string_literal_token(token.text()),
+                )),
+                _ => {
+                    let expr_id = self.expr_id(expr).ok_or(ExecSliceError::MissingExpr(
+                        self.source_for(self.entry_expr),
+                    ))?;
+                    Ok(RuntimeBoundaryInputSpec::OpaqueExpr {
+                        source: self.source_for(expr_id),
+                    })
+                }
+            };
+        }
+
+        if let Expr::Closure(_) = expr {
+            let expr_id = self.expr_id(expr).ok_or(ExecSliceError::MissingExpr(
+                self.source_for(self.entry_expr),
+            ))?;
+            return Ok(RuntimeBoundaryInputSpec::Closure {
+                source: self.source_for(expr_id),
+            });
+        }
+
+        if let Expr::Array(array) = expr {
+            let items = array
+                .items()
+                .map(|item| match item {
+                    vx_parser::ArrayItem::Expr(expr) => self.runtime_input_spec_for_expr(&expr),
+                    vx_parser::ArrayItem::Spread(spread) => {
+                        let source = spread
+                            .expr()
+                            .and_then(|expr| self.expr_id(&expr))
+                            .map(|expr_id| self.source_for(expr_id))
+                            .ok_or(ExecSliceError::MissingExpr(
+                                self.source_for(self.entry_expr),
+                            ))?;
+                        Ok(RuntimeBoundaryInputSpec::OpaqueExpr { source })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(RuntimeBoundaryInputSpec::Array(items));
+        }
+
+        let expr_id = self.expr_id(expr).ok_or(ExecSliceError::MissingExpr(
+            self.source_for(self.entry_expr),
+        ))?;
+        Ok(RuntimeBoundaryInputSpec::OpaqueExpr {
+            source: self.source_for(expr_id),
+        })
+    }
 }
 
 fn is_param_name_ref(expr: &Expr, name: &str) -> bool {
@@ -1143,4 +1185,12 @@ fn is_param_name_ref(expr: &Expr, name: &str) -> bool {
         return false;
     };
     name_ref.token().is_some_and(|token| token.text() == name)
+}
+
+fn normalize_string_literal_token(token_text: &str) -> String {
+    token_text
+        .strip_prefix('"')
+        .and_then(|stripped| stripped.strip_suffix('"'))
+        .unwrap_or(token_text)
+        .to_owned()
 }

@@ -9,8 +9,9 @@ use vx_eval3_analysis::{
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult, ExecValue,
-    RuntimeMemoKey, RuntimeSession, WaitReason, eval_executable_program,
+    BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest, CellState,
+    EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey, RuntimeSession, WaitReason,
+    eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -479,10 +480,10 @@ struct CcVersionDriver {
     saw_discover: bool,
     saw_exec: bool,
     saw_shared_keyed: bool,
-    saw_discover_closure_identity: bool,
-    saw_exec_cc_input_value: bool,
+    saw_discover_query: bool,
+    saw_exec_argv_shape: bool,
     expected_payloads: BTreeMap<vx_eval3_analysis::RuntimeNodeId, RuntimeBoundaryPayload>,
-    discover_cc_value: Option<i64>,
+    discovered_tool: Option<ExecValue>,
     last_exec_value: Option<ExecValue>,
 }
 
@@ -503,14 +504,22 @@ impl BoundaryDriver for CcVersionDriver {
                     &RuntimeBoundaryPayload::Discover(req.payload.clone()),
                     "discover request should carry typed payload from analysis executable plan"
                 );
+                let saw_closure =
+                    req.inputs.positional_inputs.iter().any(|input| {
+                        matches!(input, BoundaryPositionalInputValue::ClosureIdentity(_))
+                    });
+                let saw_missing_class = req.inputs.positional_inputs.iter().any(|input| {
+                    matches!(input, BoundaryPositionalInputValue::MissingBinding { .. })
+                });
                 assert!(
-                    !req.inputs.closure_sources.is_empty(),
-                    "discover request should expose symbolic closure identity for opaque closure arg"
+                    saw_closure && saw_missing_class,
+                    "discover request should include closure identity and unresolved class binding input"
                 );
-                self.saw_discover_closure_identity = true;
-                let discovered = 733;
-                self.discover_cc_value = Some(discovered);
-                Ok(ExecValue::Int(discovered))
+                self.saw_discover_query = true;
+                let discovered_tool =
+                    ExecValue::Pair(Box::new(ExecValue::Int(99)), Box::new(ExecValue::Int(2)));
+                self.discovered_tool = Some(discovered_tool.clone());
+                Ok(discovered_tool)
             }
             BoundaryRequest::Exec(req) => {
                 self.saw_exec = true;
@@ -523,24 +532,39 @@ impl BoundaryDriver for CcVersionDriver {
                     &RuntimeBoundaryPayload::Exec(req.payload.clone()),
                     "exec request should carry typed payload from analysis executable plan"
                 );
-                let cc_input = req
+                let expected_tool = self
+                    .discovered_tool
+                    .clone()
+                    .expect("discover should run before exec and produce concrete tool value");
+                let argv = req
                     .inputs
-                    .binding_values
+                    .positional_inputs
                     .iter()
-                    .find_map(|input| match input.value {
-                        ExecValue::Int(value) => Some(value),
+                    .find_map(|input| match input {
+                        BoundaryPositionalInputValue::Array(values) => Some(values),
                         _ => None,
                     })
-                    .expect("exec request should include concrete binding input value");
-                let expected_cc = self
-                    .discover_cc_value
-                    .expect("discover should run before exec and produce concrete cc value");
-                assert_eq!(
-                    cc_input, expected_cc,
-                    "exec request should carry concrete runtime input produced by prior discover boundary"
+                    .expect("exec request should include argv-like array positional input");
+                let saw_tool_arg = argv.iter().any(|input| {
+                    matches!(
+                        input,
+                        BoundaryPositionalInputValue::RuntimeValue { value, .. } if *value == expected_tool
+                    )
+                });
+                let saw_version_flag = argv.iter().any(|input| match input {
+                    BoundaryPositionalInputValue::StringLiteral(flag) => flag == "--version",
+                    _ => false,
+                });
+                assert!(
+                    saw_tool_arg && saw_version_flag,
+                    "exec request should carry concrete discovered tool plus --version literal"
                 );
-                self.saw_exec_cc_input_value = true;
-                let value = ExecValue::Int(4000 + cc_input);
+                self.saw_exec_argv_shape = true;
+                let stdout_fingerprint = 20260328;
+                let value = ExecValue::Pair(
+                    Box::new(ExecValue::Int(0)),
+                    Box::new(ExecValue::Int(stdout_fingerprint)),
+                );
                 self.last_exec_value = Some(value.clone());
                 Ok(value)
             }
@@ -611,14 +635,14 @@ fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
         saw_discover: false,
         saw_exec: false,
         saw_shared_keyed: false,
-        saw_discover_closure_identity: false,
-        saw_exec_cc_input_value: false,
+        saw_discover_query: false,
+        saw_exec_argv_shape: false,
         expected_payloads: program
             .runtime_nodes
             .iter()
             .map(|(id, node)| (*id, node.payload.clone()))
             .collect(),
-        discover_cc_value: None,
+        discovered_tool: None,
         last_exec_value: None,
     };
     let outcome = session
@@ -634,12 +658,12 @@ fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
         "typed boundary driver should receive at least one discover request on cc-version path"
     );
     assert!(
-        driver.saw_discover_closure_identity,
-        "discover request should include symbolic closure identity"
+        driver.saw_discover_query,
+        "discover request should drive deterministic tool discovery behavior"
     );
     assert!(
-        driver.saw_exec_cc_input_value,
-        "exec request should include concrete runtime binding input value"
+        driver.saw_exec_argv_shape,
+        "exec request should carry argv-like concrete inputs"
     );
     assert_eq!(
         outcome.entry_result,

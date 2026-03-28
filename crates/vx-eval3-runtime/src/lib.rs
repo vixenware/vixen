@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use vx_eval3_analysis::{
     BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
-    ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryKind,
-    RuntimeBoundaryPayload, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId, SourceExpr,
+    ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
+    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId,
+    SourceExpr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -129,33 +130,39 @@ pub struct SharedKeyedBoundaryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundaryBindingInputValue {
-    pub binding: BridgeLocalBindingId,
-    pub value: ExecValue,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecBoundaryInputs {
-    pub binding_values: Vec<BoundaryBindingInputValue>,
-    pub closure_sources: Vec<SourceExpr>,
+    pub positional_inputs: Vec<BoundaryPositionalInputValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoverBoundaryInputs {
-    pub binding_values: Vec<BoundaryBindingInputValue>,
-    pub closure_sources: Vec<SourceExpr>,
+    pub positional_inputs: Vec<BoundaryPositionalInputValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedKeyedBoundaryInputs {
-    pub binding_values: Vec<BoundaryBindingInputValue>,
-    pub closure_sources: Vec<SourceExpr>,
+    pub positional_inputs: Vec<BoundaryPositionalInputValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundaryPositionalInputValue {
+    RuntimeValue {
+        binding: BridgeLocalBindingId,
+        value: ExecValue,
+    },
+    MissingBinding {
+        binding: BridgeLocalBindingId,
+    },
+    IntLiteral(i64),
+    StringLiteral(String),
+    ClosureIdentity(SourceExpr),
+    Array(Vec<BoundaryPositionalInputValue>),
+    OpaqueExpr(SourceExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeBoundaryInputs {
-    binding_values: Vec<BoundaryBindingInputValue>,
-    closure_sources: Vec<SourceExpr>,
+    positional_inputs: Vec<BoundaryPositionalInputValue>,
 }
 
 pub trait BoundaryDriver {
@@ -307,8 +314,7 @@ impl<'a> RuntimeMachine<'a> {
                     source: runtime_node.source.clone(),
                     payload: payload.clone(),
                     inputs: ExecBoundaryInputs {
-                        binding_values: inputs.binding_values.clone(),
-                        closure_sources: inputs.closure_sources.clone(),
+                        positional_inputs: inputs.positional_inputs.clone(),
                     },
                 })
             }
@@ -318,8 +324,7 @@ impl<'a> RuntimeMachine<'a> {
                     source: runtime_node.source.clone(),
                     payload: payload.clone(),
                     inputs: DiscoverBoundaryInputs {
-                        binding_values: inputs.binding_values.clone(),
-                        closure_sources: inputs.closure_sources.clone(),
+                        positional_inputs: inputs.positional_inputs.clone(),
                     },
                 })
             }
@@ -329,8 +334,7 @@ impl<'a> RuntimeMachine<'a> {
                     source: runtime_node.source.clone(),
                     payload: payload.clone(),
                     inputs: SharedKeyedBoundaryInputs {
-                        binding_values: inputs.binding_values.clone(),
-                        closure_sources: inputs.closure_sources.clone(),
+                        positional_inputs: inputs.positional_inputs.clone(),
                     },
                 })
             }
@@ -583,24 +587,14 @@ impl<'a> RuntimeMachine<'a> {
                 KernelOp::AwaitRuntime {
                     dst,
                     node,
-                    input_bindings,
-                    input_closures,
+                    positional_inputs,
                     ..
                 } => {
                     let resolved_inputs = RuntimeBoundaryInputs {
-                        binding_values: input_bindings
-                            .iter()
-                            .map(|input| {
-                                Ok(BoundaryBindingInputValue {
-                                    binding: input.binding,
-                                    value: resolve_slot_operand(
-                                        &Operand::Slot(input.slot),
-                                        &frame.slots,
-                                    )?,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, ExecSliceError>>()?,
-                        closure_sources: input_closures,
+                        positional_inputs: resolve_positional_inputs(
+                            &positional_inputs,
+                            &frame.slots,
+                        )?,
                     };
                     let runtime_key = RuntimeMemoKey { node };
                     let wait = WaitReason::RuntimeNode(runtime_key.clone());
@@ -767,6 +761,43 @@ impl<'a> RuntimeMachine<'a> {
             ))),
         }
     }
+}
+
+fn resolve_positional_inputs(
+    inputs: &[RuntimeBoundaryInputSpec],
+    slots: &BTreeMap<SlotId, SlotValue>,
+) -> Result<Vec<BoundaryPositionalInputValue>, ExecSliceError> {
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(match input {
+                RuntimeBoundaryInputSpec::Binding { binding, slot } => {
+                    BoundaryPositionalInputValue::RuntimeValue {
+                        binding: *binding,
+                        value: resolve_slot_operand(&Operand::Slot(*slot), slots)?,
+                    }
+                }
+                RuntimeBoundaryInputSpec::UnresolvedBinding { binding } => {
+                    BoundaryPositionalInputValue::MissingBinding { binding: *binding }
+                }
+                RuntimeBoundaryInputSpec::IntLiteral(value) => {
+                    BoundaryPositionalInputValue::IntLiteral(*value)
+                }
+                RuntimeBoundaryInputSpec::StringLiteral(value) => {
+                    BoundaryPositionalInputValue::StringLiteral(value.clone())
+                }
+                RuntimeBoundaryInputSpec::Closure { source } => {
+                    BoundaryPositionalInputValue::ClosureIdentity(source.clone())
+                }
+                RuntimeBoundaryInputSpec::Array(items) => {
+                    BoundaryPositionalInputValue::Array(resolve_positional_inputs(items, slots)?)
+                }
+                RuntimeBoundaryInputSpec::OpaqueExpr { source } => {
+                    BoundaryPositionalInputValue::OpaqueExpr(source.clone())
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, ExecSliceError>>()
 }
 
 fn resolve_slot_operand(
