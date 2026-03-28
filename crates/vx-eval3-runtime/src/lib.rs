@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use vx_eval3_analysis::{
-    BodyId, ExecSliceError, ExecutableProgram, ExprId, KernelOp, Operand, ResultSource,
-    RuntimeNodeId, SlotId,
+    BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
+    ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryKind,
+    RuntimeBoundaryPayload, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId, SourceExpr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,8 +97,69 @@ pub enum EvalRunResult {
     Blocked(BlockedEval),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundaryRequest {
+    Exec(ExecBoundaryRequest),
+    Discover(DiscoverBoundaryRequest),
+    SharedKeyed(SharedKeyedBoundaryRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecBoundaryRequest {
+    pub node: RuntimeNodeId,
+    pub source: SourceExpr,
+    pub payload: ExecBoundaryPayload,
+    pub inputs: ExecBoundaryInputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverBoundaryRequest {
+    pub node: RuntimeNodeId,
+    pub source: SourceExpr,
+    pub payload: DiscoverBoundaryPayload,
+    pub inputs: DiscoverBoundaryInputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedKeyedBoundaryRequest {
+    pub node: RuntimeNodeId,
+    pub source: SourceExpr,
+    pub payload: SharedKeyedBoundaryPayload,
+    pub inputs: SharedKeyedBoundaryInputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryBindingInputValue {
+    pub binding: BridgeLocalBindingId,
+    pub value: ExecValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecBoundaryInputs {
+    pub binding_values: Vec<BoundaryBindingInputValue>,
+    pub closure_sources: Vec<SourceExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverBoundaryInputs {
+    pub binding_values: Vec<BoundaryBindingInputValue>,
+    pub closure_sources: Vec<SourceExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedKeyedBoundaryInputs {
+    pub binding_values: Vec<BoundaryBindingInputValue>,
+    pub closure_sources: Vec<SourceExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeBoundaryInputs {
+    binding_values: Vec<BoundaryBindingInputValue>,
+    closure_sources: Vec<SourceExpr>,
+}
+
 pub trait BoundaryDriver {
-    fn resolve_runtime_node(&mut self, node: RuntimeNodeId) -> Result<ExecValue, ExecSliceError>;
+    fn resolve_boundary(&mut self, request: &BoundaryRequest) -> Result<ExecValue, ExecSliceError>;
 }
 
 pub fn eval_executable_program(program: &ExecutableProgram) -> Result<EvalOutcome, ExecSliceError> {
@@ -178,7 +240,8 @@ impl<'a> RuntimeSession<'a> {
                         ));
                     }
                     for node in blocked.blocked_runtime_nodes {
-                        let value = driver.resolve_runtime_node(node)?;
+                        let request = self.machine.boundary_request(node)?;
+                        let value = driver.resolve_boundary(&request)?;
                         self.complete_runtime_node(node, value)?;
                     }
                 }
@@ -195,6 +258,7 @@ struct RuntimeMachine<'a> {
     frames: BTreeMap<FrameId, Frame>,
     body_cells: BTreeMap<BodyMemoKey, CellState>,
     runtime_cells: BTreeMap<RuntimeMemoKey, CellState>,
+    runtime_pending_inputs: BTreeMap<RuntimeMemoKey, RuntimeBoundaryInputs>,
     call_counts: BTreeMap<(BodyId, ExprId), usize>,
     wait_events: Vec<WaitReason>,
     body_eval_counts: BTreeMap<BodyMemoKey, usize>,
@@ -214,10 +278,70 @@ impl<'a> RuntimeMachine<'a> {
             frames: BTreeMap::new(),
             body_cells: BTreeMap::new(),
             runtime_cells,
+            runtime_pending_inputs: BTreeMap::new(),
             call_counts: BTreeMap::new(),
             wait_events: vec![],
             body_eval_counts: BTreeMap::new(),
         }
+    }
+
+    fn boundary_request(&self, node: RuntimeNodeId) -> Result<BoundaryRequest, ExecSliceError> {
+        let key = RuntimeMemoKey { node };
+        let runtime_node = self.program.runtime_nodes.get(&node).ok_or_else(|| {
+            ExecSliceError::InvalidProgram(format!("missing runtime node {}", node.0))
+        })?;
+        let inputs = self
+            .runtime_pending_inputs
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                ExecSliceError::InvalidProgram(format!(
+                    "runtime node {} missing pending concrete boundary inputs",
+                    node.0
+                ))
+            })?;
+        let request = match (runtime_node.kind, &runtime_node.payload) {
+            (RuntimeBoundaryKind::Exec, RuntimeBoundaryPayload::Exec(payload)) => {
+                BoundaryRequest::Exec(ExecBoundaryRequest {
+                    node,
+                    source: runtime_node.source.clone(),
+                    payload: payload.clone(),
+                    inputs: ExecBoundaryInputs {
+                        binding_values: inputs.binding_values.clone(),
+                        closure_sources: inputs.closure_sources.clone(),
+                    },
+                })
+            }
+            (RuntimeBoundaryKind::Discover, RuntimeBoundaryPayload::Discover(payload)) => {
+                BoundaryRequest::Discover(DiscoverBoundaryRequest {
+                    node,
+                    source: runtime_node.source.clone(),
+                    payload: payload.clone(),
+                    inputs: DiscoverBoundaryInputs {
+                        binding_values: inputs.binding_values.clone(),
+                        closure_sources: inputs.closure_sources.clone(),
+                    },
+                })
+            }
+            (RuntimeBoundaryKind::SharedKeyed, RuntimeBoundaryPayload::SharedKeyed(payload)) => {
+                BoundaryRequest::SharedKeyed(SharedKeyedBoundaryRequest {
+                    node,
+                    source: runtime_node.source.clone(),
+                    payload: payload.clone(),
+                    inputs: SharedKeyedBoundaryInputs {
+                        binding_values: inputs.binding_values.clone(),
+                        closure_sources: inputs.closure_sources.clone(),
+                    },
+                })
+            }
+            (kind, payload) => {
+                return Err(ExecSliceError::InvalidProgram(format!(
+                    "runtime node {} payload mismatch for boundary kind {:?}: {:?}",
+                    node.0, kind, payload
+                )));
+            }
+        };
+        Ok(request)
     }
 
     fn start_body_frame(&mut self, key: BodyMemoKey) -> Result<(), ExecSliceError> {
@@ -456,7 +580,28 @@ impl<'a> RuntimeMachine<'a> {
                         self.ready_frames.push_back(frame_id);
                     }
                 }
-                KernelOp::AwaitRuntime { dst, node, .. } => {
+                KernelOp::AwaitRuntime {
+                    dst,
+                    node,
+                    input_bindings,
+                    input_closures,
+                    ..
+                } => {
+                    let resolved_inputs = RuntimeBoundaryInputs {
+                        binding_values: input_bindings
+                            .iter()
+                            .map(|input| {
+                                Ok(BoundaryBindingInputValue {
+                                    binding: input.binding,
+                                    value: resolve_slot_operand(
+                                        &Operand::Slot(input.slot),
+                                        &frame.slots,
+                                    )?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, ExecSliceError>>()?,
+                        closure_sources: input_closures,
+                    };
                     let runtime_key = RuntimeMemoKey { node };
                     let wait = WaitReason::RuntimeNode(runtime_key.clone());
                     frame.slots.insert(dst, SlotValue::Waiting(wait.clone()));
@@ -465,7 +610,7 @@ impl<'a> RuntimeMachine<'a> {
                         wait: wait.clone(),
                     });
                     self.wait_events.push(wait);
-                    self.suspend_on_runtime(frame, runtime_key.clone())?;
+                    self.suspend_on_runtime(frame, runtime_key.clone(), resolved_inputs)?;
                 }
             }
         }
@@ -502,6 +647,7 @@ impl<'a> RuntimeMachine<'a> {
         &mut self,
         frame: Frame,
         key: RuntimeMemoKey,
+        resolved_inputs: RuntimeBoundaryInputs,
     ) -> Result<(), ExecSliceError> {
         let frame_id = frame.id;
         self.frames.insert(frame_id, frame);
@@ -514,15 +660,19 @@ impl<'a> RuntimeMachine<'a> {
                 if let Some(CellState::Running { waiters }) = self.runtime_cells.get_mut(&key) {
                     waiters.push(frame_id);
                 }
+                self.runtime_pending_inputs
+                    .entry(key.clone())
+                    .or_insert(resolved_inputs);
             }
             Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err.clone())),
             Some(CellState::Empty) | None => {
                 self.runtime_cells.insert(
-                    key,
+                    key.clone(),
                     CellState::Running {
                         waiters: vec![frame_id],
                     },
                 );
+                self.runtime_pending_inputs.insert(key, resolved_inputs);
             }
         }
         Ok(())
@@ -553,7 +703,8 @@ impl<'a> RuntimeMachine<'a> {
             Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err)),
         };
         self.runtime_cells
-            .insert(key, CellState::Ready(value.clone()));
+            .insert(key.clone(), CellState::Ready(value.clone()));
+        self.runtime_pending_inputs.remove(&key);
         for waiter in waiters {
             self.resume_frame_from_runtime(waiter, value.clone())?;
         }

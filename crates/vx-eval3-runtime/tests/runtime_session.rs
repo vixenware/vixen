@@ -1,22 +1,30 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use vx_eval3_analysis::{
-    BodyId, ExtractedNodeReason, KernelOp, ResultSource, RuntimeNodeId, SingleSourceBridge,
-    SourceLocalCalleeOrigin, build_minimal_analysis, lower_executable_program,
+    BodyId, ExtractedNodeReason, KernelOp, ResultSource, RuntimeBoundaryPayload,
+    SingleSourceBridge, SourceLocalCalleeOrigin, build_minimal_analysis, lower_executable_program,
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BodyMemoKey, BoundaryDriver, CellState, EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey,
-    RuntimeSession, WaitReason, eval_executable_program,
+    BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult, ExecValue,
+    RuntimeMemoKey, RuntimeSession, WaitReason, eval_executable_program,
 };
 
 struct EchoNodeDriver;
 
 impl BoundaryDriver for EchoNodeDriver {
-    fn resolve_runtime_node(
+    fn resolve_boundary(
         &mut self,
-        node: RuntimeNodeId,
+        request: &BoundaryRequest,
     ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+        let node = match request {
+            BoundaryRequest::Exec(req) => req.node,
+            BoundaryRequest::Discover(req) => req.node,
+            BoundaryRequest::SharedKeyed(req) => req.node,
+        };
         Ok(ExecValue::PendingRuntimeBoundaries(vec![node]))
     }
 }
@@ -24,9 +32,9 @@ impl BoundaryDriver for EchoNodeDriver {
 struct ConstantIntDriver(i64);
 
 impl BoundaryDriver for ConstantIntDriver {
-    fn resolve_runtime_node(
+    fn resolve_boundary(
         &mut self,
-        _node: RuntimeNodeId,
+        _request: &BoundaryRequest,
     ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
         Ok(ExecValue::Int(self.0))
     }
@@ -464,5 +472,180 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
             ExecValue::PendingRuntimeBoundaries(nodes) if !nodes.is_empty()
         ),
         "selected multi-source path should complete to an explicit runtime token shape"
+    );
+}
+
+struct CcVersionDriver {
+    saw_discover: bool,
+    saw_exec: bool,
+    saw_shared_keyed: bool,
+    saw_discover_closure_identity: bool,
+    saw_exec_cc_input_value: bool,
+    expected_payloads: BTreeMap<vx_eval3_analysis::RuntimeNodeId, RuntimeBoundaryPayload>,
+    discover_cc_value: Option<i64>,
+    last_exec_value: Option<ExecValue>,
+}
+
+impl BoundaryDriver for CcVersionDriver {
+    fn resolve_boundary(
+        &mut self,
+        request: &BoundaryRequest,
+    ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+        match request {
+            BoundaryRequest::Discover(req) => {
+                self.saw_discover = true;
+                let expected = self
+                    .expected_payloads
+                    .get(&req.node)
+                    .expect("discover request node should have expected payload");
+                assert_eq!(
+                    expected,
+                    &RuntimeBoundaryPayload::Discover(req.payload.clone()),
+                    "discover request should carry typed payload from analysis executable plan"
+                );
+                assert!(
+                    !req.inputs.closure_sources.is_empty(),
+                    "discover request should expose symbolic closure identity for opaque closure arg"
+                );
+                self.saw_discover_closure_identity = true;
+                let discovered = 733;
+                self.discover_cc_value = Some(discovered);
+                Ok(ExecValue::Int(discovered))
+            }
+            BoundaryRequest::Exec(req) => {
+                self.saw_exec = true;
+                let expected = self
+                    .expected_payloads
+                    .get(&req.node)
+                    .expect("exec request node should have expected payload");
+                assert_eq!(
+                    expected,
+                    &RuntimeBoundaryPayload::Exec(req.payload.clone()),
+                    "exec request should carry typed payload from analysis executable plan"
+                );
+                let cc_input = req
+                    .inputs
+                    .binding_values
+                    .iter()
+                    .find_map(|input| match input.value {
+                        ExecValue::Int(value) => Some(value),
+                        _ => None,
+                    })
+                    .expect("exec request should include concrete binding input value");
+                let expected_cc = self
+                    .discover_cc_value
+                    .expect("discover should run before exec and produce concrete cc value");
+                assert_eq!(
+                    cc_input, expected_cc,
+                    "exec request should carry concrete runtime input produced by prior discover boundary"
+                );
+                self.saw_exec_cc_input_value = true;
+                let value = ExecValue::Int(4000 + cc_input);
+                self.last_exec_value = Some(value.clone());
+                Ok(value)
+            }
+            BoundaryRequest::SharedKeyed(req) => {
+                self.saw_shared_keyed = true;
+                let expected = self
+                    .expected_payloads
+                    .get(&req.node)
+                    .expect("shared_keyed request node should have expected payload");
+                assert_eq!(
+                    expected,
+                    &RuntimeBoundaryPayload::SharedKeyed(req.payload.clone()),
+                    "shared_keyed request should carry typed payload from analysis executable plan"
+                );
+                Ok(ExecValue::Int(1 + req.payload.positional_arg_count as i64))
+            }
+        }
+    }
+}
+
+#[test]
+fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let bridge = SingleSourceBridge::from_entry_file(&zoo_file).expect("zoo bridge should load");
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+
+    let entry_body = bridge
+        .bodies
+        .iter()
+        .find(|body| body.name == "build" && body.span.source == bridge.source_id)
+        .map(|body| body.id)
+        .expect("cc-version should expose build in root source");
+    let program = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
+        .expect("cc-version selected body should lower");
+    let has_discover_payload = program.runtime_nodes.values().any(|node| {
+        matches!(
+            node.payload,
+            RuntimeBoundaryPayload::Discover(ref payload)
+                if payload.has_closure_arg && payload.positional_arg_count >= 2
+        )
+    });
+    let has_exec_payload = program.runtime_nodes.values().any(|node| {
+        matches!(
+            node.payload,
+            RuntimeBoundaryPayload::Exec(ref payload) if payload.positional_arg_count >= 1
+        )
+    });
+    assert!(
+        has_discover_payload,
+        "cc-version executable plan should include typed discover payload with closure arg"
+    );
+    assert!(
+        has_exec_payload,
+        "cc-version executable plan should include typed exec payload with positional args"
+    );
+
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = CcVersionDriver {
+        saw_discover: false,
+        saw_exec: false,
+        saw_shared_keyed: false,
+        saw_discover_closure_identity: false,
+        saw_exec_cc_input_value: false,
+        expected_payloads: program
+            .runtime_nodes
+            .iter()
+            .map(|(id, node)| (*id, node.payload.clone()))
+            .collect(),
+        discover_cc_value: None,
+        last_exec_value: None,
+    };
+    let outcome = session
+        .run_with_driver(&mut driver)
+        .expect("driver-mediated zoo run should complete");
+
+    assert!(
+        driver.saw_exec,
+        "typed boundary driver should receive at least one exec request on cc-version path"
+    );
+    assert!(
+        driver.saw_discover,
+        "typed boundary driver should receive at least one discover request on cc-version path"
+    );
+    assert!(
+        driver.saw_discover_closure_identity,
+        "discover request should include symbolic closure identity"
+    );
+    assert!(
+        driver.saw_exec_cc_input_value,
+        "exec request should include concrete runtime binding input value"
+    );
+    assert_eq!(
+        outcome.entry_result,
+        driver
+            .last_exec_value
+            .expect("cc-version run should produce at least one exec boundary value"),
+        "payload-derived exec boundary response should determine concrete final result"
     );
 }

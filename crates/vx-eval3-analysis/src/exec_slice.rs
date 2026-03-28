@@ -35,6 +35,31 @@ pub struct ExecutableRuntimeNode {
     pub id: RuntimeNodeId,
     pub kind: RuntimeBoundaryKind,
     pub source: SourceExpr,
+    pub payload: RuntimeBoundaryPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeBoundaryPayload {
+    Exec(ExecBoundaryPayload),
+    Discover(DiscoverBoundaryPayload),
+    SharedKeyed(SharedKeyedBoundaryPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecBoundaryPayload {
+    pub positional_arg_count: usize,
+    pub has_where_clause: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverBoundaryPayload {
+    pub positional_arg_count: usize,
+    pub has_closure_arg: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedKeyedBoundaryPayload {
+    pub positional_arg_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +130,15 @@ pub enum KernelOp {
         dst: SlotId,
         source: SourceExpr,
         node: RuntimeNodeId,
+        input_bindings: Vec<RuntimeBoundaryInputBinding>,
+        input_closures: Vec<SourceExpr>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeBoundaryInputBinding {
+    pub binding: BridgeLocalBindingId,
+    pub slot: SlotId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +160,7 @@ pub fn lower_executable_program(
 ) -> Result<ExecutableProgram, ExecSliceError> {
     let expr_nodes = expr_nodes_by_id(bridge);
     let fn_by_body = body_nodes_by_id(bridge)?;
-    let runtime_nodes = executable_runtime_nodes(analysis);
+    let runtime_nodes = executable_runtime_nodes(analysis, &expr_nodes);
     let mut bodies = BTreeMap::new();
     let lowerable_bodies = analysis
         .bodies
@@ -204,7 +237,7 @@ pub fn lower_executable_program_for_entry_body(
 ) -> Result<ExecutableProgram, ExecSliceError> {
     let expr_nodes = expr_nodes_by_id(bridge);
     let fn_by_body = body_nodes_by_id(bridge)?;
-    let runtime_nodes = executable_runtime_nodes(analysis);
+    let runtime_nodes = executable_runtime_nodes(analysis, &expr_nodes);
     let mut bodies = BTreeMap::new();
     let lowerable_bodies = reachable_body_slice(analysis, entry);
     let body_source_by_id = bridge
@@ -351,6 +384,7 @@ fn reachable_body_slice(analysis: &AnalysisResult, entry: BodyId) -> BTreeSet<Bo
 
 fn executable_runtime_nodes(
     analysis: &AnalysisResult,
+    expr_nodes: &HashMap<ExprId, Expr>,
 ) -> BTreeMap<RuntimeNodeId, ExecutableRuntimeNode> {
     let mut nodes = BTreeMap::new();
     for node in &analysis.runtime_nodes {
@@ -363,9 +397,70 @@ fn executable_runtime_nodes(
             | RuntimeNode::SharedKeyed { id, source, .. } => (*id, source.clone()),
             RuntimeNode::Lazy { .. } => continue,
         };
-        nodes.insert(id, ExecutableRuntimeNode { id, kind, source });
+        let payload = runtime_boundary_payload(kind, source.expr, expr_nodes);
+        nodes.insert(
+            id,
+            ExecutableRuntimeNode {
+                id,
+                kind,
+                source,
+                payload,
+            },
+        );
     }
     nodes
+}
+
+fn runtime_boundary_payload(
+    kind: RuntimeBoundaryKind,
+    expr_id: ExprId,
+    expr_nodes: &HashMap<ExprId, Expr>,
+) -> RuntimeBoundaryPayload {
+    let call_expr = runtime_call_expr(expr_nodes.get(&expr_id));
+    match kind {
+        RuntimeBoundaryKind::Exec => RuntimeBoundaryPayload::Exec(ExecBoundaryPayload {
+            positional_arg_count: call_expr
+                .as_ref()
+                .map(|call| call.positional_args().len())
+                .unwrap_or(0),
+            has_where_clause: matches!(expr_nodes.get(&expr_id), Some(Expr::Where(_))),
+        }),
+        RuntimeBoundaryKind::Discover => {
+            RuntimeBoundaryPayload::Discover(DiscoverBoundaryPayload {
+                positional_arg_count: call_expr
+                    .as_ref()
+                    .map(|call| call.positional_args().len())
+                    .unwrap_or(0),
+                has_closure_arg: call_expr
+                    .as_ref()
+                    .map(|call| {
+                        call.positional_args()
+                            .iter()
+                            .any(|arg| matches!(arg, Expr::Closure(_)))
+                    })
+                    .unwrap_or(false),
+            })
+        }
+        RuntimeBoundaryKind::SharedKeyed => {
+            RuntimeBoundaryPayload::SharedKeyed(SharedKeyedBoundaryPayload {
+                positional_arg_count: call_expr
+                    .as_ref()
+                    .map(|call| call.positional_args().len())
+                    .unwrap_or(0),
+            })
+        }
+    }
+}
+
+fn runtime_call_expr(expr: Option<&Expr>) -> Option<vx_parser::CallExpr> {
+    match expr.cloned() {
+        Some(Expr::Call(call)) => Some(call),
+        Some(Expr::Where(where_expr)) => {
+            let callee = where_expr.callee()?;
+            vx_parser::CallExpr::cast(callee.syntax().clone())
+        }
+        _ => None,
+    }
 }
 
 fn runtime_pending_for_body(analysis: &AnalysisResult, body: BodyId) -> Vec<RuntimeNodeId> {
@@ -444,6 +539,8 @@ struct BodyLowering<'a> {
     use_binding_by_expr: HashMap<ExprId, BridgeLocalBindingId>,
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
+    boundary_arg_bindings_by_call: HashMap<ExprId, Vec<BridgeLocalBindingId>>,
+    boundary_arg_closures_by_call: HashMap<ExprId, Vec<SourceExpr>>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
     lowerable_bodies: BTreeSet<BodyId>,
     params: Vec<SlotId>,
@@ -545,6 +642,36 @@ impl<'a> BodyLowering<'a> {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
             }
         }
+        let mut boundary_arg_bindings_by_call = HashMap::<ExprId, Vec<BridgeLocalBindingId>>::new();
+        for arg in bridge
+            .boundary_arg_bindings
+            .iter()
+            .filter(|arg| arg.body == body)
+        {
+            boundary_arg_bindings_by_call
+                .entry(arg.call_expr)
+                .or_default()
+                .push(arg.binding);
+        }
+        for bindings in boundary_arg_bindings_by_call.values_mut() {
+            bindings.sort_by_key(|binding| binding.0);
+            bindings.dedup();
+        }
+        let mut boundary_arg_closures_by_call = HashMap::<ExprId, Vec<SourceExpr>>::new();
+        for closure in bridge
+            .boundary_arg_closures
+            .iter()
+            .filter(|closure| closure.body == body)
+        {
+            boundary_arg_closures_by_call
+                .entry(closure.call_expr)
+                .or_default()
+                .push(closure.closure_source.clone());
+        }
+        for closures in boundary_arg_closures_by_call.values_mut() {
+            closures.sort_by_key(|source| (source.body.0, source.expr.0));
+            closures.dedup();
+        }
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
         for extracted in &analyzed.extracted_nodes {
             if let crate::ExtractedNodeReason::LazyProductField {
@@ -568,6 +695,8 @@ impl<'a> BodyLowering<'a> {
             use_binding_by_expr,
             binding_initializers,
             slot_by_binding,
+            boundary_arg_bindings_by_call,
+            boundary_arg_closures_by_call,
             runtime_node_by_expr,
             lowerable_bodies: lowerable_bodies.clone(),
             params,
@@ -911,11 +1040,33 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Call(call) => {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
+                    let mut input_bindings = Vec::new();
+                    for binding in self
+                        .boundary_arg_bindings_by_call
+                        .get(&expr_id)
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        match self.materialize_binding(binding) {
+                            Ok(slot) => {
+                                input_bindings.push(RuntimeBoundaryInputBinding { binding, slot })
+                            }
+                            Err(UnsupportedShape(_)) => {}
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    let input_closures = self
+                        .boundary_arg_closures_by_call
+                        .get(&expr_id)
+                        .cloned()
+                        .unwrap_or_default();
                     let dst = self.alloc_temp();
                     self.ops.push(KernelOp::AwaitRuntime {
                         dst,
                         source: self.source_for(expr_id),
                         node,
+                        input_bindings,
+                        input_closures,
                     });
                     self.awaited_runtime_nodes.insert(node);
                     return Ok(Operand::Slot(dst));
