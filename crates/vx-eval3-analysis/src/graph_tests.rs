@@ -99,7 +99,8 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("activateSearchResult("));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
-    assert!(html.contains("Source Strip"));
+    assert!(html.contains("compact-source-row"));
+    assert!(!html.contains("Source Strip"));
     assert!(html.contains("source-inspector"));
     assert!(html.contains("source_contents"));
     assert!(html.contains("line_start_offsets"));
@@ -110,7 +111,7 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("params.set(\"isrc\""));
     assert!(html.contains("params.get(\"ix\")"));
     assert!(html.contains("params.set(\"ix\""));
-    assert!(html.contains("inspector-marker"));
+    assert!(!html.contains("inspector-marker"));
     assert!(html.contains("sourceGraphMappings("));
     assert!(html.contains("activateInspectorMapping("));
     assert!(html.contains("data-inspector-line"));
@@ -120,6 +121,8 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("data-inspector-range-key"));
     assert!(html.contains("mappingHintText("));
     assert!(html.contains("choice-hint"));
+    assert!(html.contains("inspector-choice-pop"));
+    assert!(!html.contains(" pick"));
     assert!(html.contains("params.get(\"icl\")"));
     assert!(html.contains("params.set(\"icl\""));
     assert!(html.contains("keepInspectorChoice"));
@@ -410,7 +413,8 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("ArrowUp"));
     assert!(html.contains("params.get(\"q\")"));
     assert!(html.contains("params.set(\"q\""));
-    assert!(html.contains("Source Strip"));
+    assert!(html.contains("compact-source-row"));
+    assert!(!html.contains("Source Strip"));
     assert!(html.contains("source_contents"));
     assert!(html.contains("inspector-lines"));
     assert!(html.contains("lineFromByteOffset("));
@@ -421,8 +425,9 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("params.set(\"isrc\""));
     assert!(html.contains("params.get(\"ix\")"));
     assert!(html.contains("params.set(\"ix\""));
-    assert!(html.contains("inspector-marker"));
-    assert!(html.contains("inspector-choice"));
+    assert!(!html.contains("inspector-marker"));
+    assert!(html.contains("inspector-choice-pop"));
+    assert!(!html.contains(" pick"));
     assert!(html.contains("sourceGraphMappings("));
     assert!(html.contains("activateInspectorMapping("));
     assert!(html.contains("data-inspector-line"));

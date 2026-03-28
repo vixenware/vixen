@@ -283,7 +283,7 @@ impl AnalysisGraph {
         out.push_str("  .snippet-line:last-child { margin-bottom: 0; }\n");
         out.push_str("  .snippet-ln { color: #647b95; text-align: right; user-select: none; }\n");
         out.push_str("  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
-        out.push_str("  .source-inspector { border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 5px; margin: 0; font-size: 11px; }\n");
+        out.push_str("  .source-inspector { position: relative; border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 5px; margin: 0; font-size: 11px; }\n");
         out.push_str("  .source-inspector .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n");
         out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
         out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
@@ -300,13 +300,15 @@ impl AnalysisGraph {
         out.push_str(
             "  .source-inspector .inspector-line.has-mapping { border-left: 2px solid #7dd3fc; }\n",
         );
-        out.push_str("  .source-inspector .inspector-marker { background: #132031; color: #7dd3fc; border: 1px solid #2a3c52; border-radius: 999px; font-size: 10px; padding: 0 6px; min-width: 22px; line-height: 15px; cursor: pointer; }\n");
         out.push_str("  .source-inspector .inspector-line .code.clickable-range { cursor: pointer; outline: 1px dashed rgba(125,211,252,0.28); outline-offset: -1px; border: 0; background: transparent; text-align: left; padding: 0; width: 100%; font: inherit; }\n");
         out.push_str("  .source-inspector .inspector-line .code.clickable-range:hover, .source-inspector .inspector-line .code.clickable-range:focus-visible { background: rgba(125,211,252,0.1); }\n");
-        out.push_str("  .source-inspector .inspector-choice { margin: 2px 4px 4px 4px; padding: 4px; border: 1px solid #243244; border-radius: 6px; background: #101a2a; }\n");
-        out.push_str("  .source-inspector .inspector-choice button { display: block; width: 100%; margin: 3px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 6px; font-size: 10px; }\n");
-        out.push_str("  .source-inspector .inspector-choice .choice-main { display: block; }\n");
-        out.push_str("  .source-inspector .inspector-choice .choice-hint { display: block; color: #8ba5c1; font-size: 10px; margin-top: 2px; }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop { position: absolute; top: 30px; right: 6px; z-index: 9; width: min(420px, 62vw); max-height: min(54vh, 420px); overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.35); }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop .choice-title { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
+        out.push_str("  .source-inspector .inspector-choice-pop button { display: block; width: 100%; margin: 3px 0 0 0; text-align: left; background: #132031; color: #dbe7f3; border: 1px solid #1f2c3c; border-radius: 5px; padding: 3px 6px; font-size: 10px; }\n");
+        out.push_str(
+            "  .source-inspector .inspector-choice-pop .choice-main { display: block; }\n",
+        );
+        out.push_str("  .source-inspector .inspector-choice-pop .choice-hint { display: block; color: #8ba5c1; font-size: 10px; margin-top: 2px; }\n");
         out.push_str("  .source-inspector button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .source-registry { border: 0; border-radius: 0; background: transparent; padding: 2px; margin: 0; font-size: 12px; max-height: min(54vh, 520px); overflow: auto; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
@@ -461,7 +463,7 @@ impl AnalysisGraph {
         out.push_str("<div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div>\n");
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout graph-first-layout\">\n");
-        out.push_str("<section class=\"source-first-row compact-source-row\"><h2>Source Strip</h2><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
+        out.push_str("<section class=\"source-first-row compact-source-row\"><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
         out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
         out.push_str(
             "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
@@ -686,8 +688,8 @@ function nodeDisplayLines(node) {
   }
   if (node.kind === "runtime_boundary") {
     const role = compactLabelText(String(metadata.runtime_role_summary ?? "runtime boundary"), 44);
-    const source = compactLabelText(sourceLabel(String(metadata.span_source_id ?? "")) || "runtime source", 44);
-    return [role || "runtime boundary", source || "runtime source"];
+    const extractedReason = compactLabelText(String(metadata.extracted_reason ?? "").replaceAll("_", " "), 44);
+    return [role || "runtime boundary", extractedReason || "host/runtime boundary"];
   }
   if (node.kind === "closure_layout") {
     const captureCount = parsePositiveInt(metadata.capture_count);
@@ -1232,7 +1234,7 @@ function buildSearchEntries() {
   for (const sourceId of laneOrder) {
     const path = sourcePathById(sourceId);
     const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
-    const label = sourceId === "unmapped" ? "source unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
+    const label = sourceId === "unmapped" ? "module unmapped" : `module ${sourceLabel(sourceId)}`;
     entries.push({
       type: "source",
       key: `source:${sourceId}`,
@@ -1589,6 +1591,7 @@ function renderSourceInspector() {
     }
   }
   const rows = [];
+  let choicePopup = "";
   for (let lineNo = windowStart; lineNo <= windowEnd; lineNo++) {
     const html = lines[lineNo - 1] ?? "";
     const inSpan = inspectorSpanStart > 0 && lineNo >= startLine && lineNo <= endLine;
@@ -1596,33 +1599,35 @@ function renderSourceInspector() {
     const mapped = inspectorLineMappings.get(lineNo) ?? [];
     const directMapping = mapped.find((entry) => entry.startLine === lineNo && entry.endLine === lineNo)
       || (mapped.length === 1 ? mapped[0] : null);
-    const markerLabel = mapped.length <= 1 ? "go" : `${mapped.length} pick`;
-    const marker = mapped.length > 0
-      ? `<button type="button" class="inspector-marker" data-inspector-line="${lineNo}" title="Jump to mapped graph item(s)">${markerLabel}</button>`
-      : "";
+    const multiMapping = mapped.length > 1;
     const code = directMapping
       ? `<button type="button" class="code clickable-range" data-inspector-range-key="${htmlEscape(directMapping.key)}" title="Select mapped ${htmlEscape(directMapping.type)}">${html || "&nbsp;"}</button>`
-      : `<span class="code">${html || "&nbsp;"}</span>`;
-    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}"><span class="ln">${lineNo}${marker}</span>${code}</div>`);
+      : (multiMapping
+        ? `<button type="button" class="code clickable-range" data-inspector-line="${lineNo}" title="Choose mapped item">${html || "&nbsp;"}</button>`
+        : `<span class="code">${html || "&nbsp;"}</span>`);
+    rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}"><span class="ln">${lineNo}</span>${code}</div>`);
     if (inspectorChoiceLine === lineNo && mapped.length > 1) {
       const choices = mapped
         .slice(0, 12)
         .map((entry) => `<button type="button" data-inspector-select-key="${htmlEscape(entry.key)}"><span class="choice-main"><span class="kind">${htmlEscape(entry.type)}</span> ${htmlEscape(entry.label)}</span><span class="choice-hint">${htmlEscape(mappingHintText(entry))}</span></button>`)
         .join("");
-      rows.push(`<div class="inspector-choice">line ${lineNo} has ${mapped.length} mapped items.${choices}</div>`);
+      choicePopup = `<div class="inspector-choice-pop"><div class="choice-title">Choose mapping for line ${lineNo}</div>${choices}</div>`;
     }
   }
   const path = sourceEntry.path ? String(sourceEntry.path) : sourceLabel(sourceId);
   const spanMeta = inspectorSpanStart > 0
-    ? `span bytes ${inspectorSpanStart}..${inspectorSpanEnd > 0 ? inspectorSpanEnd : inspectorSpanStart} (lines ${startLine}-${endLine})`
-    : `showing lines ${windowStart}-${windowEnd} of ${total}`;
+    ? (startLine === endLine
+      ? `line ${startLine}`
+      : `lines ${startLine}-${endLine}`)
+    : `lines ${windowStart}-${windowEnd} of ${total}`;
   sourceInspector.innerHTML = `
     <div class="inspector-head">
       <div class="inspector-file">${htmlEscape(path)}</div>
       <button id="source-inspector-toggle" type="button">${inspectorExpanded ? "collapse context" : "expand file"}</button>
     </div>
-    <div class="inspector-meta">source ${htmlEscape(sourceId)} · ${htmlEscape(spanMeta)}</div>
+    <div class="inspector-meta">${htmlEscape(spanMeta)}</div>
     <div class="inspector-lines arb-code" data-arb-theme="dark">${rows.join("")}</div>
+    ${choicePopup}
   `;
   const toggle = sourceInspector.querySelector("#source-inspector-toggle");
   if (toggle) {
@@ -1632,10 +1637,10 @@ function renderSourceInspector() {
       persistViewerState(false);
     });
   }
-  const markers = sourceInspector.querySelectorAll("button[data-inspector-line]");
-  for (const marker of markers) {
-    marker.addEventListener("click", () => {
-      const lineNo = Number.parseInt(String(marker.getAttribute("data-inspector-line") ?? ""), 10);
+  const multiLineButtons = sourceInspector.querySelectorAll("button[data-inspector-line]");
+  for (const lineButton of multiLineButtons) {
+    lineButton.addEventListener("click", () => {
+      const lineNo = Number.parseInt(String(lineButton.getAttribute("data-inspector-line") ?? ""), 10);
       if (!Number.isFinite(lineNo) || lineNo <= 0) return;
       const mapped = inspectorLineMappings.get(lineNo) ?? [];
       if (mapped.length === 0) return;
@@ -1806,6 +1811,7 @@ function selectGraphItem(key, detailsValue, sourceId, options = {}) {
   unfoldLaneForInteraction(sourceId);
   setSelectedGraphElements(key);
   selectedSourceId = String(sourceId ?? "");
+  if (selectedSourceId) sourceFilterSourceId = selectedSourceId;
   dependencyJumpIndex = -1;
   if (!options.fromHistory) pushSelectionHistory(key);
   setDetails(detailsValue);
@@ -2087,8 +2093,8 @@ function renderLaneSummary() {
       const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
       const nodeMix = `body ${stats.nodeStats.body}, kernel ${stats.nodeStats.kernel}, runtime ${stats.nodeStats.runtime_boundary}, layout ${stats.nodeStats.closure_layout}`;
       const label = sourceId === "unmapped"
-        ? "unmapped"
-        : `${sourceId}: ${sourceLabel(sourceId)}`;
+        ? "unmapped module"
+        : sourceLabel(sourceId);
       return `<li data-source-id="${htmlEscape(sourceId)}"><div class="lane-head"><div class="lane-label">${htmlEscape(label)}</div><div class="lane-actions"><button type="button" data-lane-focus-source-id="${htmlEscape(sourceId)}">focus</button><button type="button" data-lane-fold-source-id="${htmlEscape(sourceId)}">${foldedLaneSourceIds.has(sourceId) ? "unfold" : "fold"}</button></div></div><div class="lane-meta">${stats.totalNodes} nodes, ${stats.totalEdges} edges</div><div class="lane-meta">${htmlEscape(nodeMix)}</div><div class="lane-hint">${htmlEscape(laneHintFor(sourceId))}</div></li>`;
     })
     .join("");
@@ -2154,7 +2160,7 @@ viewportLaneOrder.forEach((sourceId, idx) => {
   laneRectsBySource.set(String(sourceId), laneRect);
   laneLayer.appendChild(laneRect);
   const laneText = el("text", { x: 24, y: laneStart + 16, class: "source-lane-label" });
-  laneText.textContent = sourceId === "unmapped" ? "source: unmapped" : `source ${sourceId}: ${sourceLabel(sourceId)}`;
+  laneText.textContent = sourceId === "unmapped" ? "module: unmapped" : `module: ${sourceLabel(sourceId)}`;
   laneLabelsBySource.set(String(sourceId), laneText);
   laneLayer.appendChild(laneText);
 });
