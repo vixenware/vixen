@@ -95,7 +95,17 @@ pub struct GraphEdge {
     pub to: String,
     pub kind: GraphEdgeKind,
     pub label: String,
+    pub client: GraphEdgeClientFacts,
     pub metadata: GraphMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct GraphEdgeClientFacts {
+    pub semantic_role: String,
+    pub call_kind: Option<String>,
+    pub call_target: Option<String>,
+    pub cross_module: bool,
+    pub source: Option<GraphNodeSourceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -242,6 +252,9 @@ impl AnalysisGraph {
             out.push_str(",\n");
             out.push_str("      \"label\": ");
             push_json_str(&mut out, &edge.label);
+            out.push_str(",\n");
+            out.push_str("      \"client\": ");
+            push_json_edge_client_facts(&mut out, &edge.client, 6);
             out.push_str(",\n");
             out.push_str("      \"metadata\": ");
             push_json_metadata(&mut out, &edge.metadata, 6);
@@ -733,14 +746,20 @@ function edgeRoleForKind(kind) {
   if (kind === "body_to_kernel" || kind === "body_to_runtime_boundary") return "structural";
   return "structural";
 }
+function edgeRole(edge) {
+  const client = edge && edge.client && typeof edge.client === "object" ? edge.client : {};
+  const role = String(client.semantic_role ?? "");
+  return role || edgeRoleForKind(edge.kind);
+}
 function edgeSemanticLabel(edge) {
-  const role = edgeRoleForKind(edge.kind);
+  const role = edgeRole(edge);
   const metadata = metadataMap(edge.metadata);
   if (role === "value_flow") return `value flow: ${edge.label}`;
   if (role === "ownership") return "ownership: boundary -> closure layout";
   if (role === "call") {
-    const target = String(metadata.call_target ?? "");
-    const kind = String(metadata.call_kind ?? "");
+    const client = edge && edge.client && typeof edge.client === "object" ? edge.client : {};
+    const target = String(client.call_target ?? metadata.call_target ?? "");
+    const kind = String(client.call_kind ?? metadata.call_kind ?? "");
     if (target && kind) return `${kind}: ${target}`;
     if (target) return `source call: ${target}`;
     return `source call: ${edge.label}`;
@@ -817,7 +836,7 @@ function nodeShortLabel(nodeId) {
   return firstLine.length > 84 ? `${firstLine.slice(0, 81)}...` : firstLine;
 }
 function edgeWhyText(edge) {
-  const role = edgeRoleForKind(edge.kind);
+  const role = edgeRole(edge);
   if (role === "value_flow") return "A runtime value from the source boundary feeds the destination boundary.";
   if (role === "ownership") return "The runtime boundary owns or carries a closure-layout argument needed for execution.";
   if (role === "call") return "A source-local call-site resolved this dependency between caller and callee.";
@@ -838,12 +857,12 @@ function dependencySummaryHtml(value) {
   const incomingItems = incoming.length === 0
     ? `<li>None</li>`
     : incoming
-        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.from)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.from))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
+        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.from)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.from))}</strong> via <code>${htmlEscape(edgeRole(edge))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
         .join("");
   const outgoingItems = outgoing.length === 0
     ? `<li>None</li>`
     : outgoing
-        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.to)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.to))}</strong> via <code>${htmlEscape(edgeRoleForKind(edge.kind))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
+        .map((edge) => `<li class="dep-item"><button class="dep-jump" data-select-node-id="${htmlEscape(edge.to)}">open node</button><button class="dep-jump" data-select-edge-key="${htmlEscape(edgeKeyFor(edge))}">open edge</button><span><strong>${htmlEscape(nodeShortLabel(edge.to))}</strong> via <code>${htmlEscape(edgeRole(edge))}</code> (${htmlEscape(edgeSemanticLabel(edge))})</span></li>`)
         .join("");
   return `
     <div class="detail-card">
@@ -888,7 +907,7 @@ function semanticNarrative(value) {
     return "This node contributes structural context; semantic demand/sharing markers are not available for this node kind.";
   }
   if (value.type === "edge") {
-    const role = edgeRoleForKind(value.kind);
+    const role = edgeRole(value);
     if (role === "value_flow") return "This edge carries runtime value/data flow between boundary nodes.";
     if (role === "ownership") return "This edge shows runtime ownership of a closure layout argument.";
     if (role === "call") return "This edge links a source-local call-site to its resolved callee body/layout.";
@@ -917,11 +936,11 @@ function semanticSummaryRows(value, metadata) {
     const runtimeRole = nodeRuntimeRole(value);
     if (runtimeRole !== "none") rows.push(detailRow("Runtime Role", runtimeRole.replaceAll("_", "-")));
     if (value.kind === "kernel") {
-      const reason = String(metadata.kernel_reason_summary ?? "");
+      const reason = String(clientFacts(value).kernel_meaning ?? metadata.kernel_reason_summary ?? "");
       if (reason) rows.push(detailRow("Kernel Meaning", reason));
     }
   } else if (value.type === "edge") {
-    rows.push(detailRow("Edge Role", edgeRoleForKind(value.kind).replaceAll("_", " ")));
+    rows.push(detailRow("Edge Role", edgeRole(value).replaceAll("_", " ")));
   }
   return rows.join("");
 }
@@ -948,7 +967,7 @@ function edgeRoleHistogramForNode(nodeId) {
   const counts = { value_flow: 0, ownership: 0, call: 0, structural: 0 };
   for (const edge of graph.edges) {
     if (edge.from !== nodeId && edge.to !== nodeId) continue;
-    const role = edgeRoleForKind(edge.kind);
+    const role = edgeRole(edge);
     if (counts[role] !== undefined) counts[role] += 1;
   }
   return counts;
@@ -1345,6 +1364,11 @@ const laneOrder = [
 if (!laneOrder.includes("unmapped")) laneOrder.push("unmapped");
 
 function sourceIdForEdge(edge) {
+  const client = edge && edge.client && typeof edge.client === "object" ? edge.client : {};
+  const source = client.source && typeof client.source === "object" ? client.source : {};
+  if (source.source_id !== undefined && source.source_id !== null && String(source.source_id) !== "") {
+    return String(source.source_id);
+  }
   const metadata = metadataMap(edge?.metadata);
   const sourceId = metadata.span_source_id;
   return sourceId === undefined || sourceId === null || String(sourceId) === "" ? "" : String(sourceId);
@@ -1852,7 +1876,7 @@ function mappingHintText(mapping) {
   if (mapping.type === "edge") {
     const edge = graph.edges.find((entry) => edgeKeyFor(entry) === mapping.key);
     if (!edge) return "";
-    return `${range} · role ${edgeRoleForKind(edge.kind)} · ${edge.kind.replaceAll("_", "-")}`;
+    return `${range} · role ${edgeRole(edge)} · ${edge.kind.replaceAll("_", "-")}`;
   }
   if (mapping.type === "node") {
     const nodeId = String(mapping.key).replace(/^node:/, "");
@@ -2668,7 +2692,7 @@ for (const edge of graph.edges) {
     "marker-end": "url(#arrow)"
   });
   path.classList.add(`edge-kind-${edge.kind}`);
-  const edgeRole = edgeRoleForKind(edge.kind);
+  const edgeRole = edgeRole(edge);
   path.classList.add(`edge-role-${edgeRole}`);
   const edgeSourceId = sourceIdForEdge(edge);
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
@@ -3346,11 +3370,14 @@ fn project_analysis_graph_internal(
             ];
             append_source_expr_metadata(&mut metadata, &entry.source, context);
             finalize_metadata(&mut metadata);
+            let client =
+                enrich_edge_client_facts_from_metadata(GraphEdgeKind::BodyToKernel, &metadata);
             edges.insert(GraphEdge {
                 from: from.clone(),
                 to: kernel_node_id(entry.kernel.0),
                 kind: GraphEdgeKind::BodyToKernel,
                 label: "body->kernel".to_owned(),
+                client,
                 metadata,
             });
         }
@@ -3367,11 +3394,16 @@ fn project_analysis_graph_internal(
                 ];
                 append_source_expr_metadata(&mut metadata, &extracted.source, context);
                 finalize_metadata(&mut metadata);
+                let client = enrich_edge_client_facts_from_metadata(
+                    GraphEdgeKind::BodyToRuntimeBoundary,
+                    &metadata,
+                );
                 edges.insert(GraphEdge {
                     from: from.clone(),
                     to: runtime_node_id(extracted.id.0),
                     kind: GraphEdgeKind::BodyToRuntimeBoundary,
                     label: "body->runtime".to_owned(),
+                    client,
                     metadata,
                 });
             }
@@ -3413,11 +3445,16 @@ fn project_analysis_graph_internal(
                     }
                     append_source_expr_metadata(&mut metadata, &call_source, context);
                     finalize_metadata(&mut metadata);
+                    let client = enrich_edge_client_facts_from_metadata(
+                        GraphEdgeKind::CallToBody,
+                        &metadata,
+                    );
                     edges.insert(GraphEdge {
                         from: from.clone(),
                         to: body_node_id(target),
                         kind: GraphEdgeKind::CallToBody,
                         label: format!("call {}", call_target),
+                        client,
                         metadata,
                     });
                 }
@@ -3437,11 +3474,16 @@ fn project_analysis_graph_internal(
                             context,
                         );
                         finalize_metadata(&mut metadata);
+                        let client = enrich_edge_client_facts_from_metadata(
+                            GraphEdgeKind::CallToClosureLayout,
+                            &metadata,
+                        );
                         edges.insert(GraphEdge {
                             from: from.clone(),
                             to: layout_node_id(layout_id.0),
                             kind: GraphEdgeKind::CallToClosureLayout,
                             label: format!("call E{} -> layout", call_edge.call_expr.0),
+                            client,
                             metadata,
                         });
                     }
@@ -3516,11 +3558,16 @@ fn project_analysis_graph_internal(
                 context,
             );
             finalize_metadata(&mut metadata);
+            let client = enrich_edge_client_facts_from_metadata(
+                GraphEdgeKind::RuntimeValueDependency,
+                &metadata,
+            );
             edges.insert(GraphEdge {
                 from: runtime_node_id(*producer_runtime_id),
                 to: runtime_node_id(*consumer_runtime_id),
                 kind: GraphEdgeKind::RuntimeValueDependency,
                 label: format!("runtime arg `{binding_label}`"),
+                client,
                 metadata,
             });
         }
@@ -3544,11 +3591,16 @@ fn project_analysis_graph_internal(
             ];
             append_source_expr_metadata(&mut metadata, &closure_arg.closure_source, context);
             finalize_metadata(&mut metadata);
+            let client = enrich_edge_client_facts_from_metadata(
+                GraphEdgeKind::RuntimeBoundaryToClosureLayout,
+                &metadata,
+            );
             edges.insert(GraphEdge {
                 from: runtime_node_id(*runtime_id),
                 to: layout_node_id(*layout_id),
                 kind: GraphEdgeKind::RuntimeBoundaryToClosureLayout,
                 label: "boundary owns closure arg".to_owned(),
+                client,
                 metadata,
             });
         }
@@ -4291,6 +4343,44 @@ fn enrich_client_facts_from_metadata(
     client
 }
 
+fn edge_semantic_role(kind: GraphEdgeKind) -> &'static str {
+    match kind {
+        GraphEdgeKind::RuntimeValueDependency => "value_flow",
+        GraphEdgeKind::RuntimeBoundaryToClosureLayout => "ownership",
+        GraphEdgeKind::CallToBody | GraphEdgeKind::CallToClosureLayout => "call",
+        GraphEdgeKind::BodyToKernel | GraphEdgeKind::BodyToRuntimeBoundary => "structural",
+    }
+}
+
+fn enrich_edge_client_facts_from_metadata(
+    kind: GraphEdgeKind,
+    metadata: &GraphMetadata,
+) -> GraphEdgeClientFacts {
+    let source_ref = GraphNodeSourceRef {
+        source_id: parse_u32_metadata(metadata, "span_source_id"),
+        source_path: metadata_value(metadata, "source_path").map(ToOwned::to_owned),
+        span_start: parse_u32_metadata(metadata, "span_start"),
+        span_end: parse_u32_metadata(metadata, "span_end"),
+    };
+    GraphEdgeClientFacts {
+        semantic_role: edge_semantic_role(kind).to_owned(),
+        call_kind: metadata_value(metadata, "call_kind").map(ToOwned::to_owned),
+        call_target: metadata_value(metadata, "call_target").map(ToOwned::to_owned),
+        cross_module: metadata_value(metadata, "cross_module")
+            .map(|value| value == "true")
+            .unwrap_or(false),
+        source: if source_ref.source_id.is_some()
+            || source_ref.source_path.is_some()
+            || source_ref.span_start.is_some()
+            || source_ref.span_end.is_some()
+        {
+            Some(source_ref)
+        } else {
+            None
+        },
+    }
+}
+
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
     match observation {
         crate::Observation::NoObs => {
@@ -4479,6 +4569,78 @@ fn push_json_node_client_facts(out: &mut String, facts: &GraphNodeClientFacts, i
         push_json_str(out, edge_id);
     }
     out.push_str("]\n");
+    out.push_str(&pad);
+    out.push('}');
+}
+
+fn push_json_edge_client_facts(out: &mut String, facts: &GraphEdgeClientFacts, indent: usize) {
+    let pad = " ".repeat(indent);
+    let pad_inner = " ".repeat(indent + 2);
+    out.push_str("{\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "semantic_role");
+    out.push_str(": ");
+    push_json_str(out, &facts.semantic_role);
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "call_kind");
+    out.push_str(": ");
+    match &facts.call_kind {
+        Some(kind) => push_json_str(out, kind),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "call_target");
+    out.push_str(": ");
+    match &facts.call_target {
+        Some(target) => push_json_str(out, target),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "cross_module");
+    out.push_str(": ");
+    out.push_str(if facts.cross_module { "true" } else { "false" });
+    out.push_str(",\n");
+    out.push_str(&pad_inner);
+    push_json_str(out, "source");
+    out.push_str(": ");
+    match &facts.source {
+        Some(source) => {
+            out.push_str("{ ");
+            push_json_str(out, "source_id");
+            out.push_str(": ");
+            match source.source_id {
+                Some(id) => out.push_str(&id.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "source_path");
+            out.push_str(": ");
+            match &source.source_path {
+                Some(path) => push_json_str(out, path),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "span_start");
+            out.push_str(": ");
+            match source.span_start {
+                Some(start) => out.push_str(&start.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(", ");
+            push_json_str(out, "span_end");
+            out.push_str(": ");
+            match source.span_end {
+                Some(end) => out.push_str(&end.to_string()),
+                None => out.push_str("null"),
+            }
+            out.push_str(" }");
+        }
+        None => out.push_str("null"),
+    }
+    out.push('\n');
     out.push_str(&pad);
     out.push('}');
 }

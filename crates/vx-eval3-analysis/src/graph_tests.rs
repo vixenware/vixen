@@ -217,6 +217,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("sharing_state"));
     assert!(html.contains("kernel_meaning"));
     assert!(html.contains("source_id"));
+    assert!(html.contains("semantic_role"));
+    assert!(html.contains("cross_module"));
+    assert!(html.contains("call_kind"));
+    assert!(html.contains("call_target"));
     assert!(html.contains("selected_causal_path_node_ids"));
     assert!(html.contains("selected_causal_path_edge_ids"));
     assert!(!html.contains("Demand Path Nodes"));
@@ -609,6 +613,7 @@ fn zoo_tri_platform_png_graph_has_meaningful_member_call_structure() {
         call_edges.iter().any(|edge| {
             metadata_value(&edge.metadata, "call_target") == Some("fn render_png")
                 && metadata_value(&edge.metadata, "call_kind") == Some("direct-call")
+                && edge.client.semantic_role == "call"
         }),
         "expected a direct local call edge targeting render_png"
     );
@@ -973,6 +978,27 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
                 .iter()
                 .any(|edge| edge.kind == GraphEdgeKind::BodyToRuntimeBoundary),
         "imported project modules should contribute either recoverable cross-module calls or runtime-boundary structural edges"
+    );
+    assert!(
+        cross_module_call_edges
+            .iter()
+            .all(|edge| edge.client.cross_module),
+        "cross-module call edges should expose cross_module in structured edge client facts"
+    );
+    assert!(
+        cross_module_call_edges
+            .iter()
+            .all(|edge| edge.client.semantic_role == "call"),
+        "cross-module call edges should expose semantic call role in structured edge client facts"
+    );
+    assert!(
+        cross_module_call_edges.iter().any(|edge| edge
+            .client
+            .source
+            .as_ref()
+            .and_then(|s| s.source_path.as_deref())
+            .is_some()),
+        "cross-module call edges should expose structured source/provenance refs"
     );
 
     let member_call_structural_edges = graph
