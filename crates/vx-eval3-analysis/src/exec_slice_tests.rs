@@ -1,6 +1,7 @@
 use crate::{
-    BodyId, ExecValue, KernelOp, ResultSource, SingleSourceBridge, build_minimal_analysis,
-    eval_executable_program, lower_executable_program,
+    BodyId, BodyMemoKey, CellState, ExecValue, KernelOp, ResultSource, RuntimeMemoKey,
+    SingleSourceBridge, WaitReason, build_minimal_analysis, eval_executable_program,
+    lower_executable_program,
 };
 
 fn lower_and_eval(
@@ -101,7 +102,21 @@ fn main() -> U64 (
 
     assert_eq!(
         outcome.entry_result,
-        ExecValue::PendingRuntimeBoundaries(expected_boundaries)
+        ExecValue::PendingRuntimeBoundaries(expected_boundaries.clone())
+    );
+    assert!(
+        outcome
+            .wait_events
+            .iter()
+            .any(|event| matches!(event, WaitReason::RuntimeNode(_))),
+        "runtime await should produce explicit runtime wait events"
+    );
+    assert!(
+        expected_boundaries.iter().all(|id| matches!(
+            outcome.runtime_cells.get(&RuntimeMemoKey { node: *id }),
+            Some(CellState::Ready(ExecValue::PendingRuntimeBoundaries(_)))
+        )),
+        "runtime cells should record pending-token completion through the runtime wait path"
     );
 }
 
@@ -138,5 +153,40 @@ fn main() -> U64 (
     assert!(
         body.ops.iter().any(|op| matches!(op, KernelOp::Add { .. })),
         "local pure work should remain in executable ops even with boundary extraction in same body"
+    );
+}
+
+#[test]
+fn exec_slice_repeated_body_call_uses_body_cell_memo_path() {
+    let src = r#"
+fn tick() -> U64 ( 2 )
+
+fn main() -> U64 (
+  tick() + tick()
+)
+"#;
+
+    let (_analysis, _program, outcome) = lower_and_eval(src);
+    assert_eq!(outcome.entry_result, ExecValue::Int(4));
+
+    let tick_key = BodyMemoKey {
+        body: BodyId(0),
+        args: vec![],
+    };
+    assert_eq!(
+        outcome.body_eval_counts.get(&tick_key),
+        Some(&1usize),
+        "repeated call with identical args should evaluate body once through memo path"
+    );
+    assert!(
+        outcome
+            .wait_events
+            .iter()
+            .any(|event| matches!(event, WaitReason::BodyCall(_))),
+        "body calls should be represented through explicit body-call wait reasons"
+    );
+    assert!(
+        matches!(outcome.body_cells.get(&tick_key), Some(CellState::Ready(_))),
+        "body memo cell should reach ready state"
     );
 }

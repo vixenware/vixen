@@ -35,8 +35,9 @@ pub use graph::{
 
 mod exec_slice;
 pub use exec_slice::{
-    CallableValue, EvalOutcome, ExecSliceError, ExecValue, ExecutableBody, ExecutableProgram,
-    ExecutableRuntimeNode, KernelOp, Operand, ResultSource, SlotId, eval_executable_program,
+    BodyMemoKey, CallableValue, CellState, Continuation, EvalOutcome, ExecSliceError, ExecValue,
+    ExecutableBody, ExecutableProgram, ExecutableRuntimeNode, Frame, FrameId, KernelOp, Operand,
+    ResultSource, RuntimeMemoKey, SlotId, SlotValue, WaitReason, eval_executable_program,
     lower_executable_program,
 };
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
 use vx_resolve::SourceSpan;
@@ -108,7 +108,7 @@ pub enum KernelOp {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecValue {
     Int(i64),
     Pair(Box<ExecValue>, Box<ExecValue>),
@@ -117,9 +117,59 @@ pub enum ExecValue {
     PendingRuntimeBoundaries(Vec<RuntimeNodeId>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CallableValue {
     AddConst(i64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrameId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BodyMemoKey {
+    pub body: BodyId,
+    pub args: Vec<ExecValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeMemoKey {
+    pub node: RuntimeNodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellState {
+    Empty,
+    Running { waiters: Vec<FrameId> },
+    Ready(ExecValue),
+    Poison(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub id: FrameId,
+    pub body: BodyId,
+    pub pc: usize,
+    pub slots: BTreeMap<SlotId, SlotValue>,
+    pub continuation: Option<Continuation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotValue {
+    Unset,
+    Ready(ExecValue),
+    Waiting(WaitReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitReason {
+    BodyCall(BodyMemoKey),
+    RuntimeNode(RuntimeMemoKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Continuation {
+    pub dst: SlotId,
+    pub wait: WaitReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +177,10 @@ pub struct EvalOutcome {
     pub entry_result: ExecValue,
     pub body_results: BTreeMap<BodyId, ExecValue>,
     pub call_counts: BTreeMap<(BodyId, ExprId), usize>,
+    pub body_cells: BTreeMap<BodyMemoKey, CellState>,
+    pub runtime_cells: BTreeMap<RuntimeMemoKey, CellState>,
+    pub wait_events: Vec<WaitReason>,
+    pub body_eval_counts: BTreeMap<BodyMemoKey, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +193,7 @@ pub enum ExecSliceError {
     MissingBindingInitializer(BridgeLocalBindingId),
     TypeMismatch(String),
     InvalidPairIndex(usize),
+    InvalidProgram(String),
 }
 
 pub fn lower_executable_program(
@@ -204,143 +259,468 @@ pub fn lower_executable_program(
 }
 
 pub fn eval_executable_program(program: &ExecutableProgram) -> Result<EvalOutcome, ExecSliceError> {
-    let mut body_results = BTreeMap::new();
-    let mut call_counts = BTreeMap::<(BodyId, ExprId), usize>::new();
-    let entry = eval_body(
-        program,
-        program.entry,
-        vec![],
-        &mut body_results,
-        &mut call_counts,
-    )?;
+    let mut runtime = RuntimeMachine::new(program);
+    let entry_key = BodyMemoKey {
+        body: program.entry,
+        args: vec![],
+    };
+    let entry = runtime.demand_body(entry_key, None)?;
+    let body_results = runtime
+        .body_cells
+        .iter()
+        .filter_map(|(key, state)| match state {
+            CellState::Ready(value) => Some((key.body, value.clone())),
+            CellState::Empty | CellState::Running { .. } | CellState::Poison(_) => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     Ok(EvalOutcome {
         entry_result: entry,
         body_results,
-        call_counts,
+        call_counts: runtime.call_counts,
+        body_cells: runtime.body_cells,
+        runtime_cells: runtime.runtime_cells,
+        wait_events: runtime.wait_events,
+        body_eval_counts: runtime.body_eval_counts,
     })
 }
 
-fn eval_body(
-    program: &ExecutableProgram,
-    body_id: BodyId,
-    args: Vec<ExecValue>,
-    body_results: &mut BTreeMap<BodyId, ExecValue>,
-    call_counts: &mut BTreeMap<(BodyId, ExprId), usize>,
-) -> Result<ExecValue, ExecSliceError> {
-    let body = program
-        .bodies
-        .get(&body_id)
-        .ok_or(ExecSliceError::MissingBody(body_id))?;
-
-    let mut slots = BTreeMap::<SlotId, ExecValue>::new();
-    for (index, slot) in body.params.iter().enumerate() {
-        let value = args.get(index).cloned().ok_or_else(|| {
-            ExecSliceError::TypeMismatch(format!("missing arg {index} for body {}", body.id.0))
-        })?;
-        slots.insert(*slot, value);
-    }
-
-    for op in &body.ops {
-        match op {
-            KernelOp::AssignConstInt { dst, value, .. } => {
-                slots.insert(*dst, ExecValue::Int(*value));
-            }
-            KernelOp::AssignAlias { dst, value, .. } => {
-                let value = resolve_operand(value, &slots)?;
-                slots.insert(*dst, value);
-            }
-            KernelOp::AssignLazyPoison { dst, label, .. } => {
-                slots.insert(*dst, ExecValue::LazyPoison(label.clone()));
-            }
-            KernelOp::AssignCallableAddConst { dst, addend, .. } => {
-                let addend = resolve_operand(addend, &slots)?;
-                let addend_int = as_int(&addend, "callable addend")?;
-                slots.insert(
-                    *dst,
-                    ExecValue::Callable(CallableValue::AddConst(addend_int)),
-                );
-            }
-            KernelOp::ApplyCallable {
-                dst, callable, arg, ..
-            } => {
-                let callable = resolve_operand(callable, &slots)?;
-                let arg = resolve_operand(arg, &slots)?;
-                let result = apply_callable(&callable, arg)?;
-                slots.insert(*dst, result);
-            }
-            KernelOp::MakePair {
-                dst, first, second, ..
-            } => {
-                let first = resolve_operand(first, &slots)?;
-                let second = resolve_operand(second, &slots)?;
-                slots.insert(*dst, ExecValue::Pair(Box::new(first), Box::new(second)));
-            }
-            KernelOp::ProjectIndex {
-                dst, pair, index, ..
-            } => {
-                let pair = resolve_operand(pair, &slots)?;
-                let projected = match pair {
-                    ExecValue::Pair(first, second) => match index {
-                        0 => *first,
-                        1 => *second,
-                        _ => return Err(ExecSliceError::InvalidPairIndex(*index)),
-                    },
-                    other => {
-                        return Err(ExecSliceError::TypeMismatch(format!(
-                            "project expects pair, got {:?}",
-                            other
-                        )));
-                    }
-                };
-                slots.insert(*dst, projected);
-            }
-            KernelOp::Add { dst, lhs, rhs, .. } => {
-                let lhs = as_int(&resolve_operand(lhs, &slots)?, "add lhs")?;
-                let rhs = as_int(&resolve_operand(rhs, &slots)?, "add rhs")?;
-                slots.insert(*dst, ExecValue::Int(lhs + rhs));
-            }
-            KernelOp::CallBody {
-                dst,
-                source,
-                callee,
-                args,
-            } => {
-                let arg_values = args
-                    .iter()
-                    .map(|arg| resolve_operand(arg, &slots))
-                    .collect::<Result<Vec<_>, _>>()?;
-                *call_counts.entry((source.body, source.expr)).or_insert(0) += 1;
-                let value = eval_body(program, *callee, arg_values, body_results, call_counts)?;
-                slots.insert(*dst, value);
-            }
-            KernelOp::AwaitRuntime { dst, node, .. } => {
-                slots.insert(*dst, ExecValue::PendingRuntimeBoundaries(vec![*node]));
-            }
-        }
-    }
-
-    let result = match &body.result_source {
-        ResultSource::Slot(slot) => slots
-            .get(slot)
-            .cloned()
-            .ok_or(ExecSliceError::MissingSlot(*slot))?,
-        ResultSource::PendingRuntimeBoundary => {
-            ExecValue::PendingRuntimeBoundaries(body.runtime_boundary_extractions.clone())
-        }
-    };
-    body_results.insert(body_id, result.clone());
-    Ok(result)
+struct RuntimeMachine<'a> {
+    program: &'a ExecutableProgram,
+    next_frame: u32,
+    ready_frames: VecDeque<FrameId>,
+    frame_owner: BTreeMap<FrameId, BodyMemoKey>,
+    frames: BTreeMap<FrameId, Frame>,
+    body_cells: BTreeMap<BodyMemoKey, CellState>,
+    runtime_cells: BTreeMap<RuntimeMemoKey, CellState>,
+    call_counts: BTreeMap<(BodyId, ExprId), usize>,
+    wait_events: Vec<WaitReason>,
+    body_eval_counts: BTreeMap<BodyMemoKey, usize>,
 }
 
-fn resolve_operand(
+impl<'a> RuntimeMachine<'a> {
+    fn new(program: &'a ExecutableProgram) -> Self {
+        let mut runtime_cells = BTreeMap::new();
+        for node in program.runtime_nodes.keys() {
+            runtime_cells.insert(RuntimeMemoKey { node: *node }, CellState::Empty);
+        }
+        Self {
+            program,
+            next_frame: 0,
+            ready_frames: VecDeque::new(),
+            frame_owner: BTreeMap::new(),
+            frames: BTreeMap::new(),
+            body_cells: BTreeMap::new(),
+            runtime_cells,
+            call_counts: BTreeMap::new(),
+            wait_events: vec![],
+            body_eval_counts: BTreeMap::new(),
+        }
+    }
+
+    fn demand_body(
+        &mut self,
+        key: BodyMemoKey,
+        waiter: Option<FrameId>,
+    ) -> Result<ExecValue, ExecSliceError> {
+        match self.body_cells.get_mut(&key) {
+            Some(CellState::Ready(value)) => return Ok(value.clone()),
+            Some(CellState::Running { waiters }) => {
+                if let Some(waiter) = waiter {
+                    waiters.push(waiter);
+                }
+            }
+            Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err.clone())),
+            Some(CellState::Empty) => {
+                self.start_body_frame(key.clone())?;
+            }
+            None => {
+                self.body_cells.insert(key.clone(), CellState::Empty);
+                self.start_body_frame(key.clone())?;
+            }
+        }
+
+        self.run_scheduler()?;
+        match self.body_cells.get(&key) {
+            Some(CellState::Ready(value)) => Ok(value.clone()),
+            Some(CellState::Running { .. }) | Some(CellState::Empty) | None => Err(
+                ExecSliceError::TypeMismatch(format!("body {} did not resolve", key.body.0)),
+            ),
+            Some(CellState::Poison(err)) => Err(ExecSliceError::TypeMismatch(err.clone())),
+        }
+    }
+
+    fn start_body_frame(&mut self, key: BodyMemoKey) -> Result<(), ExecSliceError> {
+        let body = self
+            .program
+            .bodies
+            .get(&key.body)
+            .ok_or(ExecSliceError::MissingBody(key.body))?;
+        if body.params.len() != key.args.len() {
+            return Err(ExecSliceError::TypeMismatch(format!(
+                "missing args for body {}",
+                key.body.0
+            )));
+        }
+
+        self.body_cells
+            .insert(key.clone(), CellState::Running { waiters: vec![] });
+        *self.body_eval_counts.entry(key.clone()).or_insert(0) += 1;
+
+        let frame_id = FrameId(self.next_frame);
+        self.next_frame += 1;
+        let mut slots = BTreeMap::<SlotId, SlotValue>::new();
+        for (index, slot) in body.params.iter().enumerate() {
+            slots.insert(*slot, SlotValue::Ready(key.args[index].clone()));
+        }
+        let frame = Frame {
+            id: frame_id,
+            body: body.id,
+            pc: 0,
+            slots,
+            continuation: None,
+        };
+        self.frames.insert(frame_id, frame);
+        self.frame_owner.insert(frame_id, key);
+        self.ready_frames.push_back(frame_id);
+        Ok(())
+    }
+
+    fn run_scheduler(&mut self) -> Result<(), ExecSliceError> {
+        while let Some(frame_id) = self.ready_frames.pop_front() {
+            let mut frame = if let Some(frame) = self.frames.remove(&frame_id) {
+                frame
+            } else {
+                continue;
+            };
+            let body = self
+                .program
+                .bodies
+                .get(&frame.body)
+                .ok_or(ExecSliceError::MissingBody(frame.body))?;
+            if frame.pc >= body.ops.len() {
+                let owner_key = self.frame_owner.remove(&frame_id).ok_or_else(|| {
+                    ExecSliceError::InvalidProgram("frame without owner".to_owned())
+                })?;
+                let result = match &body.result_source {
+                    ResultSource::Slot(slot) => match frame.slots.get(slot) {
+                        Some(SlotValue::Ready(value)) => value.clone(),
+                        Some(SlotValue::Unset) | None => {
+                            return Err(ExecSliceError::MissingSlot(*slot));
+                        }
+                        Some(SlotValue::Waiting(reason)) => {
+                            return Err(ExecSliceError::TypeMismatch(format!(
+                                "result slot still waiting: {:?}",
+                                reason
+                            )));
+                        }
+                    },
+                    ResultSource::PendingRuntimeBoundary => ExecValue::PendingRuntimeBoundaries(
+                        body.runtime_boundary_extractions.clone(),
+                    ),
+                };
+                self.complete_body(owner_key, result)?;
+                continue;
+            }
+
+            let op = body.ops[frame.pc].clone();
+            match op {
+                KernelOp::AssignConstInt { dst, value, .. } => {
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Int(value)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignAlias { dst, value, .. } => {
+                    let value = resolve_slot_operand(&value, &frame.slots)?;
+                    frame.slots.insert(dst, SlotValue::Ready(value));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignLazyPoison { dst, label, .. } => {
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::LazyPoison(label)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignCallableAddConst { dst, addend, .. } => {
+                    let addend = resolve_slot_operand(&addend, &frame.slots)?;
+                    let addend_int = as_int(&addend, "callable addend")?;
+                    frame.slots.insert(
+                        dst,
+                        SlotValue::Ready(ExecValue::Callable(CallableValue::AddConst(addend_int))),
+                    );
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::ApplyCallable {
+                    dst, callable, arg, ..
+                } => {
+                    let callable = resolve_slot_operand(&callable, &frame.slots)?;
+                    let arg = resolve_slot_operand(&arg, &frame.slots)?;
+                    let result = apply_callable(&callable, arg)?;
+                    frame.slots.insert(dst, SlotValue::Ready(result));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::MakePair {
+                    dst, first, second, ..
+                } => {
+                    let first = resolve_slot_operand(&first, &frame.slots)?;
+                    let second = resolve_slot_operand(&second, &frame.slots)?;
+                    frame.slots.insert(
+                        dst,
+                        SlotValue::Ready(ExecValue::Pair(Box::new(first), Box::new(second))),
+                    );
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::ProjectIndex {
+                    dst, pair, index, ..
+                } => {
+                    let pair = resolve_slot_operand(&pair, &frame.slots)?;
+                    let projected = match pair {
+                        ExecValue::Pair(first, second) => match index {
+                            0 => *first,
+                            1 => *second,
+                            _ => return Err(ExecSliceError::InvalidPairIndex(index)),
+                        },
+                        other => {
+                            return Err(ExecSliceError::TypeMismatch(format!(
+                                "project expects pair, got {:?}",
+                                other
+                            )));
+                        }
+                    };
+                    frame.slots.insert(dst, SlotValue::Ready(projected));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::Add { dst, lhs, rhs, .. } => {
+                    let lhs = as_int(&resolve_slot_operand(&lhs, &frame.slots)?, "add lhs")?;
+                    let rhs = as_int(&resolve_slot_operand(&rhs, &frame.slots)?, "add rhs")?;
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Int(lhs + rhs)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::CallBody {
+                    dst,
+                    source,
+                    callee,
+                    args,
+                } => {
+                    let arg_values = args
+                        .iter()
+                        .map(|arg| resolve_slot_operand(arg, &frame.slots))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    *self
+                        .call_counts
+                        .entry((source.body, source.expr))
+                        .or_insert(0) += 1;
+                    let call_key = BodyMemoKey {
+                        body: callee,
+                        args: arg_values,
+                    };
+                    let wait = WaitReason::BodyCall(call_key.clone());
+                    frame.slots.insert(dst, SlotValue::Waiting(wait.clone()));
+                    frame.continuation = Some(Continuation {
+                        dst,
+                        wait: wait.clone(),
+                    });
+                    self.wait_events.push(wait);
+                    let suspended = self.suspend_on_body(frame, call_key)?;
+                    if !suspended {
+                        self.ready_frames.push_back(frame_id);
+                    }
+                }
+                KernelOp::AwaitRuntime { dst, node, .. } => {
+                    let runtime_key = RuntimeMemoKey { node };
+                    let wait = WaitReason::RuntimeNode(runtime_key.clone());
+                    frame.slots.insert(dst, SlotValue::Waiting(wait.clone()));
+                    frame.continuation = Some(Continuation {
+                        dst,
+                        wait: wait.clone(),
+                    });
+                    self.wait_events.push(wait);
+                    self.suspend_on_runtime(frame, runtime_key.clone())?;
+                    let pending = ExecValue::PendingRuntimeBoundaries(vec![node]);
+                    self.complete_runtime(runtime_key, pending)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn suspend_on_body(&mut self, frame: Frame, key: BodyMemoKey) -> Result<bool, ExecSliceError> {
+        let frame_id = frame.id;
+        self.frames.insert(frame_id, frame);
+        let state = self.body_cells.get(&key).cloned();
+        match state {
+            Some(CellState::Ready(value)) => {
+                self.resume_frame_from_body(frame_id, key, value)?;
+                Ok(false)
+            }
+            Some(CellState::Running { .. }) => {
+                if let Some(CellState::Running { waiters }) = self.body_cells.get_mut(&key) {
+                    waiters.push(frame_id);
+                }
+                Ok(true)
+            }
+            Some(CellState::Poison(err)) => Err(ExecSliceError::TypeMismatch(err.clone())),
+            Some(CellState::Empty) | None => {
+                self.start_body_frame(key.clone())?;
+                if let Some(CellState::Running { waiters }) = self.body_cells.get_mut(&key) {
+                    waiters.push(frame_id);
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    fn suspend_on_runtime(
+        &mut self,
+        frame: Frame,
+        key: RuntimeMemoKey,
+    ) -> Result<(), ExecSliceError> {
+        let frame_id = frame.id;
+        self.frames.insert(frame_id, frame);
+        let state = self.runtime_cells.get(&key).cloned();
+        match state {
+            Some(CellState::Ready(value)) => {
+                self.resume_frame_from_runtime(frame_id, value)?;
+            }
+            Some(CellState::Running { .. }) => {
+                if let Some(CellState::Running { waiters }) = self.runtime_cells.get_mut(&key) {
+                    waiters.push(frame_id);
+                }
+            }
+            Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err.clone())),
+            Some(CellState::Empty) | None => {
+                self.runtime_cells.insert(
+                    key,
+                    CellState::Running {
+                        waiters: vec![frame_id],
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn complete_body(&mut self, key: BodyMemoKey, value: ExecValue) -> Result<(), ExecSliceError> {
+        let waiters = match self.body_cells.remove(&key) {
+            Some(CellState::Running { waiters }) => waiters,
+            Some(CellState::Ready(_)) | Some(CellState::Empty) | None => vec![],
+            Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err)),
+        };
+        self.body_cells
+            .insert(key.clone(), CellState::Ready(value.clone()));
+        for waiter in waiters {
+            self.resume_frame_from_body(waiter, key.clone(), value.clone())?;
+        }
+        Ok(())
+    }
+
+    fn complete_runtime(
+        &mut self,
+        key: RuntimeMemoKey,
+        value: ExecValue,
+    ) -> Result<(), ExecSliceError> {
+        let waiters = match self.runtime_cells.remove(&key) {
+            Some(CellState::Running { waiters }) => waiters,
+            Some(CellState::Ready(_)) | Some(CellState::Empty) | None => vec![],
+            Some(CellState::Poison(err)) => return Err(ExecSliceError::TypeMismatch(err)),
+        };
+        self.runtime_cells
+            .insert(key, CellState::Ready(value.clone()));
+        for waiter in waiters {
+            self.resume_frame_from_runtime(waiter, value.clone())?;
+        }
+        Ok(())
+    }
+
+    fn resume_frame_from_body(
+        &mut self,
+        frame_id: FrameId,
+        key: BodyMemoKey,
+        value: ExecValue,
+    ) -> Result<(), ExecSliceError> {
+        let mut frame = self.frames.remove(&frame_id).ok_or_else(|| {
+            ExecSliceError::InvalidProgram(format!("missing frame {}", frame_id.0))
+        })?;
+        let Some(cont) = frame.continuation.take() else {
+            return Err(ExecSliceError::InvalidProgram(
+                "missing continuation for body resume".to_owned(),
+            ));
+        };
+        match cont.wait {
+            WaitReason::BodyCall(wait_key) if wait_key == key => {
+                frame.slots.insert(cont.dst, SlotValue::Ready(value));
+                frame.pc += 1;
+                self.frames.insert(frame_id, frame);
+                self.ready_frames.push_back(frame_id);
+                Ok(())
+            }
+            other => Err(ExecSliceError::InvalidProgram(format!(
+                "body resume mismatch: {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn resume_frame_from_runtime(
+        &mut self,
+        frame_id: FrameId,
+        value: ExecValue,
+    ) -> Result<(), ExecSliceError> {
+        let mut frame = self.frames.remove(&frame_id).ok_or_else(|| {
+            ExecSliceError::InvalidProgram(format!("missing frame {}", frame_id.0))
+        })?;
+        let Some(cont) = frame.continuation.take() else {
+            return Err(ExecSliceError::InvalidProgram(
+                "missing continuation for runtime resume".to_owned(),
+            ));
+        };
+        match cont.wait {
+            WaitReason::RuntimeNode(_) => {
+                frame.slots.insert(cont.dst, SlotValue::Ready(value));
+                frame.pc += 1;
+                self.frames.insert(frame_id, frame);
+                self.ready_frames.push_back(frame_id);
+                Ok(())
+            }
+            other => Err(ExecSliceError::InvalidProgram(format!(
+                "runtime resume mismatch: {:?}",
+                other
+            ))),
+        }
+    }
+}
+
+fn resolve_slot_operand(
     operand: &Operand,
-    slots: &BTreeMap<SlotId, ExecValue>,
+    slots: &BTreeMap<SlotId, SlotValue>,
 ) -> Result<ExecValue, ExecSliceError> {
     match operand {
-        Operand::Slot(slot) => slots
-            .get(slot)
-            .cloned()
-            .ok_or(ExecSliceError::MissingSlot(*slot)),
+        Operand::Slot(slot) => match slots.get(slot) {
+            Some(SlotValue::Ready(value)) => Ok(value.clone()),
+            Some(SlotValue::Unset) | None => Err(ExecSliceError::MissingSlot(*slot)),
+            Some(SlotValue::Waiting(reason)) => Err(ExecSliceError::TypeMismatch(format!(
+                "slot {:?} still waiting: {:?}",
+                slot, reason
+            ))),
+        },
         Operand::Int(value) => Ok(ExecValue::Int(*value)),
     }
 }
