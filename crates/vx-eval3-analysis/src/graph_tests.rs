@@ -75,7 +75,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("structural analysis graph"));
     assert!(html.contains("cc-version.vx"));
     assert!(html.contains("Source Snippet"));
-    assert!(html.contains("Source Path"));
+    assert!(html.contains("detailRow(\"Source\""));
+    assert!(html.contains("detailRow(\"Location\""));
+    assert!(!html.contains("detailRow(\"Source ID\""));
+    assert!(!html.contains("detailRow(\"Source Path\""));
     assert!(html.contains("Raw JSON"));
     assert!(html.contains("Lane Summary"));
     assert!(html.contains("fold stdlib lanes"));
@@ -141,6 +144,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("search-strip"));
     assert!(html.contains("semantic-aux"));
     assert!(html.contains("semantic-filter-chips"));
+    assert!(html.contains("compact-source-row { position: sticky;"));
+    assert!(html.contains("minmax(220px, 38vh)"));
+    assert!(html.contains("laneIsInViewport("));
+    assert!(html.contains("viewportLaneOrder"));
     assert!(html.contains("source-first-row"));
     assert!(html.contains("utility-strip"));
     assert!(html.contains("aux-pop"));
@@ -170,6 +177,14 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("shouldRenderEdgeLabel("));
     assert!(html.contains("hidden-edge-label"));
     assert!(html.contains("nodeDisplayLines("));
+    assert!(html.contains("\"Closure Layout\""));
+    assert!(html.contains("captured value"));
+    assert!(html.contains("detailRow(\"Source\""));
+    assert!(html.contains("detailRow(\"Location\""));
+    assert!(!html.contains("detailRow(\"Source ID\""));
+    assert!(!html.contains("detailRow(\"Source Path\""));
+    assert!(html.contains("\"Closure Layout\""));
+    assert!(html.contains("captured value"));
     assert!(html.contains("semantic-summary"));
     assert!(html.contains("Semantic Filters"));
     assert!(html.contains("filter-demand"));
@@ -222,15 +237,15 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("restoredFromUrl"));
     assert!(html.contains("params.set(\"v\", \"1\")"));
     assert!(html.contains("runtime_role_summary"));
-    let graph_pos = html
-        .find("graph-viewport")
-        .expect("graph viewport marker should exist");
     let source_pos = html
-        .find("source-inspector")
-        .expect("source strip marker should exist");
+        .find("<section class=\"source-first-row")
+        .expect("source strip section marker should exist");
+    let graph_pos = html
+        .find("<section class=\"graph-stage\"")
+        .expect("graph stage section marker should exist");
     assert!(
-        graph_pos < source_pos,
-        "graph viewport should appear before source strip in graph-first layout"
+        source_pos < graph_pos,
+        "source strip should appear before graph viewport in sticky source-first layout"
     );
 
     let output = unique_temp_path("cc-version-graph.html");
@@ -332,6 +347,10 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("search-strip"));
     assert!(html.contains("semantic-aux"));
     assert!(html.contains("semantic-filter-chips"));
+    assert!(html.contains("compact-source-row { position: sticky;"));
+    assert!(html.contains("minmax(220px, 38vh)"));
+    assert!(html.contains("laneIsInViewport("));
+    assert!(html.contains("viewportLaneOrder"));
     assert!(html.contains("source-first-row"));
     assert!(html.contains("utility-strip"));
     assert!(html.contains("aux-pop"));
@@ -419,15 +438,15 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("shouldRenderEdgeLabel("));
     assert!(html.contains("hidden-edge-label"));
     assert!(html.contains("nodeDisplayLines("));
-    let graph_pos = html
-        .find("graph-viewport")
-        .expect("graph viewport marker should exist");
     let source_pos = html
-        .find("source-inspector")
-        .expect("source strip marker should exist");
+        .find("<section class=\"source-first-row")
+        .expect("source strip section marker should exist");
+    let graph_pos = html
+        .find("<section class=\"graph-stage\"")
+        .expect("graph stage section marker should exist");
     assert!(
-        graph_pos < source_pos,
-        "graph viewport should appear before source strip in graph-first layout"
+        source_pos < graph_pos,
+        "source strip should appear before graph viewport in sticky source-first layout"
     );
 }
 

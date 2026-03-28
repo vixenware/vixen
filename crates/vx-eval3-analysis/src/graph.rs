@@ -240,10 +240,11 @@ impl AnalysisGraph {
         out.push_str("  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
         out.push_str("  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
         out.push_str("  .topbar .top-source { color: #93adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
-        out.push_str("  .layout { display: grid; grid-template-rows: auto auto auto; gap: 8px; padding: 8px; }\n");
+        out.push_str("  .layout { display: grid; grid-template-rows: minmax(220px, 38vh) minmax(0, 1fr) auto; gap: 8px; padding: 8px; height: calc(100vh - 54px); }\n");
         out.push_str("  .layout h2 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }\n");
         out.push_str("  .graph-stage { min-width: 0; }\n");
         out.push_str("  .source-first-row { min-width: 0; }\n");
+        out.push_str("  .source-first-row.compact-source-row { position: sticky; top: 0; z-index: 8; background: #0f1724; }\n");
         out.push_str("  .source-first-row.compact-source-row h2 { margin-bottom: 4px; }\n");
         out.push_str("  .graph-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 8px; align-items: start; margin: 0 0 6px 0; }\n");
         out.push_str("  .utility-strip { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }\n");
@@ -255,15 +256,17 @@ impl AnalysisGraph {
         out.push_str("  .aux-pop { position: absolute; top: 30px; right: 0; z-index: 6; min-width: 320px; max-width: min(62vw, 620px); border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 8px; box-shadow: 0 10px 22px rgba(0,0,0,0.35); }\n");
         out.push_str("  .aux-pop h3 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; text-transform: uppercase; letter-spacing: 0.02em; }\n");
         out.push_str("  @media (max-width: 1100px) { .graph-toolbar { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } .utility-strip { justify-content: flex-start; } }\n");
-        out.push_str("  .canvas-wrap { padding: 0; overflow: auto; min-width: 0; }\n");
+        out.push_str(
+            "  .canvas-wrap { padding: 0; overflow: hidden; min-width: 0; min-height: 0; }\n",
+        );
         out.push_str("  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 6px 0; }\n");
         out.push_str("  .viewport-toolbar button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
         out.push_str("  .viewport-toolbar button:hover { border-color: #4b647f; }\n");
         out.push_str("  .viewport-toolbar .zoom-status { color: #8ba5c1; font-size: 12px; min-width: 54px; text-align: right; }\n");
-        out.push_str("  .graph-viewport { overflow: auto; border: 1px solid #243244; border-radius: 10px; background: #0b1420; }\n");
-        out.push_str("  .panel { max-height: 44vh; overflow: auto; border: 1px solid #243244; border-radius: 10px; background: #121d2b; padding: 10px; }\n");
+        out.push_str("  .graph-viewport { overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #0b1420; min-height: 0; }\n");
+        out.push_str("  .panel { max-height: 32vh; overflow: auto; border: 1px solid #1f2c3c; border-radius: 6px; background: #121d2b; padding: 8px; }\n");
         out.push_str("  .panel h2 { margin: 0 0 8px 0; font-size: 13px; color: #dbe7f3; }\n");
-        out.push_str("  .detail-card { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 10px; }\n");
+        out.push_str("  .detail-card { border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 8px; margin-bottom: 8px; }\n");
         out.push_str("  .detail-title { margin: 0 0 8px 0; font-size: 13px; font-weight: 650; color: #dbe7f3; }\n");
         out.push_str("  .detail-card ul { margin: 6px 0 0 18px; padding: 0; }\n");
         out.push_str("  .detail-card li { margin: 4px 0; color: #c7d6e6; }\n");
@@ -280,11 +283,11 @@ impl AnalysisGraph {
         out.push_str("  .snippet-line:last-child { margin-bottom: 0; }\n");
         out.push_str("  .snippet-ln { color: #647b95; text-align: right; user-select: none; }\n");
         out.push_str("  .snippet-code { color: #dbe7f3; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
-        out.push_str("  .source-inspector { border: 1px solid #243244; border-radius: 8px; background: #0f1724; padding: 6px; margin: 0; font-size: 11px; }\n");
+        out.push_str("  .source-inspector { border: 1px solid #1f2c3c; border-radius: 6px; background: #0f1724; padding: 5px; margin: 0; font-size: 11px; }\n");
         out.push_str("  .source-inspector .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }\n");
         out.push_str("  .source-inspector .inspector-file { color: #dbe7f3; font-weight: 600; word-break: break-word; }\n");
         out.push_str("  .source-inspector .inspector-meta { color: #8ba5c1; font-size: 10px; margin-bottom: 4px; }\n");
-        out.push_str("  .source-inspector .inspector-lines { border: 1px solid #243244; border-radius: 6px; background: #0b1420; max-height: 168px; overflow: auto; }\n");
+        out.push_str("  .source-inspector .inspector-lines { border: 1px solid #1f2c3c; border-radius: 5px; background: #0b1420; max-height: min(32vh, 320px); overflow: auto; }\n");
         out.push_str("  .source-inspector .inspector-line { display: grid; grid-template-columns: 4.4em minmax(0, 1fr); gap: 6px; padding: 0 5px; }\n");
         out.push_str("  .source-inspector .inspector-line .ln { color: #5f738a; text-align: right; user-select: none; display: flex; justify-content: flex-end; align-items: center; gap: 6px; }\n");
         out.push_str("  .source-inspector .inspector-line .code { white-space: pre; overflow-x: auto; color: #dbe7f3; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace; }\n");
@@ -305,7 +308,7 @@ impl AnalysisGraph {
         out.push_str("  .source-inspector .inspector-choice .choice-main { display: block; }\n");
         out.push_str("  .source-inspector .inspector-choice .choice-hint { display: block; color: #8ba5c1; font-size: 10px; margin-top: 2px; }\n");
         out.push_str("  .source-inspector button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
-        out.push_str("  .source-registry { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .source-registry { border: 0; border-radius: 0; background: transparent; padding: 2px; margin: 0; font-size: 12px; max-height: min(54vh, 520px); overflow: auto; }\n");
         out.push_str("  .source-registry ul { margin: 8px 0 0 0; padding-left: 18px; }\n");
         out.push_str(
             "  .source-registry li { margin: 4px 0; word-break: break-word; color: #c7d6e6; cursor: pointer; }\n",
@@ -313,7 +316,7 @@ impl AnalysisGraph {
         out.push_str("  .source-registry li.active { color: #7dd3fc; font-weight: 600; }\n");
         out.push_str("  .source-registry li.focused { color: #a5f3fc; font-weight: 700; }\n");
         out.push_str("  .source-registry li.folded { opacity: 0.65; font-style: italic; }\n");
-        out.push_str("  .lane-summary { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str("  .lane-summary { border: 0; border-radius: 0; background: transparent; padding: 2px; margin: 0; font-size: 12px; max-height: min(54vh, 520px); overflow: auto; }\n");
         out.push_str(
             "  .lane-summary ul { margin: 8px 0 0 0; padding-left: 0; list-style: none; }\n",
         );
@@ -458,8 +461,8 @@ impl AnalysisGraph {
         out.push_str("<div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div>\n");
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout graph-first-layout\">\n");
-        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
         out.push_str("<section class=\"source-first-row compact-source-row\"><h2>Source Strip</h2><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
+        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
         out.push_str(
             "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
         );
@@ -683,15 +686,14 @@ function nodeDisplayLines(node) {
   }
   if (node.kind === "runtime_boundary") {
     const role = compactLabelText(String(metadata.runtime_role_summary ?? "runtime boundary"), 44);
-    const source = compactLabelText(String(node.label ?? "").split("\n")[1] ?? "", 44);
+    const source = compactLabelText(sourceLabel(String(metadata.span_source_id ?? "")) || "runtime source", 44);
     return [role || "runtime boundary", source || "runtime source"];
   }
   if (node.kind === "closure_layout") {
-    const origin = compactLabelText(String(metadata.closure_origin ?? ""), 40);
     const captureCount = parsePositiveInt(metadata.capture_count);
     return [
-      origin ? `Closure: ${origin}` : "Closure layout",
-      captureCount > 0 ? `${captureCount} captures` : "no captures",
+      "Closure Layout",
+      captureCount > 0 ? `${captureCount} captured value${captureCount === 1 ? "" : "s"}` : "no captured values",
     ];
   }
   const fallback = String(node.label ?? node.id ?? "").split("\n");
@@ -1160,6 +1162,12 @@ function computePrimaryProjectLane() {
   return bestSourceId;
 }
 const primaryProjectLane = computePrimaryProjectLane();
+function laneIsInViewport(sourceId) {
+  const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+  if (sourceId === primaryProjectLane) return true;
+  return stats.totalNodes > 0 || stats.totalEdges > 0;
+}
+const viewportLaneOrder = laneOrder.filter((sourceId) => laneIsInViewport(sourceId));
 function shouldAutoFoldLane(sourceId) {
   if (sourceId === "unmapped") return false;
   const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
@@ -1244,7 +1252,7 @@ function buildSearchEntries() {
 const searchEntries = buildSearchEntries();
 
 const laneHeightBySource = new Map();
-for (const sourceId of laneOrder) {
+for (const sourceId of viewportLaneOrder) {
   let maxNodesInKind = 0;
   for (const kind of kindOrder) {
     const count = grouped
@@ -1260,7 +1268,7 @@ for (const sourceId of laneOrder) {
 
 const laneYStartBySource = new Map();
 let laneCursor = yStart;
-for (const sourceId of laneOrder) {
+for (const sourceId of viewportLaneOrder) {
   laneYStartBySource.set(sourceId, laneCursor);
   laneCursor += laneHeightBySource.get(sourceId);
 }
@@ -1532,10 +1540,13 @@ function activateInspectorMapping(mapping) {
 }
 function mappingHintText(mapping) {
   if (!mapping) return "";
+  const range = mapping.startLine === mapping.endLine
+    ? `line ${mapping.startLine}`
+    : `lines ${mapping.startLine}-${mapping.endLine}`;
   if (mapping.type === "edge") {
     const edge = graph.edges.find((entry) => edgeKeyFor(entry) === mapping.key);
     if (!edge) return "";
-    return `role ${edgeRoleForKind(edge.kind)} · ${edge.kind.replaceAll("_", "-")}`;
+    return `${range} · role ${edgeRoleForKind(edge.kind)} · ${edge.kind.replaceAll("_", "-")}`;
   }
   if (mapping.type === "node") {
     const nodeId = String(mapping.key).replace(/^node:/, "");
@@ -1543,7 +1554,7 @@ function mappingHintText(mapping) {
     if (!node) return "";
     const demand = nodeDemandState(node);
     const runtime = nodeRuntimeRole(node).replaceAll("_", "-");
-    return `${String(node.kind).replaceAll("_", "-")} · demand ${demand}${runtime !== "none" ? ` · runtime ${runtime}` : ""}`;
+    return `${range} · ${String(node.kind).replaceAll("_", "-")} · demand ${demand}${runtime !== "none" ? ` · runtime ${runtime}` : ""}`;
   }
   return "";
 }
@@ -1583,13 +1594,14 @@ function renderSourceInspector() {
     const inSpan = inspectorSpanStart > 0 && lineNo >= startLine && lineNo <= endLine;
     const isAnchor = lineNo === anchor;
     const mapped = inspectorLineMappings.get(lineNo) ?? [];
-    const singleDirect = mapped.length === 1 && mapped[0].startLine === lineNo && mapped[0].endLine === lineNo;
+    const directMapping = mapped.find((entry) => entry.startLine === lineNo && entry.endLine === lineNo)
+      || (mapped.length === 1 ? mapped[0] : null);
     const markerLabel = mapped.length <= 1 ? "go" : `${mapped.length} pick`;
     const marker = mapped.length > 0
       ? `<button type="button" class="inspector-marker" data-inspector-line="${lineNo}" title="Jump to mapped graph item(s)">${markerLabel}</button>`
       : "";
-    const code = singleDirect
-      ? `<button type="button" class="code clickable-range" data-inspector-range-key="${htmlEscape(mapped[0].key)}" title="Select mapped ${htmlEscape(mapped[0].type)}">${html || "&nbsp;"}</button>`
+    const code = directMapping
+      ? `<button type="button" class="code clickable-range" data-inspector-range-key="${htmlEscape(directMapping.key)}" title="Select mapped ${htmlEscape(directMapping.type)}">${html || "&nbsp;"}</button>`
       : `<span class="code">${html || "&nbsp;"}</span>`;
     rows.push(`<div class="inspector-line${inSpan ? " in-span" : ""}${isAnchor ? " anchor" : ""}${mapped.length > 0 ? " has-mapping" : ""}"><span class="ln">${lineNo}${marker}</span>${code}</div>`);
     if (inspectorChoiceLine === lineNo && mapped.length > 1) {
@@ -1873,8 +1885,19 @@ function detailRow(key, value) {
 }
 function formatSpan(metadata) {
   if (!metadata.span_start || !metadata.span_end) return null;
-  const source = metadata.span_source_id ? `source ${metadata.span_source_id}, ` : "";
-  return `${source}bytes ${metadata.span_start}..${metadata.span_end}`;
+  const sourceId = String(metadata.span_source_id ?? "");
+  const sourceEntry = sourceId ? sourceContentById.get(sourceId) : null;
+  const startByte = Number.parseInt(String(metadata.span_start), 10);
+  const endByte = Number.parseInt(String(metadata.span_end), 10);
+  if (sourceEntry && Number.isFinite(startByte) && Number.isFinite(endByte)) {
+    const startLine = lineFromByteOffset(sourceEntry.line_start_offsets, startByte);
+    const endLine = lineFromByteOffset(sourceEntry.line_start_offsets, Math.max(startByte, endByte - 1));
+    const pathLabel = sourceLabel(sourceId);
+    return endLine > startLine
+      ? `${pathLabel} lines ${startLine}-${endLine}`
+      : `${pathLabel} line ${startLine}`;
+  }
+  return `bytes ${metadata.span_start}..${metadata.span_end}`;
 }
 function normalizeMetadata(value) {
   if (!value || typeof value !== "object") return {};
@@ -1951,9 +1974,12 @@ function moveDependencyFocus(step) {
 function setDetails(value) {
   const metadata = normalizeMetadata(value.metadata);
   const kind = value.kind || value.type || "graph";
-  const label = value.label || "";
+  const label = value.type === "node" ? nodeDisplayLines(value).join(" · ") : (value.label || "");
   const sourcePath = metadata.source_path || value.source_file || "";
   const sourceId = metadata.span_source_id || "";
+  const sourceSummary = sourceId
+    ? sourceLabel(String(sourceId))
+    : (sourcePath ? compactLabelText(String(sourcePath).split(/[\\/]/).pop() ?? String(sourcePath), 48) : "");
   const span = formatSpan(metadata);
   const snippet = metadata.source_snippet || "";
   const snippetHighlighted = metadata.source_snippet_highlighted_html || "";
@@ -1964,15 +1990,24 @@ function setDetails(value) {
     label ? detailRow("Label", label) : "",
     value.id ? detailRow("ID", value.id) : "",
     value.from && value.to ? detailRow("Endpoints", `${value.from} -> ${value.to}`) : "",
-    sourceId ? detailRow("Source ID", sourceId) : "",
-    sourcePath ? detailRow("Source Path", sourcePath) : "",
-    span ? detailRow("Span", span) : "",
+    sourceSummary ? detailRow("Source", sourceSummary) : "",
+    span ? detailRow("Location", span) : "",
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => !["source_path", "source_snippet", "source_snippet_highlighted_html", "span_source_id", "span_start", "span_end"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "sharing_role", "capture_count", "extracted_reason", "binding_name"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([key, val]) => detailRow(key, val))
+    .map(([key, val]) => {
+      const displayKey =
+        key === "body_name" ? "Body" :
+        key === "runtime_role_summary" ? "Runtime Role" :
+        key === "sharing_role" ? "Sharing" :
+        key === "capture_count" ? "Capture Count" :
+        key === "extracted_reason" ? "Extracted Because" :
+        key === "binding_name" ? "Binding" :
+        key;
+      return detailRow(displayKey, val);
+    })
     .join("");
   const semanticRows = semanticSummaryRows(value, metadata);
   const connectionRows = connectionSummaryRows(value);
@@ -2106,7 +2141,7 @@ defs.appendChild(marker);
 svg.appendChild(defs);
 
 const laneLayer = el("g", { "aria-label": "source lanes" });
-laneOrder.forEach((sourceId, idx) => {
+viewportLaneOrder.forEach((sourceId, idx) => {
   const laneStart = laneYStartBySource.get(sourceId) ?? yStart;
   const laneHeight = laneHeightBySource.get(sourceId) ?? 128;
   const laneRect = el("rect", {
