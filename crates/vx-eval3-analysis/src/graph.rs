@@ -2692,8 +2692,8 @@ for (const edge of graph.edges) {
     "marker-end": "url(#arrow)"
   });
   path.classList.add(`edge-kind-${edge.kind}`);
-  const edgeRole = edgeRole(edge);
-  path.classList.add(`edge-role-${edgeRole}`);
+  const edgeRoleClass = edgeRole(edge);
+  path.classList.add(`edge-role-${edgeRoleClass}`);
   const edgeSourceId = sourceIdForEdge(edge);
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
@@ -2714,7 +2714,7 @@ for (const edge of graph.edges) {
   const labelOffset = 12 + Math.abs(bucket) * 5;
   const labelX = curveX + nx * labelOffset;
   const labelY = curveY + ny * labelOffset - 3;
-  const label = el("text", { x: labelX, y: labelY, class: `edge-label edge-role-${edgeRole}`, "text-anchor": "middle" });
+  const label = el("text", { x: labelX, y: labelY, class: `edge-label edge-role-${edgeRoleClass}`, "text-anchor": "middle" });
   if (!showEdgeLabel) label.classList.add("hidden-edge-label");
   if (showEdgeLabel && edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
