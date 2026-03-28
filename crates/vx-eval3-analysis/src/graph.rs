@@ -249,29 +249,51 @@ impl AnalysisGraph {
         out.push_str("<style>\n");
         out.push_str("  :root { color-scheme: dark; }\n");
         out.push_str("  body { margin: 0; height: 100vh; overflow: hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #0f1724; color: #e2e8f0; }\n");
-        out.push_str("  .topbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 520px) auto; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
+        out.push_str("  .topbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(300px, 560px) minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #243244; background: #101a29; font-size: 12px; }\n");
         out.push_str("  .topbar .top-source { color: #93adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
-        out.push_str("  .layout { display: grid; grid-template-rows: minmax(260px, 44vh) minmax(0, 1fr) minmax(120px, 24vh); gap: 6px; padding: 6px; height: calc(100vh - 54px); overflow: hidden; }\n");
+        out.push_str("  .top-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; min-width: 0; }\n");
+        out.push_str("  .layout { --sidebar-width: clamp(300px, 30vw, 520px); display: grid; grid-template-columns: minmax(0, 1fr) 8px minmax(260px, var(--sidebar-width)); gap: 6px; padding: 6px; height: calc(100vh - 50px); overflow: hidden; }\n");
+        out.push_str("  .layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr) 0 minmax(0, 0); }\n");
+        out.push_str("  .main-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(220px, 38vh) minmax(0, 1fr); gap: 6px; overflow: hidden; }\n");
+        out.push_str("  .sidebar-resizer { width: 8px; cursor: col-resize; border-radius: 4px; background: #0f1724; border: 1px solid #1f2c3c; }\n");
+        out.push_str("  .sidebar-resizer:hover { border-color: #3f5b79; background: #132032; }\n");
+        out.push_str("  .layout.sidebar-collapsed .sidebar-resizer { display: none; }\n");
+        out.push_str("  .sidebar-shell { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; }\n");
+        out.push_str("  .layout.sidebar-collapsed .sidebar-shell { display: none; }\n");
+        out.push_str(
+            "  .sidebar-scroll { min-height: 0; overflow: auto; display: grid; gap: 6px; }\n",
+        );
         out.push_str("  .layout h2 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }\n");
-        out.push_str("  .graph-stage { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 6px; overflow: hidden; }\n");
+        out.push_str("  .graph-stage { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); gap: 6px; overflow: hidden; }\n");
         out.push_str("  .source-first-row { min-width: 0; }\n");
-        out.push_str("  .source-first-row.compact-source-row { position: sticky; top: 0; z-index: 8; background: #0f1724; min-height: 0; overflow: hidden; }\n");
+        out.push_str("  .source-first-row.compact-source-row { background: #0f1724; min-height: 0; overflow: hidden; }\n");
         out.push_str("  .source-first-row.compact-source-row h2 { margin-bottom: 4px; }\n");
         out.push_str("  .graph-toolbar { display: grid; grid-template-columns: 1fr; gap: 4px; align-items: start; margin: 0; }\n");
         out.push_str("  .utility-strip { display: flex; gap: 4px; align-items: center; justify-content: flex-end; flex-wrap: wrap; position: relative; }\n");
+        out.push_str("  .utility-buttons { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }\n");
+        out.push_str("  .utility-buttons button, .sidebar-toggle { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 3px 7px; font-size: 11px; cursor: pointer; }\n");
+        out.push_str("  .sidebar-toggle[data-collapsed=\"true\"] { border-color: #7dd3fc; }\n");
         out.push_str("  .utility-strip details { position: relative; }\n");
         out.push_str("  .utility-strip > details > summary { list-style: none; cursor: pointer; background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 3px 7px; font-size: 11px; }\n");
         out.push_str("  .utility-strip > details[open] > summary { border-color: #7dd3fc; background: #132235; }\n");
         out.push_str(
             "  .utility-strip > details > summary::-webkit-details-marker { display: none; }\n",
         );
-        out.push_str("  .aux-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 6; min-width: 320px; max-width: min(62vw, 620px); border: 1px solid #2a3c52; border-radius: 5px; background: #0f1724; padding: 6px; box-shadow: 0 8px 18px rgba(0,0,0,0.32); }\n");
+        out.push_str("  .aux-pop { position: static; z-index: 1; min-width: 0; max-width: none; border: 1px solid #2a3c52; border-radius: 5px; background: #0f1724; padding: 6px; box-shadow: none; margin-top: 5px; }\n");
         out.push_str("  .aux-pop h3 { margin: 0 0 6px 0; font-size: 12px; color: #93adc8; text-transform: uppercase; letter-spacing: 0.02em; }\n");
-        out.push_str("  @media (max-width: 1100px) { .topbar { grid-template-columns: 1fr; } .selection-nav { flex-wrap: wrap; } .utility-strip { justify-content: flex-start; } }\n");
+        out.push_str("  .sidebar-shell details { border: 1px solid #1f2c3c; border-radius: 5px; background: #101a29; padding: 4px; }\n");
+        out.push_str("  .sidebar-shell details > summary { list-style: none; cursor: pointer; background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 4px; padding: 3px 7px; font-size: 11px; }\n");
+        out.push_str(
+            "  .sidebar-shell details > summary::-webkit-details-marker { display: none; }\n",
+        );
+        out.push_str("  .sidebar-shell .utility-strip { justify-content: stretch; align-items: stretch; flex-direction: column; }\n");
+        out.push_str("  @media (max-width: 1280px) { .topbar { grid-template-columns: 1fr; } .top-actions { justify-content: flex-start; } .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(220px, 38vh); } .sidebar-resizer { display: none; } .sidebar-shell { display: grid; } .layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); } .layout.sidebar-collapsed .sidebar-shell { display: none; } }\n");
         out.push_str(
             "  .canvas-wrap { padding: 0; overflow: hidden; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 4px; }\n",
         );
-        out.push_str("  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 6px 0; }\n");
+        out.push_str(
+            "  .viewport-toolbar { display: flex; align-items: center; gap: 8px; margin: 0; }\n",
+        );
         out.push_str("  .viewport-toolbar button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer; }\n");
         out.push_str("  .viewport-toolbar button:hover { border-color: #4b647f; }\n");
         out.push_str("  .viewport-toolbar .zoom-status { color: #8ba5c1; font-size: 12px; min-width: 54px; text-align: right; }\n");
@@ -484,14 +506,12 @@ impl AnalysisGraph {
         out.push_str(&escape_html(&source_label));
         out.push_str("</div>\n");
         out.push_str("<div class=\"top-search\"><div id=\"search-controls\" class=\"search-controls search-strip compact\"><div class=\"search-row\"><input id=\"search-query\" type=\"search\" placeholder=\"Search graph\" aria-label=\"Search graph\" /><button id=\"search-clear\" type=\"button\">clear</button></div><div id=\"search-status\" class=\"search-status\"></div><ul id=\"search-results\"></ul></div></div>\n");
-        out.push_str("<div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div>\n");
+        out.push_str("<div class=\"top-actions\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div class=\"utility-buttons\"><button data-open-utility=\"semantic-aux\" type=\"button\">filters</button><button data-open-utility=\"legend-help\" type=\"button\">legend</button><button data-open-utility=\"sources-aux\" type=\"button\">sources</button><button data-open-utility=\"lanes-aux\" type=\"button\">lanes</button><button id=\"sidebar-toggle\" class=\"sidebar-toggle\" type=\"button\" aria-expanded=\"true\">collapse sidebar</button></div><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div></div>\n");
         out.push_str("</div>\n");
-        out.push_str("<div class=\"layout graph-first-layout\">\n");
-        out.push_str("<section class=\"source-first-row compact-source-row\"><div id=\"source-inspector\" class=\"source-inspector\"></div></section>\n");
-        out.push_str("<section class=\"graph-stage\"><div class=\"graph-toolbar\"><div class=\"utility-strip\"><div id=\"semantic-filter-chips\" class=\"semantic-filter-chips\"></div><details id=\"semantic-aux\"><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></div><div class=\"canvas-wrap\"><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section>\n");
-        out.push_str(
-            "<aside class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></aside>\n",
-        );
+        out.push_str("<div id=\"viewer-layout\" class=\"layout graph-first-layout\">\n");
+        out.push_str("<main class=\"main-column\"><section class=\"source-first-row compact-source-row\"><div id=\"source-inspector\" class=\"source-inspector\"></div></section><section class=\"graph-stage\"><div class=\"canvas-wrap\"><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div></section></main>\n");
+        out.push_str("<div id=\"sidebar-resizer\" class=\"sidebar-resizer\" role=\"separator\" aria-orientation=\"vertical\" aria-label=\"Resize sidebar\"></div>\n");
+        out.push_str("<aside id=\"viewer-sidebar\" class=\"sidebar-shell\"><div class=\"sidebar-scroll\"><section class=\"panel\"><h2>Selected Item</h2><div id=\"details\"></div></section><section class=\"panel\"><h2>Utilities</h2><div class=\"utility-strip\"><details id=\"semantic-aux\" open><summary>filters</summary><div class=\"aux-pop\"><h3>Semantic Filters</h3><div id=\"semantic-controls\" class=\"semantic-controls compact\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div></div></details><details id=\"legend-help\"><summary>help</summary><div class=\"aux-pop\"><h3>Graph Legend</h3><p class=\"legend\">This is a structural analysis graph (not a scheduler/execution graph).</p><div class=\"graph-legend\" aria-label=\"graph legend\"><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div></div></details><details id=\"sources-aux\"><summary>sources</summary><div class=\"aux-pop\"><h3>Source Registry</h3><div id=\"source-registry\" class=\"source-registry\"></div></div></details><details id=\"lanes-aux\"><summary>lanes</summary><div class=\"aux-pop\"><h3>Lane Summary</h3><div id=\"lane-summary\" class=\"lane-summary\"></div></div></details></div></section></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -525,6 +545,10 @@ const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
 const laneSummary = document.getElementById("lane-summary");
 const semanticFilterChips = document.getElementById("semantic-filter-chips");
+const viewerLayout = document.getElementById("viewer-layout");
+const sidebarToggleButton = document.getElementById("sidebar-toggle");
+const sidebarResizer = document.getElementById("sidebar-resizer");
+const utilityOpenButtons = Array.from(document.querySelectorAll("button[data-open-utility]"));
 const utilitySurfaceDetails = [
   document.getElementById("semantic-aux"),
   document.getElementById("legend-help"),
@@ -565,6 +589,7 @@ const selectionHistory = [];
 let selectionHistoryIndex = -1;
 let suppressUrlStateUpdate = false;
 let dependencyJumpIndex = -1;
+let sidebarCollapsed = false;
 
 const nodeWidth = 196;
 const nodeHeight = 54;
@@ -1511,6 +1536,58 @@ function setupUtilitySurfaceBehavior() {
       }
     });
   }
+}
+function setSidebarCollapsed(collapsed) {
+  sidebarCollapsed = Boolean(collapsed);
+  if (viewerLayout) viewerLayout.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  if (sidebarToggleButton) {
+    sidebarToggleButton.textContent = sidebarCollapsed ? "show sidebar" : "collapse sidebar";
+    sidebarToggleButton.setAttribute("aria-expanded", sidebarCollapsed ? "false" : "true");
+    sidebarToggleButton.setAttribute("data-collapsed", sidebarCollapsed ? "true" : "false");
+  }
+}
+function openUtilityPanelById(panelId) {
+  const panel = utilitySurfaceDetails.find((entry) => entry && entry.id === panelId);
+  if (!panel) return;
+  setSidebarCollapsed(false);
+  panel.open = true;
+  panel.scrollIntoView({ block: "nearest" });
+}
+function setupSidebarShell() {
+  setSidebarCollapsed(false);
+  if (sidebarToggleButton) {
+    sidebarToggleButton.addEventListener("click", () => {
+      setSidebarCollapsed(!sidebarCollapsed);
+    });
+  }
+  for (const button of utilityOpenButtons) {
+    button.addEventListener("click", () => {
+      const panelId = String(button.getAttribute("data-open-utility") || "");
+      if (panelId) openUtilityPanelById(panelId);
+    });
+  }
+  if (!viewerLayout || !sidebarResizer) return;
+  let dragging = false;
+  const onPointerMove = (event) => {
+    if (!dragging) return;
+    const rect = viewerLayout.getBoundingClientRect();
+    const width = Math.max(260, Math.min(640, rect.right - event.clientX));
+    viewerLayout.style.setProperty("--sidebar-width", `${width}px`);
+    setSidebarCollapsed(false);
+  };
+  const onPointerUp = () => {
+    dragging = false;
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+  };
+  sidebarResizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    dragging = true;
+    event.preventDefault();
+    sidebarResizer.setPointerCapture?.(event.pointerId);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  });
 }
 function setSearchQuery(value, options = {}) {
   searchQuery = String(value ?? "");
@@ -2482,6 +2559,7 @@ for (const node of graph.nodes) {
 for (const sourceId of laneOrder) {
   if (shouldAutoFoldLane(sourceId)) foldedLaneSourceIds.add(sourceId);
 }
+setupSidebarShell();
 setupUtilitySurfaceBehavior();
 renderSourceRegistry(graph);
 renderLaneSummary();
