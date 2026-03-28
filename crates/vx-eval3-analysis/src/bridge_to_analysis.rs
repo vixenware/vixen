@@ -123,12 +123,22 @@ fn apply_one_step_local_call_demands(
         }
     }
 
-    let mains = bridge
+    let mut mains = bridge
         .bodies
         .iter()
-        .filter(|body| body.name == "main")
+        .filter(|body| body.name == "main" && body.span.source == bridge.source_id)
         .map(|body| body.id)
         .collect::<Vec<_>>();
+    if mains.is_empty() {
+        mains = bridge
+            .bodies
+            .iter()
+            .filter(|body| body.name == "main")
+            .map(|body| body.id)
+            .collect::<Vec<_>>();
+    }
+    mains.sort_by_key(|id| id.0);
+    mains.dedup();
     let use_transitive_local_call_propagation = mains.is_empty();
     let entry_ids = if !mains.is_empty() {
         mains
@@ -136,9 +146,17 @@ fn apply_one_step_local_call_demands(
         let mut builds = bridge
             .bodies
             .iter()
-            .filter(|body| body.name == "build")
+            .filter(|body| body.name == "build" && body.span.source == bridge.source_id)
             .map(|body| body.id)
             .collect::<Vec<_>>();
+        if builds.is_empty() {
+            builds = bridge
+                .bodies
+                .iter()
+                .filter(|body| body.name == "build")
+                .map(|body| body.id)
+                .collect::<Vec<_>>();
+        }
         builds.sort_by_key(|body_id| body_id.0);
         builds.dedup();
         if !builds.is_empty() {

@@ -641,6 +641,16 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         Some("local calls: 0; runtime-boundary extracts: 2; shared-value extracts: 0")
     );
     assert_eq!(
+        metadata_value(&render_kernel.metadata, "demand_justification_status"),
+        Some("propagated")
+    );
+    assert!(
+        metadata_value(&render_kernel.metadata, "demand_justification_path")
+            .unwrap_or("")
+            .contains("build_for"),
+        "render_png kernel should expose upstream path through build_for"
+    );
+    assert_eq!(
         metadata_value(&render_kernel.metadata, "kernel_local_calls"),
         Some("none")
     );
@@ -687,6 +697,18 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             Some(expected_summary)
         );
         if body_name == "build_for" {
+            assert!(
+                metadata_value(&kernel.metadata, "demand_justification_summary")
+                    .unwrap_or("")
+                    .contains("upstream call path"),
+                "build_for kernel should describe concrete upstream demand cause"
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "demand_justification_path")
+                    .unwrap_or("")
+                    .contains("build -> build_for"),
+                "build_for kernel should expose direct entry-to-callee demand path"
+            );
             let local_calls = metadata_value(&kernel.metadata, "kernel_local_calls").unwrap_or("");
             assert!(
                 local_calls.contains("fn render_png"),
@@ -710,6 +732,11 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             );
         }
         if body_name == "build" {
+            assert_eq!(
+                metadata_value(&kernel.metadata, "demand_justification_status"),
+                Some("entry"),
+                "build kernel should remain entry-root demanded"
+            );
             assert!(
                 metadata_value(&kernel.metadata, "kernel_local_calls")
                     .unwrap_or("")
@@ -743,6 +770,15 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             Some("NeedValue"),
             "{body_name} body should be demanded in no-main project root propagation"
         );
+        let status = metadata_value(&body.metadata, "demand_justification_status").unwrap_or("");
+        if body_name == "build" {
+            assert_eq!(status, "entry", "build should be entry-root demanded");
+        } else {
+            assert_eq!(
+                status, "propagated",
+                "{body_name} should be demanded via propagated call path"
+            );
+        }
     }
 }
 
@@ -895,6 +931,40 @@ fn zoo_tri_platform_png_imported_modules_contribute_structural_nodes_and_calls()
         }),
         "pnggen.build member call should be inspectable as structural relationship"
     );
+
+    for imported_file in ["zlib-lib.vx", "libpng-lib.vx", "pnggen-app.vx"] {
+        let imported_build_body = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == GraphNodeKind::Body
+                    && metadata_value(&node.metadata, "body_name") == Some("build")
+                    && metadata_value(&node.metadata, "source_path")
+                        .map(|path| path.ends_with(imported_file))
+                        .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("imported `{imported_file}` build body should exist"));
+        assert_eq!(
+            metadata_value(&imported_build_body.metadata, "result_observation"),
+            Some("NeedValue"),
+            "imported `{imported_file}` build body should be concretely demanded"
+        );
+        assert!(
+            metadata_value(&imported_build_body.metadata, "demand_justification_edge")
+                .unwrap_or("")
+                .contains("cross-module"),
+            "imported `{imported_file}` build body should expose cross-module caller cause"
+        );
+        assert!(
+            metadata_value(
+                &imported_build_body.metadata,
+                "demand_justification_summary"
+            )
+            .unwrap_or("")
+            .contains("upstream call path"),
+            "imported `{imported_file}` build body should include upstream demand path narrative"
+        );
+    }
 }
 
 fn metadata_value<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {

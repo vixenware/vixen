@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -820,6 +820,8 @@ function semanticNarrative(value) {
   if (!value || typeof value !== "object") return "";
   if (value.type === "node") {
     const metadata = metadataMap(value.metadata);
+    const demandWhy = String(metadata.demand_justification_summary ?? "");
+    if (demandWhy) return demandWhy;
     const demand = nodeDemandState(value);
     const sharing = nodeSharingState(value);
     const runtimeRole = nodeRuntimeRole(value);
@@ -863,6 +865,12 @@ function semanticSummaryRows(value, metadata) {
     if (demand !== "unknown") rows.push(detailRow("Demand", demand));
     const demandModel = String(metadata.demand_model_note ?? "");
     if (demandModel) rows.push(detailRow("Demand Model", demandModel));
+    const demandWhy = String(metadata.demand_justification_summary ?? "");
+    if (demandWhy) rows.push(detailRow("Demand Why", demandWhy));
+    const demandPath = String(metadata.demand_justification_path ?? "");
+    if (demandPath) rows.push(detailRow("Demand Path", demandPath));
+    const demandEdge = String(metadata.demand_justification_edge ?? "");
+    if (demandEdge && demandEdge !== "none") rows.push(detailRow("Demand Edge", demandEdge));
     const sharing = nodeSharingState(value);
     if (sharing !== "local") rows.push(detailRow("Sharing", sharing));
     const runtimeRole = nodeRuntimeRole(value);
@@ -2291,7 +2299,7 @@ function setDetails(value) {
   ].join("");
 
   const metadataRows = Object.entries(metadata)
-    .filter(([key]) => ["body_name", "runtime_role_summary", "runtime_activity_summary", "runtime_input_summary", "runtime_closure_summary", "runtime_extraction_summary", "sharing_role", "capture_count", "layout_capture_summary", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "call_target", "call_kind", "cross_module"].includes(key))
+    .filter(([key]) => ["body_name", "runtime_role_summary", "runtime_activity_summary", "runtime_input_summary", "runtime_closure_summary", "runtime_extraction_summary", "sharing_role", "capture_count", "layout_capture_summary", "extracted_reason", "binding_name", "kernel_reason_summary", "kernel_local_calls", "kernel_extracted_values", "kernel_region_examples", "demand_model_note", "demand_justification_status", "demand_justification_summary", "demand_justification_path", "demand_justification_edge", "call_target", "call_kind", "cross_module"].includes(key))
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, val]) => {
       const displayKey =
@@ -2310,6 +2318,10 @@ function setDetails(value) {
         key === "kernel_extracted_values" ? "Extracted Values" :
         key === "kernel_region_examples" ? "Kernel Region" :
         key === "demand_model_note" ? "Demand Model" :
+        key === "demand_justification_status" ? "Demand Status" :
+        key === "demand_justification_summary" ? "Demand Why" :
+        key === "demand_justification_path" ? "Demand Path" :
+        key === "demand_justification_edge" ? "Demand Edge" :
         key === "call_target" ? "Call Target" :
         key === "call_kind" ? "Call Kind" :
         key === "cross_module" ? "Cross Module" :
@@ -2831,6 +2843,7 @@ fn project_analysis_graph_internal(
         .iter()
         .map(|body| (body.id, body))
         .collect::<BTreeMap<_, _>>();
+    let demand_justification = build_demand_justification_index(analysis, context);
     let mut shared_extraction_count_by_body = BTreeMap::new();
     let mut extracted_reason_by_runtime = BTreeMap::new();
 
@@ -2886,6 +2899,13 @@ fn project_analysis_graph_internal(
                 demand_model_note(&body.result_observation).to_owned(),
             ),
         ];
+        append_demand_justification_metadata(
+            &mut metadata,
+            &demand_justification,
+            body.id,
+            &body.result_observation,
+            context,
+        );
         if let Some(ctx) = context {
             metadata.push(("body_name".to_owned(), body_name.clone()));
             append_body_span_metadata(&mut metadata, ctx, body.id);
@@ -2977,6 +2997,13 @@ fn project_analysis_graph_internal(
                 shared_extract_count.to_string(),
             ),
         ];
+        append_demand_justification_metadata(
+            &mut metadata,
+            &demand_justification,
+            kernel.body,
+            &kernel.result_obs,
+            context,
+        );
         if let Some(ctx) = context {
             metadata.push((
                 "kernel_source_expr_count".to_owned(),
@@ -3063,6 +3090,17 @@ fn project_analysis_graph_internal(
             ),
             ("sharing_role".to_owned(), sharing_role.to_owned()),
         ];
+        let owner_observation = body_by_id
+            .get(&source_expr.body)
+            .map(|body| &body.result_observation)
+            .unwrap_or(&crate::Observation::NoObs);
+        append_demand_justification_metadata(
+            &mut metadata,
+            &demand_justification,
+            source_expr.body,
+            owner_observation,
+            context,
+        );
         append_source_expr_metadata(&mut metadata, &source_expr, context);
         finalize_metadata(&mut metadata);
 
@@ -3618,6 +3656,281 @@ fn layout_capture_summary(
     labels.join(", ")
 }
 
+#[derive(Debug, Clone)]
+struct DemandPathStep {
+    caller: BodyId,
+    call_expr: ExprId,
+    call_kind: String,
+    call_target: String,
+    cross_module: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DemandJustificationIndex {
+    entry_bodies: BTreeSet<BodyId>,
+    parent_step_by_body: BTreeMap<BodyId, DemandPathStep>,
+}
+
+impl DemandJustificationIndex {
+    fn path_to(&self, target: BodyId) -> Vec<BodyId> {
+        if self.entry_bodies.contains(&target) {
+            return vec![target];
+        }
+        let mut out = Vec::new();
+        let mut cursor = target;
+        let mut guard = BTreeSet::new();
+        while guard.insert(cursor) {
+            out.push(cursor);
+            let Some(step) = self.parent_step_by_body.get(&cursor) else {
+                break;
+            };
+            cursor = step.caller;
+            if self.entry_bodies.contains(&cursor) {
+                out.push(cursor);
+                break;
+            }
+        }
+        out.reverse();
+        out
+    }
+}
+
+fn observation_is_demanded(observation: &crate::Observation) -> bool {
+    !matches!(observation, crate::Observation::NoObs)
+}
+
+fn body_label_for_justification(body: BodyId, context: Option<&BridgeGraphContext<'_>>) -> String {
+    context
+        .and_then(|ctx| ctx.body_name(body))
+        .unwrap_or_else(|| format!("B{}", body.0))
+}
+
+fn select_entry_bodies(
+    analysis: &AnalysisResult,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> Vec<BodyId> {
+    let body_name = |body_id: BodyId| {
+        context
+            .and_then(|ctx| ctx.body_name(body_id))
+            .unwrap_or_default()
+    };
+    let in_entry_source = |body_id: BodyId| {
+        context
+            .and_then(|ctx| {
+                let source_id = ctx.body_source_id(body_id)?;
+                Some(source_id == ctx.entry_source_id)
+            })
+            .unwrap_or(true)
+    };
+    let mut mains = analysis
+        .bodies
+        .iter()
+        .filter(|body| body_name(body.id) == "main" && in_entry_source(body.id))
+        .map(|body| body.id)
+        .collect::<Vec<_>>();
+    if mains.is_empty() {
+        mains = analysis
+            .bodies
+            .iter()
+            .filter(|body| body_name(body.id) == "main")
+            .map(|body| body.id)
+            .collect::<Vec<_>>();
+    }
+    mains.sort_by_key(|id| id.0);
+    mains.dedup();
+    if !mains.is_empty() {
+        return mains;
+    }
+
+    let mut builds = analysis
+        .bodies
+        .iter()
+        .filter(|body| body_name(body.id) == "build" && in_entry_source(body.id))
+        .map(|body| body.id)
+        .collect::<Vec<_>>();
+    if builds.is_empty() {
+        builds = analysis
+            .bodies
+            .iter()
+            .filter(|body| body_name(body.id) == "build")
+            .map(|body| body.id)
+            .collect::<Vec<_>>();
+    }
+    builds.sort_by_key(|id| id.0);
+    builds.dedup();
+    if !builds.is_empty() {
+        return builds;
+    }
+
+    let mut incoming = BTreeSet::new();
+    for body in &analysis.bodies {
+        for edge in &body.source_local_call_edges {
+            if let SourceLocalCalleeOrigin::TopLevelBody(target) = edge.callee {
+                incoming.insert(target);
+            }
+        }
+    }
+    let mut roots = analysis
+        .bodies
+        .iter()
+        .map(|body| body.id)
+        .filter(|id| !incoming.contains(id))
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|id| id.0);
+    if let Some(root) = roots.first().copied() {
+        vec![root]
+    } else {
+        analysis
+            .bodies
+            .first()
+            .map(|body| vec![body.id])
+            .unwrap_or_default()
+    }
+}
+
+fn build_demand_justification_index(
+    analysis: &AnalysisResult,
+    context: Option<&BridgeGraphContext<'_>>,
+) -> DemandJustificationIndex {
+    let entries = select_entry_bodies(analysis, context);
+    let mut index = DemandJustificationIndex::default();
+    index.entry_bodies.extend(entries.iter().copied());
+
+    let body_by_id = analysis
+        .bodies
+        .iter()
+        .map(|body| (body.id, body))
+        .collect::<BTreeMap<_, _>>();
+    let mut queue = entries.into_iter().collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+
+    while let Some(caller_id) = queue.pop_front() {
+        if !visited.insert(caller_id) {
+            continue;
+        }
+        let Some(caller) = body_by_id.get(&caller_id).copied() else {
+            continue;
+        };
+
+        for edge in &caller.source_local_call_edges {
+            let SourceLocalCalleeOrigin::TopLevelBody(callee) = edge.callee else {
+                continue;
+            };
+            if index.entry_bodies.contains(&callee)
+                || index.parent_step_by_body.contains_key(&callee)
+            {
+                continue;
+            }
+
+            let source = SourceExpr {
+                body: caller_id,
+                expr: edge.call_expr,
+            };
+            let call_kind = context
+                .and_then(|ctx| ctx.call_site_kind_label(&source))
+                .unwrap_or("call")
+                .to_owned();
+            let call_target = context
+                .and_then(|ctx| ctx.call_target_label(&source))
+                .unwrap_or_else(|| body_label_for_justification(callee, context));
+            let cross_module = context
+                .and_then(|ctx| {
+                    let caller_source = ctx.body_source_id(caller_id)?;
+                    let callee_source = ctx.body_source_id(callee)?;
+                    Some(caller_source != callee_source)
+                })
+                .unwrap_or(false);
+
+            index.parent_step_by_body.insert(
+                callee,
+                DemandPathStep {
+                    caller: caller_id,
+                    call_expr: edge.call_expr,
+                    call_kind,
+                    call_target,
+                    cross_module,
+                },
+            );
+            queue.push_back(callee);
+        }
+    }
+
+    index
+}
+
+fn append_demand_justification_metadata(
+    metadata: &mut GraphMetadata,
+    justification: &DemandJustificationIndex,
+    body_id: BodyId,
+    observation: &crate::Observation,
+    context: Option<&BridgeGraphContext<'_>>,
+) {
+    let path = justification.path_to(body_id);
+    let path_text = if path.is_empty() {
+        "none".to_owned()
+    } else {
+        path.iter()
+            .map(|id| body_label_for_justification(*id, context))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    };
+
+    let demanded = observation_is_demanded(observation);
+    let (status, summary, edge_text) = if justification.entry_bodies.contains(&body_id) {
+        (
+            "entry",
+            format!(
+                "Demand starts here: `{}` is an entry root in the current project demand model.",
+                body_label_for_justification(body_id, context)
+            ),
+            "entry root".to_owned(),
+        )
+    } else if let Some(step) = justification.parent_step_by_body.get(&body_id) {
+        let mut edge_text = format!(
+            "{} {} @E{}",
+            step.call_kind, step.call_target, step.call_expr.0
+        );
+        if step.cross_module {
+            edge_text.push_str(" (cross-module)");
+        }
+        if demanded {
+            (
+                "propagated",
+                format!(
+                    "Demand reaches this node via upstream call path `{path_text}`; final recovered caller edge: {edge_text}."
+                ),
+                edge_text,
+            )
+        } else {
+            (
+                "reachable_but_idle",
+                format!(
+                    "Reachable via upstream call path `{path_text}`, but this node remains idle in the current bounded local-call demand model."
+                ),
+                edge_text,
+            )
+        }
+    } else if demanded {
+        (
+            "demanded_without_recovered_path",
+            "Demanded, but no recoverable upstream entry call path is currently available."
+                .to_owned(),
+            "unavailable".to_owned(),
+        )
+    } else {
+        (
+            "idle_no_recovered_path",
+            "Idle, with no recoverable upstream entry call path in the current model.".to_owned(),
+            "none".to_owned(),
+        )
+    };
+
+    metadata.push(("demand_justification_status".to_owned(), status.to_owned()));
+    metadata.push(("demand_justification_path".to_owned(), path_text));
+    metadata.push(("demand_justification_edge".to_owned(), edge_text));
+    metadata.push(("demand_justification_summary".to_owned(), summary));
+}
+
 fn demand_model_note(observation: &crate::Observation) -> &'static str {
     match observation {
         crate::Observation::NoObs => {
@@ -3715,6 +4028,7 @@ fn escape_html(input: &str) -> String {
 
 #[derive(Debug, Clone)]
 struct BridgeGraphContext<'a> {
+    entry_source_id: vx_resolve::SourceId,
     body_names: BTreeMap<BodyId, String>,
     body_expr_counts: BTreeMap<BodyId, usize>,
     binding_names: BTreeMap<BridgeLocalBindingId, String>,
@@ -3853,6 +4167,7 @@ impl<'a> BridgeGraphContext<'a> {
         }
 
         Self {
+            entry_source_id: bridge.source_id,
             body_names,
             body_expr_counts,
             binding_names,
