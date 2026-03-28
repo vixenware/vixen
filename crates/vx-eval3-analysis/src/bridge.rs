@@ -479,7 +479,15 @@ fn collect_project_bridge_data(
             &local_bindings,
             &local_bodies,
         );
-        let local_call_sites = collect_call_sites(source_id, &file, &local_exprs, resolved_refs);
+        let imported_build_targets =
+            imported_build_targets_for_source(source_id, &file, source_paths, resolution);
+        let local_call_sites = collect_call_sites(
+            source_id,
+            &file,
+            &local_exprs,
+            resolved_refs,
+            &imported_build_targets,
+        );
         let (local_boundary_arg_bindings, local_boundary_arg_closures, local_boundary_inits) =
             collect_boundary_call_links(
                 source_id,
@@ -1024,6 +1032,7 @@ fn collect_call_sites(
     file: &SourceFile,
     exprs: &[BridgeExpr],
     resolved_refs: &[BridgeResolvedRef],
+    imported_build_targets: &HashMap<String, DefId>,
 ) -> Vec<BridgeCallSite> {
     let by_span = expr_id_by_span(exprs);
     let by_id = exprs
@@ -1088,7 +1097,23 @@ fn collect_call_sites(
             } else {
                 BridgeCallSiteKind::Other
             };
-            let target = resolved.and_then(|resolved| resolved.target.as_ref().ok().map(|d| d.id));
+            let mut target =
+                resolved.and_then(|resolved| resolved.target.as_ref().ok().map(|d| d.id));
+            let mut kind = kind;
+            if matches!(
+                kind,
+                BridgeCallSiteKind::LocalCallableBinding | BridgeCallSiteKind::Other
+            ) && let Expr::Field(field) = callee
+                && let Some(receiver) = field.receiver()
+                && let Expr::NameRef(name_ref) = receiver
+                && let Some(name_token) = name_ref.token()
+                && let Some(field_name) = field.field_name()
+                && field_name.text() == "build"
+                && let Some(def_id) = imported_build_targets.get(name_token.text())
+            {
+                kind = BridgeCallSiteKind::DirectNamedFunction;
+                target = Some(*def_id);
+            }
 
             Some(BridgeCallSite {
                 body,
@@ -1110,6 +1135,66 @@ fn collect_call_sites(
     });
     call_sites.dedup();
     call_sites
+}
+
+fn imported_build_targets_for_source(
+    source_id: SourceId,
+    file: &SourceFile,
+    source_paths: &BTreeMap<u32, String>,
+    resolution: &NameResolution,
+) -> HashMap<String, DefId> {
+    let Some(source_path) = source_paths.get(&source_id.0) else {
+        return HashMap::new();
+    };
+    let base_dir = Path::new(source_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let path_to_source = source_paths
+        .iter()
+        .map(|(id, path)| (path.clone(), SourceId(*id)))
+        .collect::<HashMap<_, _>>();
+    let mut out = HashMap::new();
+
+    for let_stmt in file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::LetStmt::cast)
+    {
+        let Some(alias) = let_stmt.name().map(|name| name.text().to_owned()) else {
+            continue;
+        };
+        let Some(expr) = let_stmt.expr() else {
+            continue;
+        };
+        let Some(import_expr) = ImportExpr::cast(expr.syntax().clone()) else {
+            continue;
+        };
+        let Some(raw_path) = import_expr.path() else {
+            continue;
+        };
+        let Some(resolved_path) = resolve_local_import_path(&base_dir, &raw_path) else {
+            continue;
+        };
+        let resolved_text = resolved_path.display().to_string();
+        let Some(imported_source_id) = path_to_source.get(&resolved_text).copied() else {
+            continue;
+        };
+        let build_def = resolution
+            .scopes
+            .all_definitions_in(imported_source_id)
+            .into_iter()
+            .filter(|def| def.kind == DefKind::Function && def.name == "build")
+            .min_by_key(|def| match def.id {
+                DefId::Source { local, .. } => local,
+            })
+            .map(|def| def.id);
+        if let Some(def_id) = build_def {
+            out.insert(alias, def_id);
+        }
+    }
+
+    out
 }
 
 #[allow(clippy::too_many_arguments)]

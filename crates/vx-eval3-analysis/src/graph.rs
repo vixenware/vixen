@@ -2105,8 +2105,8 @@ function selectGraphItem(key, detailsValue, sourceId, options = {}) {
   if (selectedSourceId) sourceFilterSourceId = selectedSourceId;
   dependencyJumpIndex = -1;
   if (!options.fromHistory) pushSelectionHistory(key);
-  setDetails(detailsValue);
   applySourceFilter(sourceFilterSourceId, { skipPersist: true });
+  setDetails(detailsValue);
   if (selectedSourceId) focusSourceLane(selectedSourceId);
   if (options.persistUrl !== false) {
     persistViewerState(Boolean(options.pushUrlHistory));

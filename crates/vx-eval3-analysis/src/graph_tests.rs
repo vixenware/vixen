@@ -189,6 +189,16 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("setViewportScale("));
     assert!(html.contains("focusSourceLane("));
     assert!(html.contains("selectGraphItem("));
+    let apply_filter_idx = html
+        .find("applySourceFilter(sourceFilterSourceId, { skipPersist: true });")
+        .expect("selectGraphItem should apply source filter");
+    let set_details_idx = html
+        .find("setDetails(detailsValue);")
+        .expect("selectGraphItem should render details");
+    assert!(
+        apply_filter_idx < set_details_idx,
+        "source filter should be applied before details so inspector span metadata is not reset to line 1"
+    );
     assert!(html.contains(".selected"));
     assert!(html.contains("node-demand-demanded"));
     assert!(html.contains("node-sharing-shared"));
@@ -648,7 +658,7 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
     for (body_name, expected_summary) in [
         (
             "build_for",
-            "local calls: 1; runtime-boundary extracts: 0; shared-value extracts: 1",
+            "local calls: 4; runtime-boundary extracts: 0; shared-value extracts: 1",
         ),
         (
             "build",
@@ -677,9 +687,10 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
             Some(expected_summary)
         );
         if body_name == "build_for" {
-            assert_eq!(
-                metadata_value(&kernel.metadata, "kernel_local_calls"),
-                Some("fn render_png")
+            let local_calls = metadata_value(&kernel.metadata, "kernel_local_calls").unwrap_or("");
+            assert!(
+                local_calls.contains("fn render_png"),
+                "build_for kernel local calls should still surface render_png"
             );
             assert_eq!(
                 metadata_value(&kernel.metadata, "kernel_extracted_values"),
@@ -690,6 +701,12 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
                     .unwrap_or("")
                     .contains("render_png(class, app)"),
                 "build_for kernel region examples should include local direct call context"
+            );
+            assert!(
+                metadata_value(&kernel.metadata, "kernel_region_examples")
+                    .unwrap_or("")
+                    .contains("libpng.build(workspace, class, z)"),
+                "build_for kernel region examples should surface imported member-call context"
             );
         }
         if body_name == "build" {
