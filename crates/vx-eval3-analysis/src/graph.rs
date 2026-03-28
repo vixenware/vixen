@@ -387,6 +387,7 @@ impl AnalysisGraph {
         out.push_str("  .node-badge text { font-size: 9px; fill: #c7d6e6; font-weight: 700; pointer-events: none; }\n");
         out.push_str("  .edge { stroke: #5f7d9a; stroke-width: 1.3; fill: none; }\n");
         out.push_str("  .edge-label { font-size: 11px; fill: #b6c8db; pointer-events: none; }\n");
+        out.push_str("  .edge-label.hidden-edge-label { display: none; }\n");
         out.push_str("  .edge-label-hit { pointer-events: auto; cursor: pointer; }\n");
         out.push_str("  .node-kind-body rect { fill: #1b293c; stroke: #7dd3fc; }\n");
         out.push_str("  .node-kind-kernel rect { fill: #222636; stroke: #f9e2af; }\n");
@@ -634,13 +635,67 @@ function edgeSemanticLabel(edge) {
   if (edge.kind === "body_to_runtime_boundary") return "extract edge: body -> runtime";
   return edge.label;
 }
+function edgeDisplayLabel(edge) {
+  if (edge.kind === "runtime_value_dependency") return "value flow";
+  if (edge.kind === "runtime_boundary_to_closure_layout") return "owns closure";
+  if (edge.kind === "call_to_body" || edge.kind === "call_to_closure_layout") return "call";
+  if (edge.kind === "body_to_kernel") return "demand";
+  if (edge.kind === "body_to_runtime_boundary") return "extract";
+  return edgeSemanticLabel(edge);
+}
+function shouldRenderEdgeLabel(edge, geometry = {}) {
+  const distance = Number(geometry.distance ?? 0);
+  const parallelCount = Number(geometry.parallelCount ?? 1);
+  if (!denseGraph) return distance >= 84;
+  if (edge.kind === "body_to_kernel" || edge.kind === "body_to_runtime_boundary") return false;
+  if (distance < 168) return false;
+  if (parallelCount >= 3) return false;
+  return true;
+}
 function edgeKeyFor(edge) {
   return `edge:${edge.from}->${edge.to}:${edge.kind}:${edge.label}`;
+}
+function compactLabelText(text, max = 44) {
+  const raw = String(text ?? "").trim().replace(/\s+/g, " ");
+  if (raw.length <= max) return raw;
+  return `${raw.slice(0, max - 1)}...`;
+}
+function nodeDisplayLines(node) {
+  const metadata = metadataMap(node.metadata);
+  if (node.kind === "body") {
+    const name = compactLabelText(String(metadata.body_name ?? ""), 38);
+    const demand = nodeDemandState(node);
+    const demandText = demand === "demanded" ? "active result" : (demand === "nondemanded" ? "idle result" : "result state unknown");
+    return [name ? `Body: ${name}` : "Body", demandText];
+  }
+  if (node.kind === "kernel") {
+    const owner = compactLabelText(String(metadata.body_name ?? ""), 38);
+    const demand = nodeDemandState(node);
+    const demandText = demand === "demanded" ? "active kernel" : (demand === "nondemanded" ? "idle kernel" : "kernel state unknown");
+    return [owner ? `Kernel in ${owner}` : "Kernel", demandText];
+  }
+  if (node.kind === "runtime_boundary") {
+    const role = compactLabelText(String(metadata.runtime_role_summary ?? "runtime boundary"), 44);
+    const source = compactLabelText(String(node.label ?? "").split("\n")[1] ?? "", 44);
+    return [role || "runtime boundary", source || "runtime source"];
+  }
+  if (node.kind === "closure_layout") {
+    const origin = compactLabelText(String(metadata.closure_origin ?? ""), 40);
+    const captureCount = parsePositiveInt(metadata.capture_count);
+    return [
+      origin ? `Closure: ${origin}` : "Closure layout",
+      captureCount > 0 ? `${captureCount} captures` : "no captures",
+    ];
+  }
+  const fallback = String(node.label ?? node.id ?? "").split("\n");
+  const first = compactLabelText(fallback[0] ?? String(node.id ?? ""), 44);
+  const second = compactLabelText(fallback[1] ?? "", 44);
+  return second ? [first, second] : [first];
 }
 function nodeShortLabel(nodeId) {
   const node = nodeById.get(nodeId);
   if (!node) return nodeId;
-  const firstLine = String(node.label || node.id).split("\n")[0];
+  const firstLine = nodeDisplayLines(node)[0] ?? String(node.label || node.id).split("\n")[0];
   return firstLine.length > 84 ? `${firstLine.slice(0, 81)}...` : firstLine;
 }
 function edgeWhyText(edge) {
@@ -1078,11 +1133,35 @@ function laneHintFor(sourceId) {
   if (stats.totalNodes <= 2 && stats.totalEdges <= 2) return "sparse lane";
   return "project lane";
 }
+function computePrimaryProjectLane() {
+  let bestSourceId = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const sourceId of laneOrder) {
+    if (sourceId === "unmapped") continue;
+    const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+    if (stats.totalNodes === 0 && stats.totalEdges === 0) continue;
+    let score = stats.totalNodes * 1000 + stats.totalEdges * 10;
+    if (!stats.isStdlib) score += 1_000_000;
+    const rank = sourceRank(sourceId, laneOrder);
+    if (score > bestScore || (score === bestScore && rank < bestRank)) {
+      bestSourceId = sourceId;
+      bestScore = score;
+      bestRank = rank;
+    }
+  }
+  return bestSourceId;
+}
+const primaryProjectLane = computePrimaryProjectLane();
 function shouldAutoFoldLane(sourceId) {
   if (sourceId === "unmapped") return false;
   const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
-  if (!stats.isStdlib) return false;
-  return laneOrder.length >= 6 || graph.nodes.length >= 40;
+  if (sourceId === primaryProjectLane) return false;
+  if (stats.isStdlib) return laneOrder.length >= 6 || graph.nodes.length >= 40;
+  if (denseGraph && laneOrder.length >= 7 && stats.totalNodes <= 1 && stats.totalEdges <= 1) {
+    return true;
+  }
+  return false;
 }
 function searchText(value) {
   return String(value ?? "").toLowerCase();
@@ -1167,7 +1246,9 @@ for (const sourceId of laneOrder) {
       .length;
     maxNodesInKind = Math.max(maxNodesInKind, count);
   }
-  laneHeightBySource.set(sourceId, Math.max(128, maxNodesInKind * nodeSpacing + 52));
+  const stackDepth = Math.max(1, maxNodesInKind);
+  const minLaneHeight = stackDepth <= 1 ? 82 : (stackDepth <= 3 ? 100 : 116);
+  laneHeightBySource.set(sourceId, Math.max(minLaneHeight, stackDepth * nodeSpacing + 42));
 }
 
 const laneYStartBySource = new Map();
@@ -2065,17 +2146,23 @@ for (const edge of graph.edges) {
   const len = Math.hypot(dx, dy) || 1;
   const nx = -dy / len;
   const ny = dx / len;
-  const labelOffset = 10 + Math.abs(bucket) * 4;
-  const labelX = (x1 + x2) / 2 + nx * labelOffset;
-  const labelY = (y1 + y2) / 2 + ny * labelOffset - 3;
+  const showEdgeLabel = shouldRenderEdgeLabel(edge, { distance: len, parallelCount });
+  const t = 0.52;
+  const mt = 1 - t;
+  const curveX = mt * mt * mt * x1 + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * x2;
+  const curveY = mt * mt * mt * y1 + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * y2;
+  const labelOffset = 12 + Math.abs(bucket) * 5;
+  const labelX = curveX + nx * labelOffset;
+  const labelY = curveY + ny * labelOffset - 3;
   const label = el("text", { x: labelX, y: labelY, class: `edge-label edge-role-${edgeRole}`, "text-anchor": "middle" });
-  if (edgeSourceId) {
+  if (!showEdgeLabel) label.classList.add("hidden-edge-label");
+  if (showEdgeLabel && edgeSourceId) {
     label.setAttribute("data-source-id", edgeSourceId);
     label.classList.add("edge-label-hit");
     label.addEventListener("click", () => selectByGraphKey(edgeKey, { pushUrlHistory: true }));
   }
   sourceBoundElements.push({ el: label, sourceId: edgeSourceId });
-  label.textContent = edgeSemanticLabel(edge);
+  label.textContent = showEdgeLabel ? edgeDisplayLabel(edge) : "";
   svg.appendChild(label);
   registerSelectable(edgeKey, [path, label]);
   edgeElements.push({ key: edgeKey, edge, path, label });
@@ -2101,7 +2188,7 @@ for (const node of graph.nodes) {
   addNodeBadges(g, node);
 
   const text = el("text", { x: 10, y: 18 });
-  const lines = String(node.label).split("\n").slice(0, 2);
+  const lines = nodeDisplayLines(node).slice(0, 2);
   lines.forEach((line, i) => {
     const tspan = el("tspan", { x: 10, dy: i === 0 ? 0 : 14 });
     tspan.textContent = line;

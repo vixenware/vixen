@@ -161,6 +161,10 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("node-sharing-shared"));
     assert!(html.contains("edge-role-value_flow"));
     assert!(html.contains("edgeSemanticLabel("));
+    assert!(html.contains("edgeDisplayLabel("));
+    assert!(html.contains("shouldRenderEdgeLabel("));
+    assert!(html.contains("hidden-edge-label"));
+    assert!(html.contains("nodeDisplayLines("));
     assert!(html.contains("semantic-summary"));
     assert!(html.contains("Semantic Filters"));
     assert!(html.contains("filter-demand"));
@@ -350,6 +354,12 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("foldStdlibLanes("));
     assert!(html.contains("clearFoldedLanes("));
     assert!(html.contains("applyLaneFolding("));
+    assert!(html.contains("computePrimaryProjectLane("));
+    assert!(html.contains("primaryProjectLane"));
+    assert!(!html.contains("path.endsWith(\"/tri-platform-png.vx\")"));
+    assert!(!html.contains("path.endsWith(\"\\\\tri-platform-png.vx\")"));
+    assert!(html.contains("const stackDepth = Math.max(1, maxNodesInKind);"));
+    assert!(!html.contains("Math.max(maxNodesInKind, stats.totalNodes)"));
     assert!(html.contains("params.get(\"fold\")"));
     assert!(html.contains("params.set(\"fold\""));
     assert!(html.contains("search-query"));
@@ -385,6 +395,10 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("params.set(\"icl\""));
     assert!(html.contains("keepInspectorChoice"));
     assert!(html.contains("button type=\"button\" class=\"code clickable-range\""));
+    assert!(html.contains("edgeDisplayLabel("));
+    assert!(html.contains("shouldRenderEdgeLabel("));
+    assert!(html.contains("hidden-edge-label"));
+    assert!(html.contains("nodeDisplayLines("));
 }
 
 #[test]
