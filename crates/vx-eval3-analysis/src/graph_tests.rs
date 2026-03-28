@@ -77,6 +77,16 @@ fn zoo_cc_version_graph_smoke() {
     assert!(html.contains("Source Snippet"));
     assert!(html.contains("Source Path"));
     assert!(html.contains("Raw JSON"));
+    assert!(html.contains("Lane Summary"));
+    assert!(html.contains("fold stdlib lanes"));
+    assert!(html.contains("unfold all"));
+    assert!(html.contains("data-lane-fold-source-id"));
+    assert!(html.contains("data-lane-focus-source-id"));
+    assert!(html.contains("laneHintFor("));
+    assert!(html.contains("applyLaneFolding("));
+    assert!(html.contains("foldedLaneSourceIds"));
+    assert!(html.contains("params.get(\"fold\")"));
+    assert!(html.contains("params.set(\"fold\""));
     assert!(html.contains("source_snippet"));
     assert!(html.contains("host.which(\\\"cc\\\")"));
     assert!(html.contains("color-scheme: dark"));
@@ -279,6 +289,33 @@ fn zoo_tri_platform_png_project_import_graph_smoke() {
     assert!(html.contains("sf"));
     assert!(html.contains("trace"));
     assert!(html.contains("noise"));
+    assert!(html.contains("Lane Summary"));
+    assert!(html.contains("fold stdlib lanes"));
+    assert!(html.contains("hidden-folded-lane"));
+    assert!(html.contains("folded-lane"));
+    assert!(html.contains("setLaneFoldState("));
+    assert!(html.contains("foldStdlibLanes("));
+    assert!(html.contains("clearFoldedLanes("));
+    assert!(html.contains("applyLaneFolding("));
+    assert!(html.contains("params.get(\"fold\")"));
+    assert!(html.contains("params.set(\"fold\""));
+}
+
+#[test]
+fn zoo_tri_platform_png_projection_and_export_are_deterministic_across_repeated_runs() {
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/tri-platform-png.vx");
+    let graph_a =
+        graph_from_file(&zoo_file).expect("first project-backed zoo projection should succeed");
+    let graph_b =
+        graph_from_file(&zoo_file).expect("second project-backed zoo projection should succeed");
+
+    assert_eq!(graph_a, graph_b);
+    assert_eq!(
+        graph_a.to_mermaid_flowchart(),
+        graph_b.to_mermaid_flowchart()
+    );
+    assert_eq!(graph_a.to_json_pretty(), graph_b.to_json_pretty());
+    assert_eq!(graph_a.to_standalone_html(), graph_b.to_standalone_html());
 }
 
 fn unique_temp_path(filename: &str) -> PathBuf {

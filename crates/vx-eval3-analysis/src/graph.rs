@@ -234,6 +234,27 @@ impl AnalysisGraph {
         );
         out.push_str("  .source-registry li.active { color: #7dd3fc; font-weight: 600; }\n");
         out.push_str("  .source-registry li.focused { color: #a5f3fc; font-weight: 700; }\n");
+        out.push_str("  .source-registry li.folded { opacity: 0.65; font-style: italic; }\n");
+        out.push_str("  .lane-summary { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
+        out.push_str(
+            "  .lane-summary ul { margin: 8px 0 0 0; padding-left: 0; list-style: none; }\n",
+        );
+        out.push_str("  .lane-summary li { margin: 6px 0; color: #c7d6e6; border: 1px solid #1f2f43; border-radius: 8px; padding: 6px; }\n");
+        out.push_str("  .lane-summary li.folded { opacity: 0.7; border-style: dashed; }\n");
+        out.push_str("  .lane-summary .lane-head { display: flex; gap: 6px; align-items: center; justify-content: space-between; }\n");
+        out.push_str("  .lane-summary .lane-label { font-weight: 600; color: #dbe7f3; }\n");
+        out.push_str(
+            "  .lane-summary .lane-meta { color: #8ba5c1; font-size: 11px; margin-top: 2px; }\n",
+        );
+        out.push_str(
+            "  .lane-summary .lane-hint { color: #7dd3fc; font-size: 11px; margin-top: 2px; }\n",
+        );
+        out.push_str("  .lane-summary .lane-actions { display: flex; gap: 6px; }\n");
+        out.push_str(
+            "  .lane-summary .lane-tools { display: flex; gap: 8px; margin-bottom: 8px; }\n",
+        );
+        out.push_str("  .lane-summary .lane-tools button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
+        out.push_str("  .lane-summary button { background: #162233; color: #dbe7f3; border: 1px solid #2a3c52; border-radius: 5px; padding: 2px 6px; font-size: 11px; cursor: pointer; }\n");
         out.push_str("  .semantic-controls { border: 1px solid #2a3c52; border-radius: 10px; background: #0f1724; padding: 10px; margin-bottom: 12px; font-size: 12px; }\n");
         out.push_str("  .semantic-controls .control-row { display: grid; grid-template-columns: 92px 1fr; gap: 8px; margin-bottom: 8px; align-items: center; }\n");
         out.push_str("  .semantic-controls .control-row:last-child { margin-bottom: 0; }\n");
@@ -266,6 +287,8 @@ impl AnalysisGraph {
         out.push_str("  .source-lane-band { fill: #0d1623; stroke: #243244; stroke-width: 1; }\n");
         out.push_str("  .source-lane-band.alt { fill: #101b2a; }\n");
         out.push_str("  .source-lane-label { font-size: 11px; fill: #8ba5c1; }\n");
+        out.push_str("  .source-lane-band.folded-lane { opacity: 0.35; }\n");
+        out.push_str("  .source-lane-label.folded-lane { opacity: 0.5; }\n");
         out.push_str(
             "  .node rect { fill: #162233; stroke: #4f6b87; stroke-width: 1.2; rx: 8; ry: 8; }\n",
         );
@@ -315,6 +338,7 @@ impl AnalysisGraph {
         out.push_str("  .edge.focus-primary { stroke-width: 2.6; }\n");
         out.push_str("  .noise-dim { opacity: 0.12; }\n");
         out.push_str("  .hidden-semantic { display: none; }\n");
+        out.push_str("  .hidden-folded-lane { display: none; }\n");
         out.push_str("  .selected { opacity: 1 !important; }\n");
         out.push_str("  .node.selected rect { stroke: #f1f5f9; stroke-width: 2.4; filter: drop-shadow(0 0 4px rgba(241,245,249,0.35)); }\n");
         out.push_str("  .edge.selected { stroke-width: 2.5; filter: drop-shadow(0 0 3px rgba(241,245,249,0.35)); }\n");
@@ -350,7 +374,7 @@ impl AnalysisGraph {
         out.push_str("</div>\n");
         out.push_str("<div class=\"layout\">\n");
         out.push_str("<div class=\"canvas-wrap\"><div class=\"graph-legend\" aria-label=\"graph legend\"><h3>Graph Legend</h3><div class=\"legend-grid\"><div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1b293c;border-color:#7dd3fc\"></span>Body</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#222636;border-color:#f9e2af\"></span>Kernel</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#2a2236;border-color:#f38ba8\"></span>Runtime Boundary</div><div class=\"legend-item\"><span class=\"legend-swatch\" style=\"background:#1f2f2a;border-color:#a6e3a1\"></span>Closure Layout</div></div><div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f9e2af\"></span>body -> kernel</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#f38ba8\"></span>body -> runtime</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#fab387;border-top-style:dashed\"></span>runtime value/data</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#a6e3a1;border-top-style:dotted\"></span>boundary -> closure layout</div><div class=\"legend-item\"><span class=\"legend-line\" style=\"border-top-color:#89b4fa\"></span>source-local call</div></div></div></div><div class=\"viewport-toolbar\" aria-label=\"graph viewport controls\"><button id=\"zoom-out\" type=\"button\">-</button><button id=\"zoom-in\" type=\"button\">+</button><button id=\"zoom-reset\" type=\"button\">reset</button><span id=\"zoom-status\" class=\"zoom-status\">100%</span></div><div id=\"graph-viewport\" class=\"graph-viewport\"><svg id=\"graph-svg\" width=\"1100\" height=\"800\" aria-label=\"structural graph\"></svg></div></div>\n");
-        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
+        out.push_str("<aside class=\"panel\"><h2>Source Registry</h2><div id=\"source-registry\" class=\"source-registry\"></div><h2>Lane Summary</h2><div id=\"lane-summary\" class=\"lane-summary\"></div><h2>Semantic Filters</h2><div id=\"semantic-controls\" class=\"semantic-controls\"><div class=\"control-row\"><label for=\"filter-demand\">Demand</label><select id=\"filter-demand\"><option value=\"all\">all</option><option value=\"demanded\">demanded</option><option value=\"nondemanded\">nondemanded</option></select></div><div class=\"control-row\"><label for=\"filter-runtime-role\">Runtime</label><select id=\"filter-runtime-role\"><option value=\"all\">all</option><option value=\"exec\">exec</option><option value=\"discover\">discover</option><option value=\"shared_keyed\">shared-keyed</option><option value=\"none\">none</option></select></div><div class=\"control-row\"><label for=\"filter-sharing\">Sharing</label><select id=\"filter-sharing\"><option value=\"all\">all</option><option value=\"shared\">shared</option><option value=\"closure_env\">closure-env</option><option value=\"local\">local</option></select></div><div class=\"control-row\"><label>Focus</label><label class=\"check\"><input id=\"focus-neighborhood-toggle\" type=\"checkbox\" />dependency neighborhood</label></div><div class=\"control-row\"><label for=\"focus-path-mode\">Trace Mode</label><select id=\"focus-path-mode\"><option value=\"neighborhood\">immediate</option><option value=\"upstream\">upstream path</option><option value=\"downstream\">downstream path</option></select></div><div class=\"control-row\"><label>Noise</label><label class=\"check\"><input id=\"hide-stdlib-noise-toggle\" type=\"checkbox\" />dim stdlib-heavy sources</label></div></div><h2>Selected Item</h2><div class=\"selection-nav\"><button id=\"selection-history-back\" type=\"button\">back</button><button id=\"selection-history-forward\" type=\"button\">forward</button><button id=\"copy-share-link\" type=\"button\" title=\"Copy current focused state link\">copy link</button><span id=\"share-link-status\" class=\"share-status\"></span></div><div id=\"details\"></div></aside>\n");
         out.push_str("</div>\n");
         out.push_str("<script id=\"graph-json\" type=\"application/json\">");
         out.push_str(&graph_json);
@@ -376,11 +400,14 @@ const copyShareLinkButton = document.getElementById("copy-share-link");
 const shareLinkStatus = document.getElementById("share-link-status");
 const details = document.getElementById("details");
 const sourceRegistry = document.getElementById("source-registry");
+const laneSummary = document.getElementById("lane-summary");
 let sourceFilterSourceId = "";
 const sourceBoundElements = [];
 const selectableElements = new Map();
 const laneRectsBySource = new Map();
 const laneLabelsBySource = new Map();
+const sourceRegistryItemsBySource = new Map();
+const laneSummaryItemsBySource = new Map();
 const nodeElementsById = new Map();
 const edgeElements = [];
 let selectedGraphKey = "";
@@ -392,6 +419,7 @@ let semanticSharingFilter = "all";
 let dependencyFocusEnabled = false;
 let hideStdlibNoiseEnabled = false;
 let dependencyFocusMode = "neighborhood";
+const foldedLaneSourceIds = new Set();
 const selectionHistory = [];
 let selectionHistoryIndex = -1;
 let suppressUrlStateUpdate = false;
@@ -454,8 +482,9 @@ function hashDeterministic(value) {
   return h;
 }
 function metadataMap(entries) {
-  if (!Array.isArray(entries)) return {};
-  return Object.fromEntries(entries);
+  if (Array.isArray(entries)) return Object.fromEntries(entries);
+  if (entries && typeof entries === "object") return entries;
+  return {};
 }
 function parsePositiveInt(value) {
   const n = Number.parseInt(String(value ?? ""), 10);
@@ -658,7 +687,71 @@ function applySemanticFilters() {
     entry.label.classList.toggle("hidden-semantic", !visible);
   }
   applyDependencyFocus();
+  applyLaneFolding();
   applyNoiseReduction();
+}
+function sortedFoldedLaneIds() {
+  return Array.from(foldedLaneSourceIds.values()).sort((a, b) => sourceRank(a, laneOrder) - sourceRank(b, laneOrder));
+}
+function applyLaneFolding() {
+  for (const entry of sourceBoundElements) {
+    const sourceId = String(entry.sourceId ?? "");
+    const shouldHide = sourceId !== "" && foldedLaneSourceIds.has(sourceId);
+    entry.el.classList.toggle("hidden-folded-lane", shouldHide);
+  }
+  for (const [sourceId, rect] of laneRectsBySource.entries()) {
+    const folded = foldedLaneSourceIds.has(sourceId);
+    rect.classList.toggle("folded-lane", folded);
+  }
+  for (const [sourceId, label] of laneLabelsBySource.entries()) {
+    const folded = foldedLaneSourceIds.has(sourceId);
+    label.classList.toggle("folded-lane", folded);
+  }
+  for (const [sourceId, item] of sourceRegistryItemsBySource.entries()) {
+    item.classList.toggle("folded", foldedLaneSourceIds.has(sourceId));
+  }
+  for (const [sourceId, item] of laneSummaryItemsBySource.entries()) {
+    item.classList.toggle("folded", foldedLaneSourceIds.has(sourceId));
+    const button = item.querySelector("button[data-lane-fold-source-id]");
+    if (button) button.textContent = foldedLaneSourceIds.has(sourceId) ? "unfold" : "fold";
+  }
+}
+function unfoldLaneForInteraction(sourceId) {
+  const id = String(sourceId ?? "");
+  if (id === "" || !foldedLaneSourceIds.has(id)) return;
+  foldedLaneSourceIds.delete(id);
+  applyLaneFolding();
+}
+function setLaneFoldState(sourceId, folded, options = {}) {
+  const id = String(sourceId ?? "");
+  if (id === "" || id === "unmapped") return;
+  if (folded) {
+    foldedLaneSourceIds.add(id);
+    if (sourceFilterSourceId === id) sourceFilterSourceId = "";
+  } else {
+    foldedLaneSourceIds.delete(id);
+  }
+  applySourceFilter(sourceFilterSourceId, { skipPersist: true });
+  applyLaneFolding();
+  applyNoiseReduction();
+  if (!options.skipPersist) persistViewerState(false);
+}
+function foldStdlibLanes(options = {}) {
+  for (const sourceId of laneOrder) {
+    if (shouldAutoFoldLane(sourceId)) foldedLaneSourceIds.add(sourceId);
+  }
+  if (sourceFilterSourceId && foldedLaneSourceIds.has(sourceFilterSourceId)) sourceFilterSourceId = "";
+  applySourceFilter(sourceFilterSourceId, { skipPersist: true });
+  applyLaneFolding();
+  applyNoiseReduction();
+  if (!options.skipPersist) persistViewerState(false);
+}
+function clearFoldedLanes(options = {}) {
+  foldedLaneSourceIds.clear();
+  applySourceFilter(sourceFilterSourceId, { skipPersist: true });
+  applyLaneFolding();
+  applyNoiseReduction();
+  if (!options.skipPersist) persistViewerState(false);
 }
 function selectedNeighborhoodFromKey(key) {
   if (!key) return null;
@@ -770,12 +863,12 @@ function applyDependencyFocus() {
 }
 function applyNoiseReduction() {
   for (const entry of nodeElementsById.values()) {
-    const sourceId = String(entry.node?.metadata?.span_source_id ?? "");
+    const sourceId = sourceIdForNode(entry.node);
     const lowInterest = hideStdlibNoiseEnabled && sourceId !== "" && isStdlibSourceId(sourceId);
     entry.element.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
   }
   for (const entry of edgeElements) {
-    const sourceId = String(entry.edge?.metadata?.span_source_id ?? "");
+    const sourceId = sourceIdForEdge(entry.edge);
     const lowInterest = hideStdlibNoiseEnabled && sourceId !== "" && isStdlibSourceId(sourceId);
     entry.path.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
     entry.label.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
@@ -790,6 +883,11 @@ function applyNoiseReduction() {
   }
   const items = sourceRegistry.querySelectorAll("li[data-source-id]");
   for (const item of items) {
+    const sourceId = String(item.dataset.sourceId ?? "");
+    const lowInterest = hideStdlibNoiseEnabled && isStdlibSourceId(sourceId);
+    item.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
+  }
+  for (const item of laneSummaryItemsBySource.values()) {
     const sourceId = String(item.dataset.sourceId ?? "");
     const lowInterest = hideStdlibNoiseEnabled && isStdlibSourceId(sourceId);
     item.classList.toggle("noise-dim", lowInterest && sourceId !== selectedSourceId);
@@ -838,6 +936,53 @@ const laneOrder = [
     .sort((a, b) => String(a).localeCompare(String(b))),
 ];
 if (!laneOrder.includes("unmapped")) laneOrder.push("unmapped");
+
+function sourceIdForEdge(edge) {
+  const metadata = metadataMap(edge?.metadata);
+  const sourceId = metadata.span_source_id;
+  return sourceId === undefined || sourceId === null || String(sourceId) === "" ? "" : String(sourceId);
+}
+function laneStatsFor(sourceId) {
+  const nodeStats = {
+    body: 0,
+    kernel: 0,
+    runtime_boundary: 0,
+    closure_layout: 0,
+  };
+  let totalNodes = 0;
+  for (const node of graph.nodes) {
+    if (sourceIdForNode(node) !== sourceId) continue;
+    totalNodes += 1;
+    if (nodeStats[node.kind] !== undefined) nodeStats[node.kind] += 1;
+  }
+  let totalEdges = 0;
+  for (const edge of graph.edges) {
+    if (sourceIdForEdge(edge) !== sourceId) continue;
+    totalEdges += 1;
+  }
+  return {
+    sourceId,
+    totalNodes,
+    totalEdges,
+    nodeStats,
+    isStdlib: isStdlibSourceId(sourceId),
+  };
+}
+const laneStatsBySource = new Map(laneOrder.map((sourceId) => [sourceId, laneStatsFor(sourceId)]));
+function laneHintFor(sourceId) {
+  const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+  if (sourceId === "unmapped") return "unmapped provenance";
+  if (stats.isStdlib) return "stdlib-heavy / low-interest";
+  if (stats.totalNodes > 0 && stats.nodeStats.runtime_boundary * 2 >= stats.totalNodes) return "runtime-boundary heavy";
+  if (stats.totalNodes <= 2 && stats.totalEdges <= 2) return "sparse lane";
+  return "project lane";
+}
+function shouldAutoFoldLane(sourceId) {
+  if (sourceId === "unmapped") return false;
+  const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+  if (!stats.isStdlib) return false;
+  return laneOrder.length >= 6 || graph.nodes.length >= 40;
+}
 
 const laneHeightBySource = new Map();
 for (const sourceId of laneOrder) {
@@ -976,12 +1121,14 @@ function scrollViewportTo(x, y) {
   graphViewport.scrollTo({ left: targetLeft, top: targetTop, behavior: "smooth" });
 }
 function focusSourceLane(sourceId) {
-  const laneStart = laneYStartBySource.get(String(sourceId));
+  const normalized = String(sourceId ?? "");
+  unfoldLaneForInteraction(normalized);
+  const laneStart = laneYStartBySource.get(normalized);
   if (laneStart === undefined) return;
-  const laneHeight = laneHeightBySource.get(String(sourceId)) ?? 128;
+  const laneHeight = laneHeightBySource.get(normalized) ?? 128;
   scrollViewportTo(columns.kernel, laneStart + laneHeight / 2);
   for (const [id, rect] of laneRectsBySource.entries()) {
-    rect.classList.toggle("selected", id === String(sourceId));
+    rect.classList.toggle("selected", id === normalized);
   }
 }
 function setSelectedGraphElements(key) {
@@ -1006,6 +1153,7 @@ function readViewerStateFromUrl() {
     focus: params.get("focus") === "1",
     trace: params.get("trace") || "neighborhood",
     noise: params.get("noise") === "1",
+    folded: params.get("fold") || "",
   };
 }
 function writeViewerStateToUrl(push) {
@@ -1019,6 +1167,8 @@ function writeViewerStateToUrl(push) {
   if (dependencyFocusEnabled) params.set("focus", "1");
   if (dependencyFocusMode !== "neighborhood") params.set("trace", dependencyFocusMode);
   if (hideStdlibNoiseEnabled) params.set("noise", "1");
+  const folded = sortedFoldedLaneIds();
+  if (folded.length > 0) params.set("fold", folded.join(","));
   const nextHash = `#${params.toString()}`;
   if (window.location.hash === nextHash) return;
   if (push) {
@@ -1067,6 +1217,7 @@ function pushSelectionHistory(key) {
   updateSelectionHistoryButtons();
 }
 function selectGraphItem(key, detailsValue, sourceId, options = {}) {
+  unfoldLaneForInteraction(sourceId);
   setSelectedGraphElements(key);
   selectedSourceId = String(sourceId ?? "");
   dependencyJumpIndex = -1;
@@ -1084,7 +1235,8 @@ function selectByGraphKey(key, options = {}) {
     const nodeId = key.slice(5);
     const node = nodeById.get(nodeId);
     if (!node) return;
-    const nodeSourceId = String(node?.metadata?.find(([k]) => k === "span_source_id")?.[1] ?? "");
+    const nodeMetadata = metadataMap(node.metadata);
+    const nodeSourceId = String(nodeMetadata.span_source_id ?? "");
     selectGraphItem(key, { type: "node", ...node }, nodeSourceId, options);
     const p = positions.get(node.id);
     if (p) scrollViewportTo(p.x, p.y + nodeHeight / 2);
@@ -1093,7 +1245,8 @@ function selectByGraphKey(key, options = {}) {
   if (key.startsWith("edge:")) {
     const edgeEntry = edgeElements.find((entry) => entry.key === key);
     if (!edgeEntry) return;
-    const edgeSourceId = String(edgeEntry.edge?.metadata?.find(([k]) => k === "span_source_id")?.[1] ?? "");
+    const edgeMetadata = metadataMap(edgeEntry.edge?.metadata);
+    const edgeSourceId = String(edgeMetadata.span_source_id ?? "");
     selectGraphItem(key, { type: "edge", ...edgeEntry.edge }, edgeSourceId, options);
   }
 }
@@ -1106,6 +1259,12 @@ function applyViewerStateFromUrl() {
   dependencyFocusEnabled = Boolean(state.focus);
   dependencyFocusMode = state.trace || "neighborhood";
   hideStdlibNoiseEnabled = Boolean(state.noise);
+  foldedLaneSourceIds.clear();
+  const foldedList = String(state.folded || "")
+    .split(",")
+    .map((item) => String(item).trim())
+    .filter((item) => item !== "" && laneOrder.includes(item));
+  for (const sourceId of foldedList) foldedLaneSourceIds.add(sourceId);
   if (filterDemand) filterDemand.value = semanticDemandFilter;
   if (filterRuntimeRole) filterRuntimeRole.value = semanticRuntimeRoleFilter;
   if (filterSharing) filterSharing.value = semanticSharingFilter;
@@ -1154,6 +1313,7 @@ function highlightSourceInRegistry(sourceId) {
 }
 function applySourceFilter(sourceId, options = {}) {
   sourceFilterSourceId = String(sourceId ?? "");
+  unfoldLaneForInteraction(sourceFilterSourceId);
   for (const entry of sourceBoundElements) {
     const shouldDim =
       sourceFilterSourceId !== "" &&
@@ -1267,6 +1427,7 @@ function renderSourceRegistry(graph) {
   const files = Array.isArray(graph.source_files) ? graph.source_files : [];
   if (files.length === 0) {
     sourceRegistry.innerHTML = `<div>No source registry for this graph.</div>`;
+    sourceRegistryItemsBySource.clear();
     return;
   }
   const list = files
@@ -1278,8 +1439,11 @@ function renderSourceRegistry(graph) {
     <div>This graph includes ${files.length} source file(s).</div>
     <ul>${list}</ul>
   `;
+  sourceRegistryItemsBySource.clear();
   const items = sourceRegistry.querySelectorAll("li[data-source-id]");
   for (const item of items) {
+    const sourceId = String(item.dataset.sourceId ?? "");
+    sourceRegistryItemsBySource.set(sourceId, item);
     item.addEventListener("click", () => {
       const next = item.dataset.sourceId === sourceFilterSourceId ? "" : item.dataset.sourceId;
       applySourceFilter(next);
@@ -1288,6 +1452,59 @@ function renderSourceRegistry(graph) {
       }
     });
   }
+}
+function renderLaneSummary() {
+  if (!laneSummary) return;
+  const items = laneOrder
+    .map((sourceId) => {
+      const stats = laneStatsBySource.get(sourceId) ?? laneStatsFor(sourceId);
+      const nodeMix = `body ${stats.nodeStats.body}, kernel ${stats.nodeStats.kernel}, runtime ${stats.nodeStats.runtime_boundary}, layout ${stats.nodeStats.closure_layout}`;
+      const label = sourceId === "unmapped"
+        ? "unmapped"
+        : `${sourceId}: ${sourceLabel(sourceId)}`;
+      return `<li data-source-id="${htmlEscape(sourceId)}"><div class="lane-head"><div class="lane-label">${htmlEscape(label)}</div><div class="lane-actions"><button type="button" data-lane-focus-source-id="${htmlEscape(sourceId)}">focus</button><button type="button" data-lane-fold-source-id="${htmlEscape(sourceId)}">${foldedLaneSourceIds.has(sourceId) ? "unfold" : "fold"}</button></div></div><div class="lane-meta">${stats.totalNodes} nodes, ${stats.totalEdges} edges</div><div class="lane-meta">${htmlEscape(nodeMix)}</div><div class="lane-hint">${htmlEscape(laneHintFor(sourceId))}</div></li>`;
+    })
+    .join("");
+  laneSummary.innerHTML = `
+    <div class="lane-tools">
+      <button type="button" data-lane-action="fold-stdlib">fold stdlib lanes</button>
+      <button type="button" data-lane-action="unfold-all">unfold all</button>
+    </div>
+    <div>Lane folding hides low-value sources while preserving drill-in via focus/select.</div>
+    <ul>${items}</ul>
+  `;
+  laneSummaryItemsBySource.clear();
+  const rows = laneSummary.querySelectorAll("li[data-source-id]");
+  for (const row of rows) {
+    const sourceId = String(row.dataset.sourceId ?? "");
+    laneSummaryItemsBySource.set(sourceId, row);
+  }
+  const focusButtons = laneSummary.querySelectorAll("button[data-lane-focus-source-id]");
+  for (const button of focusButtons) {
+    button.addEventListener("click", () => {
+      const sourceId = String(button.getAttribute("data-lane-focus-source-id") ?? "");
+      if (!sourceId) return;
+      applySourceFilter(sourceId);
+      focusSourceLane(sourceId);
+    });
+  }
+  const foldButtons = laneSummary.querySelectorAll("button[data-lane-fold-source-id]");
+  for (const button of foldButtons) {
+    button.addEventListener("click", () => {
+      const sourceId = String(button.getAttribute("data-lane-fold-source-id") ?? "");
+      if (!sourceId || sourceId === "unmapped") return;
+      setLaneFoldState(sourceId, !foldedLaneSourceIds.has(sourceId));
+    });
+  }
+  const foldStdlib = laneSummary.querySelector("button[data-lane-action=\"fold-stdlib\"]");
+  if (foldStdlib) {
+    foldStdlib.addEventListener("click", () => foldStdlibLanes());
+  }
+  const unfoldAll = laneSummary.querySelector("button[data-lane-action=\"unfold-all\"]");
+  if (unfoldAll) {
+    unfoldAll.addEventListener("click", () => clearFoldedLanes());
+  }
+  applyLaneFolding();
 }
 
 const defs = el("defs");
@@ -1347,7 +1564,7 @@ for (const edge of graph.edges) {
   path.classList.add(`edge-kind-${edge.kind}`);
   const edgeRole = edgeRoleForKind(edge.kind);
   path.classList.add(`edge-role-${edgeRole}`);
-  const edgeSourceId = String(edge?.metadata?.span_source_id ?? "");
+  const edgeSourceId = sourceIdForEdge(edge);
   if (edgeSourceId) path.setAttribute("data-source-id", edgeSourceId);
   sourceBoundElements.push({ el: path, sourceId: edgeSourceId });
   const edgeKey = edgeKeyFor(edge);
@@ -1384,7 +1601,7 @@ for (const node of graph.nodes) {
   g.classList.add(`node-sharing-${nodeSharingState(node)}`);
   const runtimeRole = nodeRuntimeRole(node);
   if (runtimeRole !== "none") g.classList.add(`node-runtime-role-${runtimeRole}`);
-  const nodeSourceId = String(node?.metadata?.span_source_id ?? "");
+  const nodeSourceId = sourceIdForNode(node);
   if (nodeSourceId) g.setAttribute("data-source-id", nodeSourceId);
   sourceBoundElements.push({ el: g, sourceId: nodeSourceId });
   const nodeKey = `node:${node.id}`;
@@ -1407,7 +1624,11 @@ for (const node of graph.nodes) {
   nodeElementsById.set(node.id, { node, element: g });
 }
 
+for (const sourceId of laneOrder) {
+  if (shouldAutoFoldLane(sourceId)) foldedLaneSourceIds.add(sourceId);
+}
 renderSourceRegistry(graph);
+renderLaneSummary();
 applySourceFilter("", { skipPersist: true });
 if (filterDemand) {
   filterDemand.addEventListener("change", () => {
