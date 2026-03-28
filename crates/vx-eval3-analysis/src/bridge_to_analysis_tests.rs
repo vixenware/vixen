@@ -1210,6 +1210,127 @@ fn main(n: U64) -> U64 ( plus_one(n) )
 }
 
 #[test]
+fn bridge_to_analysis_no_main_prefers_build_entry_and_keeps_unrelated_root_idle() {
+    let src = r#"
+fn helper(n: U64) -> U64 ( n + 1 )
+fn build(n: U64) -> U64 ( n + 1 )
+fn tool(n: U64) -> U64 ( helper(n) )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let helper = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("helper body should exist");
+    let build = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("build body should exist");
+    let tool = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(2))
+        .expect("tool body should exist");
+
+    assert_eq!(
+        build.result_observation,
+        Observation::NeedValue,
+        "build should be the explicit no-main entry body"
+    );
+    assert_eq!(
+        helper.result_observation,
+        Observation::NoObs,
+        "helper should remain idle when only reachable from non-entry roots"
+    );
+    assert_eq!(
+        tool.result_observation,
+        Observation::NoObs,
+        "unrelated non-entry root should remain idle"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_no_main_build_entry_propagates_transitively_to_local_callee_chain() {
+    let src = r#"
+fn leaf(n: U64) -> U64 ( n + 1 )
+fn build(n: U64) -> U64 ( leaf(n) )
+fn helper(n: U64) -> U64 ( n + 2 )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let leaf = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("leaf body should exist");
+    let build = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("build body should exist");
+    let helper = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(2))
+        .expect("helper body should exist");
+
+    assert_eq!(
+        build.result_observation,
+        Observation::NeedValue,
+        "build should be demanded as no-main entry"
+    );
+    assert_eq!(
+        leaf.result_observation,
+        Observation::NeedValue,
+        "transitive local call from build should demand leaf"
+    );
+    assert_eq!(
+        helper.result_observation,
+        Observation::NoObs,
+        "unrelated helper should stay idle"
+    );
+}
+
+#[test]
+fn bridge_to_analysis_no_main_without_build_uses_single_deterministic_root() {
+    let src = r#"
+fn alpha(n: U64) -> U64 ( n + 1 )
+fn beta(n: U64) -> U64 ( n + 2 )
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let alpha = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(0))
+        .expect("alpha body should exist");
+    let beta = analysis
+        .bodies
+        .iter()
+        .find(|body| body.id == BodyId(1))
+        .expect("beta body should exist");
+
+    assert_eq!(
+        alpha.result_observation,
+        Observation::NeedValue,
+        "first deterministic root should be used when no main/build exists"
+    );
+    assert_eq!(
+        beta.result_observation,
+        Observation::NoObs,
+        "other top-level root should remain idle under single-root fallback"
+    );
+}
+
+#[test]
 fn bridge_to_analysis_seeds_closure_capture_for_add_n_style_program() {
     let src = r#"
 fn main(n: U64) -> U64 (

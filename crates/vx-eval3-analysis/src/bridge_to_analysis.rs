@@ -133,28 +133,40 @@ fn apply_one_step_local_call_demands(
     let entry_ids = if !mains.is_empty() {
         mains
     } else {
-        let mut incoming = BTreeSet::new();
-        for body in bodies.iter() {
-            for edge in &body.source_local_call_edges {
-                if let crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) = edge.callee {
-                    incoming.insert(callee_body);
+        let mut builds = bridge
+            .bodies
+            .iter()
+            .filter(|body| body.name == "build")
+            .map(|body| body.id)
+            .collect::<Vec<_>>();
+        builds.sort_by_key(|body_id| body_id.0);
+        builds.dedup();
+        if !builds.is_empty() {
+            builds
+        } else {
+            let mut incoming = BTreeSet::new();
+            for body in bodies.iter() {
+                for edge in &body.source_local_call_edges {
+                    if let crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) = edge.callee {
+                        incoming.insert(callee_body);
+                    }
                 }
             }
-        }
-        let mut roots = bodies
-            .iter()
-            .map(|body| body.id)
-            .filter(|body_id| !incoming.contains(body_id))
-            .collect::<Vec<_>>();
-        roots.sort_by_key(|body_id| body_id.0);
-        if roots.is_empty() {
-            bridge
-                .bodies
-                .first()
-                .map(|body| vec![body.id])
-                .unwrap_or_default()
-        } else {
-            roots
+            let mut roots = bodies
+                .iter()
+                .map(|body| body.id)
+                .filter(|body_id| !incoming.contains(body_id))
+                .collect::<Vec<_>>();
+            roots.sort_by_key(|body_id| body_id.0);
+            if let Some(root) = roots.first().copied() {
+                vec![root]
+            } else {
+                bridge
+                    .bodies
+                    .first()
+                    .map(|body| vec![body.id])
+                    .unwrap_or_default()
+            }
         }
     };
     for entry_id in &entry_ids {
