@@ -24,6 +24,8 @@ pub struct BridgeParam {
 
 #[derive(Debug, Clone)]
 pub struct BridgeBody {
+    // Source-level function/body record used as the stable bridge anchor between
+    // parser/resolver output and later analysis/lowering stages.
     pub id: BodyId,
     pub name: String,
     pub span: SourceSpan,
@@ -41,6 +43,9 @@ pub enum BridgeExprKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeExpr {
+    // Source-level expression record. This is not executable IR: it gives later
+    // stages a stable expression id, source span, enclosing body, and coarse
+    // syntactic kind for provenance and analysis seeding.
     pub id: ExprId,
     pub span: SourceSpan,
     pub body: Option<BodyId>,
