@@ -4,7 +4,6 @@ use vx_runner_proto::{
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
 use crate::RunnerService;
-use moire::task::FutureExt;
 
 impl RunnerService {
     async fn version(&self) -> ServiceVersion {
@@ -15,27 +14,12 @@ impl RunnerService {
         }
     }
 
-    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
-        let command = request.program.as_str().to_string();
-        tracing::info!(command, "runner.run starting");
-        let result = self
-            .run_vfs(request, progress)
-            .named("runner.run_vfs")
-            .await;
-        tracing::info!(
-            command,
-            success = result.success,
-            has_observer_value = result.observer_value.is_some(),
-            tracked_observations = result.tracked_observations.len(),
-            "runner.run finished"
-        );
-        result
+    async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
+        todo!("re-implement or redesign")
     }
 
-    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult {
-        self.discover_vfs(request)
-            .named("runner.discover_vfs")
-            .await
+    async fn discover(&self, _request: DiscoverRequest) -> DiscoverResult {
+        todo!("re-implement or redesign")
     }
 }
 

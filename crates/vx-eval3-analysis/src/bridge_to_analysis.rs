@@ -539,9 +539,10 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
 
     for body in bodies {
         let mut next_id = 0u32;
-        for (_, _, obs) in seeds
+        for (next_id, (_, _, obs)) in seeds
             .iter()
             .filter(|(seed_body, _, _)| *seed_body == body.id)
+            .enumerate()
         {
             body.use_observations
                 .insert(UseSiteId(next_id), obs.clone());

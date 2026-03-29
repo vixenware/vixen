@@ -35,7 +35,6 @@ ur-taking-me-with-you = { workspace = true }
 blake3 = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
-vx-eval = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 libc = { workspace = true }

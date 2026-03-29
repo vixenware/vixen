@@ -14,7 +14,6 @@ facet = { workspace = true }
 facet-postcard = { workspace = true }
 facet-value = { workspace = true }
 figue = { workspace = true }
-picante = { workspace = true }
 roam = { workspace = true }
 roam-core = { workspace = true }
 roam-types = { workspace = true }
@@ -47,13 +46,11 @@ vx-io = { workspace = true }
 vx-manifest = { workspace = true }
 vx-report = { workspace = true }
 vx-rs = { workspace = true }
-vx-toolchain = { workspace = true }
 tokio-test-lite = { workspace = true }
 vx-cache = { workspace = true }
 vx-tarball = { workspace = true }
 vx-http = { workspace = true }
 vx-parser = { workspace = true }
-vx-eval = { workspace = true }
 perfetto-proto.workspace = true
 
 [features]

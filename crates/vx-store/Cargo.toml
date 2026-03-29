@@ -34,7 +34,6 @@ vx-store-proto = { workspace = true }
 vx-http = { workspace = true }
 vx-io = { workspace = true }
 vx-tarball = { workspace = true }
-vx-toolchain = { workspace = true }
 
 [dev-dependencies]
 roam-stream = { workspace = true }

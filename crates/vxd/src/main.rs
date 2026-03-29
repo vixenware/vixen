@@ -1,26 +1,14 @@
 //! vxd - Build orchestration daemon
 //!
-//! The daemon orchestrates builds but never touches the filesystem directly.
-//! All file I/O and compilation is delegated to vx-runner.
+//! The daemon shell for store access, session management, and runner boot.
 //!
 //! Responsibilities:
-//! - Own the picante incremental computation database
-//! - Compute cache keys
-//! - Check store for cache hits
-//! - Send compile requests to execd
-//! - Materialize final outputs locally (via execd or direct store fetch)
+//! - Spawn or connect to `vx-store`
+//! - Spawn or connect to `vx-runner`
+//! - Expose the `vxd` RPC surface
+//! - Forward session-scoped progress and activity state
 
-mod activity;
-mod build_failure;
-mod cas_tree;
-mod db;
-mod error;
-mod inputs;
-mod queries;
 mod service;
-
-#[cfg(test)]
-mod tests;
 
 use ::moire::process::Child;
 use ::moire::sync::SyncMutex;
@@ -43,6 +31,7 @@ use roam_types::{
 };
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -72,11 +61,7 @@ use vx_store_proto::{
 };
 use vxd_proto::{ProgressListenerClient, VxdDispatcher};
 
-use crate::activity::{ActivityHandle, ActivityRegistry};
-use crate::service::VxdServiceDeps;
-pub use db::Database;
-pub use inputs::*;
-pub use queries::*;
+use crate::service::{ActivityHandle, ActivityRegistry, VxdServiceDeps};
 pub use service::VxdService;
 
 pub type UpstreamCaller = DriverCaller;
@@ -134,8 +119,37 @@ struct Args {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BuildVxExecutorClassConfig {
     pub(crate) class_label: String,
-    pub(crate) backend: vx_eval::ExecutorBackendKind,
+    pub(crate) backend: BuildExecutorBackendKind,
     pub(crate) target: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildExecutorBackendKind {
+    Local,
+    Daemon,
+    SshBootstrap,
+    Class,
+}
+
+impl BuildExecutorBackendKind {
+    pub(crate) fn as_tag(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Daemon => "daemon",
+            Self::SshBootstrap => "ssh_bootstrap",
+            Self::Class => "class",
+        }
+    }
+
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "local" => Some(Self::Local),
+            "daemon" => Some(Self::Daemon),
+            "ssh_bootstrap" => Some(Self::SshBootstrap),
+            "class" => Some(Self::Class),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -225,27 +239,27 @@ pub(crate) fn parse_build_vx_executor_classes(
         }
 
         let (backend, target) = if raw_spec == "local" {
-            (vx_eval::ExecutorBackendKind::Local, None)
+            (BuildExecutorBackendKind::Local, None)
         } else {
             let (backend_tag, target) = raw_spec.split_once(':').ok_or_else(|| {
                 eyre::eyre!(
                     "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?} for class {class_label:?}"
                 )
             })?;
-            let backend = vx_eval::ExecutorBackendKind::from_tag(backend_tag.trim())
+            let backend = BuildExecutorBackendKind::from_tag(backend_tag.trim())
                 .ok_or_else(|| eyre::eyre!("unknown build.vx executor backend {backend_tag:?}"))?;
             (backend, Some(target.trim().to_string()))
         };
 
         match backend {
-            vx_eval::ExecutorBackendKind::Local => {
+            BuildExecutorBackendKind::Local => {
                 if target.is_some() {
                     eyre::bail!(
                         "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?}: local executors do not take a target"
                     );
                 }
             }
-            vx_eval::ExecutorBackendKind::Daemon | vx_eval::ExecutorBackendKind::SshBootstrap => {
+            BuildExecutorBackendKind::Daemon | BuildExecutorBackendKind::SshBootstrap => {
                 let Some(target) = target.as_ref() else {
                     eyre::bail!(
                         "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?}: backend {} requires a target",
@@ -259,7 +273,7 @@ pub(crate) fn parse_build_vx_executor_classes(
                     );
                 }
             }
-            vx_eval::ExecutorBackendKind::Class => {
+            BuildExecutorBackendKind::Class => {
                 eyre::bail!("VX_BUILD_EXECUTOR_CLASSES only accepts concrete backends, not class");
             }
         }
@@ -272,6 +286,22 @@ pub(crate) fn parse_build_vx_executor_classes(
     }
 
     Ok(configs)
+}
+
+fn detect_host_triple() -> Result<String> {
+    let arch = match ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        "x86" => "i686",
+        other => eyre::bail!("unsupported host architecture {other:?}"),
+    };
+    let triple = match OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        "linux" => format!("{arch}-unknown-linux-gnu"),
+        "windows" => format!("{arch}-pc-windows-msvc"),
+        other => eyre::bail!("unsupported host operating system {other:?}"),
+    };
+    Ok(triple)
 }
 
 #[cfg(unix)]
@@ -3279,7 +3309,7 @@ async fn bootstrap_ssh_executor(
     .await;
     Ok(crate::service::SshBootstrapExecutor {
         id: format!("ssh_bootstrap:{class_label}"),
-        backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+        backend: BuildExecutorBackendKind::SshBootstrap,
         runner: Arc::new(RunnerClient::new(runner_virtual)),
         store: Some(Arc::new(StoreClient::new(store_virtual))),
         store_supports_readthrough: true,
@@ -3556,7 +3586,7 @@ async fn ensure_services(
     }
     for config in &args.build_vx_executor_classes {
         match config.backend {
-            vx_eval::ExecutorBackendKind::Local => {
+            BuildExecutorBackendKind::Local => {
                 boot_tx.phase(format!(
                     "registering build executor class:{} -> local",
                     config.class_label
@@ -3565,7 +3595,7 @@ async fn ensure_services(
                     .register_class_alias(config.class_label.clone(), "local")
                     .map_err(eyre::Report::msg)?;
             }
-            vx_eval::ExecutorBackendKind::Daemon => {
+            BuildExecutorBackendKind::Daemon => {
                 let target = config
                     .target
                     .as_deref()
@@ -3598,7 +3628,7 @@ async fn ensure_services(
                     ),
                 );
             }
-            vx_eval::ExecutorBackendKind::SshBootstrap => {
+            BuildExecutorBackendKind::SshBootstrap => {
                 let target = config
                     .target
                     .as_deref()
@@ -3627,7 +3657,7 @@ async fn ensure_services(
                     build_vx_executors.register_class_unavailable(
                         config.class_label.clone(),
                         format!("ssh_bootstrap:{}", config.class_label),
-                        vx_eval::ExecutorBackendKind::SshBootstrap,
+                        BuildExecutorBackendKind::SshBootstrap,
                         format!(
                             "build.vx executor ssh_bootstrap:{} is configured for {target}, but SSH bootstrap is only implemented on unix hosts",
                             config.class_label
@@ -3635,7 +3665,7 @@ async fn ensure_services(
                     );
                 }
             }
-            vx_eval::ExecutorBackendKind::Class => unreachable!(),
+            BuildExecutorBackendKind::Class => unreachable!(),
         }
     }
 
@@ -3780,8 +3810,7 @@ async fn async_main() -> Result<()> {
                 );
             }
 
-            vx_toolchain::detect_host_triple()
-                .map_err(|e| eyre::eyre!("failed to detect host triple: {e}"))?
+            detect_host_triple()?
         }
     };
 

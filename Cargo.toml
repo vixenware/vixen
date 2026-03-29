@@ -27,7 +27,6 @@ vx-plan = { path = "crates/vx-plan" }
 vx-io = { path = "crates/vx-io" }
 vx-tarball = { path = "crates/vx-tarball" }
 vx-http = { path = "crates/vx-http" }
-vx-toolchain = { path = "crates/vx-toolchain" }
 vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
@@ -37,7 +36,6 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
-vx-eval = { path = "crates/vx-eval" }
 vx-eval2-proto = { path = "crates/vx-eval2-proto" }
 vx-platform-exec = { path = "crates/vx-platform-exec" }
 perfetto-proto = { path = "crates/perfetto-proto" }
@@ -55,7 +53,6 @@ facet-value = { version = "0.44.1" }
 figue = { version = "2.0.0" }
 
 # incremental computation
-picante = { version = "1.0.0", features = ["macros"] }
 im = "15.1.0"
 
 # RPC
@@ -177,9 +174,6 @@ strip = "none"
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
-# [patch."https://github.com/bearcove/picante"]
-# picante = { path = "../picante/crates/picante" }
-# picante-macros = { path = "../picante/crates/picante-macros" }
 
 [patch.crates-io]
 # roam = { path = "/Users/amos/bearcove/roam/rust/roam" }

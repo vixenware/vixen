@@ -1,18 +1,8 @@
 //! vx-runner - Worker daemon
 //!
-//! Implements the Exec Roam service trait.
-//! A remote-capable compilation service - all inputs/outputs go through CAS.
-//!
-//! Responsibilities:
-//! - Populate VFS prefixes with toolchains/sources/deps from CAS metadata
-//! - Run rustc/zig
-//! - Ingest outputs to CAS
-//! - Return output manifest hashes
+//! Implements the Exec service.
 
-pub(crate) mod eval_boundary;
-pub(crate) mod sandbox;
 pub(crate) mod service;
-pub(crate) mod service_vfs;
 pub(crate) mod vfsd_client;
 
 use camino::Utf8PathBuf;
@@ -24,13 +14,11 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
-use std::collections::HashMap;
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerDispatcher;
-use vx_runner_proto::TransportValue;
 use vx_store_proto::StoreClient;
 
 use crate::vfsd_client::VfsdClient as VfsClient;
@@ -314,9 +302,6 @@ pub struct RunnerServiceInner {
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
-
-    /// Cache committed discovery results while this daemon stays alive.
-    discover_cache: std::sync::Mutex<HashMap<String, TransportValue>>,
 }
 
 /// Exec service handle - cloneable wrapper around shared inner state
@@ -353,53 +338,8 @@ impl RunnerService {
                 _store_handle: store_handle,
                 _vfsd_handle: vfsd_handle,
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
-                discover_cache: std::sync::Mutex::new(HashMap::new()),
             }),
         }
-    }
-
-    // ========================================================================
-    // VFS Prefix Management (for hermetic action execution)
-    // ========================================================================
-
-    /// Create a new action prefix in the VFS
-    ///
-    /// Returns the prefix ID (e.g., "build-01JFX...") which can be used
-    /// to add files and later clean up.
-    pub(crate) async fn create_action_prefix(&self) -> String {
-        use jiff::Timestamp;
-        let ts = Timestamp::now().as_millisecond();
-
-        for attempt in 0..3 {
-            let prefix_id = format!("build-{:x}-{:08x}", ts, fastrand::u32(..));
-
-            // Check local HashSet for collision
-            {
-                let prefixes = self.created_prefixes.lock().unwrap();
-                if prefixes.contains(&prefix_id) {
-                    tracing::warn!(prefix_id = %prefix_id, attempt, "prefix ID collision, retrying");
-                    continue;
-                }
-            }
-
-            // Create the prefix via RPC
-            let (id, _item_id) = self.vfs.create_prefix(prefix_id.clone()).await;
-
-            // Track it locally
-            self.created_prefixes
-                .lock()
-                .unwrap()
-                .insert(prefix_id.clone());
-
-            return id;
-        }
-
-        panic!("Failed to generate unique prefix ID after 3 attempts");
-    }
-
-    /// Clean up an action prefix
-    pub(crate) async fn remove_action_prefix(&self, prefix_id: &str) {
-        self.vfs.remove_prefix(prefix_id).await;
     }
 }
 
@@ -408,18 +348,6 @@ impl RunnerService {
 #[cfg(target_os = "macos")]
 static REAPER_STDIN: std::sync::OnceLock<std::sync::Mutex<std::process::ChildStdin>> =
     std::sync::OnceLock::new();
-
-/// Notify the reaper about a new child process group.
-#[cfg(target_os = "macos")]
-pub(crate) fn register_child_pgroup(pgid: u32) {
-    if let Some(stdin) = REAPER_STDIN.get() {
-        use std::io::Write;
-        if let Ok(mut guard) = stdin.lock() {
-            let _ = writeln!(guard, "{pgid}");
-            let _ = guard.flush();
-        }
-    }
-}
 
 /// Spawn the vx-reaper sidecar process.
 ///
@@ -469,61 +397,6 @@ fn spawn_reaper() {
         }
         Err(_) => {
             // Not a hard error — just means orphan protection is disabled
-        }
-    }
-}
-
-/// Detect MSVC toolchain and set LIB/INCLUDE/LIBPATH/PATH in the process environment.
-///
-/// When vx-runner is launched from VS Code or a plain terminal (not a Developer Command Prompt),
-/// the MSVC environment variables aren't set, so rustc can't find link.exe or system libraries.
-/// We use `find-msvc-tools` (same detection logic as the `cc` crate) to locate the MSVC
-/// installation and inject the required env vars.
-#[cfg(windows)]
-fn detect_msvc_environment() {
-    // If LIB is already set, assume we're in a Developer Command Prompt.
-    if std::env::var_os("LIB").is_some() {
-        return;
-    }
-
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else if cfg!(target_arch = "x86") {
-        "i686"
-    } else {
-        eprintln!("vx-runner: unknown host architecture, skipping MSVC detection");
-        return;
-    };
-
-    match find_msvc_tools::find_tool(arch, "link.exe") {
-        Some(tool) => {
-            for (key, value) in tool.env() {
-                // SAFETY: called from main() before any threads are spawned.
-                unsafe { std::env::set_var(key, value) };
-            }
-            eprintln!(
-                "vx-runner: detected MSVC toolchain at {}",
-                tool.path().display()
-            );
-        }
-        None => {
-            eprintln!(
-                "vx-runner: could not detect MSVC toolchain — link.exe may not be found by rustc"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::runner_mount_base;
-
-    #[test]
-    fn runner_mount_base_is_stable_global_path() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(runner_mount_base().as_str(), "/tmp/vx/vfs");
         }
     }
 }

@@ -357,15 +357,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
-name = "bitmaps"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "031043d04099746d8db04daf1fa424b2bc8bd69d92b25962dcde24da39ab64a2"
-dependencies = [
- "typenum",
-]
-
-[[package]]
 name = "blake3"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -686,20 +677,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
 dependencies = [
  "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
-]
-
-[[package]]
-name = "dashmap"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
-dependencies = [
- "cfg-if",
- "crossbeam-utils",
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
@@ -1729,20 +1706,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "im"
-version = "15.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0acd33ff0285af998aaf9b57342af478078f53492322fafc47450e09397e0e9"
-dependencies = [
- "bitmaps",
- "rand_core 0.6.4",
- "rand_xoshiro",
- "sized-chunks",
- "typenum",
- "version_check",
-]
-
-[[package]]
 name = "impls"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2340,37 +2303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "picante"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6150578603464b6f264b951a96e0b73a225bddd39d7cdd19d720cb15f0acd8da"
-dependencies = [
- "dashmap 6.1.0",
- "facet",
- "facet-core",
- "facet-postcard",
- "facet-reflect",
- "futures-util",
- "im",
- "parking_lot",
- "picante-macros",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "picante-macros"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2507150079d468379fb452aed2c4658e046bd6a66af1a3c0e82ae9d00dc64ab"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "unsynn",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2644,7 +2576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
 dependencies = [
  "rand_chacha",
- "rand_core 0.9.5",
+ "rand_core",
 ]
 
 [[package]]
@@ -2654,14 +2586,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core 0.9.5",
+ "rand_core",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "rand_core"
@@ -2670,15 +2596,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
-]
-
-[[package]]
-name = "rand_xoshiro"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
-dependencies = [
- "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -3185,16 +3102,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
-name = "sized-chunks"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16d69225bde7a69b235da73377861095455d298f2b970996eec25ddbb42b3d1e"
-dependencies = [
- "bitmaps",
- "typenum",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3602,7 +3509,7 @@ dependencies = [
  "async-trait",
  "auto_impl",
  "bytes",
- "dashmap 5.5.3",
+ "dashmap",
  "futures",
  "httparse",
  "lsp-types",
@@ -3967,27 +3874,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-eval"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "dashmap 6.1.0",
- "datatest-stable",
- "facet",
- "facet-json",
- "facet-value",
- "indoc",
- "parking_lot",
- "perfetto-proto",
- "prost 0.14.3",
- "tempfile",
- "tokio",
- "vx-parser",
- "vx-spec",
- "vx-store-proto",
-]
-
-[[package]]
 name = "vx-eval3-analysis"
 version = "0.1.0"
 dependencies = [
@@ -4200,7 +4086,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ur-taking-me-with-you",
- "vx-eval",
  "vx-io",
  "vx-parser",
  "vx-runner-proto",
@@ -4216,7 +4101,6 @@ dependencies = [
  "facet",
  "facet-postcard",
  "roam",
- "vx-eval",
  "vx-store-proto",
 ]
 
@@ -4454,7 +4338,6 @@ dependencies = [
  "libc",
  "moire",
  "perfetto-proto",
- "picante",
  "pin-project-lite",
  "roam",
  "roam-core",
@@ -4472,7 +4355,6 @@ dependencies = [
  "tree-sitter-vixen",
  "vx-bootstrap",
  "vx-cache",
- "vx-eval",
  "vx-http",
  "vx-io",
  "vx-manifest",
