@@ -12,6 +12,13 @@ The purpose of this note is not to praise or preserve the old evaluators as
 architectures. The purpose is to record what they were actually doing, what they
 proved, what they failed to prove, and which lessons eval3 must keep.
 
+One important caveat: the current crates in the repository are not pristine
+historical specimens. In particular, `/Users/amos/bearcove/vixen/crates/vx-eval`
+is now a hybridized survivor containing material from multiple legacy phases. So
+this note distinguishes between:
+- the legacy evaluator lines as architectural approaches
+- the current crates that only imperfectly represent those approaches
+
 ## Executive summary
 
 There were two major legacy evaluator lines.
@@ -56,9 +63,25 @@ Specifically:
 
 This rewrite corrects that.
 
-## What `vx-eval` actually was
+## Legacy line 1 vs the current `vx-eval` crate
 
-Relevant code:
+The first legacy evaluator line and the current
+`/Users/amos/bearcove/vixen/crates/vx-eval` crate should not be treated as the
+same thing anymore.
+
+The architectural line matters historically. The current crate is a contaminated
+artifact. It is useful as evidence for some old ideas, but it is not a clean
+reference implementation of a coherent evaluator.
+
+That means:
+- use the crate as evidence for surviving semantic nouns and old runtime habits
+- do not treat the crate boundary as meaningful architecture
+- do not assume every type currently in `vx-eval` belongs to the original eval1
+  worldview
+
+## What the first legacy evaluator line actually was
+
+Relevant evidence in the current repo:
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/value.rs`
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/poison.rs`
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/exec.rs`
@@ -68,6 +91,9 @@ Relevant code:
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/worker/mod.rs`
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/worker/eval.rs`
 - `/Users/amos/bearcove/vixen/crates/vx-eval/src/worker/exec_local.rs`
+
+Again: these files are evidence, not a guarantee that the current crate is a
+pure eval1 snapshot.
 
 ### The good part: it had real build/runtime nouns
 
@@ -202,7 +228,18 @@ Eval1 was:
 
 The parts worth preserving are its nouns, not its machine.
 
-## What `vx-eval2` actually was
+## Legacy line 2 vs the current `vx-eval2` crate
+
+`/Users/amos/bearcove/vixen/crates/vx-eval2` is closer to a coherent snapshot
+than `vx-eval`, but even here the surrounding application integration in
+`/Users/amos/bearcove/vixen/crates/vx` can make it easy to misattribute credit.
+
+So the distinction here is:
+- eval2 as an architectural line
+- eval2 as a crate embedded in a larger application that also did important
+  runtime/daemon work outside the crate
+
+## What the second legacy evaluator line actually was
 
 Relevant code:
 - `/Users/amos/bearcove/vixen/crates/vx-eval2/src/lib.rs`
@@ -390,16 +427,26 @@ also have learned the wrong lesson.
 
 ## Bottom line
 
-Eval1 proved that Vixen needs rich build/runtime concepts.
+The first legacy evaluator line proved that Vixen needs rich build/runtime
+concepts.
 
-Eval2 proved that evaluator state needs stronger separation discipline.
+The second legacy evaluator line proved that evaluator state needs stronger
+separation discipline.
 
-Neither gave the right final machine.
+The current `vx-eval` crate is not a clean embodiment of the first line. It is a
+hybrid artifact and should mostly be treated as salvage evidence, not as a
+reference architecture.
+
+The current `vx-eval2` crate does embody the second line more clearly, but the
+surrounding daemon/application integration should not be credited to it by
+default.
+
+Neither line gave the right final machine.
 
 Eval3 should therefore aim for:
-- eval1's important nouns
-- eval2's representation discipline
-- without eval1's eagerness and monolith
-- without eval2's machine explosion
+- legacy line 1's important nouns
+- legacy line 2's representation discipline
+- without line 1's eagerness and monolith
+- without line 2's machine explosion
 
 That is the real inheritance line.
