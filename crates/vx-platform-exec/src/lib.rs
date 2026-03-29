@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,29 @@ pub struct PlatformExecOutput {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub enum PlatformExecError {
+    Io(std::io::Error),
+    Verification(String),
+}
+
+impl fmt::Display for PlatformExecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Verification(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for PlatformExecError {}
+
+impl From<std::io::Error> for PlatformExecError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
 pub fn resolve_tool_from_path(program: &str) -> Option<String> {
     if program.contains('/') {
         return Some(program.to_owned());
@@ -37,7 +61,10 @@ pub fn resolve_tool_from_path(program: &str) -> Option<String> {
     None
 }
 
-pub fn run_platform_exec(request: PlatformExecRequest<'_>) -> std::io::Result<PlatformExecOutput> {
+pub fn run_platform_exec(
+    request: PlatformExecRequest<'_>,
+) -> Result<PlatformExecOutput, PlatformExecError> {
+    verify_platform_exec_request(&request)?;
     let mut command = sandboxed_command(
         request.program,
         request.sandbox_root,
@@ -61,6 +88,63 @@ pub fn run_platform_exec(request: PlatformExecRequest<'_>) -> std::io::Result<Pl
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+fn verify_platform_exec_request(
+    request: &PlatformExecRequest<'_>,
+) -> Result<(), PlatformExecError> {
+    verify_sandbox_exemptions(request.sandbox_exemptions)?;
+    verify_program_access(
+        request.program,
+        request.sandbox_root,
+        request.sandbox_exemptions,
+    )
+}
+
+fn verify_sandbox_exemptions(
+    sandbox_exemptions: &[SandboxExemptionRequest],
+) -> Result<(), PlatformExecError> {
+    for exemption in sandbox_exemptions {
+        let path = match exemption {
+            SandboxExemptionRequest::ExecSubpath(path)
+            | SandboxExemptionRequest::ReadSubpath(path) => path,
+        };
+        if !Path::new(path).exists() {
+            return Err(PlatformExecError::Verification(format!(
+                "sandbox exemption path `{path}` does not exist on this runner"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_program_access(
+    program: &str,
+    sandbox_root: &Path,
+    sandbox_exemptions: &[SandboxExemptionRequest],
+) -> Result<(), PlatformExecError> {
+    let program_path = Path::new(program);
+    if !program_path.is_absolute() {
+        return Ok(());
+    }
+    if !program_path.exists() {
+        return Err(PlatformExecError::Verification(format!(
+            "exec program `{program}` does not exist on this runner"
+        )));
+    }
+    if program_path.starts_with(sandbox_root) {
+        return Ok(());
+    }
+    let covered = sandbox_exemptions.iter().any(|exemption| match exemption {
+        SandboxExemptionRequest::ExecSubpath(root) => program_path.starts_with(root),
+        SandboxExemptionRequest::ReadSubpath(_) => false,
+    });
+    if covered {
+        return Ok(());
+    }
+    Err(PlatformExecError::Verification(format!(
+        "absolute exec path `{program}` requires explicit ExecSubpath coverage"
+    )))
 }
 
 fn hermetic_env(command: &mut Command, write_root: &Path) {

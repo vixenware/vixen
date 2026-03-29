@@ -1,10 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
     path::PathBuf,
 };
 use vx_platform_exec::{
-    PlatformExecRequest, SandboxExemptionRequest, resolve_tool_from_path, run_platform_exec,
+    PlatformExecError, PlatformExecRequest, SandboxExemptionRequest, resolve_tool_from_path,
+    run_platform_exec,
 };
 
 use vx_eval3_analysis::{
@@ -62,26 +62,6 @@ impl SingleHostCcVersionDriver {
         }
     }
 
-    fn verify_exemption_path_exists(path: &str) -> Result<(), vx_eval3_analysis::ExecSliceError> {
-        if Path::new(path).exists() {
-            return Ok(());
-        }
-        Err(vx_eval3_analysis::ExecSliceError::VerificationFailure(
-            format!("sandbox exemption path `{path}` does not exist on this runner"),
-        ))
-    }
-
-    fn verify_program_is_executable(
-        program: &str,
-    ) -> Result<(), vx_eval3_analysis::ExecSliceError> {
-        let actual = resolve_tool_from_path(program).ok_or_else(|| {
-            vx_eval3_analysis::ExecSliceError::VerificationFailure(format!(
-                "tool `{program}` is no longer resolvable on this runner"
-            ))
-        })?;
-        Self::verify_exemption_path_exists(&actual)
-    }
-
     fn parse_sandbox_exemptions(
         inputs: &[BoundaryPositionalInputValue],
     ) -> Result<Vec<SandboxExemptionRequest>, vx_eval3_analysis::ExecSliceError> {
@@ -109,11 +89,9 @@ impl SingleHostCcVersionDriver {
     ) -> Result<Vec<SandboxExemptionRequest>, vx_eval3_analysis::ExecSliceError> {
         match value {
             ExecValue::SandboxExemption(SandboxExemptionValue::ExecSubpath(path)) => {
-                Self::verify_exemption_path_exists(path)?;
                 Ok(vec![SandboxExemptionRequest::ExecSubpath(path.clone())])
             }
             ExecValue::SandboxExemption(SandboxExemptionValue::ReadSubpath(path)) => {
-                Self::verify_exemption_path_exists(path)?;
                 Ok(vec![SandboxExemptionRequest::ReadSubpath(path.clone())])
             }
             ExecValue::Array(items) => {
@@ -164,6 +142,17 @@ impl SingleHostCcVersionDriver {
             )),
         }
     }
+
+    fn map_platform_exec_error(error: PlatformExecError) -> vx_eval3_analysis::ExecSliceError {
+        match error {
+            PlatformExecError::Verification(message) => {
+                vx_eval3_analysis::ExecSliceError::VerificationFailure(message)
+            }
+            PlatformExecError::Io(error) => vx_eval3_analysis::ExecSliceError::TypeMismatch(
+                format!("platform exec failed: {error}"),
+            ),
+        }
+    }
 }
 
 impl BoundaryDriver for SingleHostCcVersionDriver {
@@ -182,16 +171,6 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                 };
                 let args = argv[1..].to_vec();
                 let env = Vec::<(String, String)>::new();
-                if program.contains('/') {
-                    Self::verify_program_is_executable(program)?;
-                    assert!(
-                        sandbox_exemptions.iter().any(|exemption| matches!(
-                            exemption,
-                            SandboxExemptionRequest::ExecSubpath(path) if Path::new(program).starts_with(path)
-                        )),
-                        "exec should carry an explicit coarse exec exemption covering the program path"
-                    );
-                }
                 let output = run_platform_exec(PlatformExecRequest {
                     program,
                     args: &args,
@@ -199,11 +178,7 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                     sandbox_root: self.sandbox.path(),
                     sandbox_exemptions: &sandbox_exemptions,
                 })
-                .map_err(|err| {
-                    vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
-                        "platform exec failed: {err}"
-                    ))
-                })?;
+                .map_err(Self::map_platform_exec_error)?;
                 Ok(ExecValue::ProcessResult {
                     exit_code: output.exit_code,
                     stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -806,5 +781,60 @@ fn zoo_cc_version_runs_honestly_single_host() {
     assert!(
         !version_blob.bytes.is_empty(),
         "cc-version output blob should contain real command output"
+    );
+}
+
+#[test]
+fn zoo_cc_version_requires_explicit_coarse_mounts() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    if resolve_tool_from_path("cc").is_none() {
+        return;
+    }
+
+    let src = r#"
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+
+  exec [cc, "--version"] where {
+    observer: (proc, _vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        Tree %{
+          @cc-version.txt => proc.stdout.collect().blob(),
+        }
+      )
+    ),
+  }
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program(&analysis, &bridge).expect("program should lower");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = SingleHostCcVersionDriver::new();
+    let err = session
+        .run_with_driver(&mut driver)
+        .expect_err("absolute discovered tool path should require explicit coarse mounts");
+    assert!(
+        matches!(
+            err,
+            vx_eval3_analysis::ExecSliceError::VerificationFailure(ref message)
+                if message.contains("requires explicit ExecSubpath coverage")
+        ),
+        "expected shared platform enforcement failure, got: {err:?}"
     );
 }
