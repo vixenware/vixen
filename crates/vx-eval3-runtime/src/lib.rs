@@ -10,7 +10,10 @@ use vx_eval3_analysis::{
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecValue {
     Int(i64),
+    Bool(bool),
     String(String),
+    Blob(BlobValue),
+    Tree(TreeValue),
     ProcessResult { exit_code: i64, stdout: String },
     Pair(Box<ExecValue>, Box<ExecValue>),
     Callable(CallableValue),
@@ -21,6 +24,16 @@ pub enum ExecValue {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CallableValue {
     AddConst(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobValue {
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TreeValue {
+    pub files: BTreeMap<String, BlobValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -460,6 +473,9 @@ impl<'a> RuntimeMachine<'a> {
                         body.runtime_boundary_extractions.clone(),
                     ),
                 };
+                if let ExecValue::LazyPoison(message) = &result {
+                    return Err(ExecSliceError::TypeMismatch(message.clone()));
+                }
                 self.complete_body(owner_key, result)?;
                 continue;
             }
@@ -552,6 +568,111 @@ impl<'a> RuntimeMachine<'a> {
                     frame
                         .slots
                         .insert(dst, SlotValue::Ready(ExecValue::Int(lhs + rhs)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::NotEqual { dst, lhs, rhs, .. } => {
+                    let lhs = resolve_slot_operand(&lhs, &frame.slots)?;
+                    let rhs = resolve_slot_operand(&rhs, &frame.slots)?;
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Bool(lhs != rhs)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::ProjectField {
+                    dst, value, field, ..
+                } => {
+                    let value = resolve_slot_operand(&value, &frame.slots)?;
+                    let projected = match (value, field.as_str()) {
+                        (ExecValue::ProcessResult { exit_code, .. }, "exit_code") => {
+                            ExecValue::Int(exit_code)
+                        }
+                        (ExecValue::ProcessResult { stdout, .. }, "stdout") => {
+                            ExecValue::String(stdout)
+                        }
+                        (other, _) => {
+                            return Err(ExecSliceError::TypeMismatch(format!(
+                                "unsupported field projection `{field}` on {:?}",
+                                other
+                            )));
+                        }
+                    };
+                    frame.slots.insert(dst, SlotValue::Ready(projected));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::CallMember {
+                    dst,
+                    receiver,
+                    method,
+                    args,
+                    ..
+                } => {
+                    let receiver = resolve_slot_operand(&receiver, &frame.slots)?;
+                    let args = args
+                        .iter()
+                        .map(|arg| resolve_slot_operand(arg, &frame.slots))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let result = call_member(receiver, &method, &args)?;
+                    frame.slots.insert(dst, SlotValue::Ready(result));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::BuildTree { dst, entries, .. } => {
+                    let mut files = BTreeMap::new();
+                    for (path, value) in entries {
+                        let value = resolve_slot_operand(&value, &frame.slots)?;
+                        let blob = match value {
+                            ExecValue::Blob(blob) => blob,
+                            ExecValue::String(text) => BlobValue {
+                                bytes: text.into_bytes(),
+                            },
+                            other => {
+                                return Err(ExecSliceError::TypeMismatch(format!(
+                                    "tree entry `{path}` expected blob-like value, got {:?}",
+                                    other
+                                )));
+                            }
+                        };
+                        files.insert(path, blob);
+                    }
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Tree(TreeValue { files })));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::Select {
+                    dst,
+                    condition,
+                    then_value,
+                    else_value,
+                    ..
+                } => {
+                    let condition = as_bool(
+                        &resolve_slot_operand(&condition, &frame.slots)?,
+                        "if condition",
+                    )?;
+                    let selected = if condition {
+                        resolve_slot_operand(&then_value, &frame.slots)?
+                    } else {
+                        resolve_slot_operand(&else_value, &frame.slots)?
+                    };
+                    frame.slots.insert(dst, SlotValue::Ready(selected));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignFailure { dst, message, .. } => {
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::LazyPoison(message)));
                     frame.pc += 1;
                     self.frames.insert(frame_id, frame);
                     self.ready_frames.push_back(frame_id);
@@ -824,6 +945,39 @@ fn as_int(value: &ExecValue, context: &str) -> Result<i64, ExecSliceError> {
         ExecValue::Int(int) => Ok(*int),
         other => Err(ExecSliceError::TypeMismatch(format!(
             "{context} expected int, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn as_bool(value: &ExecValue, context: &str) -> Result<bool, ExecSliceError> {
+    match value {
+        ExecValue::Bool(value) => Ok(*value),
+        other => Err(ExecSliceError::TypeMismatch(format!(
+            "{context} expected bool, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn call_member(
+    receiver: ExecValue,
+    method: &str,
+    args: &[ExecValue],
+) -> Result<ExecValue, ExecSliceError> {
+    if !args.is_empty() {
+        return Err(ExecSliceError::UnsupportedShape(format!(
+            "member call `{method}` with args is unsupported"
+        )));
+    }
+    match (receiver, method) {
+        (ExecValue::String(text), "collect") => Ok(ExecValue::String(text)),
+        (ExecValue::String(text), "blob") => Ok(ExecValue::Blob(BlobValue {
+            bytes: text.into_bytes(),
+        })),
+        (ExecValue::Blob(blob), "blob") => Ok(ExecValue::Blob(blob)),
+        (other, _) => Err(ExecSliceError::TypeMismatch(format!(
+            "unsupported member call `{method}` on {:?}",
             other
         ))),
     }

@@ -120,6 +120,42 @@ pub enum KernelOp {
         lhs: Operand,
         rhs: Operand,
     },
+    NotEqual {
+        dst: SlotId,
+        source: SourceExpr,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    ProjectField {
+        dst: SlotId,
+        source: SourceExpr,
+        value: Operand,
+        field: String,
+    },
+    CallMember {
+        dst: SlotId,
+        source: SourceExpr,
+        receiver: Operand,
+        method: String,
+        args: Vec<Operand>,
+    },
+    BuildTree {
+        dst: SlotId,
+        source: SourceExpr,
+        entries: Vec<(String, Operand)>,
+    },
+    Select {
+        dst: SlotId,
+        source: SourceExpr,
+        condition: Operand,
+        then_value: Operand,
+        else_value: Operand,
+    },
+    AssignFailure {
+        dst: SlotId,
+        source: SourceExpr,
+        message: String,
+    },
     CallBody {
         dst: SlotId,
         source: SourceExpr,
@@ -843,18 +879,18 @@ impl<'a> BodyLowering<'a> {
                 let token = literal
                     .token()
                     .ok_or_else(|| UnsupportedShape("literal without token".to_owned()))?;
-                if token.kind() != SyntaxKind::INT {
-                    return Err(UnsupportedShape(format!(
+                match token.kind() {
+                    SyntaxKind::INT => {
+                        let value = token.text().replace('_', "").parse::<i64>().map_err(|_| {
+                            UnsupportedShape(format!("invalid int `{}`", token.text()))
+                        })?;
+                        Ok(Operand::Int(value))
+                    }
+                    _ => Err(UnsupportedShape(format!(
                         "only INT literals supported, got `{}`",
                         token.text()
-                    )));
+                    ))),
                 }
-                let value = token
-                    .text()
-                    .replace('_', "")
-                    .parse::<i64>()
-                    .map_err(|_| UnsupportedShape(format!("invalid int `{}`", token.text())))?;
-                Ok(Operand::Int(value))
             }
             Expr::NameRef(_) => {
                 let binding = self.use_binding_by_expr.get(&expr_id).copied().ok_or(
@@ -864,14 +900,20 @@ impl<'a> BodyLowering<'a> {
                 Ok(Operand::Slot(slot))
             }
             Expr::Binary(binary) => {
-                let is_plus = binary
+                let source = self.source_for(expr_id);
+                let has_plus = binary
                     .syntax()
                     .children_with_tokens()
                     .filter_map(|child| child.into_token())
                     .any(|token| token.kind() == SyntaxKind::PLUS);
-                if !is_plus {
+                let has_not_equal = binary
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|child| child.into_token())
+                    .any(|token| token.kind() == SyntaxKind::BANG_EQ);
+                if !has_plus && !has_not_equal {
                     return Err(UnsupportedShape(format!(
-                        "only + binary is supported in exec slice (expr {})",
+                        "only + and != binary are supported in exec slice (expr {})",
                         expr_id.0
                     )));
                 }
@@ -891,12 +933,21 @@ impl<'a> BodyLowering<'a> {
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?,
                 )?;
                 let dst = self.alloc_temp();
-                self.ops.push(KernelOp::Add {
-                    dst,
-                    source: self.source_for(expr_id),
-                    lhs,
-                    rhs,
-                });
+                if has_plus {
+                    self.ops.push(KernelOp::Add {
+                        dst,
+                        source,
+                        lhs,
+                        rhs,
+                    });
+                } else {
+                    self.ops.push(KernelOp::NotEqual {
+                        dst,
+                        source,
+                        lhs,
+                        rhs,
+                    });
+                }
                 Ok(Operand::Slot(dst))
             }
             Expr::Tuple(tuple) => {
@@ -948,41 +999,104 @@ impl<'a> BodyLowering<'a> {
                     .ok_or_else(|| UnsupportedShape("field name missing".to_owned()))?
                     .text()
                     .to_owned();
-                let index = field_name
-                    .strip_prefix('_')
-                    .ok_or_else(|| UnsupportedShape(format!("unsupported field `{field_name}`")))?
-                    .parse::<usize>()
-                    .map_err(|_| UnsupportedShape(format!("invalid field `{field_name}`")))?;
-
                 let receiver = field
                     .receiver()
                     .ok_or_else(|| UnsupportedShape("field receiver missing".to_owned()))?;
 
-                if let Expr::NameRef(_) = receiver
-                    && let Some(receiver_id) = self.expr_id(&receiver)
-                    && let Some(binding) = self.use_binding_by_expr.get(&receiver_id).copied()
-                    && let Some(tuple_expr) = self.binding_initializers.get(&binding).copied()
-                    && let Expr::Tuple(tuple) = self.expr(tuple_expr)?
-                {
-                    let items = tuple.items().collect::<Vec<_>>();
-                    if index < items.len() {
-                        let selected_id = self
-                            .expr_id(&items[index])
-                            .ok_or(ExecSliceError::MissingExpr(self.source_for(tuple_expr)))?;
-                        return self.lower_expr(selected_id);
+                if let Some(index) = field_name.strip_prefix('_') {
+                    let index = index
+                        .parse::<usize>()
+                        .map_err(|_| UnsupportedShape(format!("invalid field `{field_name}`")))?;
+
+                    if let Expr::NameRef(_) = receiver
+                        && let Some(receiver_id) = self.expr_id(&receiver)
+                        && let Some(binding) = self.use_binding_by_expr.get(&receiver_id).copied()
+                        && let Some(tuple_expr) = self.binding_initializers.get(&binding).copied()
+                        && let Expr::Tuple(tuple) = self.expr(tuple_expr)?
+                    {
+                        let items = tuple.items().collect::<Vec<_>>();
+                        if index < items.len() {
+                            let selected_id = self
+                                .expr_id(&items[index])
+                                .ok_or(ExecSliceError::MissingExpr(self.source_for(tuple_expr)))?;
+                            return self.lower_expr(selected_id);
+                        }
                     }
+
+                    let receiver_id = self
+                        .expr_id(&receiver)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    let pair = self.lower_expr(receiver_id)?;
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::ProjectIndex {
+                        dst,
+                        source: self.source_for(expr_id),
+                        pair,
+                        index,
+                    });
+                    return Ok(Operand::Slot(dst));
                 }
 
                 let receiver_id = self
                     .expr_id(&receiver)
                     .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                let pair = self.lower_expr(receiver_id)?;
+                let value = self.lower_expr(receiver_id)?;
                 let dst = self.alloc_temp();
-                self.ops.push(KernelOp::ProjectIndex {
+                self.ops.push(KernelOp::ProjectField {
                     dst,
                     source: self.source_for(expr_id),
-                    pair,
-                    index,
+                    value,
+                    field: field_name,
+                });
+                Ok(Operand::Slot(dst))
+            }
+            Expr::If(if_expr) => {
+                let condition = if_expr
+                    .condition()
+                    .ok_or_else(|| UnsupportedShape("if condition missing".to_owned()))?;
+                let then_branch = if_expr
+                    .then_branch()
+                    .ok_or_else(|| UnsupportedShape("if then branch missing".to_owned()))?;
+                let else_branch = if_expr
+                    .else_branch()
+                    .ok_or_else(|| UnsupportedShape("if else branch missing".to_owned()))?;
+                let condition = self.lower_expr(
+                    self.expr_id(&condition)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?,
+                )?;
+                let then_value = self.lower_expr(
+                    self.expr_id(&then_branch)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?,
+                )?;
+                let else_value = self.lower_expr(
+                    self.expr_id(&else_branch)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?,
+                )?;
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::Select {
+                    dst,
+                    source: self.source_for(expr_id),
+                    condition,
+                    then_value,
+                    else_value,
+                });
+                Ok(Operand::Slot(dst))
+            }
+            Expr::Fail(fail_expr) => {
+                let message = fail_expr
+                    .message()
+                    .and_then(|message| match message {
+                        Expr::InterpolatedString(_) | Expr::Literal(_) => {
+                            Some(message.syntax().text().to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "fail".to_owned());
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::AssignFailure {
+                    dst,
+                    source: self.source_for(expr_id),
+                    message,
                 });
                 Ok(Operand::Slot(dst))
             }
@@ -1062,6 +1176,69 @@ impl<'a> BodyLowering<'a> {
                     return Ok(Operand::Slot(dst));
                 }
 
+                let source = self.source_for(expr_id);
+                let callee_expr = call
+                    .callee()
+                    .ok_or_else(|| UnsupportedShape("call has no callee".to_owned()))?;
+
+                if let Expr::NameRef(name_ref) = callee_expr.clone()
+                    && name_ref.token().is_some_and(|token| token.text() == "Tree")
+                {
+                    if call.positional_args().len() != 1 {
+                        return Err(UnsupportedShape(
+                            "Tree constructor expects one map argument".to_owned(),
+                        ));
+                    }
+                    let map_expr = call.positional_args().into_iter().next().ok_or_else(|| {
+                        UnsupportedShape("Tree constructor missing map".to_owned())
+                    })?;
+                    let Expr::Map(map) = map_expr else {
+                        return Err(UnsupportedShape(
+                            "Tree constructor requires map literal argument".to_owned(),
+                        ));
+                    };
+                    let entries = self.lower_tree_entries(map)?;
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::BuildTree {
+                        dst,
+                        source,
+                        entries,
+                    });
+                    return Ok(Operand::Slot(dst));
+                }
+
+                if let Expr::Field(field) = callee_expr.clone()
+                    && let Some(method) = field.field_name().map(|token| token.text().to_owned())
+                    && (method == "collect" || method == "blob")
+                {
+                    let receiver_expr = field.receiver().ok_or_else(|| {
+                        UnsupportedShape("member call receiver missing".to_owned())
+                    })?;
+                    let receiver_id = self
+                        .expr_id(&receiver_expr)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    let receiver = self.lower_expr(receiver_id)?;
+                    let args = call
+                        .positional_args()
+                        .into_iter()
+                        .map(|arg| {
+                            let id = self
+                                .expr_id(&arg)
+                                .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                            self.lower_expr(id)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::CallMember {
+                        dst,
+                        source,
+                        receiver,
+                        method,
+                        args,
+                    });
+                    return Ok(Operand::Slot(dst));
+                }
+
                 let args = call
                     .positional_args()
                     .into_iter()
@@ -1073,7 +1250,6 @@ impl<'a> BodyLowering<'a> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
-                let source = self.source_for(expr_id);
                 if let Some(origin) = self.analyzed.callee_local_origins.get(&expr_id) {
                     match origin {
                         SourceLocalCalleeOrigin::TopLevelBody(callee) => {
@@ -1104,9 +1280,6 @@ impl<'a> BodyLowering<'a> {
                         args.len()
                     )));
                 }
-                let callee_expr = call
-                    .callee()
-                    .ok_or_else(|| UnsupportedShape("call has no callee".to_owned()))?;
                 let callee_id = self
                     .expr_id(&callee_expr)
                     .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
@@ -1205,6 +1378,43 @@ impl<'a> BodyLowering<'a> {
             source: self.source_for(expr_id),
         })
     }
+
+    fn lower_tree_entries(
+        &mut self,
+        map: vx_parser::MapExpr,
+    ) -> Result<Vec<(String, Operand)>, ExecSliceError> {
+        let mut entries = Vec::new();
+        for entry in map.entries() {
+            if entry.spread().is_some() {
+                return Err(UnsupportedShape(
+                    "Tree map spread entries are unsupported in executable slice".to_owned(),
+                ));
+            }
+            let key = entry
+                .key()
+                .ok_or_else(|| UnsupportedShape("Tree map entry key missing".to_owned()))?;
+            let path = parse_tree_path_key(&key).ok_or_else(|| {
+                UnsupportedShape("Tree map key must be a simple path literal".to_owned())
+            })?;
+            let value = entry
+                .value()
+                .ok_or_else(|| UnsupportedShape("Tree map entry value missing".to_owned()))?;
+            let value_id = self.expr_id(&value).ok_or(ExecSliceError::MissingExpr(
+                self.source_for(self.entry_expr),
+            ))?;
+            let lowered = self.lower_expr(value_id)?;
+            entries.push((path, lowered));
+        }
+        Ok(entries)
+    }
+}
+
+fn parse_tree_path_key(expr: &Expr) -> Option<String> {
+    let Expr::PathLiteral(path) = expr else {
+        return None;
+    };
+    let text = path.syntax().text().to_string();
+    Some(text.trim().trim_start_matches('@').to_owned())
 }
 
 fn is_param_name_ref(expr: &Expr, name: &str) -> bool {

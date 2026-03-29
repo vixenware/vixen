@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use vx_eval3_analysis::{
     BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,
@@ -6,8 +9,8 @@ use vx_eval3_analysis::{
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult, ExecValue,
-    RuntimeMemoKey, RuntimeSession, WaitReason, eval_executable_program,
+    BlobValue, BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult,
+    ExecValue, RuntimeMemoKey, RuntimeSession, TreeValue, WaitReason, eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -316,6 +319,88 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
             stdout: "observer-input-tree".to_owned(),
         },
         "runtime should expose raw process completion"
+    );
+}
+
+#[test]
+fn runtime_session_exec_value_slice_builds_tree_from_process_result() {
+    let src = r#"
+fn build(root: Path, args: Array[String], env: Map[String, String]) -> Tree (
+  let proc = exec ["cc", "--version"];
+  if proc.exit_code != 0 (
+    fail `process failed`
+  ) else (
+    Tree %{ @cc-version.txt => proc.stdout.collect().blob() }
+  )
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program(&analysis, &bridge).expect("program should lower");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = ConstantProcessDriver {
+        exit_code: 0,
+        stdout: "cc 1.2.3".to_owned(),
+    };
+    let outcome = session
+        .run_with_driver(&mut driver)
+        .expect("driver-mediated run should complete");
+    let mut files = BTreeMap::new();
+    files.insert(
+        "cc-version.txt".to_owned(),
+        BlobValue {
+            bytes: b"cc 1.2.3".to_vec(),
+        },
+    );
+    assert_eq!(outcome.entry_result, ExecValue::Tree(TreeValue { files }));
+}
+
+#[test]
+fn runtime_session_exec_value_slice_surfaces_fail_from_selected_branch() {
+    let src = r#"
+fn build(root: Path, args: Array[String], env: Map[String, String]) -> Tree (
+  let proc = exec ["cc", "--version"];
+  if proc.exit_code != 0 (
+    fail `process failed`
+  ) else (
+    Tree %{ @cc-version.txt => proc.stdout.collect().blob() }
+  )
+)
+"#;
+
+    let bridge = SingleSourceBridge::from_source_text(src);
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program(&analysis, &bridge).expect("program should lower");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = ConstantProcessDriver {
+        exit_code: 1,
+        stdout: "cc 1.2.3".to_owned(),
+    };
+    let err = session
+        .run_with_driver(&mut driver)
+        .expect_err("selected fail branch should surface runtime error");
+    assert!(
+        matches!(err, vx_eval3_analysis::ExecSliceError::TypeMismatch(ref message) if message.contains("process failed")),
+        "expected process-failed runtime error, got: {err:?}"
     );
 }
 
