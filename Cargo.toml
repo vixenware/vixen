@@ -23,6 +23,7 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
+vx-diagnostics = { path = "crates/vx-diagnostics" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }

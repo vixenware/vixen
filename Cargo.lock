@@ -3283,9 +3283,6 @@ dependencies = [
 name = "vx"
 version = "0.1.0"
 dependencies = [
- "arborium",
- "arborium-highlight",
- "arborium-theme",
  "camino",
  "concolor",
  "eyre",
@@ -3306,8 +3303,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tree-sitter-vixen",
  "unicode-width",
+ "vx-diagnostics",
  "vx-io",
  "vx-services",
  "vx-tracing",
@@ -3321,6 +3318,20 @@ dependencies = [
  "vx-parser",
  "vx-resolve",
  "vx-types",
+]
+
+[[package]]
+name = "vx-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "arborium",
+ "arborium-highlight",
+ "arborium-theme",
+ "eyre",
+ "libc",
+ "margin",
+ "margin-term",
+ "tree-sitter-vixen",
 ]
 
 [[package]]
@@ -3422,7 +3433,9 @@ dependencies = [
 name = "vx-resolve"
 version = "0.1.0"
 dependencies = [
+ "margin",
  "rowan",
+ "vx-diagnostics",
  "vx-parser",
  "vx-types",
 ]

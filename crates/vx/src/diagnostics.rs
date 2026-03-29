@@ -3,21 +3,16 @@
 // d[impl integration.no-format-lockin]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IsTerminal;
-use std::sync::Arc;
 
-use arborium::advanced::{CompiledGrammar, GrammarConfig};
-use arborium::{GrammarStore, Highlighter};
-use arborium_highlight::spans_to_themed;
-use arborium_theme::{HIGHLIGHTS, ThemeSlot, capture_to_slot};
 use camino::Utf8Path;
 use eyre::{Result, eyre};
 use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
-    Span, SyntaxClass,
+    Span,
 };
-use margin_term::{
-    ColorLevel, GlyphMode, HyperlinkMode, TerminalCapabilities, Theme as TerminalTheme,
+use margin_term::TerminalCapabilities;
+use vx_diagnostics::{
+    VixenSyntaxHighlighter, detect_terminal_capabilities, render_diagnostics_with_default_theme,
 };
 use vx_services::{
     BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
@@ -41,101 +36,10 @@ fn render_build_failure_with_capabilities(
     capabilities: TerminalCapabilities,
 ) -> Result<String> {
     let diagnostics = build_failure_to_diagnostics(failure, full_stack)?;
-    let plan = margin_term::layout(&diagnostics, capabilities)?;
-    Ok(margin_term::render_plan_with_theme(
-        &plan,
+    Ok(render_diagnostics_with_default_theme(
+        &diagnostics,
         capabilities,
-        TerminalTheme::from_arborium(&arborium_theme::builtin::catppuccin_mocha()),
-    ))
-}
-
-fn detect_terminal_capabilities() -> TerminalCapabilities {
-    let stderr_is_terminal = std::io::stderr().is_terminal();
-    TerminalCapabilities {
-        width: detect_terminal_width(stderr_is_terminal),
-        glyph_mode: GlyphMode::Unicode,
-        color_level: detect_color_level(stderr_is_terminal),
-        hyperlink_mode: detect_hyperlink_mode(stderr_is_terminal),
-        tab_width: 4,
-    }
-}
-
-fn detect_terminal_width(stderr_is_terminal: bool) -> usize {
-    if let Ok(columns) = std::env::var("COLUMNS")
-        && let Ok(width) = columns.parse::<usize>()
-        && width > 0
-    {
-        return width;
-    }
-
-    if stderr_is_terminal {
-        #[cfg(unix)]
-        {
-            let mut winsize: libc::winsize = unsafe { std::mem::zeroed() };
-            let result =
-                unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut winsize) };
-            if result == 0 && winsize.ws_col > 0 {
-                return winsize.ws_col as usize;
-            }
-        }
-    }
-
-    80
-}
-
-fn detect_color_level(stderr_is_terminal: bool) -> ColorLevel {
-    if !stderr_is_terminal || std::env::var_os("NO_COLOR").is_some() {
-        return ColorLevel::None;
-    }
-
-    let colorterm = std::env::var("COLORTERM").ok();
-    let term = std::env::var("TERM").ok();
-    if colorterm
-        .as_deref()
-        .is_some_and(|value| value.contains("truecolor") || value.contains("24bit"))
-        || term.as_deref().is_some_and(|value| {
-            value.contains("direct") || value.contains("kitty") || value.contains("wezterm")
-        })
-    {
-        ColorLevel::Rgb24
-    } else {
-        ColorLevel::Ansi16
-    }
-}
-
-fn detect_hyperlink_mode(stderr_is_terminal: bool) -> HyperlinkMode {
-    if !stderr_is_terminal
-        || std::env::var_os("NO_HYPERLINK").is_some()
-        || std::env::var("TERM").ok().as_deref() == Some("dumb")
-    {
-        return HyperlinkMode::None;
-    }
-
-    let term_program = std::env::var("TERM_PROGRAM").ok();
-    let vte_version = std::env::var("VTE_VERSION")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
-    let term = std::env::var("TERM").ok();
-
-    if std::env::var_os("WT_SESSION").is_some()
-        || std::env::var_os("KONSOLE_VERSION").is_some()
-        || std::env::var_os("DOMTERM").is_some()
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
-        || term_program.as_deref().is_some_and(|program| {
-            matches!(
-                program,
-                "iTerm.app" | "WezTerm" | "vscode" | "Hyper" | "Ghostty"
-            )
-        })
-        || vte_version.is_some_and(|version| version >= 5000)
-        || term
-            .as_deref()
-            .is_some_and(|value| value.contains("xterm-kitty"))
-    {
-        HyperlinkMode::Osc8
-    } else {
-        HyperlinkMode::None
-    }
+    )?)
 }
 
 fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
@@ -166,7 +70,7 @@ fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Res
             Ok::<_, eyre::Report>(lines)
         },
     )?;
-    let mut syntax_highlighter = SyntaxHighlighter::new().ok();
+    let mut syntax_highlighter = VixenSyntaxHighlighter::new().ok();
 
     let reports = visible_reports
         .iter()
@@ -293,7 +197,7 @@ fn build_report(
     report: &BuildDiagnosticReport,
     sources_by_id: &BTreeMap<&str, &BuildDiagnosticSource>,
     syntax_lines: &BTreeMap<String, BTreeSet<i32>>,
-    syntax_highlighter: Option<&mut SyntaxHighlighter>,
+    syntax_highlighter: Option<&mut VixenSyntaxHighlighter>,
 ) -> Result<Report> {
     let mut annotations = Vec::new();
     if let Some(syntax_highlighter) = syntax_highlighter {
@@ -301,9 +205,13 @@ fn build_report(
             let Some(source) = sources_by_id.get(source_id) else {
                 continue;
             };
-            annotations.extend(
-                syntax_highlighter.syntax_annotations(source, syntax_lines.get(source_id))?,
-            );
+            if source.language.as_deref() == Some("vixen") {
+                annotations.extend(syntax_highlighter.syntax_annotations(
+                    source.source_id.as_str(),
+                    &source.text,
+                    syntax_lines.get(source_id),
+                )?);
+            }
         }
     }
 
@@ -462,103 +370,12 @@ fn byte_offset_to_display_boundary(source: &str, byte_offset: u32) -> Result<usi
     Ok(byte_offset)
 }
 
-struct SyntaxHighlighter {
-    highlighter: Highlighter,
-}
-
-impl SyntaxHighlighter {
-    fn new() -> Result<Self> {
-        let grammar = Arc::new(CompiledGrammar::new(GrammarConfig {
-            language: tree_sitter_vixen::language().into(),
-            highlights_query: tree_sitter_vixen::HIGHLIGHTS_QUERY,
-            injections_query: tree_sitter_vixen::INJECTIONS_QUERY,
-            locals_query: tree_sitter_vixen::LOCALS_QUERY,
-        })?);
-
-        let store = Arc::new(GrammarStore::new());
-        store.insert("vixen", grammar);
-
-        Ok(Self {
-            highlighter: Highlighter::with_store(store),
-        })
-    }
-
-    fn syntax_annotations(
-        &mut self,
-        source: &BuildDiagnosticSource,
-        relevant_lines: Option<&BTreeSet<i32>>,
-    ) -> Result<Vec<Annotation>> {
-        if source.language.as_deref() != Some("vixen") {
-            return Ok(Vec::new());
-        }
-
-        let mut annotations = Vec::new();
-        for span in spans_to_themed(self.highlighter.highlight_spans("vixen", &source.text)?) {
-            if span.start >= span.end {
-                continue;
-            }
-            let start_line = line_number(&source.text, span.start)?;
-            if let Some(relevant_lines) = relevant_lines
-                && !relevant_lines.contains(&start_line)
-            {
-                continue;
-            }
-
-            let start = byte_offset_to_display_boundary(&source.text, span.start)?;
-            let end = byte_offset_to_display_boundary(&source.text, span.end)?;
-            annotations.push(Annotation {
-                spans: vec![Span::new(source.source_id.as_str(), start, end)],
-                role: AnnotationRole::SyntaxToken,
-                syntax_class: syntax_class_for_theme_index(span.theme_index),
-                message: None,
-                priority: 0,
-            });
-        }
-
-        Ok(annotations)
-    }
-}
-
-fn syntax_class_for_theme_index(theme_index: usize) -> Option<SyntaxClass> {
-    let highlight = HIGHLIGHTS.get(theme_index)?;
-    let slot = capture_to_slot(highlight.name);
-    Some(match slot {
-        ThemeSlot::Keyword => SyntaxClass::Keyword,
-        ThemeSlot::Function => SyntaxClass::Function,
-        ThemeSlot::String => SyntaxClass::String,
-        ThemeSlot::Comment => SyntaxClass::Comment,
-        ThemeSlot::Type => SyntaxClass::Type,
-        ThemeSlot::Variable => SyntaxClass::Variable,
-        ThemeSlot::Constant => SyntaxClass::Constant,
-        ThemeSlot::Number => SyntaxClass::Number,
-        ThemeSlot::Operator => SyntaxClass::Operator,
-        ThemeSlot::Punctuation => SyntaxClass::Punctuation,
-        ThemeSlot::Property => SyntaxClass::Property,
-        ThemeSlot::Attribute => SyntaxClass::Attribute,
-        ThemeSlot::Tag => SyntaxClass::Tag,
-        ThemeSlot::Macro => SyntaxClass::Macro,
-        ThemeSlot::Label => SyntaxClass::Label,
-        ThemeSlot::Namespace => SyntaxClass::Namespace,
-        ThemeSlot::Constructor => SyntaxClass::Constructor,
-        ThemeSlot::Title => SyntaxClass::Title,
-        ThemeSlot::Strong => SyntaxClass::Strong,
-        ThemeSlot::Emphasis => SyntaxClass::Emphasis,
-        ThemeSlot::Link => SyntaxClass::Link,
-        ThemeSlot::Literal => SyntaxClass::Literal,
-        ThemeSlot::Strikethrough => SyntaxClass::Strikethrough,
-        ThemeSlot::DiffAdd => SyntaxClass::DiffAdd,
-        ThemeSlot::DiffDelete => SyntaxClass::DiffDelete,
-        ThemeSlot::Embedded => SyntaxClass::Embedded,
-        ThemeSlot::Error => SyntaxClass::Error,
-        ThemeSlot::None => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use concolor::ColorChoice;
+    use margin_term::{ColorLevel, GlyphMode, HyperlinkMode};
     use std::sync::{Mutex, MutexGuard};
     use vx_services::{
         BuildDiagnosticLabel, BuildDiagnosticLabelKind, BuildDiagnosticReport,
@@ -1035,7 +852,7 @@ mod tests {
     fn terminal_width_prefers_columns_env_var() {
         let _env = ENV_LOCK.lock().expect("env lock");
         with_env_var("COLUMNS", Some("123"), || {
-            assert_eq!(detect_terminal_width(false), 123);
+            assert_eq!(vx_diagnostics::terminal_width(false), 123);
         });
     }
 
@@ -1047,8 +864,8 @@ mod tests {
                 with_env_var("TERM", Some("xterm-256color"), || {
                     with_env_var("COLORTERM", Some("truecolor"), || {
                         with_env_var("WT_SESSION", Some("1"), || {
-                            assert_eq!(detect_color_level(true), ColorLevel::Rgb24);
-                            assert_eq!(detect_hyperlink_mode(true), HyperlinkMode::Osc8);
+                            assert_eq!(vx_diagnostics::color_level(true), ColorLevel::Rgb24);
+                            assert_eq!(vx_diagnostics::hyperlink_mode(true), HyperlinkMode::Osc8);
                         })
                     })
                 })
@@ -1056,11 +873,11 @@ mod tests {
         });
 
         with_env_var("NO_COLOR", Some("1"), || {
-            assert_eq!(detect_color_level(true), ColorLevel::None);
+            assert_eq!(vx_diagnostics::color_level(true), ColorLevel::None);
         });
 
         with_env_var("NO_HYPERLINK", Some("1"), || {
-            assert_eq!(detect_hyperlink_mode(true), HyperlinkMode::None);
+            assert_eq!(vx_diagnostics::hyperlink_mode(true), HyperlinkMode::None);
         });
     }
 

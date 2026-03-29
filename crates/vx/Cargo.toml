@@ -30,15 +30,12 @@ roam-stream = { workspace = true }
 indicatif = { workspace = true }
 vx-services.workspace = true
 vx-io = { workspace = true }
+vx-diagnostics = { workspace = true }
 vx-vfs = { workspace = true }
 margin = { workspace = true }
 margin-term = { workspace = true }
 strip-ansi-escapes = { workspace = true }
 unicode-width = { workspace = true }
-arborium = { workspace = true }
-arborium-highlight = { workspace = true }
-arborium-theme = { workspace = true }
-tree-sitter-vixen = { git = "https://github.com/bearcove/tree-sitter-vixen", rev = "9fe14bea91399543282035090086fec8a868fb6c" }
 
 [features]
 default = []

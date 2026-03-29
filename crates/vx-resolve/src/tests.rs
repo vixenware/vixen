@@ -1,6 +1,13 @@
 use std::{fs, path::Path};
 
+use margin::{
+    Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source,
+    SourceId as MarginSourceId, Span,
+};
 use rowan::{TextRange, TextSize};
+use vx_diagnostics::{
+    VixenSyntaxHighlighter, detect_terminal_capabilities, render_diagnostics_with_default_theme,
+};
 use vx_parser::{AstNode, SourceFile, parse};
 
 use crate::cap_check::{CapErrorKind, CapSet};
@@ -26,6 +33,146 @@ fn parse_file_path(path: &Path) -> SourceFile {
     let source = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     parse_file(&source)
+}
+
+fn render_type_errors(path: &Path, source: &str, errors: &[crate::TypeError]) -> String {
+    let source_name = path.display().to_string();
+    let reports = errors
+        .iter()
+        .map(|error| {
+            let (title, label, notes) = match &error.kind {
+                crate::TypeErrorKind::ArgTypeMismatch {
+                    param_name,
+                    expected,
+                    found,
+                } => (
+                    format!("argument `{param_name}` has the wrong type"),
+                    format!("expected {expected:?}, found {found:?}"),
+                    vec![
+                        Note {
+                            kind: NoteKind::Note,
+                            text: format!("parameter `{param_name}` expects {expected:?}"),
+                        },
+                        Note {
+                            kind: NoteKind::Note,
+                            text: format!("this argument has type {found:?}"),
+                        },
+                    ],
+                ),
+                crate::TypeErrorKind::BinaryOpMismatch { op, left, right } => (
+                    format!("operator `{op}` does not apply here"),
+                    format!("operands have types {left:?} and {right:?}"),
+                    vec![Note {
+                        kind: NoteKind::Note,
+                        text: format!("`{op}` is not defined for {left:?} and {right:?}"),
+                    }],
+                ),
+                crate::TypeErrorKind::NoSuchMethod {
+                    receiver_ty,
+                    method_name,
+                } => (
+                    format!("no method `{method_name}` on {receiver_ty:?}"),
+                    format!("{receiver_ty:?} has no method `{method_name}`"),
+                    vec![Note {
+                        kind: NoteKind::Help,
+                        text: format!(
+                            "define `{method_name}` on {receiver_ty:?} or call a different method"
+                        ),
+                    }],
+                ),
+                crate::TypeErrorKind::UnusedExprStatement => (
+                    "unused expression statement".to_string(),
+                    "this expression does not flow into a value".to_string(),
+                    vec![Note {
+                        kind: NoteKind::Help,
+                        text: "assign it, return it, or remove it".to_string(),
+                    }],
+                ),
+            };
+
+            Report {
+                severity: Severity::Error,
+                title,
+                annotations: vec![Annotation {
+                    spans: vec![Span::new(
+                        source_name.as_str(),
+                        u32::from(error.range.start()) as usize,
+                        u32::from(error.range.end()) as usize,
+                    )],
+                    role: AnnotationRole::PrimaryLabel,
+                    syntax_class: None,
+                    message: Some(label),
+                    priority: 100,
+                }],
+                notes,
+                sections: Vec::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    render_reports(path, source, reports)
+}
+
+fn render_resolve_errors(path: &Path, source: &str, errors: &[crate::ResolveError]) -> String {
+    let source_name = path.display().to_string();
+    let reports = errors
+        .iter()
+        .map(|error| {
+            let (source_span, title, label, notes) = match error {
+                crate::ResolveError::Unresolved { name, span } => (
+                    *span,
+                    format!("unresolved name `{name}`"),
+                    format!("`{name}` does not resolve here"),
+                    vec![Note {
+                        kind: NoteKind::Help,
+                        text: format!("define `{name}` in scope or import it"),
+                    }],
+                ),
+            };
+
+            Report {
+                severity: Severity::Error,
+                title,
+                annotations: vec![Annotation {
+                    spans: vec![Span::new(
+                        source_name.as_str(),
+                        u32::from(source_span.start()) as usize,
+                        u32::from(source_span.end()) as usize,
+                    )],
+                    role: AnnotationRole::PrimaryLabel,
+                    syntax_class: None,
+                    message: Some(label),
+                    priority: 100,
+                }],
+                notes,
+                sections: Vec::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    render_reports(path, source, reports)
+}
+
+fn render_reports(path: &Path, source: &str, mut reports: Vec<Report>) -> String {
+    let source_name = path.display().to_string();
+    let syntax_annotations = VixenSyntaxHighlighter::new()
+        .and_then(|mut highlighter| highlighter.syntax_annotations(&source_name, source, None))
+        .unwrap_or_default();
+    for report in &mut reports {
+        let mut annotations = syntax_annotations.clone();
+        annotations.append(&mut report.annotations);
+        report.annotations = annotations;
+    }
+
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: MarginSourceId(source_name.clone()),
+            name: source_name.clone(),
+            hyperlink: None,
+            text: source.to_string(),
+        }],
+        reports,
+    };
+    render_diagnostics_with_default_theme(&diagnostics, detect_terminal_capabilities())
+        .unwrap_or_else(|err| panic!("failed to render diagnostics for {}: {err}", path.display()))
 }
 
 fn stdlib_program(file: &SourceFile) -> (Vec<SourceFileRef>, ImportGraph) {
@@ -1412,115 +1559,125 @@ fn main() {
 #[test]
 fn cc_version_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
 
     let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
-        "resolve errors in {}: {:?}",
+        "resolve errors in {}:\n{}",
         path.display(),
-        resolution.errors
+        render_resolve_errors(&path, &source, &resolution.errors)
     );
 
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
-        "type errors in {}: {:?}",
+        "type errors in {}:\n{}",
         path.display(),
-        checked.errors
+        render_type_errors(&path, &source, &checked.errors)
     );
 }
 
 #[test]
 fn lua_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
 
     let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
-        "resolve errors in {}: {:?}",
+        "resolve errors in {}:\n{}",
         path.display(),
-        resolution.errors
+        render_resolve_errors(&path, &source, &resolution.errors)
     );
 
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
-        "type errors in {}: {:?}",
+        "type errors in {}:\n{}",
         path.display(),
-        checked.errors
+        render_type_errors(&path, &source, &checked.errors)
     );
 }
 
 #[test]
 fn cargo_resolve_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
 
     let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
-        "resolve errors in {}: {:?}",
+        "resolve errors in {}:\n{}",
         path.display(),
-        resolution.errors
+        render_resolve_errors(&path, &source, &resolution.errors)
     );
 
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
-        "type errors in {}: {:?}",
+        "type errors in {}:\n{}",
         path.display(),
-        checked.errors
+        render_type_errors(&path, &source, &checked.errors)
     );
 }
 
 #[test]
 fn libpng_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
 
     let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
-        "resolve errors in {}: {:?}",
+        "resolve errors in {}:\n{}",
         path.display(),
-        resolution.errors
+        render_resolve_errors(&path, &source, &resolution.errors)
     );
 
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
-        "type errors in {}: {:?}",
+        "type errors in {}:\n{}",
         path.display(),
-        checked.errors
+        render_type_errors(&path, &source, &checked.errors)
     );
 }
 
 #[test]
 fn remote_libpng_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/remote-libpng.vx");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
 
     let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
-        "resolve errors in {}: {:?}",
+        "resolve errors in {}:\n{}",
         path.display(),
-        resolution.errors
+        render_resolve_errors(&path, &source, &resolution.errors)
     );
 
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
-        "type errors in {}: {:?}",
+        "type errors in {}:\n{}",
         path.display(),
-        checked.errors
+        render_type_errors(&path, &source, &checked.errors)
     );
 }
 

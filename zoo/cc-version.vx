@@ -1,25 +1,31 @@
+let c_toolchain = import("vixen:c-toolchain");
+
 // Minimal cc-version build sketch for the current resolver/evaluator lane.
 //
 // This is intentionally separate from `zoo/lua.vx`: it exercises a small
 // discovery/exec path and returns a real output file instead of an empty tree.
+//
+// The surface here is intentionally aspirational. The point of this sketch is
+// to show the shape we want:
+// - discover returns a named toolchain record, not a pair
+// - coarse host exposure is a single authored concept
+// - toolchain discovery lives in a package/module, not on `Host`
+// - low-level CLT subpath bookkeeping should not be spelled out inline here
+
+struct CToolchain {
+  cc: String,
+  coarse_mounts: Array[SandboxExemption],
+}
+
+fn discover_c_toolchain(class: ExecutorClass) {
+  discover(class, (host) => c_toolchain.discover(host))
+}
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
   let class = executor_class("default");
-  let tool = discover(class, (host) => (
-    host.which("cc"),
-    [
-      host.exec_subpath("/usr/bin"),
-      host.exec_subpath("/Library/Developer/CommandLineTools/usr/bin"),
-      host.read_subpath("/Library/Developer/CommandLineTools"),
-      host.read_subpath("/Library/Developer/CommandLineTools/usr/lib"),
-      host.read_subpath("/Library/Developer/CommandLineTools/SDKs"),
-    ]
-  ));
-  let cc = tool._0;
-  let coarse_mounts = tool._1;
-
-  exec [cc, "--version"] where {
-    coarse_mounts: coarse_mounts,
+  let toolchain = discover_c_toolchain(class);
+  exec [toolchain.cc, "--version"] where {
+    coarse_mounts: toolchain.coarse_mounts,
     observer: (proc, _vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`

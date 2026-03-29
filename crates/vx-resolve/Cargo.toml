@@ -16,3 +16,5 @@ vx-types = { path = "../vx-types" }
 rowan = "0.16.1"
 
 [dev-dependencies]
+margin = { path = "../../crates-plus/margin" }
+vx-diagnostics = { path = "../vx-diagnostics" }
