@@ -22,8 +22,7 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 tokio-util = { workspace = true }
 
-vx-store-proto = { workspace = true }
-vxd-proto = { workspace = true }
+vx-services.workspace = true
 vx-io = { workspace = true }
 
 [features]

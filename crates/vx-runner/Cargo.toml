@@ -25,8 +25,7 @@ tokio = { workspace = true }
 eyre = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
-vx-store-proto = { workspace = true }
-vx-runner-proto = { workspace = true }
+vx-services.workspace = true
 vx-io = { workspace = true }
 moire = { workspace = true }
 

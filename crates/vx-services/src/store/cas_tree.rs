@@ -1,12 +1,12 @@
 //! Build Merkle directory trees from flat file lists.
 //!
-//! Converts a list of (relative_path, DirEntryKind) pairs into a recursive
+//! Converts a list of (relative_path, DirectoryEntryKind) pairs into a recursive
 //! DirectoryNode tree stored in the CAS.
 
 use std::collections::BTreeMap;
 
 use crate::{
-    CasNode, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+    CasNode, DirectoryEntry, DirectoryEntryKind, DirectoryNode, NodeHash, StoreClient,
     chunking::put_nodes_if_missing,
 };
 
@@ -15,7 +15,7 @@ pub struct MerkleTreeFile {
     /// Full relative path (e.g. "src/main.rs").
     pub path: String,
     /// The entry kind (SmallFile, LargeFile, Symlink).
-    pub kind: DirEntryKind,
+    pub kind: DirectoryEntryKind,
 }
 
 /// Split "foo/bar/baz" into ("foo/bar", "baz"). Root entries: ("", "name").
@@ -27,7 +27,7 @@ fn split_path(path: &str) -> (&str, &str) {
 }
 
 /// Ensure all parent directories of `dir` exist in the map.
-fn ensure_parent_dirs(dir_entries: &mut BTreeMap<String, Vec<DirEntry>>, dir: &str) {
+fn ensure_parent_dirs(dir_entries: &mut BTreeMap<String, Vec<DirectoryEntry>>, dir: &str) {
     let mut current = dir.to_string();
     while let Some(pos) = current.rfind('/') {
         current = current[..pos].to_string();
@@ -44,7 +44,7 @@ pub async fn build_merkle_tree(
     cas: &StoreClient,
     files: Vec<MerkleTreeFile>,
 ) -> Result<(NodeHash, u64), String> {
-    let mut dir_entries: BTreeMap<String, Vec<DirEntry>> = BTreeMap::new();
+    let mut dir_entries: BTreeMap<String, Vec<DirectoryEntry>> = BTreeMap::new();
 
     // Group files by parent directory
     for file in files {
@@ -52,7 +52,7 @@ pub async fn build_merkle_tree(
         dir_entries
             .entry(parent.to_string())
             .or_default()
-            .push(DirEntry {
+            .push(DirectoryEntry {
                 name: name.to_string(),
                 kind: file.kind,
             });
@@ -93,9 +93,9 @@ pub async fn build_merkle_tree(
         let mut total_size: u64 = 0;
         for entry in entries.iter() {
             match &entry.kind {
-                DirEntryKind::SmallFile { size, .. } => total_size += size,
-                DirEntryKind::LargeFile { size, .. } => total_size += size,
-                DirEntryKind::Dir { .. } => {
+                DirectoryEntryKind::SmallFile { size, .. } => total_size += size,
+                DirectoryEntryKind::LargeFile { size, .. } => total_size += size,
+                DirectoryEntryKind::Dir { .. } => {
                     let child_path = if dir_path.is_empty() {
                         entry.name.clone()
                     } else {
@@ -105,7 +105,7 @@ pub async fn build_merkle_tree(
                         total_size += child_total;
                     }
                 }
-                DirEntryKind::Symlink { .. } => {}
+                DirectoryEntryKind::Symlink { .. } => {}
             }
         }
 
@@ -125,9 +125,9 @@ pub async fn build_merkle_tree(
             dir_entries
                 .entry(parent.to_string())
                 .or_default()
-                .push(DirEntry {
+                .push(DirectoryEntry {
                     name: name.to_string(),
-                    kind: DirEntryKind::Dir { hash: node_hash },
+                    kind: DirectoryEntryKind::Dir { hash: node_hash },
                 });
         }
     }

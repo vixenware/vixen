@@ -29,7 +29,7 @@ tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 vx-tracing = { workspace = true }
-vx-store-proto = { workspace = true }
+vx-services.workspace = true
 vx-http = { workspace = true }
 vx-io = { workspace = true }
 
@@ -39,7 +39,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 vx-io = { path = "../vx-io" }
-vx-store-proto = { path = "../vx-store-proto" }
+vx-services.workspace = true
 
 [features]
 default = []

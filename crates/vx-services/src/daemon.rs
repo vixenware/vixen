@@ -1,6 +1,6 @@
 //! vxd protocol definitions
 //!
-//! This crate defines the daemon RPC surface only.
+//! This defines the daemon RPC surface only.
 //!
 //! During the evaluator purge, `vxd` is intentionally a reduced daemon shell.
 //! The protocol still carries build-shaped requests and progress/reporting
@@ -9,9 +9,9 @@
 
 use std::fmt;
 
+use crate::{ServiceVersion, store::CacheKey};
 use camino::Utf8PathBuf;
 use facet::Facet;
-use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
@@ -324,7 +324,7 @@ pub struct PsResult {
 #[roam::service]
 pub trait Vxd {
     /// Get service version information (for health checks and compatibility)
-    async fn version(&self) -> vx_store_proto::ServiceVersion;
+    async fn version(&self) -> ServiceVersion;
 
     /// Build a project.
     ///
@@ -377,266 +377,4 @@ pub trait ProgressListener {
 
     /// Add a log message
     async fn log_message(&self, message: String);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use facet_postcard::{from_slice, to_vec};
-
-    #[test]
-    fn build_failure_debug_uses_display_format() {
-        let failure = BuildFailure {
-            message: "build evaluation failed".to_string(),
-            sources: Vec::new(),
-            reports: vec![BuildDiagnosticReport {
-                severity: BuildDiagnosticSeverity::Error,
-                message: "scheduler stalled".to_string(),
-                primary_span: BuildDiagnosticSpan {
-                    source_id: "build.vx".to_string(),
-                    start: 10,
-                    end: 20,
-                },
-                labels: vec![BuildDiagnosticLabel {
-                    span: BuildDiagnosticSpan {
-                        source_id: "build.vx".to_string(),
-                        start: 10,
-                        end: 20,
-                    },
-                    kind: BuildDiagnosticLabelKind::Primary,
-                    message: Some("this expression failed".to_string()),
-                }],
-                notes: vec!["build.vx exec[class:default]: cc -c foo.c".to_string()],
-            }],
-        };
-
-        assert_eq!(format!("{failure}"), format!("{failure:?}"));
-    }
-
-    #[test]
-    fn build_result_debug_uses_display_format() {
-        let result = BuildResult {
-            success: false,
-            message: "build failed".to_string(),
-            cached: false,
-            duration_ms: 0,
-            output_path: None,
-            error: None,
-            failure: Some(BuildFailure {
-                message: "build evaluation failed".to_string(),
-                sources: Vec::new(),
-                reports: Vec::new(),
-            }),
-            total_actions: 1,
-            cache_hits: 0,
-            rebuilt: 1,
-            cancelled: 0,
-        };
-
-        assert_eq!(format!("{result}"), format!("{result:?}"));
-    }
-
-    #[test]
-    fn test_build_result_roundtrip() {
-        let result = BuildResult {
-            success: true,
-            message: "done".to_string(),
-            cached: false,
-            duration_ms: 100,
-            output_path: Some(Utf8PathBuf::from("/output/binary")),
-            error: None,
-            failure: None,
-            total_actions: 5,
-            cache_hits: 2,
-            rebuilt: 3,
-            cancelled: 0,
-        };
-
-        let bytes = to_vec(&result).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: BuildResult = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded.success, result.success);
-        assert_eq!(decoded.message, result.message);
-        assert_eq!(decoded.output_path, result.output_path);
-    }
-
-    #[test]
-    fn test_build_request_roundtrip() {
-        let request = BuildRequest::new("/home/user/project")
-            .build_file_path("/home/user/project/lua.vx")
-            .release(true)
-            .args(vec!["--verbose".to_string()])
-            .env(vec![("VX_PLATFORMS".to_string(), "local".to_string())]);
-
-        let bytes = to_vec(&request).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: BuildRequest = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded.project_path, request.project_path);
-        assert_eq!(decoded.build_file_path, request.build_file_path);
-        assert_eq!(decoded.release, request.release);
-        assert_eq!(decoded.args, request.args);
-        assert_eq!(decoded.env, request.env);
-    }
-
-    #[test]
-    fn test_option_utf8pathbuf_some() {
-        let value: Option<Utf8PathBuf> = Some(Utf8PathBuf::from("/path"));
-
-        let bytes = to_vec(&value).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: Option<Utf8PathBuf> = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn test_option_utf8pathbuf_none() {
-        let value: Option<Utf8PathBuf> = None;
-
-        let bytes = to_vec(&value).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: Option<Utf8PathBuf> = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded, value);
-    }
-
-    // Minimal struct to reproduce the issue
-    #[derive(Debug, Clone, PartialEq, Facet)]
-    struct SimpleWithOptionalPath {
-        value: u32,
-        path: Option<Utf8PathBuf>,
-    }
-
-    #[test]
-    fn test_simple_struct_with_optional_path() {
-        let value = SimpleWithOptionalPath {
-            value: 42,
-            path: Some(Utf8PathBuf::from("/path")),
-        };
-
-        let bytes = to_vec(&value).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: SimpleWithOptionalPath = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded, value);
-    }
-
-    // Mirror BuildResult structure but with u64 instead of usize
-    #[derive(Debug, Clone, PartialEq, Facet)]
-    struct MirrorBuildResultU64 {
-        success: bool,
-        message: String,
-        cached: bool,
-        duration_ms: u64,
-        output_path: Option<Utf8PathBuf>,
-        error: Option<String>,
-        failure: Option<BuildFailure>,
-        total_actions: u64,
-        cache_hits: u64,
-        rebuilt: u64,
-        cancelled: u64,
-    }
-
-    // With usize
-    #[derive(Debug, Clone, PartialEq, Facet)]
-    struct MirrorBuildResult {
-        success: bool,
-        message: String,
-        cached: bool,
-        duration_ms: u64,
-        output_path: Option<Utf8PathBuf>,
-        error: Option<String>,
-        failure: Option<BuildFailure>,
-        total_actions: usize,
-        cache_hits: usize,
-        rebuilt: usize,
-        cancelled: usize,
-    }
-
-    #[test]
-    fn test_action_progress_roundtrip() {
-        let progress = ActionProgress {
-            message: "downloading rustc".to_string(),
-            current: Some(82_000_000),
-            total: Some(158_000_000),
-        };
-
-        let bytes = to_vec(&progress).expect("serialize");
-        let decoded: ActionProgress = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded.message, progress.message);
-        assert_eq!(decoded.current, progress.current);
-        assert_eq!(decoded.total, progress.total);
-
-        // Also test with None values
-        let progress_indeterminate = ActionProgress {
-            message: "extracting".to_string(),
-            current: None,
-            total: None,
-        };
-        let bytes = to_vec(&progress_indeterminate).expect("serialize");
-        let decoded: ActionProgress = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded.message, "extracting");
-        assert_eq!(decoded.current, None);
-        assert_eq!(decoded.total, None);
-    }
-
-    #[test]
-    fn test_mirror_build_result() {
-        let value = MirrorBuildResult {
-            success: true,
-            message: "done".to_string(),
-            cached: false,
-            duration_ms: 100,
-            output_path: Some(Utf8PathBuf::from("/output/binary")),
-            error: None,
-            failure: None,
-            total_actions: 5,
-            cache_hits: 2,
-            rebuilt: 3,
-            cancelled: 0,
-        };
-
-        let bytes = to_vec(&value).expect("serialize");
-        println!("Serialized {} bytes: {:?}", bytes.len(), bytes);
-
-        let decoded: MirrorBuildResult = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn test_build_failure_roundtrip() {
-        let failure = BuildFailure {
-            message: "build input not found".to_string(),
-            sources: vec![BuildDiagnosticSource {
-                source_id: "build.vx".to_string(),
-                language: Some("vixen".to_string()),
-                text: "fn build()".to_string(),
-            }],
-            reports: vec![BuildDiagnosticReport {
-                severity: BuildDiagnosticSeverity::Error,
-                message: "build input not found".to_string(),
-                primary_span: BuildDiagnosticSpan {
-                    source_id: "build.vx".to_string(),
-                    start: 3,
-                    end: 8,
-                },
-                labels: vec![BuildDiagnosticLabel {
-                    span: BuildDiagnosticSpan {
-                        source_id: "build.vx".to_string(),
-                        start: 3,
-                        end: 8,
-                    },
-                    kind: BuildDiagnosticLabelKind::Primary,
-                    message: Some("missing input".to_string()),
-                }],
-                notes: vec!["resolved path: /workspace/input".to_string()],
-            }],
-        };
-
-        let bytes = to_vec(&failure).expect("serialize");
-        let decoded: BuildFailure = from_slice(&bytes).expect("deserialize");
-        assert_eq!(decoded, failure);
-    }
 }

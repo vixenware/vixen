@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use vx_platform_exec::resolve_tool_from_path;
 
 use vx_eval3_analysis::{
     BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
@@ -1104,25 +1103,7 @@ fn call_member(
             Ok(ExecValue::Blob(blob))
         }
         (ExecValue::Host(HostValue::Local), RuntimeMemberOp::Which) => {
-            if args.len() != 1 {
-                return Err(ExecSliceError::UnsupportedShape(
-                    "which(program) expects one argument".to_owned(),
-                ));
-            }
-            let ExecValue::String(program) = &args[0] else {
-                return Err(ExecSliceError::TypeMismatch(
-                    "which(program) expects string argument".to_owned(),
-                ));
-            };
-            let resolved = resolve_tool_from_path(program).ok_or_else(|| {
-                ExecSliceError::TypeMismatch(format!(
-                    "could not resolve tool `{program}` from PATH"
-                ))
-            })?;
-            Ok(ExecValue::ObservedTool(ObservedToolValue {
-                program: program.clone(),
-                resolved_path: resolved,
-            }))
+            panic!("'which' is garbage anyway for this kind of build, good night");
         }
         (ExecValue::Host(HostValue::Local), RuntimeMemberOp::ExecSubpath) => {
             if args.len() != 1 {

@@ -15,7 +15,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 moire = { workspace = true }
 tracing = { workspace = true }
-vx-store-proto = { workspace = true }
+vx-services.workspace = true
 
 async-compression = { version = "0.4.41", default-features = false, features = [
   "tokio",

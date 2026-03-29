@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "xtask"]
+members = ["crates/*", "crates-plus/*", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -11,15 +11,10 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 # instrumentation
 moire = { version = "1.0.0" }
-vixenfs-proto = { path = "crates/vixenfs-proto" }
-vx-store-proto = { path = "crates/vx-store-proto" }
-vx-runner-proto = { path = "crates/vx-runner-proto" }
-vx-manifest = { path = "crates/vx-manifest" }
-vxd-proto = { path = "crates/vxd-proto" }
+vx-services = { path = "crates/vx-services" }
 vx-report = { path = "crates/vx-report" }
-margin = { path = "crates/margin" }
-margin-term = { path = "crates/margin-term" }
-vx-plan = { path = "crates/vx-plan" }
+margin = { path = "crates-plus/margin" }
+margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-http = { path = "crates/vx-http" }
 vx-tracing = { path = "crates/vx-tracing" }
@@ -28,7 +23,6 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
-vx-platform-exec = { path = "crates/vx-platform-exec" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }
@@ -87,7 +81,7 @@ async-stream = "0.3"
 bytes = "1"
 
 # FUSE (Linux) — vendored
-fuse3 = { path = "crates/fuse3", features = ["telemetry"] }
+fuse3 = { path = "crates-plus/fuse3", features = ["telemetry"] }
 
 # ProjFS (Windows)
 windows-projfs = { version = "0.1", features = ["dynamic-import"] }

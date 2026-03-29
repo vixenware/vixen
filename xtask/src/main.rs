@@ -13,6 +13,7 @@ fn main() {
 
     match args.first().map(|s| s.as_str()) {
         Some("install") => install(),
+        Some("vixenfs-codegen") => vixenfs_codegen(),
         Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
         Some("perfetto-proto") => {
             if let Err(error) = perfetto_proto() {
@@ -144,6 +145,30 @@ fn install() {
             println!("Installed {}", binary_name);
         }
     }
+}
+
+fn vixenfs_codegen() -> Result<(), eyre::Error> {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("failed to locate workspace root")?
+        .to_path_buf();
+
+    let service = vixen_services::vixenfs::vfs_service_descriptor();
+    let swift = roam_codegen::targets::swift::generate_service_with_bindings(
+        service,
+        roam_codegen::targets::swift::SwiftBindings::Client,
+    );
+
+    let output = workspace_root.join("apps/mac/xcode/VixenFS/VfsClient.swift");
+
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&output, &swift)?;
+    println!("Wrote {}", output.display());
+
+    Ok(())
 }
 
 fn bump_roam(rev: Option<&str>) {

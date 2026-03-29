@@ -14,7 +14,7 @@ camino = { workspace = true }
 facet = { workspace = true }
 facet-error = { workspace = true }
 tokio = { workspace = true }
-vixenfs-proto = { workspace = true }
+vx-services.workspace = true
 cfg-if = "1"
 tracing = { workspace = true }
 vx-vfs-types = { workspace = true }

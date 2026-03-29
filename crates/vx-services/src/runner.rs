@@ -6,8 +6,8 @@
 //! shell. The request and result payloads here are placeholders, not a stable
 //! execution model.
 
+use crate::store::{ServiceVersion, StoreProgress};
 use facet::Facet;
-use vx_store_proto::{ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.

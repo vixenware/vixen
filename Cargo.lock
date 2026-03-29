@@ -674,7 +674,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf2c09e5a796b8989e7555cbe097ddd3c3ffa4c02392b9b4ad0d7cd48b1af5c2"
 dependencies = [
  "autocfg",
- "bytes",
  "camino",
  "const-fnv1a-hash",
  "iddqd",
@@ -794,7 +793,6 @@ dependencies = [
  "facet-path",
  "facet-reflect",
  "facet-value",
- "jiff",
  "tracing",
 ]
 
@@ -855,12 +853,6 @@ dependencies = [
  "facet-reflect",
  "indexmap",
 ]
-
-[[package]]
-name = "fastcdc"
-version = "3.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf51ceb43e96afbfe4dd5c6f6082af5dfd60e220820b8123792d61963f2ce6bc"
 
 [[package]]
 name = "fastrand"
@@ -2053,15 +2045,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ppv-lite86"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
-dependencies = [
- "zerocopy",
-]
-
-[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2241,46 +2224,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "ra-ap-rustc_lexer"
-version = "0.153.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7f1b8788c35235246bd93e6609c2a91a7cebc80e34b41c210b9f5619730bd68"
-dependencies = [
- "memchr",
- "unicode-ident",
- "unicode-properties",
-]
-
-[[package]]
-name = "rand"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
-dependencies = [
- "rand_chacha",
- "rand_core",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
-dependencies = [
- "ppv-lite86",
- "rand_core",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom 0.3.4",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2372,18 +2315,6 @@ dependencies = [
  "roam-core",
  "roam-hash",
  "roam-service-macros",
- "roam-types",
-]
-
-[[package]]
-name = "roam-codegen"
-version = "7.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c427795fc5183c53ff010c6cc3ac7756ba39674a7d9438b22180d87b467fda0b"
-dependencies = [
- "facet-core",
- "heck",
- "roam-hash",
  "roam-types",
 ]
 
@@ -2809,27 +2740,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
-name = "strid"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a118c95fa490818468c1a7541a55b7050e03b4fb179c81c8d10f8eda622b2326"
-dependencies = [
- "facet",
- "strid-macros",
-]
-
-[[package]]
-name = "strid-macros"
-version = "9.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afacde6a060d0297a0ae98509bb32394ba1cb0dd5141f5d14f852d68576eb86d"
-dependencies = [
- "proc-macro2",
- "quote",
- "unsynn",
-]
-
-[[package]]
 name = "strip-ansi-escapes"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3237,26 +3147,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
-name = "ulid"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
-dependencies = [
- "rand",
- "web-time",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[package]]
-name = "unicode-properties"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unicode-width"
@@ -3358,22 +3252,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5208a9710a6ca1c2da0d64289a5dcca13deb05afdedf651f4e11bcd9fc53eb"
 
 [[package]]
-name = "vixenfs-codegen"
-version = "0.1.0"
-dependencies = [
- "roam-codegen",
- "vixenfs-proto",
-]
-
-[[package]]
-name = "vixenfs-proto"
-version = "0.1.0"
-dependencies = [
- "facet",
- "roam",
-]
-
-[[package]]
 name = "vte"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3412,19 +3290,9 @@ dependencies = [
  "tree-sitter-vixen",
  "unicode-width",
  "vx-io",
- "vx-report",
- "vx-store-proto",
+ "vx-services",
  "vx-tracing",
  "vx-vfs",
- "vxd-proto",
-]
-
-[[package]]
-name = "vx-cache"
-version = "0.1.0"
-dependencies = [
- "vx-runner-proto",
- "vx-store-proto",
 ]
 
 [[package]]
@@ -3442,7 +3310,6 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "vx-eval3-analysis",
- "vx-platform-exec",
 ]
 
 [[package]]
@@ -3529,20 +3396,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-plan"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-json",
- "strid",
-]
-
-[[package]]
-name = "vx-platform-exec"
-version = "0.1.0"
-
-[[package]]
 name = "vx-reaper"
 version = "0.1.0"
 dependencies = [
@@ -3555,41 +3408,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-report"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-json",
- "tokio",
- "ulid",
- "vx-plan",
-]
-
-[[package]]
 name = "vx-resolve"
 version = "0.1.0"
 dependencies = [
  "rowan",
  "vx-parser",
  "vx-types",
-]
-
-[[package]]
-name = "vx-rs"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "facet",
- "facet-cargo-toml",
- "hex",
- "ra-ap-rustc_lexer",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "vx-manifest",
- "vx-store-proto",
 ]
 
 [[package]]
@@ -3608,18 +3432,17 @@ dependencies = [
  "tracing",
  "ur-taking-me-with-you",
  "vx-io",
- "vx-runner-proto",
- "vx-store-proto",
+ "vx-services",
  "vx-tracing",
 ]
 
 [[package]]
-name = "vx-runner-proto"
+name = "vx-services"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "facet",
  "roam",
- "vx-store-proto",
 ]
 
 [[package]]
@@ -3653,21 +3476,8 @@ dependencies = [
  "ur-taking-me-with-you",
  "vx-http",
  "vx-io",
- "vx-store-proto",
+ "vx-services",
  "vx-tracing",
-]
-
-[[package]]
-name = "vx-store-proto"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "facet",
- "facet-postcard",
- "fastcdc",
- "hex",
- "roam",
- "tokio",
 ]
 
 [[package]]
@@ -3684,7 +3494,7 @@ dependencies = [
  "tokio",
  "tokio-tar",
  "tracing",
- "vx-store-proto",
+ "vx-services",
 ]
 
 [[package]]
@@ -3723,9 +3533,9 @@ dependencies = [
  "shm-primitives",
  "tokio",
  "tracing",
- "vixenfs-proto",
  "vx-fskit",
  "vx-io",
+ "vx-services",
  "vx-vfs-types",
  "windows-projfs",
 ]
@@ -3761,9 +3571,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ur-taking-me-with-you",
- "vixenfs-proto",
  "vx-io",
- "vx-store-proto",
+ "vx-services",
  "vx-tracing",
  "vx-vfs",
 ]
@@ -3790,20 +3599,8 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vx-io",
- "vx-store-proto",
+ "vx-services",
  "vx-tracing",
- "vxd-proto",
-]
-
-[[package]]
-name = "vxd-proto"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-postcard",
- "roam",
- "vx-store-proto",
 ]
 
 [[package]]

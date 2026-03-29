@@ -2,10 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
-use vx_platform_exec::{
-    PlatformExecError, PlatformExecRequest, SandboxExemptionRequest, ToolObservationRequest,
-    resolve_tool_from_path, run_platform_exec,
-};
 
 use vx_eval3_analysis::{
     BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,

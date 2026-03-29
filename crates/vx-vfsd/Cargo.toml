@@ -21,8 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal
-vx-store-proto = { workspace = true }
-vixenfs-proto = { workspace = true }
+vx-services.workspace = true
 vx-vfs = { workspace = true }
 
 # RPC

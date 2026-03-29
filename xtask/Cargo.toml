@@ -20,10 +20,12 @@ indicatif = { workspace = true }
 owo-colors = { workspace = true }
 prost-build = "0.13"
 protoc-bin-vendored = "3"
+roam-codegen.workspace = true
 sha2 = "0.10"
 tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+vx-services.workspace = true
 
 [lints]
 workspace = true

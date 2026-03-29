@@ -368,7 +368,7 @@ pub struct ChunkEntry {
 #[derive(Debug, Clone, Facet)]
 pub struct DirectoryNode {
     /// Directory entries, sorted by name.as_bytes() lexicographic.
-    pub entries: Vec<DirEntry>,
+    pub entries: Vec<DirectoryEntry>,
     /// Recursive sum of file content bytes in this subtree.
     /// Symlinks contribute 0. For progress reporting only.
     /// Validated at finalization time (not on put_node).
@@ -377,19 +377,19 @@ pub struct DirectoryNode {
 
 /// A single entry in a DirectoryNode.
 #[derive(Debug, Clone, Facet)]
-pub struct DirEntry {
+pub struct DirectoryEntry {
     /// Filename only (not full path). Must be valid UTF-8.
     /// Must not be empty, ".", "..", or contain "/".
     pub name: String,
     /// Entry kind and associated data.
-    pub kind: DirEntryKind,
+    pub kind: DirectoryEntryKind,
 }
 
 /// Kind of directory entry. The type explicitly encodes whether a file is
 /// single-chunk or multi-chunk, eliminating any "try chunks/ then nodes/" guessing.
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
-pub enum DirEntryKind {
+pub enum DirectoryEntryKind {
     /// Regular file, single chunk (≤ CDC_MAX_CHUNK bytes).
     /// `content_hash` is blake3 of the file content, which is also the chunk hash.
     /// Fetch via `get_chunk(content_hash.0)`.
@@ -436,9 +436,9 @@ pub enum BlobRef {
 
 impl BlobRef {
     /// Convert to the corresponding `DirEntryKind` for embedding in a directory node.
-    pub fn to_dir_entry_kind(&self, executable: bool) -> DirEntryKind {
+    pub fn to_dir_entry_kind(&self, executable: bool) -> DirectoryEntryKind {
         match self {
-            BlobRef::Small { chunk, size } => DirEntryKind::SmallFile {
+            BlobRef::Small { chunk, size } => DirectoryEntryKind::SmallFile {
                 content_hash: ContentHash(chunk.0),
                 size: *size,
                 executable,
@@ -447,7 +447,7 @@ impl BlobRef {
                 blob_node,
                 content_hash,
                 size,
-            } => DirEntryKind::LargeFile {
+            } => DirectoryEntryKind::LargeFile {
                 blob_node: *blob_node,
                 content_hash: *content_hash,
                 size: *size,
@@ -1531,32 +1531,32 @@ mod tests {
     fn test_cas_node_directory_roundtrip() {
         let node = CasNode::Directory(DirectoryNode {
             entries: vec![
-                DirEntry {
+                DirectoryEntry {
                     name: "README.md".to_string(),
-                    kind: DirEntryKind::SmallFile {
+                    kind: DirectoryEntryKind::SmallFile {
                         content_hash: ContentHash(Blake3Hash([10u8; 32])),
                         size: 1024,
                         executable: false,
                     },
                 },
-                DirEntry {
+                DirectoryEntry {
                     name: "big_binary".to_string(),
-                    kind: DirEntryKind::LargeFile {
+                    kind: DirectoryEntryKind::LargeFile {
                         content_hash: ContentHash(Blake3Hash([20u8; 32])),
                         blob_node: NodeHash(Blake3Hash([21u8; 32])),
                         size: 100_000_000,
                         executable: true,
                     },
                 },
-                DirEntry {
+                DirectoryEntry {
                     name: "link".to_string(),
-                    kind: DirEntryKind::Symlink {
+                    kind: DirectoryEntryKind::Symlink {
                         target: "../other".to_string(),
                     },
                 },
-                DirEntry {
+                DirectoryEntry {
                     name: "subdir".to_string(),
-                    kind: DirEntryKind::Dir {
+                    kind: DirectoryEntryKind::Dir {
                         hash: NodeHash(Blake3Hash([30u8; 32])),
                     },
                 },
@@ -1581,9 +1581,9 @@ mod tests {
     // i[verify impl.tree]
     fn directory_nodes_reference_subtrees_by_hash() {
         let child = CasNode::Directory(DirectoryNode {
-            entries: vec![DirEntry {
+            entries: vec![DirectoryEntry {
                 name: "lib.rs".to_string(),
-                kind: DirEntryKind::SmallFile {
+                kind: DirectoryEntryKind::SmallFile {
                     content_hash: ContentHash(Blake3Hash([0x11; 32])),
                     size: 123,
                     executable: false,
@@ -1594,9 +1594,9 @@ mod tests {
         let (_, child_hash) = child.to_bytes_and_hash();
 
         let parent = CasNode::Directory(DirectoryNode {
-            entries: vec![DirEntry {
+            entries: vec![DirectoryEntry {
                 name: "src".to_string(),
-                kind: DirEntryKind::Dir { hash: child_hash },
+                kind: DirectoryEntryKind::Dir { hash: child_hash },
             }],
             total_size: 123,
         });
@@ -1606,7 +1606,7 @@ mod tests {
         let CasNode::Directory(dir) = decoded else {
             panic!("expected Directory node");
         };
-        let DirEntryKind::Dir { hash } = &dir.entries[0].kind else {
+        let DirectoryEntryKind::Dir { hash } = &dir.entries[0].kind else {
             panic!("expected child directory entry");
         };
 
@@ -1654,9 +1654,9 @@ mod tests {
     #[test]
     fn test_cas_node_to_bytes_and_hash_determinism() {
         let node = CasNode::Directory(DirectoryNode {
-            entries: vec![DirEntry {
+            entries: vec![DirectoryEntry {
                 name: "test.txt".to_string(),
-                kind: DirEntryKind::SmallFile {
+                kind: DirectoryEntryKind::SmallFile {
                     content_hash: ContentHash(Blake3Hash([42u8; 32])),
                     size: 100,
                     executable: false,
@@ -1758,9 +1758,9 @@ mod tests {
 
     #[test]
     fn golden_small_file_dir_entry() {
-        let entry = DirEntry {
+        let entry = DirectoryEntry {
             name: "hello.txt".to_string(),
-            kind: DirEntryKind::SmallFile {
+            kind: DirectoryEntryKind::SmallFile {
                 content_hash: ContentHash(Blake3Hash([0xAA; 32])),
                 size: 42,
                 executable: false,
