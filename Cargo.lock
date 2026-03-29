@@ -3907,10 +3907,7 @@ dependencies = [
  "eyre",
  "facet",
  "facet-json",
- "facet-value",
  "figue",
- "flate2",
- "hex",
  "indicatif",
  "indoc",
  "libc",
@@ -3921,18 +3918,13 @@ dependencies = [
  "roam-core",
  "roam-stream",
  "roam-types",
- "sha2",
  "strip-ansi-escapes",
- "tar",
- "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "tree-sitter-vixen",
  "unicode-width",
- "vx-http",
  "vx-io",
- "vx-platform-exec",
  "vx-report",
  "vx-store-proto",
  "vx-tracing",
@@ -3993,48 +3985,6 @@ dependencies = [
  "vx-parser",
  "vx-spec",
  "vx-store-proto",
-]
-
-[[package]]
-name = "vx-eval2"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "datatest-stable",
- "facet-json",
- "facet-toml",
- "facet-value",
- "im",
- "moire",
- "roam-core",
- "roam-stream",
- "roam-types",
- "tempfile",
- "tokio",
- "vx-eval2-proto",
- "vx-io",
- "vx-parser",
- "vx-resolve",
- "vx-spec",
- "vx-types",
-]
-
-[[package]]
-name = "vx-eval2-proto"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-postcard",
- "moire",
- "roam",
- "roam-core",
- "roam-stream",
- "roam-types",
- "tempfile",
- "tokio",
- "vx-io",
 ]
 
 [[package]]
