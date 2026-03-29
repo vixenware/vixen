@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, VecDeque};
 use vx_eval3_analysis::{
     BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
     ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
-    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId,
-    SourceExpr,
+    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField, RuntimeMemberOp, RuntimeNodeId,
+    SharedKeyedBoundaryPayload, SlotId, SourceExpr, TreeFilePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -586,16 +586,16 @@ impl<'a> RuntimeMachine<'a> {
                     dst, value, field, ..
                 } => {
                     let value = resolve_slot_operand(&value, &frame.slots)?;
-                    let projected = match (value, field.as_str()) {
-                        (ExecValue::ProcessResult { exit_code, .. }, "exit_code") => {
+                    let projected = match (value, field) {
+                        (ExecValue::ProcessResult { exit_code, .. }, RuntimeField::ExitCode) => {
                             ExecValue::Int(exit_code)
                         }
-                        (ExecValue::ProcessResult { stdout, .. }, "stdout") => {
+                        (ExecValue::ProcessResult { stdout, .. }, RuntimeField::Stdout) => {
                             ExecValue::String(stdout)
                         }
                         (other, _) => {
                             return Err(ExecSliceError::TypeMismatch(format!(
-                                "unsupported field projection `{field}` on {:?}",
+                                "unsupported runtime field projection on {:?}",
                                 other
                             )));
                         }
@@ -617,7 +617,7 @@ impl<'a> RuntimeMachine<'a> {
                         .iter()
                         .map(|arg| resolve_slot_operand(arg, &frame.slots))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let result = call_member(receiver, &method, &args)?;
+                    let result = call_member(receiver, method, &args)?;
                     frame.slots.insert(dst, SlotValue::Ready(result));
                     frame.pc += 1;
                     self.frames.insert(frame_id, frame);
@@ -625,7 +625,7 @@ impl<'a> RuntimeMachine<'a> {
                 }
                 KernelOp::BuildTree { dst, entries, .. } => {
                     let mut files = BTreeMap::new();
-                    for (path, value) in entries {
+                    for (TreeFilePath(path), value) in entries {
                         let value = resolve_slot_operand(&value, &frame.slots)?;
                         let blob = match value {
                             ExecValue::Blob(blob) => blob,
@@ -962,22 +962,22 @@ fn as_bool(value: &ExecValue, context: &str) -> Result<bool, ExecSliceError> {
 
 fn call_member(
     receiver: ExecValue,
-    method: &str,
+    method: RuntimeMemberOp,
     args: &[ExecValue],
 ) -> Result<ExecValue, ExecSliceError> {
     if !args.is_empty() {
-        return Err(ExecSliceError::UnsupportedShape(format!(
-            "member call `{method}` with args is unsupported"
-        )));
+        return Err(ExecSliceError::UnsupportedShape(
+            "runtime member call with args is unsupported".to_owned(),
+        ));
     }
     match (receiver, method) {
-        (ExecValue::String(text), "collect") => Ok(ExecValue::String(text)),
-        (ExecValue::String(text), "blob") => Ok(ExecValue::Blob(BlobValue {
+        (ExecValue::String(text), RuntimeMemberOp::Collect) => Ok(ExecValue::String(text)),
+        (ExecValue::String(text), RuntimeMemberOp::Blob) => Ok(ExecValue::Blob(BlobValue {
             bytes: text.into_bytes(),
         })),
-        (ExecValue::Blob(blob), "blob") => Ok(ExecValue::Blob(blob)),
+        (ExecValue::Blob(blob), RuntimeMemberOp::Blob) => Ok(ExecValue::Blob(blob)),
         (other, _) => Err(ExecSliceError::TypeMismatch(format!(
-            "unsupported member call `{method}` on {:?}",
+            "unsupported runtime member call on {:?}",
             other
         ))),
     }

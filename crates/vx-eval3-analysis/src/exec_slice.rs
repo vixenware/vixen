@@ -74,6 +74,21 @@ pub enum Operand {
     Int(i64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeField {
+    ExitCode,
+    Stdout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMemberOp {
+    Collect,
+    Blob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TreeFilePath(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelOp {
     AssignConstInt {
@@ -130,19 +145,19 @@ pub enum KernelOp {
         dst: SlotId,
         source: SourceExpr,
         value: Operand,
-        field: String,
+        field: RuntimeField,
     },
     CallMember {
         dst: SlotId,
         source: SourceExpr,
         receiver: Operand,
-        method: String,
+        method: RuntimeMemberOp,
         args: Vec<Operand>,
     },
     BuildTree {
         dst: SlotId,
         source: SourceExpr,
-        entries: Vec<(String, Operand)>,
+        entries: Vec<(TreeFilePath, Operand)>,
     },
     Select {
         dst: SlotId,
@@ -1046,7 +1061,7 @@ impl<'a> BodyLowering<'a> {
                     dst,
                     source: self.source_for(expr_id),
                     value,
-                    field: field_name,
+                    field: runtime_field_from_name(&field_name)?,
                 });
                 Ok(Operand::Slot(dst))
             }
@@ -1208,8 +1223,9 @@ impl<'a> BodyLowering<'a> {
                 }
 
                 if let Expr::Field(field) = callee_expr.clone()
-                    && let Some(method) = field.field_name().map(|token| token.text().to_owned())
-                    && (method == "collect" || method == "blob")
+                    && let Some(method_name) =
+                        field.field_name().map(|token| token.text().to_owned())
+                    && let Some(method) = runtime_member_op_from_name(&method_name)
                 {
                     let receiver_expr = field.receiver().ok_or_else(|| {
                         UnsupportedShape("member call receiver missing".to_owned())
@@ -1382,7 +1398,7 @@ impl<'a> BodyLowering<'a> {
     fn lower_tree_entries(
         &mut self,
         map: vx_parser::MapExpr,
-    ) -> Result<Vec<(String, Operand)>, ExecSliceError> {
+    ) -> Result<Vec<(TreeFilePath, Operand)>, ExecSliceError> {
         let mut entries = Vec::new();
         for entry in map.entries() {
             if entry.spread().is_some() {
@@ -1409,12 +1425,30 @@ impl<'a> BodyLowering<'a> {
     }
 }
 
-fn parse_tree_path_key(expr: &Expr) -> Option<String> {
+fn parse_tree_path_key(expr: &Expr) -> Option<TreeFilePath> {
     let Expr::PathLiteral(path) = expr else {
         return None;
     };
     let text = path.syntax().text().to_string();
-    Some(text.trim().trim_start_matches('@').to_owned())
+    Some(TreeFilePath(text.trim().trim_start_matches('@').to_owned()))
+}
+
+fn runtime_field_from_name(name: &str) -> Result<RuntimeField, ExecSliceError> {
+    match name {
+        "exit_code" => Ok(RuntimeField::ExitCode),
+        "stdout" => Ok(RuntimeField::Stdout),
+        _ => Err(UnsupportedShape(format!(
+            "unsupported runtime field `{name}` in executable slice"
+        ))),
+    }
+}
+
+fn runtime_member_op_from_name(name: &str) -> Option<RuntimeMemberOp> {
+    match name {
+        "collect" => Some(RuntimeMemberOp::Collect),
+        "blob" => Some(RuntimeMemberOp::Blob),
+        _ => None,
+    }
 }
 
 fn is_param_name_ref(expr: &Expr, name: &str) -> bool {
