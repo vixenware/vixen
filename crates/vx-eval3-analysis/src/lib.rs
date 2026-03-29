@@ -26,13 +26,6 @@ mod boundary;
 mod bridge_to_analysis;
 pub use bridge_to_analysis::build_minimal_analysis;
 
-mod graph;
-pub use graph::{
-    AnalysisGraph, GraphEdge, GraphEdgeKind, GraphMetadata, GraphNode, GraphNodeKind,
-    export_graph_html_from_file, graph_from_file, graph_from_source_text, project_analysis_graph,
-    project_analysis_graph_with_bridge,
-};
-
 mod exec_slice;
 pub use exec_slice::{
     DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError, ExecutableBody,
@@ -43,16 +36,7 @@ pub use exec_slice::{
 };
 
 #[cfg(test)]
-mod fixtures;
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod bridge_tests;
 
 #[cfg(test)]
 mod bridge_to_analysis_tests;
-
-#[cfg(test)]
-mod graph_tests;
