@@ -11,10 +11,6 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 # instrumentation
 moire = { version = "1.0.0" }
-
-
-# internal crates
-vx-cache = { path = "crates/vx-cache" }
 vixenfs-proto = { path = "crates/vixenfs-proto" }
 vx-store-proto = { path = "crates/vx-store-proto" }
 vx-runner-proto = { path = "crates/vx-runner-proto" }
@@ -25,33 +21,24 @@ margin = { path = "crates/margin" }
 margin-term = { path = "crates/margin-term" }
 vx-plan = { path = "crates/vx-plan" }
 vx-io = { path = "crates/vx-io" }
-vx-tarball = { path = "crates/vx-tarball" }
 vx-http = { path = "crates/vx-http" }
 vx-tracing = { path = "crates/vx-tracing" }
-vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
-vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-platform-exec = { path = "crates/vx-platform-exec" }
-perfetto-proto = { path = "crates/perfetto-proto" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-error = { version = "0.44.1" }
 facet-json = { version = "0.44.1" }
-facet-toml = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-cargo-toml = { version = "0.44.0" }
-facet-value = { version = "0.44.1" }
 
 # cmdline parsing
 figue = { version = "2.0.0" }
-
-# incremental computation
-im = "15.1.0"
 
 # RPC
 roam = "7.1.0"
@@ -95,7 +82,6 @@ tokio = { version = "1", features = [
   "sync",
   "signal",
 ] }
-tokio-test-lite = "0.2"
 futures-util = "0.3"
 async-stream = "0.3"
 bytes = "1"

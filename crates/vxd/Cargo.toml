@@ -11,54 +11,26 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vx-tracing = { workspace = true }
 facet = { workspace = true }
-facet-postcard = { workspace = true }
-facet-value = { workspace = true }
 figue = { workspace = true }
-roam = { workspace = true }
 roam-core = { workspace = true }
 roam-types = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
-futures-util = { workspace = true }
-blake3 = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
-libc = { workspace = true }
 tokio-util = { workspace = true }
-pin-project-lite = { workspace = true }
-hex = { workspace = true }
-ignore = "0.4"
-base64 = "0.22"
-flate2 = "1"
-serde_json = "1"
-sha2 = "0.10"
-tar = "0.4"
-http-body-util = "0.1"
 
 vx-store-proto = { workspace = true }
-vx-runner-proto = { workspace = true }
 vxd-proto = { workspace = true }
 vx-io = { workspace = true }
-vx-manifest = { workspace = true }
-vx-report = { workspace = true }
-vx-rs = { workspace = true }
-tokio-test-lite = { workspace = true }
-vx-cache = { workspace = true }
-vx-tarball = { workspace = true }
-vx-http = { workspace = true }
-vx-parser = { workspace = true }
-perfetto-proto.workspace = true
 
 [features]
 default = []
 diagnostics = ["moire/diagnostics"]
 
 [dev-dependencies]
-tempfile = { workspace = true }
-tar = { workspace = true }
 ariadne = { version = "0.6", features = ["auto-color"] }
 arborium = { workspace = true }
 arborium-highlight = { workspace = true }

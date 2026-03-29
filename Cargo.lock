@@ -304,12 +304,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
 name = "bincode-next"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -377,16 +371,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "bstr"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
-dependencies = [
- "memchr",
- "serde",
 ]
 
 [[package]]
@@ -623,25 +607,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "crossbeam-deque"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-epoch"
-version = "0.9.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
-dependencies = [
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -1383,19 +1348,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
-name = "globset"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "gloo-timers"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1687,22 +1639,6 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "ignore"
-version = "0.4.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
 ]
 
 [[package]]
@@ -3449,16 +3385,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-test-lite"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d510187ff54d4baba7a36d605a79a666ed9a1f07e2cff088bbfd87354d5227"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3832,8 +3758,6 @@ dependencies = [
 name = "vx-cache"
 version = "0.1.0"
 dependencies = [
- "blake3",
- "facet-postcard",
  "vx-runner-proto",
  "vx-store-proto",
 ]
@@ -4029,7 +3953,6 @@ name = "vx-runner-proto"
 version = "0.1.0"
 dependencies = [
  "facet",
- "facet-postcard",
  "roam",
  "vx-store-proto",
 ]
@@ -4067,7 +3990,6 @@ dependencies = [
  "roam-stream",
  "roam-types",
  "sha2",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4078,7 +4000,6 @@ dependencies = [
  "vx-http",
  "vx-io",
  "vx-store-proto",
- "vx-tarball",
  "vx-tracing",
 ]
 
@@ -4201,48 +4122,21 @@ dependencies = [
  "arborium-highlight",
  "arborium-theme",
  "ariadne",
- "base64",
- "blake3",
  "camino",
  "concolor",
  "eyre",
  "facet",
- "facet-postcard",
- "facet-value",
  "figue",
- "flate2",
- "futures-util",
- "hex",
- "http-body-util",
- "ignore",
- "libc",
  "moire",
- "perfetto-proto",
- "pin-project-lite",
- "roam",
  "roam-core",
  "roam-stream",
  "roam-types",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-test-lite",
  "tokio-util",
  "tracing",
  "tree-sitter-vixen",
- "vx-cache",
- "vx-http",
  "vx-io",
- "vx-manifest",
- "vx-parser",
- "vx-report",
- "vx-rs",
- "vx-runner-proto",
  "vx-store-proto",
- "vx-tarball",
  "vx-tracing",
  "vxd-proto",
 ]

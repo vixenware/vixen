@@ -23,7 +23,6 @@ roam-types = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"
-tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
@@ -33,7 +32,6 @@ vx-tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-http = { workspace = true }
 vx-io = { workspace = true }
-vx-tarball = { workspace = true }
 
 [dev-dependencies]
 roam-stream = { workspace = true }

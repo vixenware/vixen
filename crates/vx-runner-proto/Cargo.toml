@@ -15,7 +15,6 @@ roam = { workspace = true }
 vx-store-proto = { workspace = true }
 
 [dev-dependencies]
-facet-postcard = { workspace = true }
 
 [lints]
 workspace = true
