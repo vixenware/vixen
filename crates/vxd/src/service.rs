@@ -4,7 +4,7 @@
 //! the daemon RPC shell, store access needed by `vx clean --cache`, session
 //! wiring, and small bootstrap-side helper types that `main.rs` still uses.
 
-use crate::{BuildExecutorBackendKind, SpawnTracker};
+use crate::SpawnTracker;
 use camino::Utf8PathBuf;
 use moire::sync::SyncMutex;
 use std::collections::BTreeMap;
@@ -43,6 +43,13 @@ pub(crate) struct VxdServiceDeps {
     pub(crate) store_handle: Arc<ServiceHandle>,
     pub(crate) activity_registry: ActivityRegistry,
     pub(crate) build_vx_config_path: Option<Utf8PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildExecutorBackendKind {
+    Local,
+    Daemon,
+    SshBootstrap,
 }
 
 type BuildExecutorFuture =
@@ -234,7 +241,7 @@ impl BuildVxExecutors {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ActivityRegistry {
     next_id: Arc<AtomicU64>,
     entries: Arc<SyncMutex<BTreeMap<u64, Arc<SyncMutex<ActivityState>>>>>,
@@ -315,6 +322,12 @@ impl ActivityRegistry {
                 }
             })
             .collect()
+    }
+}
+
+impl Default for ActivityRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
