@@ -19,13 +19,13 @@ use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
-use vixenfs_proto::{
+use vx_io::boot::{BootDispatcher, BootGate};
+use vx_io::net::{Endpoint, Listener};
+use vx_services::StoreClient;
+use vx_services::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
 };
-use vx_io::boot::{BootDispatcher, BootGate};
-use vx_io::net::{Endpoint, Listener};
-use vx_store_proto::StoreClient;
 use vx_vfs::{VfsConfig, VfsStart};
 
 use crate::protocol::VfsdDispatcher;
@@ -83,14 +83,14 @@ impl SharedVfs {
         }
     }
 
-    fn canary_attrs(&self) -> vixenfs_proto::ItemAttributes {
-        vixenfs_proto::ItemAttributes {
+    fn canary_attrs(&self) -> vx_services::ItemAttributes {
+        vx_services::ItemAttributes {
             item_id: self.canary.item_id,
-            item_type: vixenfs_proto::ItemType::File,
+            item_type: vx_services::ItemType::File,
             size: self.canary.content.len() as u64,
             modified_time: 0,
             created_time: 0,
-            mode: vixenfs_proto::mode::FILE_REGULAR,
+            mode: vx_services::mode::FILE_REGULAR,
         }
     }
 }
@@ -101,7 +101,7 @@ impl SharedVfs {
             tracing::trace!(parent_id, %name, item_id = self.canary.item_id, "canary lookup hit");
             return LookupResult {
                 attrs: self.canary_attrs(),
-                error: vixenfs_proto::errno::OK,
+                error: vx_services::errno::OK,
             };
         }
         tracing::trace!(parent_id, %name, "lookup");
@@ -113,7 +113,7 @@ impl SharedVfs {
             tracing::trace!(item_id, "canary get_attributes hit");
             return GetAttributesResult {
                 attrs: self.canary_attrs(),
-                error: vixenfs_proto::errno::OK,
+                error: vx_services::errno::OK,
             };
         }
         tracing::trace!(item_id, "get_attributes");
@@ -133,7 +133,7 @@ impl SharedVfs {
             let end = (start + len as usize).min(content.len());
             return ReadResult {
                 data: content[start..end].to_vec(),
-                error: vixenfs_proto::errno::OK,
+                error: vx_services::errno::OK,
             };
         }
         tracing::trace!(item_id, offset, len, "read");
@@ -149,7 +149,7 @@ impl SharedVfs {
         &self,
         parent_id: ItemId,
         name: String,
-        item_type: vixenfs_proto::ItemType,
+        item_type: vx_services::ItemType,
     ) -> CreateResult {
         tracing::trace!(parent_id, %name, ?item_type, "create");
         CasVfs::create(self.inner.as_ref(), parent_id, name, item_type).await
@@ -201,7 +201,7 @@ impl Vfs for SharedVfs {
         &self,
         parent_id: ItemId,
         name: String,
-        item_type: vixenfs_proto::ItemType,
+        item_type: vx_services::ItemType,
     ) -> CreateResult {
         SharedVfs::create(self, parent_id, name, item_type).await
     }

@@ -14,7 +14,7 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use std::future::Future;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWriteExt};
-use vx_store_proto::{Blake3Hash, BlobRef, ContentHash, TreeManifest};
+use vx_services::{Blake3Hash, BlobRef, ContentHash, TreeManifest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TarballError {
@@ -403,7 +403,7 @@ pub async fn materialize_tree(
     dest: &Utf8Path,
     get_blob: impl AsyncFn(Blake3Hash) -> Result<Vec<u8>, String>,
 ) -> Result<(), TarballError> {
-    use vx_store_proto::TreeEntryKind;
+    use vx_services::TreeEntryKind;
 
     // Create destination directory
     moire::fs::create_dir_all(dest)

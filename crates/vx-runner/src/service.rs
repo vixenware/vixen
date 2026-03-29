@@ -1,7 +1,7 @@
-use vx_runner_proto::{
+use vx_services::{
     DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
 };
-use vx_store_proto::{ServiceVersion, StoreProgress};
+use vx_services::{ServiceVersion, StoreProgress};
 
 use crate::RunnerService;
 

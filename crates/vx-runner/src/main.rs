@@ -16,7 +16,7 @@ use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
-use vx_runner_proto::RunnerDispatcher;
+use vx_services::RunnerDispatcher;
 
 #[derive(Clone)]
 struct RunnerVirtualAcceptor {

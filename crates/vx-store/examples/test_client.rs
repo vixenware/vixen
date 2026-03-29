@@ -1,7 +1,7 @@
 //! Simple test client to verify vx-store TCP connectivity
 
 use eyre::Result;
-use vx_store_proto::{ChunkHash, StoreClient};
+use vx_services::{ChunkHash, StoreClient};
 
 fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -29,7 +29,7 @@ async fn async_main() -> Result<()> {
     // Test: put a chunk
     tracing::info!("Testing put_chunk...");
     let test_data = b"Hello from vx-store test client!";
-    let chunk_hash = ChunkHash(vx_store_proto::Blake3Hash::from_bytes(test_data));
+    let chunk_hash = ChunkHash(vx_services::Blake3Hash::from_bytes(test_data));
     client
         .put_chunk(chunk_hash, test_data.to_vec())
         .await

@@ -793,6 +793,7 @@ dependencies = [
  "facet-path",
  "facet-reflect",
  "facet-value",
+ "jiff",
  "tracing",
 ]
 
@@ -853,6 +854,12 @@ dependencies = [
  "facet-reflect",
  "indexmap",
 ]
+
+[[package]]
+name = "fastcdc"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf51ceb43e96afbfe4dd5c6f6082af5dfd60e220820b8123792d61963f2ce6bc"
 
 [[package]]
 name = "fastrand"
@@ -2319,6 +2326,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "roam-codegen"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c427795fc5183c53ff010c6cc3ac7756ba39674a7d9438b22180d87b467fda0b"
+dependencies = [
+ "facet-core",
+ "heck",
+ "roam-hash",
+ "roam-types",
+]
+
+[[package]]
 name = "roam-core"
 version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3305,14 +3324,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-eval3-runtime"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "vx-eval3-analysis",
-]
-
-[[package]]
 name = "vx-fskit"
 version = "0.1.0"
 dependencies = [
@@ -3440,9 +3451,14 @@ dependencies = [
 name = "vx-services"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "camino",
  "facet",
+ "facet-postcard",
+ "fastcdc",
+ "hex",
  "roam",
+ "tokio",
 ]
 
 [[package]]
@@ -4076,10 +4092,12 @@ dependencies = [
  "owo-colors",
  "prost-build",
  "protoc-bin-vendored",
+ "roam-codegen",
  "sha2",
  "tar",
  "tempfile",
  "tokio",
+ "vx-services",
 ]
 
 [[package]]

@@ -2,11 +2,11 @@ use crate::registry::download_crate;
 use crate::types::StoreService;
 use moire::task::FutureExt;
 use std::time::{Duration, Instant};
-use vx_store_proto::Store as StoreRpc;
-use vx_store_proto::chunking::{PreparedBlob, prepare_blob};
-use vx_store_proto::{
-    Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
-    EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
+use vx_services::Store as StoreRpc;
+use vx_services::chunking::{PreparedBlob, prepare_blob};
+use vx_services::{
+    Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirectoryEntryKind,
+    DirectoryNode, EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
     EnsureToolchainResult, KNOWN_CDC_PARAMS, MAX_CHUNKS_PER_BLOB, MAX_MISSING_CHUNKS_BATCH,
     MAX_MISSING_NODES_BATCH, MAX_NODE_BYTES, MaterializationPlan, MaterializeStep, NodeHash,
     PublishResult, REGISTRY_MANIFEST_SCHEMA_VERSION, RegistryCrateManifest, RegistrySpec,
@@ -763,7 +763,7 @@ impl StoreRpc for StoreService {
 // Validation Helpers
 // =============================================================================
 
-fn validate_blob_node(blob: &vx_store_proto::BlobNode) -> Result<(), String> {
+fn validate_blob_node(blob: &vx_services::BlobNode) -> Result<(), String> {
     // chunks.len() >= 2 (single-chunk files should be SmallFile)
     if blob.chunks.len() < 2 {
         return Err(format!(
@@ -841,7 +841,7 @@ fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
 
         // Validate SmallFile/LargeFile size constraints
         match &entry.kind {
-            DirEntryKind::SmallFile { size, .. } => {
+            DirectoryEntryKind::SmallFile { size, .. } => {
                 if *size > CDC_MAX_CHUNK as u64 {
                     return Err(format!(
                         "entry[{i}] \"{}\" is SmallFile but size {} > CDC_MAX_CHUNK ({})",
@@ -849,7 +849,7 @@ fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
                     ));
                 }
             }
-            DirEntryKind::LargeFile { size, .. } => {
+            DirectoryEntryKind::LargeFile { size, .. } => {
                 if *size <= CDC_MAX_CHUNK as u64 {
                     return Err(format!(
                         "entry[{i}] \"{}\" is LargeFile but size {} <= CDC_MAX_CHUNK ({})",
@@ -857,7 +857,7 @@ fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
                     ));
                 }
             }
-            DirEntryKind::Dir { .. } | DirEntryKind::Symlink { .. } => {}
+            DirectoryEntryKind::Dir { .. } | DirectoryEntryKind::Symlink { .. } => {}
         }
 
         // Check sorted order and no duplicates

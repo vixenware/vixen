@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
-use vx_store_proto::{
+use vx_services::{
     BlobRef, ChunkHash, EnsureRustToolchainComponentResult, NodeHash, RustComponent, StoreClient,
     ToolchainSpecKey,
 };

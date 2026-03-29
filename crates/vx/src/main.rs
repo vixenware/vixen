@@ -18,10 +18,8 @@ use roam_core::Driver;
 use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-use vx_report::ReportStore;
-use vx_store_proto::Blake3Hash;
+use vx_services::{BuildRequest, PsResult, VxdClient};
 use vx_tracing::init_cli_stderr;
-use vxd_proto::{BuildRequest, PsResult, VxdClient};
 
 use crate::reporting::print_fatal_error;
 use crate::types::{CliContext, CliMode, DaemonStrategy};
@@ -163,7 +161,7 @@ impl CliContext {
         }
 
         let progress_listener = ProgressListenerImpl::new(self.mode.clone());
-        let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
+        let dispatcher = vx_services::ProgressListenerDispatcher::new(progress_listener);
         let virtual_handle = handle
             .session_handle
             .open_connection(
@@ -506,61 +504,7 @@ impl CliContext {
     /// Invalidate cache entries from the last build while preserving toolchains
     /// and registry crates.
     async fn cmd_clean_cache(&self, _vx_home: &Utf8PathBuf) -> Result<()> {
-        let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
-        let report_store = ReportStore::new(&cwd);
-
-        let Some(report) = report_store.load_latest().await? else {
-            println!(
-                "{} No build reports found. Run {} first.",
-                "Error:".red().bold(),
-                "vx build".cyan()
-            );
-            return Ok(());
-        };
-
-        // Collect cache keys for non-infrastructure nodes
-        let mut cache_keys = Vec::new();
-
-        for node in &report.nodes {
-            // Use cas_cache_key (the actual store cache key) when available,
-            // fall back to cache_key for older reports
-            let hex = node.cas_cache_key.as_deref().unwrap_or(&node.cache_key);
-
-            if let Some(key) = Blake3Hash::from_hex(hex) {
-                cache_keys.push(key);
-            }
-        }
-
-        if cache_keys.is_empty() {
-            println!(
-                "{} No cache entries to invalidate.",
-                "Note:".yellow().bold()
-            );
-            return Ok(());
-        }
-
-        // Connect to daemon (spawns it if needed), unpublish via RPC
-        let daemon = self.ensure_vxd().await?;
-
-        let result = daemon
-            .unpublish_cache_keys(cache_keys)
-            .await
-            .map_err(|e| eyre!("unpublish_cache_keys RPC failed: {e:?}"))?;
-
-        println!(
-            "{} Invalidated {} cache entries ({} already absent)",
-            "Done.".green().bold(),
-            result.removed,
-            result.not_found,
-        );
-        if result.removed > 0 {
-            println!(
-                "{}",
-                "Next build will re-execute these nodes from scratch.".dimmed()
-            );
-        }
-
-        Ok(())
+        bail!("vx clean --cache is temporarily unavailable during the daemon/proto merge")
     }
 
     async fn cmd_doctor(&mut self) -> Result<()> {

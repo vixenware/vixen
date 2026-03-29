@@ -13,7 +13,12 @@ fn main() {
 
     match args.first().map(|s| s.as_str()) {
         Some("install") => install(),
-        Some("vixenfs-codegen") => vixenfs_codegen(),
+        Some("vixenfs-codegen") => {
+            if let Err(error) = vixenfs_codegen() {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        }
         Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
         Some("perfetto-proto") => {
             if let Err(error) = perfetto_proto() {
@@ -151,10 +156,10 @@ fn vixenfs_codegen() -> Result<(), eyre::Error> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .ok_or("failed to locate workspace root")?
+        .ok_or_else(|| eyre::eyre!("failed to locate workspace root"))?
         .to_path_buf();
 
-    let service = vixen_services::vixenfs::vfs_service_descriptor();
+    let service = vx_services::vfs_service_descriptor();
     let swift = roam_codegen::targets::swift::generate_service_with_bindings(
         service,
         roam_codegen::targets::swift::SwiftBindings::Client,

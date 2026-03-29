@@ -25,7 +25,7 @@ use roam_types::{ConnectionSettings, Metadata, MetadataEntry, MetadataValue};
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
-use vx_store_proto::StoreDispatcher;
+use vx_services::StoreDispatcher;
 
 /// vx-store - Content-Addressed Storage daemon
 #[derive(Facet, Debug)]
@@ -82,9 +82,9 @@ impl ConnectionAcceptor for StoreVirtualAcceptor {
                     async move {
                         let mut driver = Driver::new(handle, dispatcher);
                         if wants_upstream {
-                            connection_store.set_upstream(Arc::new(
-                                vx_store_proto::StoreClient::new(driver.caller()),
-                            ));
+                            connection_store.set_upstream(Arc::new(vx_services::StoreClient::new(
+                                driver.caller(),
+                            )));
                         }
                         driver.run().await;
                     }

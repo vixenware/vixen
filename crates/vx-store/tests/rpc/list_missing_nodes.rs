@@ -1,6 +1,4 @@
-use vx_store_proto::{
-    Blake3Hash, CasNode, MAX_MISSING_NODES_BATCH, NodeHash, NodeId, NodeManifest,
-};
+use vx_services::{Blake3Hash, CasNode, MAX_MISSING_NODES_BATCH, NodeHash, NodeId, NodeManifest};
 
 use crate::harness::StoreTestEnv;
 

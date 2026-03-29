@@ -5,9 +5,9 @@ use crate::vfs::CasVfs;
 use camino::Utf8PathBuf;
 use std::collections::HashSet;
 use std::sync::Arc;
-use vx_store_proto::{
-    Blake3Hash, CasNode, ContentHash, DirEntry as CasDirEntry, DirEntryKind, DirectoryNode,
-    NodeHash, StoreClient,
+use vx_services::{
+    Blake3Hash, CasNode, ContentHash, DirectoryEntry, DirectoryEntryKind, DirectoryNode, NodeHash,
+    StoreClient,
 };
 
 #[derive(Clone)]
@@ -314,7 +314,7 @@ impl VfsdService {
         &self,
         cas: &Arc<StoreClient>,
         items: &crate::vfs::VfsItems,
-        dir_item_id: vixenfs_proto::ItemId,
+        dir_item_id: vx_services::ItemId,
     ) -> Result<NodeHash, String> {
         let mut visited = HashSet::new();
         let (hash, _total_size) = self
@@ -328,10 +328,10 @@ impl VfsdService {
         &self,
         cas: &Arc<StoreClient>,
         items: &crate::vfs::VfsItems,
-        dir_item_id: vixenfs_proto::ItemId,
-        visited: &mut HashSet<vixenfs_proto::ItemId>,
+        dir_item_id: vx_services::ItemId,
+        visited: &mut HashSet<vx_services::ItemId>,
     ) -> Result<(NodeHash, u64), String> {
-        use vixenfs_proto::ItemType;
+        use vx_services::ItemType;
 
         if !visited.insert(dir_item_id) {
             return Err(format!(
@@ -356,12 +356,12 @@ impl VfsdService {
                     total_size += size;
 
                     let kind = match child.blob_node {
-                        None => DirEntryKind::SmallFile {
+                        None => DirectoryEntryKind::SmallFile {
                             content_hash: ContentHash(hash),
                             size,
                             executable,
                         },
-                        Some(blob_node) => DirEntryKind::LargeFile {
+                        Some(blob_node) => DirectoryEntryKind::LargeFile {
                             content_hash: ContentHash(hash),
                             blob_node,
                             size,
@@ -369,7 +369,7 @@ impl VfsdService {
                         },
                     };
 
-                    entries.push(CasDirEntry {
+                    entries.push(DirectoryEntry {
                         name: child_name.to_string(),
                         kind,
                     });
@@ -381,9 +381,9 @@ impl VfsdService {
 
                     total_size += child_total;
 
-                    entries.push(CasDirEntry {
+                    entries.push(DirectoryEntry {
                         name: child_name.to_string(),
-                        kind: DirEntryKind::Dir { hash: child_hash },
+                        kind: DirectoryEntryKind::Dir { hash: child_hash },
                     });
                 }
                 ItemType::Symlink => {
@@ -415,13 +415,13 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    use vixenfs_proto::{ItemId, ItemType, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-    use vx_store_proto::{
-        Blake3Hash, CasNode, ChunkHash, ContentHash, DirEntry as CasDirEntry, DirEntryKind,
+    use vx_services::{
+        Blake3Hash, CasNode, ChunkHash, ContentHash, DirectoryEntry, DirectoryEntryKind,
         DirectoryNode, StoreClient,
         chunking::{put_chunk_if_missing, put_node_if_missing},
     };
+    use vx_services::{ItemId, ItemType, errno};
 
     use super::*;
     use crate::protocol::VfsTrackedObservation;
@@ -579,7 +579,7 @@ mod tests {
 
     async fn store_directory_node(
         cas: &StoreClient,
-        entries: Vec<CasDirEntry>,
+        entries: Vec<DirectoryEntry>,
         total_size: u64,
     ) -> Blake3Hash {
         let node = CasNode::Directory(DirectoryNode {
@@ -605,9 +605,9 @@ mod tests {
             .expect("relative path should contain a file name");
         let mut current_hash = store_directory_node(
             cas,
-            vec![CasDirEntry {
+            vec![DirectoryEntry {
                 name: leaf_name.to_string(),
-                kind: DirEntryKind::SmallFile {
+                kind: DirectoryEntryKind::SmallFile {
                     content_hash: ContentHash(content_hash),
                     size: data.len() as u64,
                     executable: false,
@@ -620,10 +620,10 @@ mod tests {
         for component in rel_path.split('/').rev().skip(1) {
             current_hash = store_directory_node(
                 cas,
-                vec![CasDirEntry {
+                vec![DirectoryEntry {
                     name: component.to_string(),
-                    kind: DirEntryKind::Dir {
-                        hash: vx_store_proto::NodeHash(current_hash),
+                    kind: DirectoryEntryKind::Dir {
+                        hash: vx_services::NodeHash(current_hash),
                     },
                 }],
                 data.len() as u64,
@@ -650,7 +650,7 @@ mod tests {
 
         let node_bytes = env
             .cas
-            .get_node(vx_store_proto::NodeHash(root_hash))
+            .get_node(vx_services::NodeHash(root_hash))
             .await
             .expect("get_node RPC failed")
             .expect("flushed empty node not found in CAS");
@@ -894,8 +894,8 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     mod buffer_flush {
         use super::*;
-        use vixenfs_proto::SetAttributesParams;
-        use vx_store_proto::{Blake3Hash, CDC_MAX_CHUNK, ChunkHash};
+        use vx_services::SetAttributesParams;
+        use vx_services::{Blake3Hash, CDC_MAX_CHUNK, ChunkHash};
 
         #[tokio::test(flavor = "multi_thread")]
         async fn flush_writes_buffered_file_to_cas_and_returns_directory_hash() {
@@ -910,7 +910,7 @@ mod tests {
 
             let node_bytes = env
                 .cas
-                .get_node(vx_store_proto::NodeHash(root_hash))
+                .get_node(vx_services::NodeHash(root_hash))
                 .await
                 .expect("get_node RPC failed")
                 .expect("flushed root node not found in CAS");

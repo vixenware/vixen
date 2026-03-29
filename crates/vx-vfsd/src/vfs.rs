@@ -36,13 +36,13 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use moire::sync::SyncMutex;
-use vixenfs_proto::{
+use vx_services::{
+    Blake3Hash, BlobNode, CasNode, ChunkHash, DirectoryEntryKind, NodeHash, StoreClient,
+};
+use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
     errno, mode,
-};
-use vx_store_proto::{
-    Blake3Hash, BlobNode, CasNode, ChunkHash, DirEntryKind, NodeHash, StoreClient,
 };
 
 use crate::protocol::{VfsPrefixStateSummary, VfsTrackedObservation};
@@ -1175,7 +1175,7 @@ impl CasVfs {
         let mut entries = Vec::with_capacity(dir.entries.len());
         for entry in dir.entries {
             let prefix_entry = match entry.kind {
-                DirEntryKind::SmallFile {
+                DirectoryEntryKind::SmallFile {
                     content_hash,
                     size,
                     executable,
@@ -1191,7 +1191,7 @@ impl CasVfs {
                     },
                     dir_node: None,
                 },
-                DirEntryKind::LargeFile {
+                DirectoryEntryKind::LargeFile {
                     content_hash,
                     blob_node,
                     size,
@@ -1208,7 +1208,7 @@ impl CasVfs {
                     },
                     dir_node: None,
                 },
-                DirEntryKind::Dir { hash, .. } => PrefixEntry {
+                DirectoryEntryKind::Dir { hash, .. } => PrefixEntry {
                     item_type: ItemType::Directory,
                     cas_hash: None,
                     blob_node: None,
@@ -1216,7 +1216,7 @@ impl CasVfs {
                     mode: mode::DIRECTORY,
                     dir_node: Some(hash),
                 },
-                DirEntryKind::Symlink { .. } => {
+                DirectoryEntryKind::Symlink { .. } => {
                     tracing::warn!(name = %entry.name, "skipping symlink (not yet supported)");
                     continue;
                 }

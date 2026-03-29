@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-use vx_store_proto::{Blake3Hash, CasNode, NodeHash, NodeId, NodeManifest, StoreClient};
+use vx_services::{Blake3Hash, CasNode, NodeHash, NodeId, NodeManifest, StoreClient};
 
 pub struct StoreTestEnv {
     _root: TempDir,

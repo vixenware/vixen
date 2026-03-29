@@ -19,7 +19,7 @@ use margin::{
 use margin_term::{
     ColorLevel, GlyphMode, HyperlinkMode, TerminalCapabilities, Theme as TerminalTheme,
 };
-use vxd_proto::{
+use vx_services::{
     BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
     BuildDiagnosticSource, BuildDiagnosticSpan, BuildFailure,
 };
@@ -560,7 +560,7 @@ mod tests {
 
     use concolor::ColorChoice;
     use std::sync::{Mutex, MutexGuard};
-    use vxd_proto::{
+    use vx_services::{
         BuildDiagnosticLabel, BuildDiagnosticLabelKind, BuildDiagnosticReport,
         BuildDiagnosticSeverity, BuildDiagnosticSource, BuildDiagnosticSpan, BuildFailure,
     };

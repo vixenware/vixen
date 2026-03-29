@@ -3,7 +3,7 @@
 use camino::Utf8PathBuf;
 use facet::Facet;
 use thiserror::Error;
-use vx_store_proto::Blake3Hash;
+use vx_services::Blake3Hash;
 
 /// Errors that can occur during exec operations.
 #[derive(Debug, Clone, Error, Facet)]

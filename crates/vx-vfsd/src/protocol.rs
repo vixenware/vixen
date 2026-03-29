@@ -1,7 +1,7 @@
 //! RPC protocol between vx-runner and vx-vfsd.
 
 use facet::Facet;
-use vx_store_proto::{Blake3Hash, NodeHash};
+use vx_services::{Blake3Hash, NodeHash};
 
 #[derive(Debug, Clone, Facet)]
 pub struct VfsPrefixStateSummary {

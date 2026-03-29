@@ -13,7 +13,7 @@ use fuse3::raw::prelude::*;
 use fuse3::telemetry::TelemetryState;
 use fuse3::{Errno, Inode, MountOptions, SetAttr, Timestamp};
 use futures_util::Stream;
-use vixenfs_proto::{ItemAttributes, ItemType, Vfs, VfsDiskNotify};
+use vx_services::{ItemAttributes, ItemType, Vfs, VfsDiskNotify};
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
 
@@ -162,7 +162,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _fh: Option<u64>,
         set_attr: SetAttr,
     ) -> fuse3::Result<ReplyAttr> {
-        let params = vixenfs_proto::SetAttributesParams {
+        let params = vx_services::SetAttributesParams {
             mode: set_attr.mode,
             modified_time: None,
             size: set_attr.size,

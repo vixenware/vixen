@@ -4,7 +4,7 @@
 //! store RPC surface intact, but fail explicitly until a new toolchain model is
 //! designed.
 
-use vx_store_proto::{
+use vx_services::{
     BlobRef, EnsureRustToolchainComponentResult, EnsureStatus, EnsureToolchainResult, NodeHash,
     RustComponent, RustToolchainSpec, ToolchainSpecKey, ZigToolchainSpec,
 };
@@ -61,7 +61,7 @@ impl StoreService {
     pub async fn ensure_rust_toolchain(
         &self,
         spec: RustToolchainSpec,
-        _progress: roam::Tx<vx_store_proto::StoreProgress>,
+        _progress: roam::Tx<vx_services::StoreProgress>,
     ) -> EnsureToolchainResult {
         unavailable_toolchain_result(
             spec.spec_key(),
@@ -73,7 +73,7 @@ impl StoreService {
         &self,
         spec: RustToolchainSpec,
         component: RustComponent,
-        _progress: roam::Tx<vx_store_proto::StoreProgress>,
+        _progress: roam::Tx<vx_services::StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
         unavailable_component_result(
             spec.spec_key(),
@@ -87,7 +87,7 @@ impl StoreService {
         spec: RustToolchainSpec,
         component: RustComponent,
         _tarball: BlobRef,
-        _progress: roam::Tx<vx_store_proto::StoreProgress>,
+        _progress: roam::Tx<vx_services::StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
         unavailable_component_result(
             spec.spec_key(),
@@ -106,7 +106,7 @@ impl StoreService {
     pub async fn ensure_zig_toolchain(
         &self,
         spec: ZigToolchainSpec,
-        _progress: roam::Tx<vx_store_proto::StoreProgress>,
+        _progress: roam::Tx<vx_services::StoreProgress>,
     ) -> EnsureToolchainResult {
         unavailable_toolchain_result(
             spec.spec_key(),

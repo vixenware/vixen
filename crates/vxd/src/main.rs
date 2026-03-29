@@ -27,8 +27,8 @@ use std::time::Duration;
 use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-use vx_store_proto::StoreClient;
-use vxd_proto::{ProgressListenerClient, VxdDispatcher};
+use vx_services::StoreClient;
+use vx_services::{ProgressListenerClient, VxdDispatcher};
 
 use crate::service::{ActivityRegistry, VxdServiceDeps};
 pub use service::VxdService;

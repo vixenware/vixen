@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use thiserror::Error;
-use vx_store_proto::Blake3Hash;
-use vx_store_proto::{EnsureRegistryCrateResult, EnsureStatus, NodeHash, RegistrySpecKey};
+use vx_services::Blake3Hash;
+use vx_services::{EnsureRegistryCrateResult, EnsureStatus, NodeHash, RegistrySpecKey};
 
 /// Maximum retry attempts for transient failures
 const MAX_RETRIES: u32 = 3;

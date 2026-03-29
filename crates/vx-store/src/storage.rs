@@ -15,9 +15,7 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use tokio::io::AsyncWriteExt;
 use vx_io::atomic_write;
-use vx_store_proto::{
-    Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
-};
+use vx_services::{Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey};
 
 // =============================================================================
 // FsStorage — single-directory storage backend

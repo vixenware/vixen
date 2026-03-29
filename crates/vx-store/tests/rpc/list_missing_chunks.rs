@@ -1,4 +1,4 @@
-use vx_store_proto::{Blake3Hash, ChunkHash, MAX_MISSING_CHUNKS_BATCH};
+use vx_services::{Blake3Hash, ChunkHash, MAX_MISSING_CHUNKS_BATCH};
 
 use crate::harness::StoreTestEnv;
 

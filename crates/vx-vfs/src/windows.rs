@@ -7,7 +7,7 @@ use std::io::{self, Cursor, Read};
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
-use vixenfs_proto::{ItemType, Vfs, VfsDiskNotify};
+use vx_services::{ItemType, Vfs, VfsDiskNotify};
 use windows_projfs::{
     DirectoryEntry, DirectoryInfo, FileCloseAction, FileInfo, Notification, ProjectedFileSystem,
     ProjectedFileSystemSource,

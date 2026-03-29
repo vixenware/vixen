@@ -11,11 +11,11 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use vx_io::boot::GracefulShutdown;
 use vx_io::spawn::ServiceHandle;
-use vx_store_proto::{ServiceVersion, StoreClient};
-use vxd_proto::{
+use vx_services::{
     BuildRequest, BuildResult, ProgressListenerClient, PsEntry, PsResult, UnpublishResult,
     VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
+use vx_services::{ServiceVersion, StoreClient};
 
 #[derive(Clone)]
 pub struct VxdService {
@@ -153,7 +153,7 @@ impl VxdRpc for VxdService {
 
     async fn unpublish_cache_keys(
         &self,
-        cache_keys: Vec<vx_store_proto::CacheKey>,
+        cache_keys: Vec<vx_services::CacheKey>,
     ) -> UnpublishResult {
         let mut removed = 0u32;
         let mut not_found = 0u32;

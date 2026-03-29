@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tar::{Builder, Header};
 use tokio::io::AsyncReadExt;
-use vx_store_proto::chunking::prepare_blob;
+use vx_services::chunking::prepare_blob;
 
 fn tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut archive_bytes = Vec::new();

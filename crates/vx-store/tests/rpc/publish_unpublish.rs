@@ -1,4 +1,4 @@
-use vx_store_proto::{Blake3Hash, NodeHash};
+use vx_services::{Blake3Hash, NodeHash};
 
 use crate::harness::StoreTestEnv;
 

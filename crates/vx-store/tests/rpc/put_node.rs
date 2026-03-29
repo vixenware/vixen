@@ -1,4 +1,4 @@
-use vx_store_proto::{
+use vx_services::{
     Blake3Hash, CAS_NODE_VERSION, CDC_MAX_CHUNK, CasNode, ChunkHash, ContentHash, NodeHash, NodeId,
     NodeManifest,
 };
@@ -67,8 +67,8 @@ async fn put_node_rejects_invalid_postcard_payload() {
 async fn put_node_rejects_invalid_blob_structure() {
     let env = StoreTestEnv::new().await;
     // BlobNode must have >=2 chunks; this payload intentionally violates that.
-    let invalid_blob = vx_store_proto::BlobNode {
-        chunks: vec![vx_store_proto::ChunkEntry {
+    let invalid_blob = vx_services::BlobNode {
+        chunks: vec![vx_services::ChunkEntry {
             hash: ChunkHash(Blake3Hash::from_bytes(b"only-one")),
             size: 1,
         }],

@@ -4,7 +4,7 @@ use crate::{
     types::CliMode,
 };
 use std::sync::atomic::{self, AtomicU64};
-use vxd_proto::{ActionProgress, ActionType, ProgressListener};
+use vx_services::{ActionProgress, ActionType, ProgressListener};
 
 /// Progress listener that dispatches to TUI, JSON, or plain text output.
 pub(crate) struct ProgressListenerImpl {

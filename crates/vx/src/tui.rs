@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing_subscriber::Layer;
-use vxd_proto::{ActionProgress, ActionType};
+use vx_services::{ActionProgress, ActionType};
 
 /// Tracks a single action
 #[derive(Debug, Clone)]
