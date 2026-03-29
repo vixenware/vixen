@@ -31,6 +31,13 @@ pub struct ExecutableBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutableClosure {
+    pub params: Vec<SlotId>,
+    pub ops: Vec<KernelOp>,
+    pub result_source: ResultSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutableRuntimeNode {
     pub id: RuntimeNodeId,
     pub kind: RuntimeBoundaryKind,
@@ -214,6 +221,7 @@ pub enum RuntimeBoundaryInputSpec {
     StringLiteral(String),
     Closure {
         source: SourceExpr,
+        closure: ExecutableClosure,
     },
     Array(Vec<RuntimeBoundaryInputSpec>),
     OpaqueExpr {
@@ -609,6 +617,14 @@ struct LoweredBody {
     local_call_dependencies: Vec<BodyId>,
 }
 
+struct LoweredClosure {
+    params: Vec<SlotId>,
+    ops: Vec<KernelOp>,
+    result: ResultSource,
+    local_call_dependencies: Vec<BodyId>,
+    awaited_runtime_nodes: Vec<RuntimeNodeId>,
+}
+
 struct BodyLowering<'a> {
     body: BodyId,
     body_source_id: vx_resolve::SourceId,
@@ -617,6 +633,7 @@ struct BodyLowering<'a> {
     expr_nodes: &'a HashMap<ExprId, Expr>,
     entry_expr: ExprId,
     use_binding_by_expr: HashMap<ExprId, BridgeLocalBindingId>,
+    use_binding_by_span: HashMap<SourceSpan, BridgeLocalBindingId>,
     binding_by_name_span: HashMap<SourceSpan, BridgeLocalBindingId>,
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
@@ -654,6 +671,20 @@ impl<'a> BodyLowering<'a> {
             if usage.body == body {
                 use_binding_by_expr.insert(usage.expr, usage.binding);
             }
+        }
+        let local_binding_by_def = body_bindings
+            .iter()
+            .map(|binding| (binding.def_id, binding.id))
+            .collect::<HashMap<_, _>>();
+        let mut use_binding_by_span = HashMap::new();
+        for resolved in &bridge.resolved_refs {
+            let Some(target) = resolved.target.as_ref().ok() else {
+                continue;
+            };
+            let Some(binding) = local_binding_by_def.get(&target.id).copied() else {
+                continue;
+            };
+            use_binding_by_span.insert(resolved.span, binding);
         }
         let binding_by_name_span = body_bindings
             .iter()
@@ -754,6 +785,7 @@ impl<'a> BodyLowering<'a> {
             expr_nodes,
             entry_expr,
             use_binding_by_expr,
+            use_binding_by_span,
             binding_by_name_span,
             binding_initializers,
             slot_by_binding,
@@ -778,6 +810,30 @@ impl<'a> BodyLowering<'a> {
             ops: self.ops,
             result,
             local_call_dependencies: self.local_call_dependencies.into_iter().collect(),
+        })
+    }
+
+    fn lower_closure(
+        mut self,
+        closure_param_bindings: Vec<BridgeLocalBindingId>,
+    ) -> Result<LoweredClosure, ExecSliceError> {
+        self.params = closure_param_bindings
+            .iter()
+            .map(|binding| {
+                self.slot_by_binding.get(binding).copied().ok_or_else(|| {
+                    UnsupportedShape(format!("missing slot for binding {}", binding.0))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.materialized_bindings = closure_param_bindings.into_iter().collect();
+        let result_operand = self.lower_expr(self.entry_expr)?;
+        let result = self.ensure_slot(result_operand, self.source_for(self.entry_expr));
+        Ok(LoweredClosure {
+            params: self.params,
+            ops: self.ops,
+            result: ResultSource::Slot(result),
+            local_call_dependencies: self.local_call_dependencies.into_iter().collect(),
+            awaited_runtime_nodes: self.awaited_runtime_nodes.into_iter().collect(),
         })
     }
 
@@ -921,6 +977,62 @@ impl<'a> BodyLowering<'a> {
         self.lower_expr(body_id)
     }
 
+    fn shipped_closure_for_expr(
+        &self,
+        closure: &vx_parser::ClosureExpr,
+        source_expr: ExprId,
+    ) -> Result<ExecutableClosure, ExecSliceError> {
+        let param_bindings = self.closure_param_bindings(closure)?;
+        let body = closure
+            .body()
+            .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
+        let body_id = self
+            .expr_id(&body)
+            .ok_or(ExecSliceError::MissingExpr(self.source_for(source_expr)))?;
+
+        let lowered = BodyLowering {
+            bridge: self.bridge,
+            analyzed: self.analyzed,
+            body: self.body,
+            body_source_id: self.body_source_id,
+            expr_nodes: self.expr_nodes,
+            entry_expr: body_id,
+            use_binding_by_expr: self.use_binding_by_expr.clone(),
+            use_binding_by_span: self.use_binding_by_span.clone(),
+            binding_by_name_span: self.binding_by_name_span.clone(),
+            binding_initializers: self.binding_initializers.clone(),
+            slot_by_binding: self.slot_by_binding.clone(),
+            runtime_node_by_expr: self.runtime_node_by_expr.clone(),
+            runtime_kind_by_expr: self.runtime_kind_by_expr.clone(),
+            lowerable_bodies: self.lowerable_bodies.clone(),
+            params: vec![],
+            next_slot: self.next_slot,
+            ops: vec![],
+            materialized_bindings: HashSet::new(),
+            lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
+            local_call_dependencies: BTreeSet::new(),
+            awaited_runtime_nodes: BTreeSet::new(),
+        }
+        .lower_closure(param_bindings)?;
+
+        if !lowered.local_call_dependencies.is_empty() {
+            return Err(UnsupportedShape(
+                "shipped closures with local body-call dependencies are unsupported".to_owned(),
+            ));
+        }
+        if !lowered.awaited_runtime_nodes.is_empty() {
+            return Err(UnsupportedShape(
+                "shipped closures with nested runtime waits are unsupported".to_owned(),
+            ));
+        }
+
+        Ok(ExecutableClosure {
+            params: lowered.params,
+            ops: lowered.ops,
+            result_source: lowered.result,
+        })
+    }
+
     fn lower_expr(&mut self, expr_id: ExprId) -> Result<Operand, ExecSliceError> {
         let expr = self.expr(expr_id)?;
         match expr {
@@ -1053,9 +1165,18 @@ impl<'a> BodyLowering<'a> {
                 }
             }
             Expr::NameRef(_) => {
-                let binding = self.use_binding_by_expr.get(&expr_id).copied().ok_or(
-                    ExecSliceError::MissingBindingForUse(self.source_for(expr_id)),
-                )?;
+                let binding = self
+                    .use_binding_by_expr
+                    .get(&expr_id)
+                    .copied()
+                    .or_else(|| {
+                        let expr = self.expr_nodes.get(&expr_id)?;
+                        let span = SourceSpan::new(self.body_source_id, expr.syntax().text_range());
+                        self.use_binding_by_span.get(&span).copied()
+                    })
+                    .ok_or(ExecSliceError::MissingBindingForUse(
+                        self.source_for(expr_id),
+                    ))?;
                 let slot = self.materialize_binding(binding)?;
                 Ok(Operand::Slot(slot))
             }
@@ -1315,35 +1436,6 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Call(call) => {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
-                    let runtime_kind = self.runtime_kind_by_expr.get(&expr_id).copied();
-                    if runtime_kind == Some(RuntimeBoundaryKind::Discover) {
-                        let positional_args = call.positional_args();
-                        if positional_args.is_empty() {
-                            return Err(UnsupportedShape(format!(
-                                "discover expects at least one argument ending with closure, got {}",
-                                positional_args.len()
-                            )));
-                        }
-                        let (closure_arg, _) = positional_args
-                            .split_last()
-                            .expect("checked discover arg count");
-                        let Expr::Closure(closure) = closure_arg.clone() else {
-                            return Err(UnsupportedShape(
-                                "discover expects final closure argument".to_owned(),
-                            ));
-                        };
-                        let host = self.alloc_temp();
-                        self.ops.push(KernelOp::AssignHostLocal {
-                            dst: host,
-                            source: self.source_for(expr_id),
-                        });
-                        return self.lower_closure_with_bound_operands(
-                            &closure,
-                            vec![Operand::Slot(host)],
-                            expr_id,
-                        );
-                    }
-
                     let positional_inputs = call
                         .positional_args()
                         .into_iter()
@@ -1495,7 +1587,7 @@ impl<'a> BodyLowering<'a> {
         {
             return match self.materialize_binding(binding) {
                 Ok(slot) => Ok(RuntimeBoundaryInputSpec::Binding { binding, slot }),
-                Err(UnsupportedShape(_)) => {
+                Err(UnsupportedShape(_)) | Err(ExecSliceError::MissingBindingForUse(_)) => {
                     Ok(RuntimeBoundaryInputSpec::UnresolvedBinding { binding })
                 }
                 Err(err) => Err(err),
@@ -1531,8 +1623,12 @@ impl<'a> BodyLowering<'a> {
             let expr_id = self.expr_id(expr).ok_or(ExecSliceError::MissingExpr(
                 self.source_for(self.entry_expr),
             ))?;
+            let Expr::Closure(closure) = expr else {
+                unreachable!("checked closure expr");
+            };
             return Ok(RuntimeBoundaryInputSpec::Closure {
                 source: self.source_for(expr_id),
+                closure: self.shipped_closure_for_expr(closure, expr_id)?,
             });
         }
 

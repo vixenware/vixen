@@ -3,9 +3,10 @@ use vx_platform_exec::resolve_tool_from_path;
 
 use vx_eval3_analysis::{
     BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
-    ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
-    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField, RuntimeMemberOp, RuntimeNodeId,
-    SharedKeyedBoundaryPayload, SlotId, SourceExpr, TreeFilePath,
+    ExecutableBody, ExecutableClosure, ExecutableProgram, ExprId, KernelId, KernelOp, Operand,
+    ResultSource, RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload,
+    RuntimeField, RuntimeMemberOp, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId, SourceExpr,
+    TreeFilePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -183,7 +184,10 @@ pub enum BoundaryPositionalInputValue {
     },
     IntLiteral(i64),
     StringLiteral(String),
-    ClosureIdentity(SourceExpr),
+    Closure {
+        source: SourceExpr,
+        closure: ExecutableClosure,
+    },
     Array(Vec<BoundaryPositionalInputValue>),
     OpaqueExpr(SourceExpr),
 }
@@ -214,6 +218,37 @@ pub fn eval_executable_program_with_driver<D: BoundaryDriver>(
 ) -> Result<EvalOutcome, ExecSliceError> {
     let mut session = RuntimeSession::new(program)?;
     session.run_with_driver(driver)
+}
+
+pub fn eval_executable_closure(
+    closure: &ExecutableClosure,
+    args: Vec<ExecValue>,
+) -> Result<ExecValue, ExecSliceError> {
+    let body_id = BodyId(0);
+    let program = ExecutableProgram {
+        entry: body_id,
+        bodies: BTreeMap::from([(
+            body_id,
+            ExecutableBody {
+                id: body_id,
+                kernel: KernelId(0),
+                params: closure.params.clone(),
+                ops: closure.ops.clone(),
+                result_source: closure.result_source.clone(),
+                runtime_boundary_extractions: vec![],
+                local_call_dependencies: vec![],
+            },
+        )]),
+        runtime_nodes: BTreeMap::new(),
+    };
+    let mut session = RuntimeSession::new_with_entry_args(&program, args)?;
+    match session.run_until_blocked()? {
+        EvalRunResult::Complete(outcome) => Ok(outcome.entry_result),
+        EvalRunResult::Blocked(blocked) => Err(ExecSliceError::InvalidProgram(format!(
+            "closure evaluation blocked on runtime nodes {:?}",
+            blocked.blocked_runtime_nodes
+        ))),
+    }
 }
 
 pub struct RuntimeSession<'a> {
@@ -949,8 +984,11 @@ fn resolve_positional_inputs(
                 RuntimeBoundaryInputSpec::StringLiteral(value) => {
                     BoundaryPositionalInputValue::StringLiteral(value.clone())
                 }
-                RuntimeBoundaryInputSpec::Closure { source } => {
-                    BoundaryPositionalInputValue::ClosureIdentity(source.clone())
+                RuntimeBoundaryInputSpec::Closure { source, closure } => {
+                    BoundaryPositionalInputValue::Closure {
+                        source: source.clone(),
+                        closure: closure.clone(),
+                    }
                 }
                 RuntimeBoundaryInputSpec::Array(items) => {
                     BoundaryPositionalInputValue::Array(resolve_positional_inputs(items, slots)?)

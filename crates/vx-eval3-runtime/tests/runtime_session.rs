@@ -11,8 +11,8 @@ use vx_eval3_analysis::{
 };
 use vx_eval3_runtime::{
     BlobValue, BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest,
-    CellState, EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey, RuntimeSession, TreeValue,
-    WaitReason, eval_executable_program,
+    CellState, EvalOutcome, EvalRunResult, ExecValue, HostValue, RuntimeMemoKey, RuntimeSession,
+    TreeValue, WaitReason, eval_executable_closure, eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -127,21 +127,26 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                 })
             }
             BoundaryRequest::Discover(req) => {
+                let closure = req
+                    .inputs
+                    .positional_inputs
+                    .iter()
+                    .find_map(|input| match input {
+                        BoundaryPositionalInputValue::Closure { closure, .. } => Some(closure),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                            "discover requires shipped closure input".to_owned(),
+                        )
+                    })?;
                 let first = req.inputs.positional_inputs.first().ok_or_else(|| {
                     vx_eval3_analysis::ExecSliceError::UnsupportedShape(
                         "discover requires at least one positional input".to_owned(),
                     )
                 })?;
-                match first {
-                    BoundaryPositionalInputValue::RuntimeValue { value, .. } => Ok(value.clone()),
-                    BoundaryPositionalInputValue::StringLiteral(text) => {
-                        Ok(ExecValue::String(text.clone()))
-                    }
-                    BoundaryPositionalInputValue::IntLiteral(value) => Ok(ExecValue::Int(*value)),
-                    other => Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
-                        format!("discover input shape unsupported: {:?}", other),
-                    )),
-                }
+                let _ = first;
+                eval_executable_closure(closure, vec![ExecValue::Host(HostValue::Local)])
             }
             BoundaryRequest::SharedKeyed(_) => {
                 Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
