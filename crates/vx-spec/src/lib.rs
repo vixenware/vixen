@@ -1,7 +1,8 @@
 //! Styx-backed evaluator spec fixtures.
 //!
 //! This crate is intentionally small and parsing-focused. It exists to let us
-//! experiment with fixture shapes independently of `vx-eval`.
+//! experiment with fixture shapes independently of any particular evaluator
+//! implementation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,23 +1,10 @@
 //! Runner service protocol definitions
 //!
-//! The runner service is a remote-capable worker that compiles code.
-//! All file inputs and outputs go through CAS/VFS, and shipped evaluator
-//! payloads go over RPC. No filesystem paths are shared between daemon and runner.
+//! This crate defines the runner RPC surface only.
 //!
-//! Runner responsibilities:
-//! - Materialize toolchains from CAS (cached locally)
-//! - Materialize source trees from CAS
-//! - Materialize dependency artifacts from CAS
-//! - Run rustc/zig
-//! - Ingest outputs to CAS
-//! - Return output manifest hashes
-//!
-//! Daemon responsibilities:
-//! - Ingest source files to CAS
-//! - Orchestrate build order
-//! - Compute cache keys
-//! - Check cache hits
-//! - Materialize final outputs locally (if needed)
+//! During the evaluator purge, `vx-runner` is intentionally a minimal protocol
+//! shell. The request and result payloads here are placeholders, not a stable
+//! execution model.
 
 use facet::Facet;
 use vx_store_proto::{ServiceVersion, StoreProgress};
@@ -34,39 +21,32 @@ pub const RUNNER_PROTOCOL_VERSION: u32 = 20;
 // Runner Service Trait
 // =============================================================================
 
-/// TODO: design for eval3
+/// Placeholder run request while the eval3 runner protocol is rebuilt.
 #[derive(Facet)]
 pub struct RunRequest {}
+/// Placeholder run result while the eval3 runner protocol is rebuilt.
 #[derive(Facet)]
 pub struct RunResult {}
+/// Placeholder discover request while the eval3 runner protocol is rebuilt.
 #[derive(Facet)]
 pub struct DiscoverRequest {}
+/// Placeholder discover result while the eval3 runner protocol is rebuilt.
 #[derive(Facet)]
 pub struct DiscoverResult {}
 
 /// Runner service trait
 ///
-/// A remote-capable compilation service. All inputs/outputs go through CAS.
-/// No filesystem paths are shared between the daemon and the runner.
+/// A remote-capable worker shell.
 #[roam::service]
 pub trait Runner {
     /// Get service version information (for health checks and compatibility)
     async fn version(&self) -> ServiceVersion;
 
-    /// Compile a Rust crate (lib or bin)
-    ///
-    /// Runner will:
-    /// 1. Materialize the toolchain from CAS (cached locally)
-    /// 2. Materialize the source tree from CAS
-    /// 3. Materialize dependency rlibs from CAS
-    /// 4. Run rustc
-    /// 5. Ingest output to CAS
-    /// 6. Return the output manifest hash
-    ///
-    /// Progress channel receives merged stdout/stderr lines during compilation.
-    /// Run a sandboxed command with hermetic inputs/outputs via CAS/VFS.
+    /// Run work on the runner. The payload shape is intentionally unspecified
+    /// until the eval3 execution protocol is defined.
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
 
-    /// Evaluate a shipped discovery probe on the executor host.
+    /// Evaluate discovery work on the runner host. The payload shape is
+    /// intentionally unspecified until the eval3 execution protocol is defined.
     async fn discover(&self, request: DiscoverRequest) -> DiscoverResult;
 }

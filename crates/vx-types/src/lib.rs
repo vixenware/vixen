@@ -1,7 +1,7 @@
 //! Type representation for the Vixen language.
 //!
 //! This crate defines the data structures that represent Vixen's type system.
-//! It is used by the type checker (vx-check) and evaluator (vx-eval).
+//! It is used by the type checker and evaluator stack.
 
 mod display;
 

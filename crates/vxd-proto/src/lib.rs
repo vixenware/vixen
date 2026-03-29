@@ -1,12 +1,11 @@
 //! vxd protocol definitions
 //!
-//! The daemon is the brain of vx. It:
-//! - Owns the picante incremental computation runtime
-//! - Parses manifests and tracks source files
-//! - Computes cache keys
-//! - Orchestrates builds via CAS and Exec services
+//! This crate defines the daemon RPC surface only.
 //!
-//! The CLI is a thin client that just asks the daemon to do things.
+//! During the evaluator purge, `vxd` is intentionally a reduced daemon shell.
+//! The protocol still carries build-shaped requests and progress/reporting
+//! structures because the CLI depends on them, but the daemon no longer claims
+//! to own the old picante/eval/runtime architecture.
 
 use std::fmt;
 
@@ -18,7 +17,10 @@ use vx_store_proto::CacheKey;
 /// Bump this when making breaking changes to the daemon RPC interface.
 pub const VXD_PROTOCOL_VERSION: u32 = 6;
 
-/// Request to build a project
+/// Request to build a project.
+///
+/// This remains the CLI-facing build entrypoint even while the daemon-side
+/// build implementation is being rebuilt.
 #[derive(Debug, Clone, Facet)]
 pub struct BuildRequest {
     /// Path to the project directory (containing Cargo.toml)
@@ -65,7 +67,7 @@ impl BuildRequest {
     }
 }
 
-/// Result of a build
+/// Result of a build request.
 #[derive(Clone, Facet)]
 pub struct BuildResult {
     /// Whether the build succeeded
@@ -318,13 +320,16 @@ pub struct PsResult {
     pub entries: Vec<PsEntry>,
 }
 
-/// The daemon service trait
+/// The daemon service trait.
 #[roam::service]
 pub trait Vxd {
     /// Get service version information (for health checks and compatibility)
     async fn version(&self) -> vx_store_proto::ServiceVersion;
 
-    /// Build a project
+    /// Build a project.
+    ///
+    /// During the purge this may return an explicit "unavailable" result while
+    /// preserving the CLI-facing request/response shape.
     async fn build(&self, request: BuildRequest) -> BuildResult;
 
     /// Set a session ID for cache key namespacing. When set, all cache keys
