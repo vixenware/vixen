@@ -42,6 +42,7 @@ vx-eval = { path = "crates/vx-eval" }
 vx-eval2 = { path = "crates/vx-eval2" }
 vx-eval2-proto = { path = "crates/vx-eval2-proto" }
 vx-platform-exec = { path = "crates/vx-platform-exec" }
+perfetto-proto = { path = "crates/perfetto-proto" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }
@@ -68,9 +69,7 @@ roam-shm = "7.1.0"
 shm-primitives = "7.1.0"
 roam-local = "7.1.0"
 roam-codegen = "7.1.0"
-ur-taking-me-with-you = { version = "7.1.0", features = [
-  "tokio",
-] }
+ur-taking-me-with-you = { version = "7.1.0", features = ["tokio"] }
 
 # config files
 facet-styx = { version = "3.0.0" }
@@ -154,6 +153,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "fmt",
   "ansi",
 ] }
+
+prost = "0.14.3"
 
 # Compile dependencies with optimizations even in dev builds.
 # This dramatically speeds up CPU-intensive operations like decompression (xz2/lzma)

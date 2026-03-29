@@ -2943,7 +2943,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         None,
                         Some(index + 1),
                         Some(
-                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
                                 as i32,
                         ),
                     )
@@ -2961,10 +2961,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 Some(acquire_track_id),
                 None,
                 Some(10),
-                Some(
-                    vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
-                        as i32,
-                ),
+                Some(vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
             )
         });
 
@@ -3539,7 +3536,7 @@ async fn run_build_vx_exec_via_runner(
                         None,
                         Some(1),
                         Some(
-                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
                                 as i32,
                         ),
                     )
@@ -3552,7 +3549,7 @@ async fn run_build_vx_exec_via_runner(
                         None,
                         Some(2),
                         Some(
-                            vx_eval::perfetto_proto_generated::track_descriptor::SiblingMergeBehavior::None
+                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
                                 as i32,
                         ),
                     )

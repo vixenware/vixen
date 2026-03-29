@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use prost::Message;
 
-use crate::perfetto_proto_generated::{
+use perfetto_proto::{
     DebugAnnotation, ProcessDescriptor, Trace, TracePacket, TrackDescriptor, TrackEvent,
     debug_annotation, trace_packet, track_descriptor, track_event,
 };
@@ -802,7 +802,7 @@ mod tests {
     use prost::Message;
 
     use super::*;
-    use crate::perfetto_proto_generated::{Trace, trace_packet, track_descriptor, track_event};
+    use perfetto_proto::{Trace, trace_packet, track_descriptor, track_event};
 
     fn decode_trace(path: &std::path::Path) -> Trace {
         Trace::decode(std::fs::read(path).expect("read trace").as_slice()).expect("decode trace")
@@ -846,13 +846,10 @@ mod tests {
         );
         assert!(begin.debug_annotations.iter().any(|annotation| {
             annotation.name_field
-                == Some(
-                    crate::perfetto_proto_generated::debug_annotation::NameField::Name(
-                        "node_id".to_string(),
-                    ),
-                )
-                && annotation.value
-                    == Some(crate::perfetto_proto_generated::debug_annotation::Value::IntValue(7))
+                == Some(perfetto_proto::debug_annotation::NameField::Name(
+                    "node_id".to_string(),
+                ))
+                && annotation.value == Some(perfetto_proto::debug_annotation::Value::IntValue(7))
         }));
     }
 

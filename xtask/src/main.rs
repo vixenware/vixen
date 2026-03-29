@@ -214,7 +214,7 @@ fn perfetto_proto() -> Result<()> {
     let workspace_root = find_workspace_root().context("Could not find workspace root")?;
     let proto_root = workspace_root.join("third_party/perfetto-proto");
     let proto_file = proto_root.join("perfetto_trace.proto");
-    let output_file = workspace_root.join("crates/vx-eval/src/perfetto_proto_generated.rs");
+    let output_file = workspace_root.join("crates/perfetto-proto/lib.rs");
     let output_dir = tempfile::tempdir().context("failed to create temp output dir")?;
     let protoc = protoc_bin_vendored::protoc_bin_path().context("failed to resolve protoc")?;
 
