@@ -750,6 +750,7 @@ impl CargoSketchRuntime {
             args: &args,
             env: &env,
             sandbox_root: &sandbox_root,
+            coarse_host_exec_paths: &[],
         })
         .map_err(|error| {
             EvalError::new(

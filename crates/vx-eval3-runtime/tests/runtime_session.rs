@@ -59,6 +59,52 @@ impl SingleHostCcVersionDriver {
         }
     }
 
+    fn verify_discovered_tool(
+        program: &str,
+        resolved_path: &str,
+    ) -> Result<(), vx_eval3_analysis::ExecSliceError> {
+        let actual = resolve_tool_from_path(program).ok_or_else(|| {
+            vx_eval3_analysis::ExecSliceError::VerificationFailure(format!(
+                "tool `{program}` is no longer resolvable on this runner"
+            ))
+        })?;
+        if actual != resolved_path {
+            return Err(vx_eval3_analysis::ExecSliceError::VerificationFailure(
+                format!(
+                    "tool `{program}` drifted: discovered `{resolved_path}`, runner resolved `{actual}`"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn collect_coarse_host_exec_paths(
+        inputs: &[BoundaryPositionalInputValue],
+    ) -> Result<Vec<String>, vx_eval3_analysis::ExecSliceError> {
+        let mut paths = Vec::new();
+        for input in inputs {
+            match input {
+                BoundaryPositionalInputValue::RuntimeValue { value, .. } => {
+                    if let ExecValue::DiscoveredTool(tool) = value {
+                        Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
+                        paths.push(tool.resolved_path.clone());
+                    }
+                }
+                BoundaryPositionalInputValue::Array(items) => {
+                    paths.extend(Self::collect_coarse_host_exec_paths(items)?);
+                }
+                BoundaryPositionalInputValue::MissingBinding { .. }
+                | BoundaryPositionalInputValue::IntLiteral(_)
+                | BoundaryPositionalInputValue::StringLiteral(_)
+                | BoundaryPositionalInputValue::Closure { .. }
+                | BoundaryPositionalInputValue::OpaqueExpr(_) => {}
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     fn argv_from_inputs(
         inputs: &[BoundaryPositionalInputValue],
     ) -> Result<Vec<String>, vx_eval3_analysis::ExecSliceError> {
@@ -82,6 +128,10 @@ impl SingleHostCcVersionDriver {
         match input {
             BoundaryPositionalInputValue::RuntimeValue { value, .. } => match value {
                 ExecValue::String(text) => Ok(text.clone()),
+                ExecValue::DiscoveredTool(tool) => {
+                    Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
+                    Ok(tool.resolved_path.clone())
+                }
                 other => Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
                     "exec argv expects string-like input, got {:?}",
                     other
@@ -103,6 +153,8 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
         match request {
             BoundaryRequest::Exec(req) => {
                 let argv = Self::argv_from_inputs(&req.inputs.positional_inputs)?;
+                let coarse_host_exec_paths =
+                    Self::collect_coarse_host_exec_paths(&req.inputs.positional_inputs)?;
                 let Some(program) = argv.first() else {
                     return Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
                         "exec argv cannot be empty".to_owned(),
@@ -110,11 +162,18 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                 };
                 let args = argv[1..].to_vec();
                 let env = Vec::<(String, String)>::new();
+                if program.contains('/') {
+                    assert!(
+                        coarse_host_exec_paths.iter().any(|path| path == program),
+                        "exec should carry the discovered coarse host path it relies on"
+                    );
+                }
                 let output = run_platform_exec(PlatformExecRequest {
                     program,
                     args: &args,
                     env: &env,
                     sandbox_root: self.sandbox.path(),
+                    coarse_host_exec_paths: &coarse_host_exec_paths,
                 })
                 .map_err(|err| {
                     vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
@@ -146,7 +205,16 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                     )
                 })?;
                 let _ = first;
-                eval_executable_closure(closure, vec![ExecValue::Host(HostValue::Local)])
+                let discovered =
+                    eval_executable_closure(closure, vec![ExecValue::Host(HostValue::Local)])?;
+                let ExecValue::DiscoveredTool(tool) = &discovered else {
+                    return Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
+                        "discover probe should return obligation-bearing tool value, got {:?}",
+                        discovered
+                    )));
+                };
+                Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
+                Ok(discovered)
             }
             BoundaryRequest::SharedKeyed(_) => {
                 Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(

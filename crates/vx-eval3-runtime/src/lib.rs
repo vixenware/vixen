@@ -15,6 +15,7 @@ pub enum ExecValue {
     Bool(bool),
     String(String),
     Host(HostValue),
+    DiscoveredTool(DiscoveredToolValue),
     SandboxTreeRoot(SandboxTreeRootValue),
     Blob(BlobValue),
     Tree(TreeValue),
@@ -33,6 +34,12 @@ pub enum CallableValue {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostValue {
     Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DiscoveredToolValue {
+    pub program: String,
+    pub resolved_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1087,7 +1094,10 @@ fn call_member(
                     "could not resolve tool `{program}` from PATH"
                 ))
             })?;
-            Ok(ExecValue::String(resolved))
+            Ok(ExecValue::DiscoveredTool(DiscoveredToolValue {
+                program: program.clone(),
+                resolved_path: resolved,
+            }))
         }
         (other, _) => Err(ExecSliceError::TypeMismatch(format!(
             "unsupported runtime member call on {:?}",

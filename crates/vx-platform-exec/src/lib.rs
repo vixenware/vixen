@@ -7,6 +7,7 @@ pub struct PlatformExecRequest<'a> {
     pub args: &'a [String],
     pub env: &'a [(String, String)],
     pub sandbox_root: &'a Path,
+    pub coarse_host_exec_paths: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +32,11 @@ pub fn resolve_tool_from_path(program: &str) -> Option<String> {
 }
 
 pub fn run_platform_exec(request: PlatformExecRequest<'_>) -> std::io::Result<PlatformExecOutput> {
-    let mut command = sandboxed_command(request.program, request.sandbox_root);
+    let mut command = sandboxed_command(
+        request.program,
+        request.sandbox_root,
+        request.coarse_host_exec_paths,
+    );
     hermetic_env(&mut command, request.sandbox_root);
     command.current_dir(request.sandbox_root);
     for arg in request.args {
@@ -128,7 +133,11 @@ fn additional_host_read_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn sandboxed_command(program: &str, sandbox_root: &Path) -> Command {
+fn sandboxed_command(
+    program: &str,
+    sandbox_root: &Path,
+    coarse_host_exec_paths: &[String],
+) -> Command {
     let mut profile = String::from(SEATBELT_PROFILE_BASE);
     let program_path = PathBuf::from(program);
     if program_path.is_absolute() {
@@ -140,6 +149,16 @@ fn sandboxed_command(program: &str, sandbox_root: &Path) -> Command {
         profile.push('\n');
         profile.push_str("(allow file-read* (literal ");
         profile.push_str(&sbpl_literal(&program_text));
+        profile.push_str("))");
+    }
+    for host_path in coarse_host_exec_paths {
+        profile.push('\n');
+        profile.push_str("(allow process-exec (literal ");
+        profile.push_str(&sbpl_literal(host_path));
+        profile.push_str("))");
+        profile.push('\n');
+        profile.push_str("(allow file-read* (literal ");
+        profile.push_str(&sbpl_literal(host_path));
         profile.push_str("))");
     }
     for root in additional_host_read_roots() {
@@ -167,6 +186,10 @@ fn sandboxed_command(program: &str, sandbox_root: &Path) -> Command {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sandboxed_command(program: &str, _sandbox_root: &Path) -> Command {
+fn sandboxed_command(
+    program: &str,
+    _sandbox_root: &Path,
+    _coarse_host_exec_paths: &[String],
+) -> Command {
     Command::new(program)
 }

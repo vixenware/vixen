@@ -238,6 +238,7 @@ pub enum ExecSliceError {
     MissingBindingForUse(SourceExpr),
     MissingBindingInitializer(BridgeLocalBindingId),
     TypeMismatch(String),
+    VerificationFailure(String),
     InvalidPairIndex(usize),
     InvalidProgram(String),
 }
