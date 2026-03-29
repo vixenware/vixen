@@ -3871,18 +3871,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-fuse-stress"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "libc",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "vx-http"
 version = "0.1.0"
 dependencies = [
@@ -4165,37 +4153,6 @@ dependencies = [
  "vx-io",
  "vx-vfs-types",
  "windows-projfs",
-]
-
-[[package]]
-name = "vx-vfs-bench"
-version = "0.1.0"
-dependencies = [
- "camino",
- "tokio",
- "tracing-subscriber",
- "vixenfs-proto",
- "vx-vfs",
-]
-
-[[package]]
-name = "vx-vfs-integrity"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "eyre",
- "facet",
- "fastcdc",
- "fastrand",
- "figue",
- "tokio",
- "tracing",
- "ur-taking-me-with-you",
- "vx-io",
- "vx-store-proto",
- "vx-tracing",
- "vx-vfsd",
 ]
 
 [[package]]
