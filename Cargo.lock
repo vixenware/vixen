@@ -4524,6 +4524,7 @@ dependencies = [
  "ignore",
  "libc",
  "moire",
+ "perfetto-proto",
  "petgraph 0.8.3",
  "picante",
  "pin-project-lite",

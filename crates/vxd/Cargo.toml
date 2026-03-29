@@ -57,6 +57,7 @@ vx-tarball = { workspace = true }
 vx-http = { workspace = true }
 vx-parser = { workspace = true }
 vx-eval = { workspace = true }
+perfetto-proto.workspace = true
 
 [features]
 default = []

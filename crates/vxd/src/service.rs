@@ -2942,10 +2942,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                         Some(acquire_track_id),
                         None,
                         Some(index + 1),
-                        Some(
-                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
-                                as i32,
-                        ),
+                        Some(perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2961,7 +2958,7 @@ pub(crate) async fn run_build_vx_acquire_via_store(
                 Some(acquire_track_id),
                 None,
                 Some(10),
-                Some(vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
+                Some(perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
             )
         });
 
@@ -3535,10 +3532,7 @@ async fn run_build_vx_exec_via_runner(
                         Some(runner_track_id),
                         None,
                         Some(1),
-                        Some(
-                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
-                                as i32,
-                        ),
+                        Some(perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
                     )
                 });
                 let store_node_track = event_recorder_for_progress.as_ref().map(|recorder| {
@@ -3548,10 +3542,7 @@ async fn run_build_vx_exec_via_runner(
                         Some(runner_track_id),
                         None,
                         Some(2),
-                        Some(
-                            vx_eval::perfetto_proto::track_descriptor::SiblingMergeBehavior::None
-                                as i32,
-                        ),
+                        Some(perfetto_proto::track_descriptor::SiblingMergeBehavior::None as i32),
                     )
                 });
                 let mut remote_trace_spans =
