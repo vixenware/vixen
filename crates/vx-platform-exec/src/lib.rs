@@ -231,18 +231,16 @@ fn additional_host_read_roots() -> Vec<PathBuf> {
     if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        && cargo_home.exists()
     {
-        if cargo_home.exists() {
-            roots.push(cargo_home);
-        }
+        roots.push(cargo_home);
     }
     if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
+        && rustup_home.exists()
     {
-        if rustup_home.exists() {
-            roots.push(rustup_home);
-        }
+        roots.push(rustup_home);
     }
     roots
 }

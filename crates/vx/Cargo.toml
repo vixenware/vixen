@@ -34,8 +34,6 @@ vx-store-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-http = { workspace = true }
 vx-report = { workspace = true }
-vx-eval2 = { workspace = true }
-vx-eval2-proto = { workspace = true }
 vx-platform-exec = { workspace = true }
 vx-vfs = { workspace = true }
 margin = { workspace = true }

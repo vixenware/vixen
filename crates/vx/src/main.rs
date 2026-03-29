@@ -5,41 +5,28 @@
 mod build_json;
 mod cli;
 mod diagnostics;
-mod eval_progress;
-mod eval_runtime;
 mod progress_listener;
+mod reporting;
 mod tui;
 mod types;
 
-use std::fs;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
-
 use camino::Utf8PathBuf;
 use eyre::{Result, bail, eyre};
-use facet::Facet;
-use facet_value::Value as FacetValue;
 use figue as args;
 use owo_colors::OwoColorize;
 use roam_core::Driver;
 use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
-use vx_eval2::{
-    EvalError, EvalSession, PendingRef, Resolution, RuntimeHooks, Value as EvalValue,
-    value_to_envelope,
-};
-use vx_eval2_proto::ValueEnvelope;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
 use vx_tracing::init_cli_stderr;
 use vxd_proto::{BuildRequest, PsResult, VxdClient};
 
+use crate::reporting::print_fatal_error;
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, EvalArgs, KillArgs, StartArgs},
-    eval_progress::EvalProgressReporter,
-    eval_runtime::build_eval_runtime_with_progress,
     progress_listener::ProgressListenerImpl,
 };
 use vx_io::boot::BootStatusState;
@@ -108,111 +95,6 @@ async fn async_main() {
     }
 }
 
-fn print_fatal_error(error: &eyre::Report) {
-    // Cap content width: readable at 60, never wider than terminal
-    let term_width = terminal_width().saturating_sub(4).max(40);
-    let content_width = term_width.min(90);
-
-    let full_message = format!("{error:#}");
-    let wrapped = soft_wrap(&full_message, content_width);
-    let lines: Vec<&str> = wrapped.lines().collect();
-    let bar = "─".repeat(content_width + 2);
-
-    eprintln!();
-    eprintln!("{}", format!("┌{bar}┐").red().bold());
-    eprintln!(
-        "{}",
-        format!("│ {:content_width$} │", "FATAL ERROR").red().bold()
-    );
-    eprintln!("{}", format!("├{bar}┤").red().bold());
-    for line in &lines {
-        let visible_len = visible_width(line);
-        let padding = content_width.saturating_sub(visible_len);
-        eprintln!(
-            "{}{}{}{}",
-            "│ ".red().bold(),
-            line,
-            " ".repeat(padding),
-            " │".red().bold(),
-        );
-    }
-    eprintln!("{}", format!("└{bar}┘").red().bold());
-    eprintln!();
-}
-
-/// Count visible display width, ignoring ANSI escape sequences.
-fn visible_width(s: &str) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    let stripped = strip_ansi_escapes::strip(s);
-    let plain = String::from_utf8_lossy(&stripped);
-    UnicodeWidthStr::width(plain.as_ref())
-}
-
-fn terminal_width() -> usize {
-    // Try COLUMNS env var first, then ioctl
-    if let Ok(cols) = std::env::var("COLUMNS")
-        && let Ok(w) = cols.parse::<usize>()
-    {
-        return w;
-    }
-    #[cfg(unix)]
-    {
-        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        let ret = unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) };
-        if ret == 0 && ws.ws_col > 0 {
-            return ws.ws_col as usize;
-        }
-    }
-    80
-}
-
-fn soft_wrap(text: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        if visible_width(line) <= max_width {
-            out.push_str(line);
-            out.push('\n');
-        } else {
-            // Extract the visual indent (leading whitespace after stripping ANSI).
-            // We keep the full prefix (ANSI escapes + spaces) so continuations
-            // preserve both color and indentation.
-            let (indent, indent_width) = extract_indent(line);
-            let cont_width = max_width.saturating_sub(indent_width).max(20);
-
-            let mut first = true;
-            let mut remaining = line;
-            while !remaining.is_empty() {
-                // First line uses full width; continuations use reduced width
-                // because we prepend the indent prefix.
-                let width = if first { max_width } else { cont_width };
-                if visible_width(remaining) <= width {
-                    out.push_str(remaining);
-                    out.push('\n');
-                    break;
-                }
-                let break_pos = find_wrap_point(remaining, width);
-                let chunk = &remaining[..break_pos];
-                out.push_str(chunk);
-                let active_sgr = last_sgr(chunk);
-                if active_sgr.is_some() {
-                    out.push_str("\x1b[0m");
-                }
-                out.push('\n');
-                remaining = remaining[break_pos..].trim_start();
-                first = false;
-                // Prepend indent on continuation lines
-                if !remaining.is_empty() {
-                    out.push_str(indent);
-                    if let Some(ref sgr) = active_sgr {
-                        out.push_str(sgr);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
 struct ConnectedVxd {
     handle: ServiceHandle,
     client: VxdClient,
@@ -223,299 +105,6 @@ impl std::ops::Deref for ConnectedVxd {
 
     fn deref(&self) -> &Self::Target {
         &self.client
-    }
-}
-
-#[derive(Facet)]
-#[facet(rename_all = "snake_case")]
-#[repr(u8)]
-#[allow(dead_code)]
-enum EvalCliResolution {
-    Ready {
-        value: ValueEnvelope,
-    },
-    Pending {
-        node_id: u64,
-        description: String,
-    },
-    Waiting,
-    Poison {
-        kind: String,
-        message: String,
-        detail: Option<ValueEnvelope>,
-    },
-}
-
-fn eval_error_report(error: EvalError) -> eyre::Report {
-    eyre!("{:?}: {}", error.kind, error.message)
-}
-
-/// Extract the leading "indent" from a line that may contain ANSI escapes.
-///
-/// Returns `(prefix, visible_width)` where `prefix` is the byte slice
-/// covering all leading ANSI escapes and whitespace, and `visible_width`
-/// is how many display columns the whitespace occupies.
-fn extract_indent(line: &str) -> (&str, usize) {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    let mut width = 0;
-
-    while i < bytes.len() {
-        // Skip ANSI CSI sequences (ESC [ ... final_byte)
-        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            i += 2;
-            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1; // skip final byte
-            }
-            continue;
-        }
-        // Count spaces/tabs
-        if bytes[i] == b' ' {
-            width += 1;
-            i += 1;
-        } else if bytes[i] == b'\t' {
-            width += 4; // approximate
-            i += 1;
-        } else {
-            break;
-        }
-    }
-
-    (&line[..i], width)
-}
-
-/// Extract the last SGR (Select Graphic Rendition) sequence from a string,
-/// or None if the string ends with a reset or has no SGR sequences.
-fn last_sgr(s: &str) -> Option<String> {
-    let mut last: Option<String> = None;
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            let start = i;
-            i += 2;
-            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1; // skip final byte
-                let seq = &s[start..i];
-                // Only track SGR sequences (ending with 'm')
-                if seq.ends_with('m') {
-                    if seq == "\x1b[0m" || seq == "\x1b[m" {
-                        last = None; // reset clears active style
-                    } else {
-                        last = Some(seq.to_string());
-                    }
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    last
-}
-
-/// Find byte offset in `s` where visible width reaches `max_width`,
-/// preferring to break at a space. Skips ANSI escape sequences.
-fn find_wrap_point(s: &str, max_width: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-
-    let bytes = s.as_bytes();
-    let mut orig_pos = 0;
-    let mut col = 0;
-    let mut last_space = None;
-
-    while orig_pos < bytes.len() && col < max_width {
-        if bytes[orig_pos] == b'\x1b' && orig_pos + 1 < bytes.len() && bytes[orig_pos + 1] == b'[' {
-            // Skip CSI sequence: ESC [ ... final_byte
-            orig_pos += 2;
-            while orig_pos < bytes.len() && !(0x40..=0x7E).contains(&bytes[orig_pos]) {
-                orig_pos += 1;
-            }
-            if orig_pos < bytes.len() {
-                orig_pos += 1;
-            }
-        } else {
-            let c = s[orig_pos..].chars().next().unwrap();
-            let w = UnicodeWidthChar::width(c).unwrap_or(0);
-            if col + w > max_width {
-                break;
-            }
-            if c == ' ' {
-                last_space = Some(orig_pos);
-            }
-            col += w;
-            orig_pos += c.len_utf8();
-        }
-    }
-
-    last_space.unwrap_or(orig_pos)
-}
-
-fn read_eval_source(file: &str) -> Result<(String, String, PathBuf)> {
-    if file == "-" {
-        let mut source = String::new();
-        io::stdin()
-            .read_to_string(&mut source)
-            .map_err(|error| eyre!("failed to read stdin: {error}"))?;
-        let root_dir = std::env::current_dir()?;
-        return Ok((source, "<stdin>".to_string(), root_dir));
-    }
-
-    let cwd = std::env::current_dir()?;
-    let path = PathBuf::from(file);
-    let full_path = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    };
-    let source = fs::read_to_string(&full_path)
-        .map_err(|error| eyre!("failed to read {}: {error}", full_path.display()))?;
-    let root_dir = full_path.parent().map(Path::to_path_buf).unwrap_or(cwd);
-    Ok((source, full_path.display().to_string(), root_dir))
-}
-
-fn parse_eval_args(arg_json: &[String]) -> Result<Vec<EvalValue>> {
-    arg_json.iter().map(|arg| parse_eval_arg(arg)).collect()
-}
-
-fn default_eval_workers() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-}
-
-fn parse_eval_arg(arg: &str) -> Result<EvalValue> {
-    let value = facet_json::from_str::<FacetValue>(arg)
-        .map_err(|error| eyre!("failed to parse --arg-json value {arg:?}: {error}"))?;
-    facet_value_to_eval_value(&value)
-}
-
-fn facet_value_to_eval_value(value: &FacetValue) -> Result<EvalValue> {
-    if value.is_null() {
-        return Ok(EvalValue::unit());
-    }
-    if let Some(value) = value.as_bool() {
-        return Ok(EvalValue::bool(value));
-    }
-    if let Some(value) = value.as_string() {
-        return Ok(EvalValue::string(value.as_str()));
-    }
-    if let Some(value) = value.as_number() {
-        return value
-            .to_u64()
-            .map(EvalValue::u64)
-            .ok_or_else(|| eyre!("only non-negative integer JSON numbers are supported"));
-    }
-    if let Some(items) = value.as_array() {
-        return items
-            .as_slice()
-            .iter()
-            .map(facet_value_to_eval_value)
-            .collect::<Result<Vec<_>>>()
-            .map(EvalValue::array);
-    }
-    if let Some(entries) = value.as_object() {
-        let entries = entries.iter().collect::<Vec<_>>();
-        if entries.len() == 1 && entries[0].0.as_str() == "$path" {
-            let Some(path) = entries[0].1.as_string() else {
-                bail!("`$path` JSON arguments must be strings");
-            };
-            return Ok(EvalValue::external("Path", path.as_str()));
-        }
-        if entries.len() == 1 && entries[0].0.as_str() == "$external" {
-            let Some(object) = entries[0].1.as_object() else {
-                bail!("`$external` JSON arguments must be objects");
-            };
-            let object_entries = object.iter().collect::<Vec<_>>();
-            let kind = object_entries
-                .iter()
-                .find(|(key, _)| key.as_str() == "kind")
-                .and_then(|(_, value)| value.as_string())
-                .map(|value| value.as_str())
-                .ok_or_else(|| eyre!("`$external.kind` must be a string"))?;
-            let descriptor = object_entries
-                .iter()
-                .find(|(key, _)| key.as_str() == "descriptor")
-                .and_then(|(_, value)| value.as_string())
-                .map(|value| value.as_str())
-                .ok_or_else(|| eyre!("`$external.descriptor` must be a string"))?;
-            return Ok(EvalValue::external(kind, descriptor));
-        }
-        return entries
-            .iter()
-            .map(|(key, value)| {
-                Ok((
-                    EvalValue::string(key.as_str()),
-                    facet_value_to_eval_value(value)?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()
-            .map(EvalValue::map);
-    }
-
-    Err(eyre!(
-        "unsupported JSON argument type: {:?}",
-        value.value_type()
-    ))
-}
-
-fn eval_cli_resolution(resolution: Resolution) -> Result<EvalCliResolution> {
-    match resolution {
-        Resolution::Ready(value) => Ok(EvalCliResolution::Ready {
-            value: value_to_envelope(&value).map_err(eval_error_report)?,
-        }),
-        Resolution::Pending(PendingRef {
-            node_id,
-            description,
-        }) => Ok(EvalCliResolution::Pending {
-            node_id,
-            description: description.to_string(),
-        }),
-        Resolution::Waiting => Ok(EvalCliResolution::Waiting),
-        Resolution::Poison(error) => Ok(EvalCliResolution::Poison {
-            kind: format!("{:?}", error.kind),
-            message: error.message.to_string(),
-            detail: error
-                .detail
-                .as_ref()
-                .map(value_to_envelope)
-                .transpose()
-                .map_err(eval_error_report)?,
-        }),
-    }
-}
-
-fn print_eval_resolution(mode: &CliMode, resolution: &EvalCliResolution) -> Result<()> {
-    let output = match mode {
-        CliMode::Json => facet_json::to_string(resolution)
-            .map_err(|error| eyre!("serialize eval output: {error}"))?,
-        CliMode::Text | CliMode::Tui(_) => facet_json::to_string_pretty(resolution)
-            .map_err(|error| eyre!("serialize eval output: {error}"))?,
-    };
-    println!("{output}");
-    Ok(())
-}
-
-fn print_eval_reports<Runtime: RuntimeHooks>(args: &EvalArgs, session: &EvalSession<'_, Runtime>) {
-    if args.profile {
-        eprintln!("{}", session.profile_report(args.profile_limit));
-    }
-    if args.call_profile {
-        eprintln!("{}", session.call_summary_report(args.profile_limit));
-    }
-    if args.causal_profile {
-        eprintln!("{}", session.causal_profile_report(args.profile_limit));
-    }
-    if args.owner_profile {
-        eprintln!("{}", session.owner_commit_profile_report());
-    }
-    if args.trace {
-        eprintln!("{:#?}", session.trace());
     }
 }
 
@@ -597,49 +186,8 @@ impl CliContext {
 
     // ─── Commands ───────────────────────────────────────────────────────
 
-    async fn cmd_eval(&mut self, args: EvalArgs) -> Result<()> {
-        let (source, source_id, source_dir) = read_eval_source(&args.file)?;
-        let cwd = std::env::current_dir()?;
-        let runtime = build_eval_runtime_with_progress(
-            &args.runtime,
-            source_dir,
-            cwd,
-            EvalProgressReporter::maybe_new(&self.mode),
-        )?;
-        let eval_args = parse_eval_args(&args.arg_json)?;
-        let mut session = EvalSession::new(
-            source,
-            source_id,
-            args.entry.clone(),
-            eval_args,
-            &runtime,
-            args.place.clone(),
-        );
-        if args.trace {
-            session.set_trace_enabled(true);
-        }
-        if args.profile || args.causal_profile || args.call_profile {
-            session.set_completed_work_enabled(true);
-        }
-        if args.call_profile {
-            session.set_call_summary_enabled(true);
-        }
-
-        let workers = args.workers.unwrap_or_else(default_eval_workers);
-        if workers == 0 {
-            bail!("--workers must be at least 1");
-        }
-        let resolution = session.run_parallel(workers).map_err(eval_error_report)?;
-        let cli_resolution = eval_cli_resolution(resolution.clone())?;
-        print_eval_resolution(&self.mode, &cli_resolution)?;
-        print_eval_reports(&args, &session);
-
-        match resolution {
-            Resolution::Ready(_) => Ok(()),
-            Resolution::Pending(_) | Resolution::Waiting | Resolution::Poison(_) => {
-                std::process::exit(1);
-            }
-        }
+    async fn cmd_eval(&mut self, _args: EvalArgs) -> Result<()> {
+        panic!("eval is currently under construction since eval1/eval2/eval3 lied");
     }
 
     async fn cmd_build(&mut self, args: BuildArgs) -> Result<()> {
@@ -972,14 +520,8 @@ impl CliContext {
 
         // Collect cache keys for non-infrastructure nodes
         let mut cache_keys = Vec::new();
-        let mut skipped = 0u32;
 
         for node in &report.nodes {
-            if is_infrastructure_node(&node.kind) {
-                skipped += 1;
-                continue;
-            }
-
             // Use cas_cache_key (the actual store cache key) when available,
             // fall back to cache_key for older reports
             let hex = node.cas_cache_key.as_deref().unwrap_or(&node.cache_key);
@@ -1019,10 +561,9 @@ impl CliContext {
         }
 
         println!(
-            "{} Invalidated {} cache entries ({} infrastructure preserved, {} already absent)",
+            "{} Invalidated {} cache entries ({} already absent)",
             "Done.".green().bold(),
             result.removed,
-            skipped,
             result.not_found,
         );
         if result.removed > 0 {
@@ -1120,16 +661,3 @@ fn format_duration_ms(ms: u64) -> String {
         format!("{ms}ms")
     }
 }
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/// Returns true if this node kind represents infrastructure (toolchains, registry)
-/// that should be preserved during cache invalidation.
-fn is_infrastructure_node(kind: &str) -> bool {
-    kind.starts_with("toolchain.")
-        || kind.starts_with("zig.toolchain.")
-        || kind == "registry.acquire"
-}
-
-#[cfg(test)]
-mod tests;

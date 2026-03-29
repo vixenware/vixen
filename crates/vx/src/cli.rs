@@ -127,26 +127,6 @@ pub(crate) struct EvalArgs {
     #[facet(args::named, default)]
     pub(crate) arg_json: Vec<String>,
 
-    /// Print eval2 trace events to stderr
-    #[facet(args::named)]
-    pub(crate) trace: bool,
-
-    /// Print eval2 work profile to stderr
-    #[facet(args::named)]
-    pub(crate) profile: bool,
-
-    /// Print eval2 authored call profile to stderr
-    #[facet(args::named)]
-    pub(crate) call_profile: bool,
-
-    /// Print eval2 causal work profile to stderr
-    #[facet(args::named)]
-    pub(crate) causal_profile: bool,
-
-    /// Print eval2 owner commit profile to stderr
-    #[facet(args::named)]
-    pub(crate) owner_profile: bool,
-
     /// Max entries to print in profiler reports
     #[facet(args::named, default = 20)]
     pub(crate) profile_limit: usize,

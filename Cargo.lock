@@ -2340,18 +2340,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "petgraph"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
-dependencies = [
- "fixedbitset",
- "hashbrown 0.15.5",
- "indexmap",
- "serde",
-]
-
-[[package]]
 name = "picante"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2509,7 +2497,7 @@ dependencies = [
  "log",
  "multimap",
  "once_cell",
- "petgraph 0.7.1",
+ "petgraph",
  "prettyplease",
  "prost 0.13.5",
  "prost-types",
@@ -3914,7 +3902,6 @@ dependencies = [
  "arborium",
  "arborium-highlight",
  "arborium-theme",
- "blake3",
  "camino",
  "concolor",
  "eyre",
@@ -3943,8 +3930,6 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter-vixen",
  "unicode-width",
- "vx-eval2",
- "vx-eval2-proto",
  "vx-http",
  "vx-io",
  "vx-platform-exec",
@@ -4056,9 +4041,6 @@ dependencies = [
 name = "vx-eval3-analysis"
 version = "0.1.0"
 dependencies = [
- "arborium",
- "arborium-theme",
- "tree-sitter-vixen",
  "vx-parser",
  "vx-resolve",
  "vx-types",
@@ -4070,9 +4052,7 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "vx-eval3-analysis",
- "vx-parser",
  "vx-platform-exec",
- "vx-resolve",
 ]
 
 [[package]]
@@ -4270,7 +4250,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ur-taking-me-with-you",
- "vx-cache",
  "vx-eval",
  "vx-io",
  "vx-parser",
@@ -4525,7 +4504,6 @@ dependencies = [
  "libc",
  "moire",
  "perfetto-proto",
- "petgraph 0.8.3",
  "picante",
  "pin-project-lite",
  "roam",
@@ -4549,8 +4527,6 @@ dependencies = [
  "vx-io",
  "vx-manifest",
  "vx-parser",
- "vx-plan",
- "vx-project",
  "vx-report",
  "vx-rs",
  "vx-runner-proto",
