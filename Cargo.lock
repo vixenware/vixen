@@ -4053,34 +4053,21 @@ dependencies = [
 name = "vx-runner"
 version = "0.1.0"
 dependencies = [
- "blake3",
- "camino",
  "eyre",
  "facet",
- "facet-postcard",
- "fastrand",
  "figue",
- "find-msvc-tools",
- "futures-util",
- "jiff",
- "libc",
  "moire",
  "roam",
  "roam-core",
  "roam-stream",
  "roam-types",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tracing",
  "ur-taking-me-with-you",
  "vx-io",
- "vx-parser",
  "vx-runner-proto",
  "vx-store-proto",
  "vx-tracing",
- "vx-vfsd",
 ]
 
 [[package]]

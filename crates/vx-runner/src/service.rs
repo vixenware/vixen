@@ -15,11 +15,11 @@ impl RunnerService {
     }
 
     async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
-        todo!("re-implement or redesign")
+        RunResult {}
     }
 
     async fn discover(&self, _request: DiscoverRequest) -> DiscoverResult {
-        todo!("re-implement or redesign")
+        DiscoverResult {}
     }
 }
 
