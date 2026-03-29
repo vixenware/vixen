@@ -49,18 +49,12 @@ pub enum RuntimeBoundaryPayload {
 pub struct ExecBoundaryPayload {
     pub positional_arg_count: usize,
     pub has_where_clause: bool,
-    pub observer_plan: Option<ExecObserverPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoverBoundaryPayload {
     pub positional_arg_count: usize,
     pub has_closure_arg: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecObserverPlan {
-    ProcessStdoutString,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,12 +126,6 @@ pub enum KernelOp {
         callee: BodyId,
         args: Vec<Operand>,
     },
-    ApplyExecObserver {
-        dst: SlotId,
-        source: SourceExpr,
-        process: Operand,
-        plan: ExecObserverPlan,
-    },
     AwaitRuntime {
         dst: SlotId,
         source: SourceExpr,
@@ -159,9 +147,6 @@ pub enum RuntimeBoundaryInputSpec {
     StringLiteral(String),
     Closure {
         source: SourceExpr,
-    },
-    DiscoverHostWhich {
-        program: String,
     },
     Array(Vec<RuntimeBoundaryInputSpec>),
     OpaqueExpr {
@@ -452,7 +437,6 @@ fn runtime_boundary_payload(
                 .map(|call| call.positional_args().len())
                 .unwrap_or(0),
             has_where_clause: matches!(expr_nodes.get(&expr_id), Some(Expr::Where(_))),
-            observer_plan: exec_observer_plan(expr_id, expr_nodes),
         }),
         RuntimeBoundaryKind::Discover => {
             RuntimeBoundaryPayload::Discover(DiscoverBoundaryPayload {
@@ -479,56 +463,6 @@ fn runtime_boundary_payload(
             })
         }
     }
-}
-
-fn exec_observer_plan(
-    expr_id: ExprId,
-    expr_nodes: &HashMap<ExprId, Expr>,
-) -> Option<ExecObserverPlan> {
-    let Some(expr) = expr_nodes.get(&expr_id) else {
-        return None;
-    };
-    let where_expr = match expr {
-        Expr::Where(where_expr) => Some(where_expr.clone()),
-        Expr::Call(call_expr) => expr_nodes.values().find_map(|candidate| {
-            let Expr::Where(where_expr) = candidate else {
-                return None;
-            };
-            let callee = where_expr.callee()?;
-            if callee.syntax().text_range() == call_expr.syntax().text_range() {
-                Some(where_expr.clone())
-            } else {
-                None
-            }
-        }),
-        _ => None,
-    };
-    let Some(where_expr) = where_expr else {
-        return None;
-    };
-    observer_plan_from_where(&where_expr)
-}
-
-fn observer_plan_from_where(where_expr: &vx_parser::WhereExpr) -> Option<ExecObserverPlan> {
-    let Some(keywords) = where_expr.keywords() else {
-        return None;
-    };
-    let Expr::Record(record) = keywords else {
-        return None;
-    };
-    let observer_expr = record.fields().find_map(|entry| {
-        let name = entry.name()?;
-        if name.text() == "observer" {
-            entry.value()
-        } else {
-            None
-        }
-    })?;
-    let Expr::Closure(closure) = observer_expr else {
-        return None;
-    };
-    let _ = closure.body()?;
-    Some(ExecObserverPlan::ProcessStdoutString)
 }
 
 fn runtime_call_expr(expr: Option<&Expr>) -> Option<vx_parser::CallExpr> {
@@ -619,7 +553,6 @@ struct BodyLowering<'a> {
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
-    runtime_kind_by_expr: HashMap<ExprId, RuntimeBoundaryKind>,
     lowerable_bodies: BTreeSet<BodyId>,
     params: Vec<SlotId>,
     next_slot: u32,
@@ -712,11 +645,9 @@ impl<'a> BodyLowering<'a> {
         }
 
         let mut runtime_node_by_expr = HashMap::new();
-        let mut runtime_kind_by_expr = HashMap::new();
         for extracted in &analyzed.extracted_nodes {
-            if let crate::ExtractedNodeReason::RuntimeBoundary { kind } = extracted.reason {
+            if let crate::ExtractedNodeReason::RuntimeBoundary { kind: _ } = extracted.reason {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
-                runtime_kind_by_expr.insert(extracted.source.expr, kind);
             }
         }
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
@@ -743,7 +674,6 @@ impl<'a> BodyLowering<'a> {
             binding_initializers,
             slot_by_binding,
             runtime_node_by_expr,
-            runtime_kind_by_expr,
             lowerable_bodies: lowerable_bodies.clone(),
             params,
             next_slot,
@@ -854,27 +784,43 @@ impl<'a> BodyLowering<'a> {
                 self.lower_expr(inner_id)
             }
             Expr::Where(where_expr) => {
+                if where_expr.keywords().is_some() {
+                    return Err(UnsupportedShape(
+                        "where keywords/observer lowering is not supported in executable slice"
+                            .to_owned(),
+                    ));
+                }
+                if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
+                    let call = where_expr
+                        .callee()
+                        .and_then(|callee| vx_parser::CallExpr::cast(callee.syntax().clone()))
+                        .ok_or_else(|| {
+                            UnsupportedShape(
+                                "runtime boundary where-expression must wrap a call".to_owned(),
+                            )
+                        })?;
+                    let positional_inputs = call
+                        .positional_args()
+                        .into_iter()
+                        .map(|arg| self.runtime_input_spec_for_expr(&arg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::AwaitRuntime {
+                        dst,
+                        source: self.source_for(expr_id),
+                        node,
+                        positional_inputs,
+                    });
+                    self.awaited_runtime_nodes.insert(node);
+                    return Ok(Operand::Slot(dst));
+                }
                 let callee = where_expr.callee().ok_or_else(|| {
                     UnsupportedShape("where expression missing callee".to_owned())
                 })?;
                 let callee_id = self
                     .expr_id(&callee)
                     .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                let lowered = self.lower_expr(callee_id)?;
-                if self.runtime_node_by_expr.contains_key(&callee_id)
-                    && let Some(plan) = observer_plan_from_where(&where_expr)
-                {
-                    let dst = self.alloc_temp();
-                    self.ops.push(KernelOp::ApplyExecObserver {
-                        dst,
-                        source: self.source_for(expr_id),
-                        process: lowered,
-                        plan,
-                    });
-                    Ok(Operand::Slot(dst))
-                } else {
-                    Ok(lowered)
-                }
+                self.lower_expr(callee_id)
             }
             Expr::Block(block) => {
                 let statements = block.statements().collect::<Vec<_>>();
@@ -1100,11 +1046,10 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Call(call) => {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
-                    let runtime_kind = self.runtime_kind_by_expr.get(&expr_id).copied();
                     let positional_inputs = call
                         .positional_args()
                         .into_iter()
-                        .map(|arg| self.runtime_input_spec_for_call_arg(runtime_kind, &arg))
+                        .map(|arg| self.runtime_input_spec_for_expr(&arg))
                         .collect::<Result<Vec<_>, _>>()?;
                     let dst = self.alloc_temp();
                     self.ops.push(KernelOp::AwaitRuntime {
@@ -1180,19 +1125,6 @@ impl<'a> BodyLowering<'a> {
                 other
             ))),
         }
-    }
-
-    fn runtime_input_spec_for_call_arg(
-        &mut self,
-        runtime_kind: Option<RuntimeBoundaryKind>,
-        expr: &Expr,
-    ) -> Result<RuntimeBoundaryInputSpec, ExecSliceError> {
-        if runtime_kind == Some(RuntimeBoundaryKind::Discover)
-            && let Some(program) = discover_host_which_program(expr)
-        {
-            return Ok(RuntimeBoundaryInputSpec::DiscoverHostWhich { program });
-        }
-        self.runtime_input_spec_for_expr(expr)
     }
 
     fn runtime_input_spec_for_expr(
@@ -1288,20 +1220,4 @@ fn normalize_string_literal_token(token_text: &str) -> String {
         .and_then(|stripped| stripped.strip_suffix('"'))
         .unwrap_or(token_text)
         .to_owned()
-}
-
-fn discover_host_which_program(expr: &Expr) -> Option<String> {
-    let Expr::Closure(closure) = expr else {
-        return None;
-    };
-    let body = closure.body()?;
-    let text = body.syntax().text().to_string();
-    let needle = "which(\"";
-    let start = text.find(needle)? + needle.len();
-    let tail = &text[start..];
-    let end = tail.find("\")")?;
-    if end == 0 {
-        return None;
-    }
-    Some(tail[..end].to_owned())
 }

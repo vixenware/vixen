@@ -1,20 +1,14 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    env,
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, path::PathBuf};
 
 use vx_eval3_analysis::{
-    BodyId, ExtractedNodeReason, KernelOp, ResultSource, RuntimeBoundaryPayload,
-    SingleSourceBridge, SourceLocalCalleeOrigin, build_minimal_analysis, lower_executable_program,
+    BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,
+    SourceLocalCalleeOrigin, build_minimal_analysis, lower_executable_program,
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest, CellState,
-    EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey, RuntimeSession, WaitReason,
-    eval_executable_program,
+    BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult, ExecValue,
+    RuntimeMemoKey, RuntimeSession, WaitReason, eval_executable_program,
 };
-use vx_platform_exec::{PlatformExecRequest, run_platform_exec};
 
 struct EchoNodeDriver;
 
@@ -265,9 +259,7 @@ fn runtime_session_build_shaped_source_runs_through_driver_to_concrete_result() 
 fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let class = executor_class("default");
   let cc = discover(class, (host) => host.which("cc"));
-  exec [cc, "-c", @root/main.c, "-o", @out/main.o] where {
-    observer: (proc, tree) => tree,
-  }
+  exec [cc, "-c", @root/main.c, "-o", @out/main.o]
 )
 "#;
 
@@ -319,8 +311,11 @@ fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discove
         .expect("driver-mediated run should complete");
     assert_eq!(
         completed.entry_result,
-        ExecValue::String("observer-input-tree".to_owned()),
-        "observer application should derive final result from process output"
+        ExecValue::ProcessResult {
+            exit_code: 0,
+            stdout: "observer-input-tree".to_owned(),
+        },
+        "runtime should expose raw process completion"
     );
 }
 
@@ -487,140 +482,8 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
     );
 }
 
-struct CcVersionHostDriver {
-    saw_discover: bool,
-    saw_exec: bool,
-    saw_shared_keyed: bool,
-    saw_discover_query: bool,
-    saw_exec_argv_shape: bool,
-    expected_payloads: BTreeMap<vx_eval3_analysis::RuntimeNodeId, RuntimeBoundaryPayload>,
-    discovered_tool: Option<String>,
-    last_raw_exec: Option<ExecValue>,
-}
-
-impl BoundaryDriver for CcVersionHostDriver {
-    fn resolve_boundary(
-        &mut self,
-        request: &BoundaryRequest,
-    ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
-        match request {
-            BoundaryRequest::Discover(req) => {
-                self.saw_discover = true;
-                let expected = self
-                    .expected_payloads
-                    .get(&req.node)
-                    .expect("discover request node should have expected payload");
-                assert_eq!(
-                    expected,
-                    &RuntimeBoundaryPayload::Discover(req.payload.clone()),
-                    "discover request should carry typed payload from analysis executable plan"
-                );
-                let saw_structured_probe = req.inputs.positional_inputs.iter().any(|input| {
-                    matches!(
-                        input,
-                        BoundaryPositionalInputValue::DiscoverHostWhich { .. }
-                    )
-                });
-                assert!(
-                    saw_structured_probe,
-                    "discover request should include structured host.which probe input"
-                );
-                let query = req
-                    .inputs
-                    .positional_inputs
-                    .iter()
-                    .find_map(|input| match input {
-                        BoundaryPositionalInputValue::DiscoverHostWhich { program } => {
-                            Some(program.as_str())
-                        }
-                        _ => None,
-                    });
-                let query = query
-                    .expect("discover request should include structured host.which probe input");
-                let tool = resolve_tool_from_path(&query).ok_or_else(|| {
-                    vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
-                        "could not resolve tool `{query}` from PATH"
-                    ))
-                })?;
-                self.saw_discover_query = true;
-                self.discovered_tool = Some(tool.clone());
-                Ok(ExecValue::String(tool))
-            }
-            BoundaryRequest::Exec(req) => {
-                self.saw_exec = true;
-                let expected = self
-                    .expected_payloads
-                    .get(&req.node)
-                    .expect("exec request node should have expected payload");
-                assert_eq!(
-                    expected,
-                    &RuntimeBoundaryPayload::Exec(req.payload.clone()),
-                    "exec request should carry typed payload from analysis executable plan"
-                );
-                assert!(
-                    req.payload.observer_plan.is_some(),
-                    "cc-version exec should carry observer plan in static payload for runtime application"
-                );
-                let expected_tool = self
-                    .discovered_tool
-                    .clone()
-                    .expect("discover should run before exec and produce concrete tool value");
-                let argv = req
-                    .inputs
-                    .positional_inputs
-                    .iter()
-                    .find_map(|input| match input {
-                        BoundaryPositionalInputValue::Array(values) => Some(values),
-                        _ => None,
-                    })
-                    .expect("exec request should include argv-like array positional input");
-                let saw_tool_arg = argv.iter().any(|input| match input {
-                    BoundaryPositionalInputValue::RuntimeValue {
-                        value: ExecValue::String(value),
-                        ..
-                    } => value == &expected_tool,
-                    _ => false,
-                });
-                let saw_version_flag = argv.iter().any(|input| match input {
-                    BoundaryPositionalInputValue::StringLiteral(flag) => flag == "--version",
-                    _ => false,
-                });
-                assert!(
-                    saw_tool_arg && saw_version_flag,
-                    "exec request should carry concrete discovered tool plus --version literal"
-                );
-                self.saw_exec_argv_shape = true;
-                let command_argv = argv
-                    .iter()
-                    .filter_map(boundary_positional_as_string)
-                    .collect::<Vec<_>>();
-                assert!(
-                    !command_argv.is_empty(),
-                    "exec argv should resolve to command and args"
-                );
-                let raw_value = platform_exec_process_result(&command_argv)?;
-                self.last_raw_exec = Some(raw_value.clone());
-                Ok(raw_value)
-            }
-            BoundaryRequest::SharedKeyed(req) => {
-                self.saw_shared_keyed = true;
-                let expected = self
-                    .expected_payloads
-                    .get(&req.node)
-                    .expect("shared_keyed request node should have expected payload");
-                assert_eq!(
-                    expected,
-                    &RuntimeBoundaryPayload::SharedKeyed(req.payload.clone()),
-                    "shared_keyed request should carry typed payload from analysis executable plan"
-                );
-                Ok(ExecValue::Int(1 + req.payload.positional_arg_count as i64))
-            }
-        }
-    }
-}
-
 #[test]
-fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
+fn zoo_cc_version_lowering_is_honestly_unsupported_without_semantic_macros() {
     let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let bridge = SingleSourceBridge::from_entry_file(&zoo_file).expect("zoo bridge should load");
     let analysis = build_minimal_analysis(&bridge);
@@ -632,151 +495,10 @@ fn zoo_cc_version_runs_to_concrete_result_through_typed_boundary_driver() {
         .find(|body| body.name == "build" && body.span.source == bridge.source_id)
         .map(|body| body.id)
         .expect("cc-version should expose build in root source");
-    let program = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
-        .expect("cc-version selected body should lower");
-    let has_discover_payload = program.runtime_nodes.values().any(|node| {
-        matches!(
-            node.payload,
-            RuntimeBoundaryPayload::Discover(ref payload)
-                if payload.has_closure_arg && payload.positional_arg_count >= 2
-        )
-    });
-    let has_exec_payload = program.runtime_nodes.values().any(|node| {
-        matches!(
-            node.payload,
-            RuntimeBoundaryPayload::Exec(ref payload)
-                if payload.positional_arg_count >= 1 && payload.observer_plan.is_some()
-        )
-    });
+    let err = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
+        .expect_err("cc-version should fail lowering without semantic macro shortcuts");
     assert!(
-        has_discover_payload,
-        "cc-version executable plan should include typed discover payload with closure arg"
+        matches!(err, vx_eval3_analysis::ExecSliceError::UnsupportedShape(_)),
+        "cc-version must fail honestly as unsupported instead of passing via recognized plans: {err:?}"
     );
-    assert!(
-        has_exec_payload,
-        "cc-version executable plan should include typed exec payload with observer"
-    );
-
-    let entry_param_count = program
-        .bodies
-        .get(&program.entry)
-        .expect("entry body should exist")
-        .params
-        .len();
-    let mut session =
-        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
-            .expect("session should start");
-    let mut driver = CcVersionHostDriver {
-        saw_discover: false,
-        saw_exec: false,
-        saw_shared_keyed: false,
-        saw_discover_query: false,
-        saw_exec_argv_shape: false,
-        expected_payloads: program
-            .runtime_nodes
-            .iter()
-            .map(|(id, node)| (*id, node.payload.clone()))
-            .collect(),
-        discovered_tool: None,
-        last_raw_exec: None,
-    };
-    let outcome = session
-        .run_with_driver(&mut driver)
-        .expect("driver-mediated zoo run should complete");
-
-    assert!(
-        driver.saw_exec,
-        "typed boundary driver should receive at least one exec request on cc-version path"
-    );
-    assert!(
-        driver.saw_discover,
-        "typed boundary driver should receive at least one discover request on cc-version path"
-    );
-    assert!(
-        driver.saw_discover_query,
-        "discover request should drive deterministic tool discovery behavior"
-    );
-    assert!(
-        driver.saw_exec_argv_shape,
-        "exec request should carry argv-like concrete inputs"
-    );
-    assert!(
-        matches!(outcome.entry_result, ExecValue::String(_)),
-        "cc-version final result should be observer-derived (string), not raw process result"
-    );
-    assert!(
-        !matches!(outcome.entry_result, ExecValue::Pair(_, _)),
-        "cc-version mini-host must not regress to Pair(Int, String) output"
-    );
-    assert!(
-        !matches!(outcome.entry_result, ExecValue::ProcessResult { .. }),
-        "runtime should apply observer success path and not return raw process result"
-    );
-    let raw = driver
-        .last_raw_exec
-        .expect("cc-version exec should produce raw process output before observer application");
-    let ExecValue::ProcessResult {
-        exit_code: 0,
-        stdout: raw_stdout,
-    } = raw
-    else {
-        panic!("expected successful raw process result from real exec host");
-    };
-    assert_eq!(
-        outcome.entry_result,
-        ExecValue::String(raw_stdout),
-        "observer-derived final result should be computed from raw process stdout"
-    );
-}
-
-fn resolve_tool_from_path(query: &str) -> Option<String> {
-    if query.contains('/') {
-        return Some(query.to_owned());
-    }
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(query);
-        if candidate.exists() {
-            return Some(candidate.to_string_lossy().to_string());
-        }
-    }
-    None
-}
-
-fn boundary_positional_as_string(input: &BoundaryPositionalInputValue) -> Option<String> {
-    match input {
-        BoundaryPositionalInputValue::RuntimeValue {
-            value: ExecValue::String(value),
-            ..
-        } => Some(value.clone()),
-        BoundaryPositionalInputValue::StringLiteral(value) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn platform_exec_process_result(
-    argv: &[String],
-) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
-    if argv.is_empty() {
-        return Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(
-            "exec argv must not be empty".to_owned(),
-        ));
-    }
-    let sandbox_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = run_platform_exec(PlatformExecRequest {
-        program: &argv[0],
-        args: &argv[1..],
-        env: &[],
-        sandbox_root: &sandbox_root,
-    })
-    .map_err(|err| {
-        vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
-            "platform exec failed for {:?}: {err}",
-            argv
-        ))
-    })?;
-    Ok(ExecValue::ProcessResult {
-        exit_code: output.exit_code,
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-    })
 }
