@@ -187,7 +187,7 @@ impl CliContext {
     // ─── Commands ───────────────────────────────────────────────────────
 
     async fn cmd_eval(&mut self, _args: EvalArgs) -> Result<()> {
-        panic!("eval is currently under construction since eval1/eval2/eval3 lied");
+        bail!("vx eval is temporarily unavailable during the evaluator purge");
     }
 
     async fn cmd_build(&mut self, args: BuildArgs) -> Result<()> {
@@ -505,7 +505,7 @@ impl CliContext {
 
     /// Invalidate cache entries from the last build while preserving toolchains
     /// and registry crates.
-    async fn cmd_clean_cache(&self, vx_home: &Utf8PathBuf) -> Result<()> {
+    async fn cmd_clean_cache(&self, _vx_home: &Utf8PathBuf) -> Result<()> {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
         let report_store = ReportStore::new(&cwd);
 
@@ -546,19 +546,6 @@ impl CliContext {
             .unpublish_cache_keys(cache_keys)
             .await
             .map_err(|e| eyre!("unpublish_cache_keys RPC failed: {e:?}"))?;
-
-        // Clear persisted picante state so a fresh daemon recomputes on next build.
-        // In integration tests, VX_TEST_SESSION is per-test while the daemon is shared,
-        // so removing global files here would invalidate other tests racing in parallel.
-        if std::env::var("VX_TEST_SESSION").is_err() {
-            let picante_cache = vx_home.join("picante.cache");
-            let picante_wal = vx_home.join("picante.wal");
-            for path in [&picante_cache, &picante_wal] {
-                if path.exists() {
-                    std::fs::remove_file(path)?;
-                }
-            }
-        }
 
         println!(
             "{} Invalidated {} cache entries ({} already absent)",

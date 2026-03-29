@@ -1,7 +1,7 @@
 use facet::Facet;
 use figue as args;
 
-/// vx - Build execution engine with deterministic caching
+/// vx - Thin CLI for the current daemon shell
 #[derive(Facet, Debug)]
 pub(crate) struct Cli {
     /// Disable TUI and use plain log output
@@ -48,7 +48,7 @@ pub(crate) enum CliCommand {
     /// Collect live diagnostic snapshots from all vixen processes
     Debug(DebugArgs),
 
-    /// Evaluate a single Vixen source file locally
+    /// Placeholder eval entrypoint
     Eval(EvalArgs),
 }
 
@@ -87,7 +87,7 @@ pub(crate) struct CleanArgs {
     #[facet(args::named)]
     pub(crate) home: bool,
 
-    /// Invalidate cache entries from the last build (keeps toolchains)
+    /// Invalidate cache entries from the last build
     #[facet(args::named)]
     pub(crate) cache: bool,
 }
@@ -100,34 +100,13 @@ pub(crate) struct DebugArgs {}
 #[derive(Facet, Debug)]
 pub(crate) struct DoctorArgs {}
 
-/// Arguments for the `eval` subcommand
+/// Arguments for the `eval` subcommand.
+///
+/// The command is intentionally unavailable during the evaluator purge, but we
+/// still accept `-f/--file` so existing invocations fail cleanly.
 #[derive(Facet, Debug)]
 pub(crate) struct EvalArgs {
     /// Vixen source file to evaluate, or `-` for stdin
     #[facet(args::named, args::short = 'f')]
-    pub(crate) file: String,
-
-    /// Runtime profile to expose to the evaluator
-    #[facet(args::named, default = "local")]
-    pub(crate) runtime: String,
-
-    /// Function entry point to call
-    #[facet(args::named, default = "build")]
-    pub(crate) entry: String,
-
-    /// Place label exposed to runtime hooks
-    #[facet(args::named, default = "local")]
-    pub(crate) place: String,
-
-    /// Number of eval workers to use (defaults to host parallelism)
-    #[facet(args::named, args::short = 'j')]
-    pub(crate) workers: Option<usize>,
-
-    /// JSON argument passed to the entry function
-    #[facet(args::named, default)]
-    pub(crate) arg_json: Vec<String>,
-
-    /// Max entries to print in profiler reports
-    #[facet(args::named, default = 20)]
-    pub(crate) profile_limit: usize,
+    pub(crate) file: Option<String>,
 }
