@@ -31,7 +31,6 @@ vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
-vx-bootstrap = { path = "crates/vx-bootstrap" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }

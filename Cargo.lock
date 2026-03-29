@@ -3829,36 +3829,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-bootstrap"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "eyre",
- "facet",
- "facet-postcard",
- "flate2",
- "tar",
- "tempfile",
-]
-
-[[package]]
 name = "vx-cache"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "facet-postcard",
  "vx-runner-proto",
- "vx-store-proto",
-]
-
-[[package]]
-name = "vx-cc"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "facet",
  "vx-store-proto",
 ]
 
@@ -3988,16 +3964,6 @@ dependencies = [
 [[package]]
 name = "vx-platform-exec"
 version = "0.1.0"
-
-[[package]]
-name = "vx-project"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-styx",
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "vx-reaper"
@@ -4310,7 +4276,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tree-sitter-vixen",
- "vx-bootstrap",
  "vx-cache",
  "vx-http",
  "vx-io",

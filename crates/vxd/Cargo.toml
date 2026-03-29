@@ -40,7 +40,6 @@ http-body-util = "0.1"
 
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
-vx-bootstrap = { workspace = true }
 vxd-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-manifest = { workspace = true }

@@ -8,7 +8,7 @@ today, not the eventual ideal end state.
 
 - SSH reachability from the machine running `vxd`
 - Sufficient disk space for:
-  - the bootstrap cache
+  - copied bootstrap binaries
   - remote checkout/build artifacts
   - `VX_HOME`
 - Sufficient RAM and CPU to build:
@@ -17,18 +17,16 @@ today, not the eventual ideal end state.
   - `vx-runner`
   - `landlock-exec` on Linux
 
-## Unix SSH Bootstrap
+## Unix Remote Bring-Up
 
 Current status:
-- uses `vx-bootstrap` over SSH stdio
-- source sync is file-manifest based
-- Git is no longer required for the Unix bootstrap transport
+- planned direction is `cross-compile, scp, done`
+- no dedicated bootstrap RPC/protocol layer
+- remote setup should assume copied binaries plus ordinary SSH command execution
 
 Required commands / facilities:
 - `sshd`
 - `sh`
-- `head`
-- `gzip`
 - `mkdir`
 - `chmod`
 - `mv`
@@ -40,28 +38,25 @@ Required commands / facilities:
 - a working linker / C toolchain suitable for building the Rust binaries
 
 Current behavioral assumptions:
-- normal UTF-8 paths under the bootstrap cache root
-- symlinks in the local source tree are ignored by the sync path
-- `gzip -dc` is available on the remote host
+- normal UTF-8 paths under the remote staging root
 - the remote host can build native Linux Rust binaries for its own architecture
 
-## Windows SSH Bootstrap
+## Windows Remote Bring-Up
 
 Current status:
-- still uses the legacy PowerShell + Git-based path
-- this is expected to be replaced by `vx-bootstrap.exe`
+- still requires a replacement plan
+- should converge on the same model: cross-compile, copy binaries, invoke them
+- no dedicated `vx-bootstrap.exe` protocol plan anymore
 
 Required commands / facilities today:
 - OpenSSH server
 - `powershell`
-- `git`
 - `cargo`
 - `rustc`
 - MSVC build environment suitable for building the Rust binaries
 
 Current behavioral assumptions today:
 - user profile and toolchain paths are discoverable through PowerShell
-- the bootstrap root may be inferred from `CARGO_HOME`, `RUSTUP_HOME`, `TMP`, or `TEMP`
 - TCP loopback ports can be allocated for store / vfsd / runner
 
 ## Likely Future Direction
@@ -69,9 +64,9 @@ Current behavioral assumptions today:
 These requirements should shrink over time:
 
 - Unix should stop requiring host cargo once stable prebuilt binaries exist.
-- Windows should stop requiring Git and most PowerShell command construction once
-  `vx-bootstrap.exe` is in place.
+- Windows should stop requiring local toolchain discovery hacks and ad hoc
+  PowerShell setup once copied binaries are the normal path.
 - Both platforms should eventually converge on:
   - SSH
-  - a tiny bootstrap binary
-  - enough OS facilities to store and execute that binary
+  - copied prebuilt binaries
+  - enough OS facilities to store and execute those binaries
