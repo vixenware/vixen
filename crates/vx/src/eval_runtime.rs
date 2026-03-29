@@ -750,6 +750,7 @@ impl CargoSketchRuntime {
             args: &args,
             env: &env,
             sandbox_root: &sandbox_root,
+            tool_observations: &[],
             sandbox_exemptions: &[],
         })
         .map_err(|error| {

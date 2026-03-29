@@ -8,12 +8,19 @@ pub enum SandboxExemptionRequest {
     ReadSubpath(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolObservationRequest {
+    pub program: String,
+    pub resolved_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlatformExecRequest<'a> {
     pub program: &'a str,
     pub args: &'a [String],
     pub env: &'a [(String, String)],
     pub sandbox_root: &'a Path,
+    pub tool_observations: &'a [ToolObservationRequest],
     pub sandbox_exemptions: &'a [SandboxExemptionRequest],
 }
 
@@ -93,12 +100,33 @@ pub fn run_platform_exec(
 fn verify_platform_exec_request(
     request: &PlatformExecRequest<'_>,
 ) -> Result<(), PlatformExecError> {
+    verify_tool_observations(request.tool_observations)?;
     verify_sandbox_exemptions(request.sandbox_exemptions)?;
     verify_program_access(
         request.program,
         request.sandbox_root,
         request.sandbox_exemptions,
     )
+}
+
+fn verify_tool_observations(
+    tool_observations: &[ToolObservationRequest],
+) -> Result<(), PlatformExecError> {
+    for observation in tool_observations {
+        let actual = resolve_tool_from_path(&observation.program).ok_or_else(|| {
+            PlatformExecError::Verification(format!(
+                "observed tool `{}` is no longer resolvable on this runner",
+                observation.program
+            ))
+        })?;
+        if actual != observation.resolved_path {
+            return Err(PlatformExecError::Verification(format!(
+                "observed tool `{}` changed from `{}` to `{actual}` on this runner",
+                observation.program, observation.resolved_path
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn verify_sandbox_exemptions(

@@ -15,6 +15,7 @@ pub enum ExecValue {
     Bool(bool),
     String(String),
     Host(HostValue),
+    ObservedTool(ObservedToolValue),
     Array(Vec<ExecValue>),
     SandboxExemption(SandboxExemptionValue),
     SandboxTreeRoot(SandboxTreeRootValue),
@@ -35,6 +36,12 @@ pub enum CallableValue {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostValue {
     Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObservedToolValue {
+    pub program: String,
+    pub resolved_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1112,7 +1119,10 @@ fn call_member(
                     "could not resolve tool `{program}` from PATH"
                 ))
             })?;
-            Ok(ExecValue::String(resolved))
+            Ok(ExecValue::ObservedTool(ObservedToolValue {
+                program: program.clone(),
+                resolved_path: resolved,
+            }))
         }
         (ExecValue::Host(HostValue::Local), RuntimeMemberOp::ExecSubpath) => {
             if args.len() != 1 {

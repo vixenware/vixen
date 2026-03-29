@@ -3,8 +3,8 @@ use std::{
     path::PathBuf,
 };
 use vx_platform_exec::{
-    PlatformExecError, PlatformExecRequest, SandboxExemptionRequest, resolve_tool_from_path,
-    run_platform_exec,
+    PlatformExecError, PlatformExecRequest, SandboxExemptionRequest, ToolObservationRequest,
+    resolve_tool_from_path, run_platform_exec,
 };
 
 use vx_eval3_analysis::{
@@ -14,8 +14,9 @@ use vx_eval3_analysis::{
 };
 use vx_eval3_runtime::{
     BlobValue, BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest,
-    CellState, EvalOutcome, EvalRunResult, ExecValue, HostValue, RuntimeMemoKey, RuntimeSession,
-    SandboxExemptionValue, TreeValue, WaitReason, eval_executable_closure, eval_executable_program,
+    CellState, EvalOutcome, EvalRunResult, ExecValue, HostValue, ObservedToolValue, RuntimeMemoKey,
+    RuntimeSession, SandboxExemptionValue, TreeValue, WaitReason, eval_executable_closure,
+    eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -125,12 +126,70 @@ impl SingleHostCcVersionDriver {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    fn parse_tool_observations(
+        inputs: &[BoundaryPositionalInputValue],
+    ) -> Result<Vec<ToolObservationRequest>, vx_eval3_analysis::ExecSliceError> {
+        let mut observations = Vec::new();
+        for input in inputs {
+            match input {
+                BoundaryPositionalInputValue::RuntimeValue { value, .. } => {
+                    observations.extend(Self::parse_tool_observations_from_value(value)?);
+                }
+                BoundaryPositionalInputValue::Array(items) => {
+                    observations.extend(Self::parse_tool_observations(items)?);
+                }
+                BoundaryPositionalInputValue::MissingBinding { .. }
+                | BoundaryPositionalInputValue::IntLiteral(_)
+                | BoundaryPositionalInputValue::StringLiteral(_)
+                | BoundaryPositionalInputValue::Closure { .. }
+                | BoundaryPositionalInputValue::OpaqueExpr(_) => {}
+            }
+        }
+        Ok(observations)
+    }
+
+    fn parse_tool_observations_from_value(
+        value: &ExecValue,
+    ) -> Result<Vec<ToolObservationRequest>, vx_eval3_analysis::ExecSliceError> {
+        match value {
+            ExecValue::ObservedTool(observed) => Ok(vec![ToolObservationRequest {
+                program: observed.program.clone(),
+                resolved_path: observed.resolved_path.clone(),
+            }]),
+            ExecValue::Array(items) => {
+                let mut out = Vec::new();
+                for item in items {
+                    out.extend(Self::parse_tool_observations_from_value(item)?);
+                }
+                Ok(out)
+            }
+            ExecValue::Pair(left, right) => {
+                let mut out = Self::parse_tool_observations_from_value(left)?;
+                out.extend(Self::parse_tool_observations_from_value(right)?);
+                Ok(out)
+            }
+            ExecValue::Int(_)
+            | ExecValue::Bool(_)
+            | ExecValue::String(_)
+            | ExecValue::Host(_)
+            | ExecValue::SandboxExemption(_)
+            | ExecValue::SandboxTreeRoot(_)
+            | ExecValue::Blob(_)
+            | ExecValue::Tree(_)
+            | ExecValue::ProcessResult { .. }
+            | ExecValue::Callable(_)
+            | ExecValue::LazyPoison(_)
+            | ExecValue::PendingRuntimeBoundaries(_) => Ok(vec![]),
+        }
+    }
+
     fn input_to_string(
         input: &BoundaryPositionalInputValue,
     ) -> Result<String, vx_eval3_analysis::ExecSliceError> {
         match input {
             BoundaryPositionalInputValue::RuntimeValue { value, .. } => match value {
                 ExecValue::String(text) => Ok(text.clone()),
+                ExecValue::ObservedTool(observed) => Ok(observed.resolved_path.clone()),
                 other => Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
                     "exec argv expects string-like input, got {:?}",
                     other
@@ -163,6 +222,8 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
         match request {
             BoundaryRequest::Exec(req) => {
                 let argv = Self::argv_from_inputs(&req.inputs.positional_inputs)?;
+                let tool_observations =
+                    Self::parse_tool_observations(&req.inputs.positional_inputs)?;
                 let sandbox_exemptions = Self::parse_sandbox_exemptions(&req.inputs.coarse_mounts)?;
                 let Some(program) = argv.first() else {
                     return Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
@@ -176,6 +237,7 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                     args: &args,
                     env: &env,
                     sandbox_root: self.sandbox.path(),
+                    tool_observations: &tool_observations,
                     sandbox_exemptions: &sandbox_exemptions,
                 })
                 .map_err(Self::map_platform_exec_error)?;
@@ -836,5 +898,102 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> T
                 if message.contains("requires explicit ExecSubpath coverage")
         ),
         "expected shared platform enforcement failure, got: {err:?}"
+    );
+}
+
+#[test]
+fn zoo_cc_version_rechecks_observed_tool_identity() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let Some(cc_path) = resolve_tool_from_path("cc") else {
+        return;
+    };
+    let Some(clang_path) = resolve_tool_from_path("clang") else {
+        return;
+    };
+    if cc_path == clang_path {
+        return;
+    }
+
+    struct DishonestDiscoverDriver {
+        inner: SingleHostCcVersionDriver,
+        fake_path: String,
+    }
+
+    impl BoundaryDriver for DishonestDiscoverDriver {
+        fn resolve_boundary(
+            &mut self,
+            request: &BoundaryRequest,
+        ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+            match request {
+                BoundaryRequest::Discover(_) => Ok(ExecValue::Pair(
+                    Box::new(ExecValue::ObservedTool(ObservedToolValue {
+                        program: "cc".to_owned(),
+                        resolved_path: self.fake_path.clone(),
+                    })),
+                    Box::new(ExecValue::Array(vec![
+                        ExecValue::SandboxExemption(SandboxExemptionValue::ExecSubpath(
+                            "/usr/bin".to_owned(),
+                        )),
+                        ExecValue::SandboxExemption(SandboxExemptionValue::ExecSubpath(
+                            "/Library/Developer/CommandLineTools/usr/bin".to_owned(),
+                        )),
+                        ExecValue::SandboxExemption(SandboxExemptionValue::ReadSubpath(
+                            "/Library/Developer/CommandLineTools".to_owned(),
+                        )),
+                        ExecValue::SandboxExemption(SandboxExemptionValue::ReadSubpath(
+                            "/Library/Developer/CommandLineTools/usr/lib".to_owned(),
+                        )),
+                        ExecValue::SandboxExemption(SandboxExemptionValue::ReadSubpath(
+                            "/Library/Developer/CommandLineTools/SDKs".to_owned(),
+                        )),
+                    ])),
+                )),
+                BoundaryRequest::Exec(_) | BoundaryRequest::SharedKeyed(_) => {
+                    self.inner.resolve_boundary(request)
+                }
+            }
+        }
+    }
+
+    let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let bridge = SingleSourceBridge::from_entry_file(&zoo_file).expect("zoo bridge should load");
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().expect("analysis should validate");
+    let program = lower_executable_program_for_entry_body(
+        &analysis,
+        &bridge,
+        bridge
+            .bodies
+            .iter()
+            .find(|body| body.name == "build" && body.span.source == bridge.source_id)
+            .map(|body| body.id)
+            .expect("cc-version should expose build in root source"),
+    )
+    .expect("cc-version should lower for single-host runtime path");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = DishonestDiscoverDriver {
+        inner: SingleHostCcVersionDriver::new(),
+        fake_path: clang_path,
+    };
+    let err = session
+        .run_with_driver(&mut driver)
+        .expect_err("shared exec verification should reject mismatched observed tool identity");
+    assert!(
+        matches!(
+            err,
+            vx_eval3_analysis::ExecSliceError::VerificationFailure(ref message)
+                if message.contains("observed tool `cc` changed")
+        ),
+        "expected observed-tool verification failure, got: {err:?}"
     );
 }
