@@ -1,6 +1,8 @@
 //! Process group reaper for macOS.
 //!
-//! Usage: vx-reaper --parent-pid <PID> [--log-file <PATH>]
+//! Usage:
+//!
+//!     vx-reaper --parent-pid <PID> [--log-file <PATH>]
 //!
 //! Reads process group IDs from stdin (one per line) as vx-runner creates
 //! them. Polls parent PID liveness and also reacts to stdin EOF. When the

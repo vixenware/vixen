@@ -2,7 +2,9 @@
 //!
 //! This binary applies landlock restrictions and then execs the target program.
 //!
-//! Usage: landlock-exec --vfs-root <PATH> --write-dir <PATH> -- <program> [args...]
+//! Usage:
+//!
+//!     landlock-exec --vfs-root <PATH> --write-dir <PATH> -- <program> [args...]
 //!
 //! Security model:
 //! - File reads: restricted to VFS_ROOT + system paths (/usr, /lib, /etc for toolchain)

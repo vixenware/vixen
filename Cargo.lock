@@ -4034,20 +4034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-eval3-core"
-version = "0.1.0"
-dependencies = [
- "vx-eval3-oracle",
-]
-
-[[package]]
-name = "vx-eval3-oracle"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "vx-eval3-runtime"
 version = "0.1.0"
 dependencies = [

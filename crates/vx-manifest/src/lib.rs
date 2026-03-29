@@ -226,7 +226,7 @@ pub struct Manifest {
     pub edition: Edition,
     /// Library target (if this crate has a lib.rs)
     pub lib: Option<LibTarget>,
-    /// Binary target (if this crate has a main.rs or [[bin]])
+    /// Binary target (if this crate has a main.rs or `[[bin]]`)
     pub bin: Option<BinTarget>,
     /// Path dependencies (with source spans)
     pub deps: Vec<PathDependency>,
