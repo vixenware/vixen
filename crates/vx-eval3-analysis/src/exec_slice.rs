@@ -56,6 +56,7 @@ pub enum RuntimeBoundaryPayload {
 pub struct ExecBoundaryPayload {
     pub positional_arg_count: usize,
     pub has_where_clause: bool,
+    pub has_coarse_mounts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,8 @@ pub enum RuntimeMemberOp {
     Collect,
     Blob,
     Which,
+    ExecSubpath,
+    ReadSubpath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -182,6 +185,11 @@ pub enum KernelOp {
         source: SourceExpr,
         entries: Vec<(TreeFilePath, Operand)>,
     },
+    MakeArray {
+        dst: SlotId,
+        source: SourceExpr,
+        items: Vec<Operand>,
+    },
     Select {
         dst: SlotId,
         source: SourceExpr,
@@ -205,6 +213,7 @@ pub enum KernelOp {
         source: SourceExpr,
         node: RuntimeNodeId,
         positional_inputs: Vec<RuntimeBoundaryInputSpec>,
+        coarse_mounts: Vec<RuntimeBoundaryInputSpec>,
     },
 }
 
@@ -513,6 +522,14 @@ fn runtime_boundary_payload(
                 .map(|call| call.positional_args().len())
                 .unwrap_or(0),
             has_where_clause: matches!(expr_nodes.get(&expr_id), Some(Expr::Where(_))),
+            has_coarse_mounts: expr_nodes
+                .get(&expr_id)
+                .and_then(|expr| match expr {
+                    Expr::Where(where_expr) => where_expr.keywords(),
+                    _ => None,
+                })
+                .and_then(|keywords| extract_where_field_expr(&keywords, "coarse_mounts").ok())
+                .is_some(),
         }),
         RuntimeBoundaryKind::Discover => {
             RuntimeBoundaryPayload::Discover(DiscoverBoundaryPayload {
@@ -1055,7 +1072,48 @@ impl<'a> BodyLowering<'a> {
                     let callee_id = self
                         .expr_id(&callee)
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    let callee_value = self.lower_expr(callee_id)?;
+                    let runtime_node = self.runtime_node_by_expr.get(&callee_id).copied();
+                    let runtime_kind = self.runtime_kind_by_expr.get(&callee_id).copied();
+                    let callee_value = if runtime_kind == Some(RuntimeBoundaryKind::Exec) {
+                        let call = vx_parser::CallExpr::cast(callee.syntax().clone()).ok_or_else(
+                            || {
+                                UnsupportedShape(
+                                    "runtime boundary where-expression must wrap a call".to_owned(),
+                                )
+                            },
+                        )?;
+                        let positional_inputs = call
+                            .positional_args()
+                            .into_iter()
+                            .map(|arg| self.runtime_input_spec_for_expr(&arg))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let coarse_mounts =
+                            match extract_where_field_expr(&keywords, "coarse_mounts") {
+                                Ok(expr) => match self.runtime_input_spec_for_expr(&expr)? {
+                                    RuntimeBoundaryInputSpec::Array(items) => items,
+                                    other => vec![other],
+                                },
+                                Err(ExecSliceError::UnsupportedShape(_)) => vec![],
+                                Err(err) => return Err(err),
+                            };
+                        let node = runtime_node.ok_or_else(|| {
+                            UnsupportedShape(
+                                "exec observer requires concrete exec runtime node".to_owned(),
+                            )
+                        })?;
+                        let dst = self.alloc_temp();
+                        self.ops.push(KernelOp::AwaitRuntime {
+                            dst,
+                            source: self.source_for(callee_id),
+                            node,
+                            positional_inputs,
+                            coarse_mounts,
+                        });
+                        self.awaited_runtime_nodes.insert(node);
+                        Operand::Slot(dst)
+                    } else {
+                        self.lower_expr(callee_id)?
+                    };
                     let param_bindings = self.closure_param_bindings(&observer)?;
                     if param_bindings.len() > 2 {
                         return Err(UnsupportedShape(format!(
@@ -1068,8 +1126,6 @@ impl<'a> BodyLowering<'a> {
                         bound_operands.push(callee_value.clone());
                     }
                     if param_bindings.len() >= 2 {
-                        let runtime_node = self.runtime_node_by_expr.get(&callee_id).copied();
-                        let runtime_kind = self.runtime_kind_by_expr.get(&callee_id).copied();
                         if runtime_kind != Some(RuntimeBoundaryKind::Exec) {
                             return Err(UnsupportedShape(
                                 "observer second parameter requires exec runtime boundary context"
@@ -1116,6 +1172,7 @@ impl<'a> BodyLowering<'a> {
                         source: self.source_for(expr_id),
                         node,
                         positional_inputs,
+                        coarse_mounts: vec![],
                     });
                     self.awaited_runtime_nodes.insert(node);
                     return Ok(Operand::Slot(dst));
@@ -1272,6 +1329,29 @@ impl<'a> BodyLowering<'a> {
                     source: self.source_for(expr_id),
                     first: operands[0].clone(),
                     second: operands[1].clone(),
+                });
+                Ok(Operand::Slot(dst))
+            }
+            Expr::Array(array) => {
+                let items = array
+                    .items()
+                    .map(|item| match item {
+                        vx_parser::ArrayItem::Expr(expr) => {
+                            let id = self
+                                .expr_id(&expr)
+                                .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                            self.lower_expr(id)
+                        }
+                        vx_parser::ArrayItem::Spread(_) => Err(UnsupportedShape(
+                            "array spread is outside restricted executable slice".to_owned(),
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::MakeArray {
+                    dst,
+                    source: self.source_for(expr_id),
+                    items,
                 });
                 Ok(Operand::Slot(dst))
             }
@@ -1448,6 +1528,7 @@ impl<'a> BodyLowering<'a> {
                         source: self.source_for(expr_id),
                         node,
                         positional_inputs,
+                        coarse_mounts: vec![],
                     });
                     self.awaited_runtime_nodes.insert(node);
                     return Ok(Operand::Slot(dst));
@@ -1714,23 +1795,32 @@ fn runtime_member_op_from_name(name: &str) -> Option<RuntimeMemberOp> {
         "collect" => Some(RuntimeMemberOp::Collect),
         "blob" => Some(RuntimeMemberOp::Blob),
         "which" => Some(RuntimeMemberOp::Which),
+        "exec_subpath" => Some(RuntimeMemberOp::ExecSubpath),
+        "read_subpath" => Some(RuntimeMemberOp::ReadSubpath),
         _ => None,
     }
 }
 
-fn extract_observer_closure(keywords: &Expr) -> Result<vx_parser::ClosureExpr, ExecSliceError> {
+fn extract_where_field_expr<'a>(
+    keywords: &'a Expr,
+    field_name: &str,
+) -> Result<Expr, ExecSliceError> {
     let Expr::Record(record) = keywords else {
         return Err(UnsupportedShape(
             "where keywords must be a record for observer execution".to_owned(),
         ));
     };
-    let observer_expr = record
+    record
         .fields()
         .find_map(|field| {
             let name = field.name()?;
-            (name.text() == "observer").then(|| field.value()).flatten()
+            (name.text() == field_name).then(|| field.value()).flatten()
         })
-        .ok_or_else(|| UnsupportedShape("where observer keyword missing".to_owned()))?;
+        .ok_or_else(|| UnsupportedShape(format!("where {field_name} keyword missing")))
+}
+
+fn extract_observer_closure(keywords: &Expr) -> Result<vx_parser::ClosureExpr, ExecSliceError> {
+    let observer_expr = extract_where_field_expr(keywords, "observer")?;
     let Expr::Closure(closure) = observer_expr else {
         return Err(UnsupportedShape(
             "where observer must be a closure expression".to_owned(),

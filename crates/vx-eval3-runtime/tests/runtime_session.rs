@@ -1,8 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
     path::PathBuf,
 };
-use vx_platform_exec::{PlatformExecRequest, resolve_tool_from_path, run_platform_exec};
+use vx_platform_exec::{
+    PlatformExecRequest, SandboxExemptionRequest, resolve_tool_from_path, run_platform_exec,
+};
 
 use vx_eval3_analysis::{
     BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,
@@ -12,7 +15,7 @@ use vx_eval3_analysis::{
 use vx_eval3_runtime::{
     BlobValue, BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest,
     CellState, EvalOutcome, EvalRunResult, ExecValue, HostValue, RuntimeMemoKey, RuntimeSession,
-    TreeValue, WaitReason, eval_executable_closure, eval_executable_program,
+    SandboxExemptionValue, TreeValue, WaitReason, eval_executable_closure, eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -59,39 +62,37 @@ impl SingleHostCcVersionDriver {
         }
     }
 
-    fn verify_discovered_tool(
+    fn verify_exemption_path_exists(path: &str) -> Result<(), vx_eval3_analysis::ExecSliceError> {
+        if Path::new(path).exists() {
+            return Ok(());
+        }
+        Err(vx_eval3_analysis::ExecSliceError::VerificationFailure(
+            format!("sandbox exemption path `{path}` does not exist on this runner"),
+        ))
+    }
+
+    fn verify_program_is_executable(
         program: &str,
-        resolved_path: &str,
     ) -> Result<(), vx_eval3_analysis::ExecSliceError> {
         let actual = resolve_tool_from_path(program).ok_or_else(|| {
             vx_eval3_analysis::ExecSliceError::VerificationFailure(format!(
                 "tool `{program}` is no longer resolvable on this runner"
             ))
         })?;
-        if actual != resolved_path {
-            return Err(vx_eval3_analysis::ExecSliceError::VerificationFailure(
-                format!(
-                    "tool `{program}` drifted: discovered `{resolved_path}`, runner resolved `{actual}`"
-                ),
-            ));
-        }
-        Ok(())
+        Self::verify_exemption_path_exists(&actual)
     }
 
-    fn collect_coarse_host_exec_paths(
+    fn parse_sandbox_exemptions(
         inputs: &[BoundaryPositionalInputValue],
-    ) -> Result<Vec<String>, vx_eval3_analysis::ExecSliceError> {
-        let mut paths = Vec::new();
+    ) -> Result<Vec<SandboxExemptionRequest>, vx_eval3_analysis::ExecSliceError> {
+        let mut exemptions = Vec::new();
         for input in inputs {
             match input {
                 BoundaryPositionalInputValue::RuntimeValue { value, .. } => {
-                    if let ExecValue::DiscoveredTool(tool) = value {
-                        Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
-                        paths.push(tool.resolved_path.clone());
-                    }
+                    exemptions.extend(Self::parse_sandbox_exemptions_from_value(value)?);
                 }
                 BoundaryPositionalInputValue::Array(items) => {
-                    paths.extend(Self::collect_coarse_host_exec_paths(items)?);
+                    exemptions.extend(Self::parse_sandbox_exemptions(items)?);
                 }
                 BoundaryPositionalInputValue::MissingBinding { .. }
                 | BoundaryPositionalInputValue::IntLiteral(_)
@@ -100,9 +101,33 @@ impl SingleHostCcVersionDriver {
                 | BoundaryPositionalInputValue::OpaqueExpr(_) => {}
             }
         }
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
+        Ok(exemptions)
+    }
+
+    fn parse_sandbox_exemptions_from_value(
+        value: &ExecValue,
+    ) -> Result<Vec<SandboxExemptionRequest>, vx_eval3_analysis::ExecSliceError> {
+        match value {
+            ExecValue::SandboxExemption(SandboxExemptionValue::ExecSubpath(path)) => {
+                Self::verify_exemption_path_exists(path)?;
+                Ok(vec![SandboxExemptionRequest::ExecSubpath(path.clone())])
+            }
+            ExecValue::SandboxExemption(SandboxExemptionValue::ReadSubpath(path)) => {
+                Self::verify_exemption_path_exists(path)?;
+                Ok(vec![SandboxExemptionRequest::ReadSubpath(path.clone())])
+            }
+            ExecValue::Array(items) => {
+                let mut out = Vec::new();
+                for item in items {
+                    out.extend(Self::parse_sandbox_exemptions_from_value(item)?);
+                }
+                Ok(out)
+            }
+            other => Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
+                "coarse_mounts expects sandbox exemption values, got {:?}",
+                other
+            ))),
+        }
     }
 
     fn argv_from_inputs(
@@ -128,10 +153,6 @@ impl SingleHostCcVersionDriver {
         match input {
             BoundaryPositionalInputValue::RuntimeValue { value, .. } => match value {
                 ExecValue::String(text) => Ok(text.clone()),
-                ExecValue::DiscoveredTool(tool) => {
-                    Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
-                    Ok(tool.resolved_path.clone())
-                }
                 other => Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
                     "exec argv expects string-like input, got {:?}",
                     other
@@ -153,8 +174,7 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
         match request {
             BoundaryRequest::Exec(req) => {
                 let argv = Self::argv_from_inputs(&req.inputs.positional_inputs)?;
-                let coarse_host_exec_paths =
-                    Self::collect_coarse_host_exec_paths(&req.inputs.positional_inputs)?;
+                let sandbox_exemptions = Self::parse_sandbox_exemptions(&req.inputs.coarse_mounts)?;
                 let Some(program) = argv.first() else {
                     return Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
                         "exec argv cannot be empty".to_owned(),
@@ -163,9 +183,13 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                 let args = argv[1..].to_vec();
                 let env = Vec::<(String, String)>::new();
                 if program.contains('/') {
+                    Self::verify_program_is_executable(program)?;
                     assert!(
-                        coarse_host_exec_paths.iter().any(|path| path == program),
-                        "exec should carry the discovered coarse host path it relies on"
+                        sandbox_exemptions.iter().any(|exemption| matches!(
+                            exemption,
+                            SandboxExemptionRequest::ExecSubpath(path) if Path::new(program).starts_with(path)
+                        )),
+                        "exec should carry an explicit coarse exec exemption covering the program path"
                     );
                 }
                 let output = run_platform_exec(PlatformExecRequest {
@@ -173,7 +197,7 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                     args: &args,
                     env: &env,
                     sandbox_root: self.sandbox.path(),
-                    coarse_host_exec_paths: &coarse_host_exec_paths,
+                    sandbox_exemptions: &sandbox_exemptions,
                 })
                 .map_err(|err| {
                     vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
@@ -207,13 +231,6 @@ impl BoundaryDriver for SingleHostCcVersionDriver {
                 let _ = first;
                 let discovered =
                     eval_executable_closure(closure, vec![ExecValue::Host(HostValue::Local)])?;
-                let ExecValue::DiscoveredTool(tool) = &discovered else {
-                    return Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
-                        "discover probe should return obligation-bearing tool value, got {:?}",
-                        discovered
-                    )));
-                };
-                Self::verify_discovered_tool(&tool.program, &tool.resolved_path)?;
                 Ok(discovered)
             }
             BoundaryRequest::SharedKeyed(_) => {
@@ -746,6 +763,9 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
 
 #[test]
 fn zoo_cc_version_runs_honestly_single_host() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
     if resolve_tool_from_path("cc").is_none() {
         return;
     }

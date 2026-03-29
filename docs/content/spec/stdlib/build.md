@@ -183,6 +183,7 @@ model, but they are not part of the core language syntax.
 > ) where {
 >   env: Map[String, ExecInput] = %{},
 >   mounts: Map[Path, TreeEntry] = %{},
+>   coarse_mounts: Array[SandboxExemption] = [],
 >   writable: Array[Path] = [],
 >   create_dirs: Array[Path] = [],
 >   executor: ExecutorClass = executor_class("default"),
@@ -214,6 +215,29 @@ model, but they are not part of the core language syntax.
 > A plain `String` is a literal argument. A plain `Path` names a VFS
 > location directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount
 > obligations.
+
+> r[exec.coarse-mounts]
+>
+> `coarse_mounts` is the explicit surface for host-backed sandbox
+> exemptions that cannot be justified through ordinary VFS tracking.
+> Unlike `mounts`, which are fine-grained VFS content exposures, coarse
+> mounts are host filesystem holes chosen by authored Vixen code and
+> verified by the runtime on the concrete runner.
+>
+> ```vixen
+> enum SandboxExemption {
+>   struct ExecSubpath {
+>     root: String,
+>   },
+>
+>   struct ReadSubpath {
+>     root: String,
+>   },
+> }
+> ```
+>
+> The runtime applies these exemptions only after rechecking the
+> discovery observations attached to them on the concrete runner.
 
 > r[exec.arg.path]
 >
@@ -436,6 +460,8 @@ model, but they are not part of the core language syntax.
 >   fn which(self, name: String) -> String;
 >   fn read(self, path: String) -> Blob;
 >   fn hash(self, path: String) -> Blob;
+>   fn exec_subpath(self, root: String) -> SandboxExemption;
+>   fn read_subpath(self, root: String) -> SandboxExemption;
 > }
 > ```
 >
@@ -443,7 +469,10 @@ model, but they are not part of the core language syntax.
 > concrete executor instance. `host.which(name)` poisons if the tool is
 > missing; callers that want `Option[String]` can use the ordinary
 > fallible form on the call. `host.hash(path)` uses Blake3 and records the
-> observed host fact. These operations are for discovery and rechecking
+> observed host fact. `host.exec_subpath(root)` and
+> `host.read_subpath(root)` produce explicit coarse sandbox exemptions to
+> be carried out of `discover` and later passed back into `exec` through
+> `coarse_mounts`. These operations are for discovery and rechecking
 > discovered facts, not for general network access.
 
 > r[exec.verifier.host.coarse]
@@ -458,12 +487,15 @@ model, but they are not part of the core language syntax.
 > host-side execution may perform beneath such a path.
 >
 > Coarse host facts are therefore justified by discovery and verification,
-> not by ordinary VFS tracking. If a discovered value later authorizes
-> host-side access during `exec`, that access must be explained by the
-> carried observations attached to the value and rechecked on the concrete
-> runner. Implementations should derive any such coarse host access from
-> the relevant verified obligations rather than granting broad host roots
-> unconditionally.
+> not by ordinary VFS tracking. Authored Vixen code must return explicit
+> `SandboxExemption` values from `discover` and pass them back into
+> `exec` through `coarse_mounts`; the runtime does not invent coarse host
+> policy on behalf of the build. When a discovered exemption later
+> authorizes host-side access during `exec`, that access must be
+> explained by the carried observations attached to the exemption and
+> rechecked on the concrete runner. Implementations should apply only the
+> explicitly requested verified exemptions rather than granting broad
+> host roots unconditionally.
 
 > r[exec.verifier.compose]
 >

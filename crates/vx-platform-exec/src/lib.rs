@@ -2,12 +2,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
+pub enum SandboxExemptionRequest {
+    ExecSubpath(String),
+    ReadSubpath(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct PlatformExecRequest<'a> {
     pub program: &'a str,
     pub args: &'a [String],
     pub env: &'a [(String, String)],
     pub sandbox_root: &'a Path,
-    pub coarse_host_exec_paths: &'a [String],
+    pub sandbox_exemptions: &'a [SandboxExemptionRequest],
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +41,7 @@ pub fn run_platform_exec(request: PlatformExecRequest<'_>) -> std::io::Result<Pl
     let mut command = sandboxed_command(
         request.program,
         request.sandbox_root,
-        request.coarse_host_exec_paths,
+        request.sandbox_exemptions,
     );
     hermetic_env(&mut command, request.sandbox_root);
     command.current_dir(request.sandbox_root);
@@ -89,15 +95,12 @@ const SEATBELT_PROFILE_BASE: &str = r#"(version 1)
 (allow process-exec (subpath (param "VFS_ROOT_ALT")))
 (allow process-exec (subpath "/bin"))
 (allow process-exec (subpath "/usr/bin"))
-(allow process-exec (subpath "/Library/Developer/CommandLineTools"))
 (allow file-read* (subpath (param "VFS_ROOT")))
 (allow file-read* (subpath (param "VFS_ROOT_ALT")))
 (allow file-read* (subpath "/bin"))
 (allow file-read* (subpath "/usr/bin"))
-(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
 (allow file-read* (subpath "/usr"))
 (allow file-read* (subpath "/System"))
-(allow file-read* (subpath "/Library"))
 (allow file-read* (subpath "/private"))
 (allow file-write* (subpath (param "WRITE_DIR")))
 (allow file-write* (subpath (param "WRITE_DIR_ALT")))
@@ -136,7 +139,7 @@ fn additional_host_read_roots() -> Vec<PathBuf> {
 fn sandboxed_command(
     program: &str,
     sandbox_root: &Path,
-    coarse_host_exec_paths: &[String],
+    sandbox_exemptions: &[SandboxExemptionRequest],
 ) -> Command {
     let mut profile = String::from(SEATBELT_PROFILE_BASE);
     let program_path = PathBuf::from(program);
@@ -151,15 +154,24 @@ fn sandboxed_command(
         profile.push_str(&sbpl_literal(&program_text));
         profile.push_str("))");
     }
-    for host_path in coarse_host_exec_paths {
+    for exemption in sandbox_exemptions {
         profile.push('\n');
-        profile.push_str("(allow process-exec (literal ");
-        profile.push_str(&sbpl_literal(host_path));
-        profile.push_str("))");
-        profile.push('\n');
-        profile.push_str("(allow file-read* (literal ");
-        profile.push_str(&sbpl_literal(host_path));
-        profile.push_str("))");
+        match exemption {
+            SandboxExemptionRequest::ExecSubpath(path) => {
+                profile.push_str("(allow process-exec (subpath ");
+                profile.push_str(&sbpl_literal(path));
+                profile.push_str("))");
+                profile.push('\n');
+                profile.push_str("(allow file-read* (subpath ");
+                profile.push_str(&sbpl_literal(path));
+                profile.push_str("))");
+            }
+            SandboxExemptionRequest::ReadSubpath(path) => {
+                profile.push_str("(allow file-read* (subpath ");
+                profile.push_str(&sbpl_literal(path));
+                profile.push_str("))");
+            }
+        }
     }
     for root in additional_host_read_roots() {
         let root_text = root.to_string_lossy();
@@ -189,7 +201,7 @@ fn sandboxed_command(
 fn sandboxed_command(
     program: &str,
     _sandbox_root: &Path,
-    _coarse_host_exec_paths: &[String],
+    _sandbox_exemptions: &[SandboxExemptionRequest],
 ) -> Command {
     Command::new(program)
 }

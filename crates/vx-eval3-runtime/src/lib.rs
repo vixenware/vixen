@@ -15,7 +15,8 @@ pub enum ExecValue {
     Bool(bool),
     String(String),
     Host(HostValue),
-    DiscoveredTool(DiscoveredToolValue),
+    Array(Vec<ExecValue>),
+    SandboxExemption(SandboxExemptionValue),
     SandboxTreeRoot(SandboxTreeRootValue),
     Blob(BlobValue),
     Tree(TreeValue),
@@ -37,9 +38,9 @@ pub enum HostValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DiscoveredToolValue {
-    pub program: String,
-    pub resolved_path: String,
+pub enum SandboxExemptionValue {
+    ExecSubpath(String),
+    ReadSubpath(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -168,6 +169,7 @@ pub struct SharedKeyedBoundaryRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecBoundaryInputs {
     pub positional_inputs: Vec<BoundaryPositionalInputValue>,
+    pub coarse_mounts: Vec<BoundaryPositionalInputValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +204,7 @@ pub enum BoundaryPositionalInputValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeBoundaryInputs {
     positional_inputs: Vec<BoundaryPositionalInputValue>,
+    coarse_mounts: Vec<BoundaryPositionalInputValue>,
 }
 
 pub trait BoundaryDriver {
@@ -385,6 +388,7 @@ impl<'a> RuntimeMachine<'a> {
                     payload: payload.clone(),
                     inputs: ExecBoundaryInputs {
                         positional_inputs: inputs.positional_inputs.clone(),
+                        coarse_mounts: inputs.coarse_mounts.clone(),
                     },
                 })
             }
@@ -730,6 +734,18 @@ impl<'a> RuntimeMachine<'a> {
                     self.frames.insert(frame_id, frame);
                     self.ready_frames.push_back(frame_id);
                 }
+                KernelOp::MakeArray { dst, items, .. } => {
+                    let items = items
+                        .iter()
+                        .map(|item| resolve_slot_operand(item, &frame.slots))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Array(items)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
                 KernelOp::Select {
                     dst,
                     condition,
@@ -793,6 +809,7 @@ impl<'a> RuntimeMachine<'a> {
                     dst,
                     node,
                     positional_inputs,
+                    coarse_mounts,
                     ..
                 } => {
                     let resolved_inputs = RuntimeBoundaryInputs {
@@ -800,6 +817,7 @@ impl<'a> RuntimeMachine<'a> {
                             &positional_inputs,
                             &frame.slots,
                         )?,
+                        coarse_mounts: resolve_positional_inputs(&coarse_mounts, &frame.slots)?,
                     };
                     let runtime_key = RuntimeMemoKey { node };
                     let wait = WaitReason::RuntimeNode(runtime_key.clone());
@@ -1094,10 +1112,37 @@ fn call_member(
                     "could not resolve tool `{program}` from PATH"
                 ))
             })?;
-            Ok(ExecValue::DiscoveredTool(DiscoveredToolValue {
-                program: program.clone(),
-                resolved_path: resolved,
-            }))
+            Ok(ExecValue::String(resolved))
+        }
+        (ExecValue::Host(HostValue::Local), RuntimeMemberOp::ExecSubpath) => {
+            if args.len() != 1 {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "exec_subpath(path) expects one argument".to_owned(),
+                ));
+            }
+            let ExecValue::String(path) = &args[0] else {
+                return Err(ExecSliceError::TypeMismatch(
+                    "exec_subpath(path) expects string argument".to_owned(),
+                ));
+            };
+            Ok(ExecValue::SandboxExemption(
+                SandboxExemptionValue::ExecSubpath(path.clone()),
+            ))
+        }
+        (ExecValue::Host(HostValue::Local), RuntimeMemberOp::ReadSubpath) => {
+            if args.len() != 1 {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "read_subpath(path) expects one argument".to_owned(),
+                ));
+            }
+            let ExecValue::String(path) = &args[0] else {
+                return Err(ExecSliceError::TypeMismatch(
+                    "read_subpath(path) expects string argument".to_owned(),
+                ));
+            };
+            Ok(ExecValue::SandboxExemption(
+                SandboxExemptionValue::ReadSubpath(path.clone()),
+            ))
         }
         (other, _) => Err(ExecSliceError::TypeMismatch(format!(
             "unsupported runtime member call on {:?}",

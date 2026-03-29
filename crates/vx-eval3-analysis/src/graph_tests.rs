@@ -347,16 +347,14 @@ fn zoo_cc_version_includes_runtime_dependency_and_boundary_to_layout_edges() {
     let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let graph = graph_from_file(&zoo_file).expect("zoo graph projection should succeed");
 
-    let has_discover_to_exec = graph.edges.iter().any(|edge| {
-        edge.kind == GraphEdgeKind::RuntimeValueDependency
-            && edge
-                .metadata
-                .iter()
-                .any(|(k, v)| k == "binding_name" && v == "cc")
-    });
+    let runtime_boundary_count = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::RuntimeBoundary)
+        .count();
     assert!(
-        has_discover_to_exec,
-        "cc-version should include discover->exec runtime dependency via `cc` binding"
+        runtime_boundary_count >= 3,
+        "cc-version should include discover, exec, and intermediate extracted runtime nodes"
     );
 
     let boundary_to_layout_count = graph

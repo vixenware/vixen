@@ -5,9 +5,21 @@
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
   let class = executor_class("default");
-  let cc = discover(class, (host) => host.which("cc"));
+  let tool = discover(class, (host) => (
+    host.which("cc"),
+    [
+      host.exec_subpath("/usr/bin"),
+      host.exec_subpath("/Library/Developer/CommandLineTools/usr/bin"),
+      host.read_subpath("/Library/Developer/CommandLineTools"),
+      host.read_subpath("/Library/Developer/CommandLineTools/usr/lib"),
+      host.read_subpath("/Library/Developer/CommandLineTools/SDKs"),
+    ]
+  ));
+  let cc = tool._0;
+  let coarse_mounts = tool._1;
 
   exec [cc, "--version"] where {
+    coarse_mounts: coarse_mounts,
     observer: (proc, _vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
