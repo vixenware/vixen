@@ -3917,6 +3917,7 @@ dependencies = [
  "vx-eval2-proto",
  "vx-http",
  "vx-io",
+ "vx-platform-exec",
  "vx-report",
  "vx-store-proto",
  "vx-tracing",
@@ -4052,6 +4053,9 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "vx-eval3-analysis",
+ "vx-parser",
+ "vx-platform-exec",
+ "vx-resolve",
 ]
 
 [[package]]
@@ -4158,6 +4162,10 @@ dependencies = [
  "facet-json",
  "strid",
 ]
+
+[[package]]
+name = "vx-platform-exec"
+version = "0.1.0"
 
 [[package]]
 name = "vx-project"

@@ -15,6 +15,9 @@ vx-eval3-analysis = { path = "../vx-eval3-analysis" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+vx-platform-exec = { path = "../vx-platform-exec" }
+vx-parser = { path = "../vx-parser" }
+vx-resolve = { path = "../vx-resolve" }
 
 [lints]
 workspace = true

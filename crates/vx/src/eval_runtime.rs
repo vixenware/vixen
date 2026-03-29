@@ -16,6 +16,7 @@ use vx_eval2::{
     RuntimeCallOutcome, RuntimeExecReady, RuntimeExecRequest, RuntimeHooks, SourceSpan,
     Value as EvalValue, ValueRep,
 };
+use vx_platform_exec::{PlatformExecRequest, run_platform_exec};
 
 use crate::eval_progress::EvalProgressReporter;
 
@@ -728,24 +729,29 @@ impl CargoSketchRuntime {
             .progress
             .as_ref()
             .map(|reporter| reporter.begin_runtime_call("exec", Some(program.clone()), source));
-        let mut command = sandboxed_eval_command(&program, &sandbox_root);
-        hermetic_eval_env(&mut command, &sandbox_root);
-        command.current_dir(&sandbox_root);
+        let mut args = Vec::with_capacity(request.args.len().saturating_sub(1));
         for arg in request.args.iter().skip(1) {
-            command.arg(render_exec_value(arg, &sandbox_root, "exec arg")?);
+            args.push(render_exec_value(arg, &sandbox_root, "exec arg")?);
         }
+        let mut env = Vec::with_capacity(request.env.len());
         for (name, value) in &request.env {
-            command.env(
-                name.as_ref(),
+            env.push((
+                name.as_ref().to_owned(),
                 render_exec_value(value, &sandbox_root, "exec env value")?,
-            );
+            ));
         }
         if let Some(progress) = progress.as_ref() {
             progress.report_phase("setup", setup_started.elapsed());
         }
 
         let run_started = Instant::now();
-        let output = command.output().map_err(|error| {
+        let output = run_platform_exec(PlatformExecRequest {
+            program: &program,
+            args: &args,
+            env: &env,
+            sandbox_root: &sandbox_root,
+        })
+        .map_err(|error| {
             EvalError::new(
                 EvalErrorKind::UserFail,
                 format!("failed to execute {program}: {error}"),
@@ -764,10 +770,6 @@ impl CargoSketchRuntime {
             progress.report_phase("capture", capture_started.elapsed());
         }
 
-        let exit_code = output
-            .status
-            .code()
-            .unwrap_or_else(|| if output.status.success() { 0 } else { 1 });
         let process = EvalValue::structure(
             "Process",
             [
@@ -789,7 +791,7 @@ impl CargoSketchRuntime {
                 ),
                 (
                     Arc::from("exit_code"),
-                    EvalValue::u64(exit_code as u64)
+                    EvalValue::u64(output.exit_code as u64)
                         .with_provenance(Provenance::unknown(source.clone())),
                 ),
             ],
@@ -1251,125 +1253,6 @@ fn render_exec_value(
             format!("{context} must evaluate to String or Path"),
         )),
     }
-}
-
-fn hermetic_eval_env(command: &mut Command, write_root: &Path) {
-    command.env_clear();
-    for var in [
-        "PATH",
-        "HOME",
-        "LIB",
-        "INCLUDE",
-        "LIBPATH",
-        "WindowsSdkDir",
-        "WindowsSDKVersion",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
-    ] {
-        if let Ok(value) = std::env::var(var) {
-            command.env(var, value);
-        }
-    }
-    command.env("TMPDIR", write_root);
-    command.env("TMP", write_root);
-    command.env("TEMP", write_root);
-}
-
-#[cfg(target_os = "macos")]
-const EVAL_SEATBELT_PROFILE_BASE: &str = r#"(version 1)
-(debug deny)
-(deny default)
-(import "system.sb")
-(allow process-fork)
-(allow process-exec (subpath (param "VFS_ROOT")))
-(allow process-exec (subpath (param "VFS_ROOT_ALT")))
-(allow process-exec (subpath "/bin"))
-(allow process-exec (subpath "/usr/bin"))
-(allow process-exec (subpath "/Library/Developer/CommandLineTools"))
-(allow file-read* (subpath (param "VFS_ROOT")))
-(allow file-read* (subpath (param "VFS_ROOT_ALT")))
-(allow file-read* (subpath "/bin"))
-(allow file-read* (subpath "/usr/bin"))
-(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
-(allow file-read* (subpath "/usr"))
-(allow file-read* (subpath "/System"))
-(allow file-read* (subpath "/Library"))
-(allow file-read* (subpath "/private"))
-(allow file-write* (subpath (param "WRITE_DIR")))
-(allow file-write* (subpath (param "WRITE_DIR_ALT")))
-(allow file-write* (subpath "/private/var/folders"))
-(deny network*)"#;
-
-#[cfg(target_os = "macos")]
-fn sbpl_literal(path: &str) -> String {
-    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-#[cfg(target_os = "macos")]
-fn additional_host_read_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
-    {
-        if cargo_home.exists() {
-            roots.push(cargo_home);
-        }
-    }
-    if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
-    {
-        if rustup_home.exists() {
-            roots.push(rustup_home);
-        }
-    }
-    roots
-}
-
-#[cfg(target_os = "macos")]
-fn sandboxed_eval_command(program: &str, sandbox_root: &Path) -> Command {
-    let mut profile = String::from(EVAL_SEATBELT_PROFILE_BASE);
-    let program_path = PathBuf::from(program);
-    if program_path.is_absolute() {
-        let program_text = program_path.to_string_lossy();
-        profile.push('\n');
-        profile.push_str("(allow process-exec (literal ");
-        profile.push_str(&sbpl_literal(&program_text));
-        profile.push_str("))");
-        profile.push('\n');
-        profile.push_str("(allow file-read* (literal ");
-        profile.push_str(&sbpl_literal(&program_text));
-        profile.push_str("))");
-    }
-    for root in additional_host_read_roots() {
-        let root_text = root.to_string_lossy();
-        profile.push('\n');
-        profile.push_str("(allow file-read* (subpath ");
-        profile.push_str(&sbpl_literal(&root_text));
-        profile.push_str("))");
-    }
-
-    let mut command = Command::new("/usr/bin/sandbox-exec");
-    command.arg("-p").arg(profile);
-    let write_dir = sandbox_root.to_string_lossy().into_owned();
-    let write_dir_alt = write_dir.replace("/tmp", "/private/tmp");
-    command.arg("-D").arg(format!("WRITE_DIR={write_dir}"));
-    command
-        .arg("-D")
-        .arg(format!("WRITE_DIR_ALT={write_dir_alt}"));
-    command.arg("-D").arg(format!("VFS_ROOT={write_dir}"));
-    command
-        .arg("-D")
-        .arg(format!("VFS_ROOT_ALT={write_dir_alt}"));
-    command.arg(program);
-    command
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sandboxed_eval_command(program: &str, _sandbox_root: &Path) -> Command {
-    Command::new(program)
 }
 
 fn io_error(error: std::io::Error) -> EvalError {

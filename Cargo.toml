@@ -41,6 +41,7 @@ vx-types = { path = "crates/vx-types" }
 vx-eval = { path = "crates/vx-eval" }
 vx-eval2 = { path = "crates/vx-eval2" }
 vx-eval2-proto = { path = "crates/vx-eval2-proto" }
+vx-platform-exec = { path = "crates/vx-platform-exec" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }

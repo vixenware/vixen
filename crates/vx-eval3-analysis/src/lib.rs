@@ -35,7 +35,7 @@ pub use graph::{
 
 mod exec_slice;
 pub use exec_slice::{
-    DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError, ExecutableBody,
+    DiscoverBoundaryPayload, ExecBoundaryPayload, ExecObserverPlan, ExecSliceError, ExecutableBody,
     ExecutableProgram, ExecutableRuntimeNode, KernelOp, Operand, ResultSource,
     RuntimeBoundaryInputSpec, RuntimeBoundaryPayload, SharedKeyedBoundaryPayload, SlotId,
     lower_executable_program, lower_executable_program_for_entry_body,

@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use vx_eval3_analysis::{
-    BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
-    ExecutableProgram, ExprId, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
-    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SharedKeyedBoundaryPayload, SlotId,
-    SourceExpr,
+    BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecObserverPlan,
+    ExecSliceError, ExecutableProgram, ExprId, KernelOp, Operand, ResultSource,
+    RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId,
+    SharedKeyedBoundaryPayload, SlotId, SourceExpr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -158,6 +158,9 @@ pub enum BoundaryPositionalInputValue {
     IntLiteral(i64),
     StringLiteral(String),
     ClosureIdentity(SourceExpr),
+    DiscoverHostWhich {
+        program: String,
+    },
     Array(Vec<BoundaryPositionalInputValue>),
     OpaqueExpr(SourceExpr),
 }
@@ -586,6 +589,16 @@ impl<'a> RuntimeMachine<'a> {
                         self.ready_frames.push_back(frame_id);
                     }
                 }
+                KernelOp::ApplyExecObserver {
+                    dst, process, plan, ..
+                } => {
+                    let process = resolve_slot_operand(&process, &frame.slots)?;
+                    let observed = apply_exec_observer(plan, process)?;
+                    frame.slots.insert(dst, SlotValue::Ready(observed));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
                 KernelOp::AwaitRuntime {
                     dst,
                     node,
@@ -791,6 +804,11 @@ fn resolve_positional_inputs(
                 RuntimeBoundaryInputSpec::Closure { source } => {
                     BoundaryPositionalInputValue::ClosureIdentity(source.clone())
                 }
+                RuntimeBoundaryInputSpec::DiscoverHostWhich { program } => {
+                    BoundaryPositionalInputValue::DiscoverHostWhich {
+                        program: program.clone(),
+                    }
+                }
                 RuntimeBoundaryInputSpec::Array(items) => {
                     BoundaryPositionalInputValue::Array(resolve_positional_inputs(items, slots)?)
                 }
@@ -826,6 +844,21 @@ fn as_int(value: &ExecValue, context: &str) -> Result<i64, ExecSliceError> {
             "{context} expected int, got {:?}",
             other
         ))),
+    }
+}
+
+fn apply_exec_observer(
+    plan: ExecObserverPlan,
+    process: ExecValue,
+) -> Result<ExecValue, ExecSliceError> {
+    match plan {
+        ExecObserverPlan::ProcessStdoutString => match process {
+            ExecValue::ProcessResult { stdout, .. } => Ok(ExecValue::String(stdout)),
+            other => Err(ExecSliceError::TypeMismatch(format!(
+                "exec observer expected process result, got {:?}",
+                other
+            ))),
+        },
     }
 }
 
