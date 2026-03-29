@@ -33,8 +33,6 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 blake3 = { workspace = true }
-
-vx-cache = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
 vx-eval = { workspace = true }

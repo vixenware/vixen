@@ -46,7 +46,6 @@ arborium = { workspace = true }
 arborium-highlight = { workspace = true }
 arborium-theme = { workspace = true }
 tree-sitter-vixen = { git = "https://github.com/bearcove/tree-sitter-vixen", rev = "9fe14bea91399543282035090086fec8a868fb6c" }
-blake3 = { workspace = true }
 hex = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }

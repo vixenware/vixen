@@ -19,7 +19,6 @@ vixenfs-proto = { path = "crates/vixenfs-proto" }
 vx-store-proto = { path = "crates/vx-store-proto" }
 vx-runner-proto = { path = "crates/vx-runner-proto" }
 vx-manifest = { path = "crates/vx-manifest" }
-vx-project = { path = "crates/vx-project" }
 vxd-proto = { path = "crates/vxd-proto" }
 vx-report = { path = "crates/vx-report" }
 margin = { path = "crates/margin" }
@@ -121,9 +120,6 @@ indicatif = "0.18"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
-
-# build utilities
-petgraph = "0.8"
 tar = "0.4"
 tokio-util = { version = "0.7" }
 pin-project-lite = "0.2"
