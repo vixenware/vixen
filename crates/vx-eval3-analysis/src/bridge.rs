@@ -903,11 +903,6 @@ fn collect_local_bindings(
     resolution: &NameResolution,
     bodies: &[BridgeBody],
 ) -> Vec<BridgeLocalBinding> {
-    let param_spans = bodies
-        .iter()
-        .flat_map(|body| body.params.iter().map(move |param| (body.id, param.span)))
-        .collect::<Vec<_>>();
-
     let mut entries = resolution
         .scopes
         .all_definitions_in(source_id)
@@ -916,15 +911,7 @@ fn collect_local_bindings(
             let body = body_for_range(def.name_span.range, bodies)?;
             let kind = match def.kind {
                 DefKind::Binding => BridgeLocalBindingKind::Let,
-                DefKind::Parameter => {
-                    if !param_spans
-                        .iter()
-                        .any(|(param_body, span)| *param_body == body && *span == def.name_span)
-                    {
-                        return None;
-                    }
-                    BridgeLocalBindingKind::Parameter
-                }
+                DefKind::Parameter => BridgeLocalBindingKind::Parameter,
                 _ => return None,
             };
 
@@ -932,10 +919,13 @@ fn collect_local_bindings(
         })
         .collect::<Vec<_>>();
 
-    entries.sort_by_key(|(body, span, name, kind, _)| {
+    entries.sort_by_key(|(body, span, name, kind, def_id)| {
         let kind_rank = match kind {
             BridgeLocalBindingKind::Parameter => 0u8,
             BridgeLocalBindingKind::Let => 1,
+        };
+        let (def_source, def_local) = match def_id {
+            DefId::Source { source, local } => (source.0, *local),
         };
         (
             body.0,
@@ -943,8 +933,12 @@ fn collect_local_bindings(
             u32::from(span.range.end()),
             kind_rank,
             name.clone(),
+            def_source,
+            def_local,
         )
     });
+    entries
+        .dedup_by(|lhs, rhs| lhs.0 == rhs.0 && lhs.1 == rhs.1 && lhs.2 == rhs.2 && lhs.3 == rhs.3);
 
     entries
         .into_iter()
@@ -1060,6 +1054,7 @@ fn collect_call_sites(
             let call_expr = by_span.get(&call_span).copied()?;
             let body = by_id.get(&call_expr)?.body?;
             let callee = call.callee()?;
+            let callee_is_name_ref = matches!(callee, Expr::NameRef(_));
             let callee_span = SourceSpan::new(source_id, callee.syntax().text_range());
 
             let resolved = resolved_refs
@@ -1076,7 +1071,9 @@ fn collect_call_sites(
                     } else {
                         match resolved.target.as_ref().ok().map(|target| target.kind) {
                             Some(DefKind::Function) => BridgeCallSiteKind::DirectNamedFunction,
-                            Some(DefKind::Binding) | Some(DefKind::Parameter) => {
+                            Some(DefKind::Binding) | Some(DefKind::Parameter)
+                                if callee_is_name_ref =>
+                            {
                                 BridgeCallSiteKind::LocalCallableBinding
                             }
                             _ => BridgeCallSiteKind::Other,
@@ -1099,7 +1096,7 @@ fn collect_call_sites(
                 } else {
                     match resolved.target.as_ref().ok().map(|target| target.kind) {
                         Some(DefKind::Function) => BridgeCallSiteKind::DirectNamedFunction,
-                        Some(DefKind::Binding) | Some(DefKind::Parameter) => {
+                        Some(DefKind::Binding) | Some(DefKind::Parameter) if callee_is_name_ref => {
                             BridgeCallSiteKind::LocalCallableBinding
                         }
                         _ => BridgeCallSiteKind::Other,
@@ -1108,8 +1105,13 @@ fn collect_call_sites(
             } else {
                 BridgeCallSiteKind::Other
             };
-            let mut target =
-                resolved.and_then(|resolved| resolved.target.as_ref().ok().map(|d| d.id));
+            let mut target = resolved.and_then(|resolved| {
+                let target = resolved.target.as_ref().ok()?;
+                if !callee_is_name_ref && matches!(target.kind, DefKind::Parameter) {
+                    return None;
+                }
+                Some(target.id)
+            });
             let mut kind = kind;
             if matches!(
                 kind,

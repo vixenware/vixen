@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
+use vx_platform_exec::{PlatformExecRequest, resolve_tool_from_path, run_platform_exec};
 
 use vx_eval3_analysis::{
     BodyId, ExtractedNodeReason, KernelOp, ResultSource, SingleSourceBridge,
@@ -9,8 +10,9 @@ use vx_eval3_analysis::{
     lower_executable_program_for_entry_body,
 };
 use vx_eval3_runtime::{
-    BlobValue, BodyMemoKey, BoundaryDriver, BoundaryRequest, CellState, EvalOutcome, EvalRunResult,
-    ExecValue, RuntimeMemoKey, RuntimeSession, TreeValue, WaitReason, eval_executable_program,
+    BlobValue, BodyMemoKey, BoundaryDriver, BoundaryPositionalInputValue, BoundaryRequest,
+    CellState, EvalOutcome, EvalRunResult, ExecValue, RuntimeMemoKey, RuntimeSession, TreeValue,
+    WaitReason, eval_executable_program,
 };
 
 struct EchoNodeDriver;
@@ -43,6 +45,110 @@ impl BoundaryDriver for ConstantProcessDriver {
             exit_code: self.exit_code,
             stdout: self.stdout.clone(),
         })
+    }
+}
+
+struct SingleHostCcVersionDriver {
+    sandbox: tempfile::TempDir,
+}
+
+impl SingleHostCcVersionDriver {
+    fn new() -> Self {
+        Self {
+            sandbox: tempfile::tempdir().expect("sandbox tempdir should be created"),
+        }
+    }
+
+    fn argv_from_inputs(
+        inputs: &[BoundaryPositionalInputValue],
+    ) -> Result<Vec<String>, vx_eval3_analysis::ExecSliceError> {
+        let argv_inputs: Vec<BoundaryPositionalInputValue> = if inputs.len() == 1 {
+            match &inputs[0] {
+                BoundaryPositionalInputValue::Array(items) => items.clone(),
+                other => vec![other.clone()],
+            }
+        } else {
+            inputs.to_vec()
+        };
+        argv_inputs
+            .iter()
+            .map(Self::input_to_string)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn input_to_string(
+        input: &BoundaryPositionalInputValue,
+    ) -> Result<String, vx_eval3_analysis::ExecSliceError> {
+        match input {
+            BoundaryPositionalInputValue::RuntimeValue { value, .. } => match value {
+                ExecValue::String(text) => Ok(text.clone()),
+                other => Err(vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
+                    "exec argv expects string-like input, got {:?}",
+                    other
+                ))),
+            },
+            BoundaryPositionalInputValue::StringLiteral(text) => Ok(text.clone()),
+            other => Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                format!("exec argv input shape unsupported: {:?}", other),
+            )),
+        }
+    }
+}
+
+impl BoundaryDriver for SingleHostCcVersionDriver {
+    fn resolve_boundary(
+        &mut self,
+        request: &BoundaryRequest,
+    ) -> Result<ExecValue, vx_eval3_analysis::ExecSliceError> {
+        match request {
+            BoundaryRequest::Exec(req) => {
+                let argv = Self::argv_from_inputs(&req.inputs.positional_inputs)?;
+                let Some(program) = argv.first() else {
+                    return Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                        "exec argv cannot be empty".to_owned(),
+                    ));
+                };
+                let args = argv[1..].to_vec();
+                let env = Vec::<(String, String)>::new();
+                let output = run_platform_exec(PlatformExecRequest {
+                    program,
+                    args: &args,
+                    env: &env,
+                    sandbox_root: self.sandbox.path(),
+                })
+                .map_err(|err| {
+                    vx_eval3_analysis::ExecSliceError::TypeMismatch(format!(
+                        "platform exec failed: {err}"
+                    ))
+                })?;
+                Ok(ExecValue::ProcessResult {
+                    exit_code: output.exit_code,
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                })
+            }
+            BoundaryRequest::Discover(req) => {
+                let first = req.inputs.positional_inputs.first().ok_or_else(|| {
+                    vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                        "discover requires at least one positional input".to_owned(),
+                    )
+                })?;
+                match first {
+                    BoundaryPositionalInputValue::RuntimeValue { value, .. } => Ok(value.clone()),
+                    BoundaryPositionalInputValue::StringLiteral(text) => {
+                        Ok(ExecValue::String(text.clone()))
+                    }
+                    BoundaryPositionalInputValue::IntLiteral(value) => Ok(ExecValue::Int(*value)),
+                    other => Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                        format!("discover input shape unsupported: {:?}", other),
+                    )),
+                }
+            }
+            BoundaryRequest::SharedKeyed(_) => {
+                Err(vx_eval3_analysis::ExecSliceError::UnsupportedShape(
+                    "shared_keyed boundary is unsupported in this test driver".to_owned(),
+                ))
+            }
+        }
     }
 }
 
@@ -566,7 +672,11 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
 }
 
 #[test]
-fn zoo_cc_version_is_honestly_unsupported_without_typed_discover_observer_inputs() {
+fn zoo_cc_version_runs_honestly_single_host() {
+    if resolve_tool_from_path("cc").is_none() {
+        return;
+    }
+
     let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let bridge = SingleSourceBridge::from_entry_file(&zoo_file).expect("zoo bridge should load");
     let analysis = build_minimal_analysis(&bridge);
@@ -578,17 +688,30 @@ fn zoo_cc_version_is_honestly_unsupported_without_typed_discover_observer_inputs
         .find(|body| body.name == "build" && body.span.source == bridge.source_id)
         .map(|body| body.id)
         .expect("cc-version should expose build in root source");
-    let err = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
-        .expect_err("cc-version should stay honestly unsupported in this slice");
-    match err {
-        vx_eval3_analysis::ExecSliceError::UnsupportedShape(message) => {
-            assert!(
-                message.contains(
-                    "discover closure execution requires typed closure-parameter identity"
-                ) || message.contains("observer closures with parameters are unsupported"),
-                "unsupported reason should point to missing typed discover/observer input model, got: {message}"
-            );
-        }
-        other => panic!("expected unsupported shape, got {other:?}"),
-    }
+    let program = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
+        .expect("cc-version should lower for single-host runtime path");
+    let entry_param_count = program
+        .bodies
+        .get(&program.entry)
+        .expect("entry body should exist")
+        .params
+        .len();
+    let mut session =
+        RuntimeSession::new_with_entry_args(&program, vec![ExecValue::Int(0); entry_param_count])
+            .expect("session should start");
+    let mut driver = SingleHostCcVersionDriver::new();
+    let outcome = session
+        .run_with_driver(&mut driver)
+        .expect("cc-version should run through real single-host exec path");
+    let ExecValue::Tree(tree) = outcome.entry_result else {
+        panic!("cc-version should produce tree output");
+    };
+    let version_blob = tree
+        .files
+        .get("cc-version.txt")
+        .expect("cc-version tree should include cc-version.txt");
+    assert!(
+        !version_blob.bytes.is_empty(),
+        "cc-version output blob should contain real command output"
+    );
 }

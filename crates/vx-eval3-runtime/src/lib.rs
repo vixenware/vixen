@@ -14,6 +14,7 @@ pub enum ExecValue {
     Bool(bool),
     String(String),
     Host(HostValue),
+    SandboxTreeRoot(SandboxTreeRootValue),
     Blob(BlobValue),
     Tree(TreeValue),
     ProcessResult { exit_code: i64, stdout: String },
@@ -31,6 +32,11 @@ pub enum CallableValue {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostValue {
     Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SandboxTreeRootValue {
+    pub exec_node: RuntimeNodeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -489,10 +495,37 @@ impl<'a> RuntimeMachine<'a> {
 
             let op = body.ops[frame.pc].clone();
             match op {
+                KernelOp::AssignHostLocal { dst, .. } => {
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::Host(HostValue::Local)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignSandboxTreeRoot { dst, node, .. } => {
+                    frame.slots.insert(
+                        dst,
+                        SlotValue::Ready(ExecValue::SandboxTreeRoot(SandboxTreeRootValue {
+                            exec_node: node,
+                        })),
+                    );
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
                 KernelOp::AssignConstInt { dst, value, .. } => {
                     frame
                         .slots
                         .insert(dst, SlotValue::Ready(ExecValue::Int(value)));
+                    frame.pc += 1;
+                    self.frames.insert(frame_id, frame);
+                    self.ready_frames.push_back(frame_id);
+                }
+                KernelOp::AssignConstString { dst, value, .. } => {
+                    frame
+                        .slots
+                        .insert(dst, SlotValue::Ready(ExecValue::String(value)));
                     frame.pc += 1;
                     self.frames.insert(frame_id, frame);
                     self.ready_frames.push_back(frame_id);
@@ -944,6 +977,7 @@ fn resolve_slot_operand(
             ))),
         },
         Operand::Int(value) => Ok(ExecValue::Int(*value)),
+        Operand::String(value) => Ok(ExecValue::String(value.clone())),
     }
 }
 

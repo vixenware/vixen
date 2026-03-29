@@ -753,7 +753,7 @@ fn zoo_tri_platform_png_demand_notes_and_kernel_summaries_are_explicit() {
         ),
         (
             "build",
-            "local calls: 3; runtime-boundary extracts: 0; shared-value extracts: 0",
+            "local calls: 2; runtime-boundary extracts: 0; shared-value extracts: 0",
         ),
     ] {
         let kernel = graph

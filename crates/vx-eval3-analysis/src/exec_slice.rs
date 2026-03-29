@@ -72,6 +72,7 @@ pub enum ResultSource {
 pub enum Operand {
     Slot(SlotId),
     Int(i64),
+    String(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,10 +93,24 @@ pub struct TreeFilePath(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelOp {
+    AssignHostLocal {
+        dst: SlotId,
+        source: SourceExpr,
+    },
+    AssignSandboxTreeRoot {
+        dst: SlotId,
+        source: SourceExpr,
+        node: RuntimeNodeId,
+    },
     AssignConstInt {
         dst: SlotId,
         source: SourceExpr,
         value: i64,
+    },
+    AssignConstString {
+        dst: SlotId,
+        source: SourceExpr,
+        value: String,
     },
     AssignAlias {
         dst: SlotId,
@@ -602,6 +617,7 @@ struct BodyLowering<'a> {
     expr_nodes: &'a HashMap<ExprId, Expr>,
     entry_expr: ExprId,
     use_binding_by_expr: HashMap<ExprId, BridgeLocalBindingId>,
+    binding_by_name_span: HashMap<SourceSpan, BridgeLocalBindingId>,
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
@@ -639,6 +655,10 @@ impl<'a> BodyLowering<'a> {
                 use_binding_by_expr.insert(usage.expr, usage.binding);
             }
         }
+        let binding_by_name_span = body_bindings
+            .iter()
+            .map(|binding| (binding.name_span, binding.id))
+            .collect::<HashMap<_, _>>();
 
         let mut slot_by_binding = HashMap::new();
         let mut next_slot = 0u32;
@@ -647,11 +667,19 @@ impl<'a> BodyLowering<'a> {
             next_slot += 1;
         }
 
+        let fn_param_spans = fn_decl
+            .parameters()
+            .filter_map(|param| {
+                param
+                    .name()
+                    .map(|name| SourceSpan::new(body_source_id, name.text_range()))
+            })
+            .collect::<HashSet<_>>();
         let mut params = Vec::new();
-        for binding in body_bindings
-            .iter()
-            .filter(|binding| binding.kind == BridgeLocalBindingKind::Parameter)
-        {
+        for binding in body_bindings.iter().filter(|binding| {
+            binding.kind == BridgeLocalBindingKind::Parameter
+                && fn_param_spans.contains(&binding.name_span)
+        }) {
             params.push(*slot_by_binding.get(&binding.id).expect("slot exists"));
         }
         params.sort_by_key(|slot| slot.0);
@@ -726,6 +754,7 @@ impl<'a> BodyLowering<'a> {
             expr_nodes,
             entry_expr,
             use_binding_by_expr,
+            binding_by_name_span,
             binding_initializers,
             slot_by_binding,
             runtime_node_by_expr,
@@ -793,6 +822,15 @@ impl<'a> BodyLowering<'a> {
                 });
                 slot
             }
+            Operand::String(value) => {
+                let slot = self.alloc_temp();
+                self.ops.push(KernelOp::AssignConstString {
+                    dst: slot,
+                    source,
+                    value,
+                });
+                slot
+            }
         }
     }
 
@@ -827,6 +865,62 @@ impl<'a> BodyLowering<'a> {
         Ok(slot)
     }
 
+    fn closure_param_bindings(
+        &self,
+        closure: &vx_parser::ClosureExpr,
+    ) -> Result<Vec<BridgeLocalBindingId>, ExecSliceError> {
+        let mut bindings = Vec::new();
+        for param in closure.parameters() {
+            let name = param
+                .name()
+                .ok_or_else(|| UnsupportedShape("closure parameter missing".to_owned()))?;
+            let span = SourceSpan::new(self.body_source_id, name.text_range());
+            let binding = self
+                .binding_by_name_span
+                .get(&span)
+                .copied()
+                .ok_or_else(|| {
+                    UnsupportedShape(format!(
+                        "missing typed binding identity for closure parameter `{}`",
+                        name.text()
+                    ))
+                })?;
+            bindings.push(binding);
+        }
+        Ok(bindings)
+    }
+
+    fn lower_closure_with_bound_operands(
+        &mut self,
+        closure: &vx_parser::ClosureExpr,
+        bound_operands: Vec<Operand>,
+        source_expr: ExprId,
+    ) -> Result<Operand, ExecSliceError> {
+        let bindings = self.closure_param_bindings(closure)?;
+        if bindings.len() != bound_operands.len() {
+            return Err(UnsupportedShape(format!(
+                "closure expects {} params, got {} bound values",
+                bindings.len(),
+                bound_operands.len()
+            )));
+        }
+        let body = closure
+            .body()
+            .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
+        let body_id = self
+            .expr_id(&body)
+            .ok_or(ExecSliceError::MissingExpr(self.source_for(source_expr)))?;
+        for (binding, value) in bindings.into_iter().zip(bound_operands) {
+            let slot = self.materialize_binding(binding)?;
+            self.ops.push(KernelOp::AssignAlias {
+                dst: slot,
+                source: self.source_for(source_expr),
+                value,
+            });
+        }
+        self.lower_expr(body_id)
+    }
+
     fn lower_expr(&mut self, expr_id: ExprId) -> Result<Operand, ExecSliceError> {
         let expr = self.expr(expr_id)?;
         match expr {
@@ -842,25 +936,52 @@ impl<'a> BodyLowering<'a> {
             Expr::Where(where_expr) => {
                 if let Some(keywords) = where_expr.keywords() {
                     let observer = extract_observer_closure(&keywords)?;
-                    if observer.parameters().next().is_some() {
-                        return Err(UnsupportedShape(
-                            "observer closures with parameters are unsupported until typed executor-local observer inputs are modeled".to_owned(),
-                        ));
-                    }
                     let callee = where_expr.callee().ok_or_else(|| {
                         UnsupportedShape("where expression missing callee".to_owned())
                     })?;
                     let callee_id = self
                         .expr_id(&callee)
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    let _ = self.lower_expr(callee_id)?;
-                    let body = observer
-                        .body()
-                        .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
-                    let body_id = self
-                        .expr_id(&body)
-                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    return self.lower_expr(body_id);
+                    let callee_value = self.lower_expr(callee_id)?;
+                    let param_bindings = self.closure_param_bindings(&observer)?;
+                    if param_bindings.len() > 2 {
+                        return Err(UnsupportedShape(format!(
+                            "observer closure supports up to 2 parameters, got {}",
+                            param_bindings.len()
+                        )));
+                    }
+                    let mut bound_operands = Vec::with_capacity(param_bindings.len());
+                    if !param_bindings.is_empty() {
+                        bound_operands.push(callee_value.clone());
+                    }
+                    if param_bindings.len() >= 2 {
+                        let runtime_node = self.runtime_node_by_expr.get(&callee_id).copied();
+                        let runtime_kind = self.runtime_kind_by_expr.get(&callee_id).copied();
+                        if runtime_kind != Some(RuntimeBoundaryKind::Exec) {
+                            return Err(UnsupportedShape(
+                                "observer second parameter requires exec runtime boundary context"
+                                    .to_owned(),
+                            ));
+                        }
+                        let node = runtime_node.ok_or_else(|| {
+                            UnsupportedShape(
+                                "observer second parameter requires concrete exec runtime node"
+                                    .to_owned(),
+                            )
+                        })?;
+                        let sandbox_root = self.alloc_temp();
+                        self.ops.push(KernelOp::AssignSandboxTreeRoot {
+                            dst: sandbox_root,
+                            source: self.source_for(expr_id),
+                            node,
+                        });
+                        bound_operands.push(Operand::Slot(sandbox_root));
+                    }
+                    return self.lower_closure_with_bound_operands(
+                        &observer,
+                        bound_operands,
+                        expr_id,
+                    );
                 }
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
                     let call = where_expr
@@ -922,8 +1043,11 @@ impl<'a> BodyLowering<'a> {
                         })?;
                         Ok(Operand::Int(value))
                     }
+                    SyntaxKind::STRING => Ok(Operand::String(normalize_string_literal_token(
+                        token.text(),
+                    ))),
                     _ => Err(UnsupportedShape(format!(
-                        "only INT literals supported, got `{}`",
+                        "only INT/STRING literals supported, got `{}`",
                         token.text()
                     ))),
                 }
@@ -1137,22 +1261,13 @@ impl<'a> BodyLowering<'a> {
                 Ok(Operand::Slot(dst))
             }
             Expr::Closure(closure) => {
-                let mut params = closure.parameters();
-                let Some(param) = params.next() else {
-                    return Err(UnsupportedShape(
-                        "closure requires one parameter".to_owned(),
-                    ));
-                };
-                if params.next().is_some() {
+                let param_bindings = self.closure_param_bindings(&closure)?;
+                if param_bindings.len() != 1 {
                     return Err(UnsupportedShape(
                         "only single-parameter closure supported".to_owned(),
                     ));
-                }
-                let param_name = param
-                    .name()
-                    .ok_or_else(|| UnsupportedShape("closure parameter missing".to_owned()))?
-                    .text()
-                    .to_owned();
+                };
+                let param_binding = param_bindings[0];
                 let body = closure
                     .body()
                     .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
@@ -1170,16 +1285,20 @@ impl<'a> BodyLowering<'a> {
                 let rhs = binary
                     .rhs()
                     .ok_or_else(|| UnsupportedShape("closure rhs missing".to_owned()))?;
-                let addend = if is_param_name_ref(&lhs, &param_name) {
-                    self.lower_expr(
-                        self.expr_id(&rhs)
-                            .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?,
-                    )?
-                } else if is_param_name_ref(&rhs, &param_name) {
-                    self.lower_expr(
-                        self.expr_id(&lhs)
-                            .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?,
-                    )?
+                let lhs_id = self
+                    .expr_id(&lhs)
+                    .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?;
+                let rhs_id = self
+                    .expr_id(&rhs)
+                    .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?;
+                let lhs_is_param =
+                    self.use_binding_by_expr.get(&lhs_id).copied() == Some(param_binding);
+                let rhs_is_param =
+                    self.use_binding_by_expr.get(&rhs_id).copied() == Some(param_binding);
+                let addend = if lhs_is_param {
+                    self.lower_expr(rhs_id)?
+                } else if rhs_is_param {
+                    self.lower_expr(lhs_id)?
                 } else {
                     return Err(UnsupportedShape(
                         "closure add must include parameter on one side".to_owned(),
@@ -1198,9 +1317,31 @@ impl<'a> BodyLowering<'a> {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
                     let runtime_kind = self.runtime_kind_by_expr.get(&expr_id).copied();
                     if runtime_kind == Some(RuntimeBoundaryKind::Discover) {
-                        return Err(UnsupportedShape(
-                            "discover closure execution requires typed closure-parameter identity; currently unsupported".to_owned(),
-                        ));
+                        let positional_args = call.positional_args();
+                        if positional_args.is_empty() {
+                            return Err(UnsupportedShape(format!(
+                                "discover expects at least one argument ending with closure, got {}",
+                                positional_args.len()
+                            )));
+                        }
+                        let (closure_arg, _) = positional_args
+                            .split_last()
+                            .expect("checked discover arg count");
+                        let Expr::Closure(closure) = closure_arg.clone() else {
+                            return Err(UnsupportedShape(
+                                "discover expects final closure argument".to_owned(),
+                            ));
+                        };
+                        let host = self.alloc_temp();
+                        self.ops.push(KernelOp::AssignHostLocal {
+                            dst: host,
+                            source: self.source_for(expr_id),
+                        });
+                        return self.lower_closure_with_bound_operands(
+                            &closure,
+                            vec![Operand::Slot(host)],
+                            expr_id,
+                        );
                     }
 
                     let positional_inputs = call
@@ -1499,13 +1640,6 @@ fn extract_observer_closure(keywords: &Expr) -> Result<vx_parser::ClosureExpr, E
         ));
     };
     Ok(closure)
-}
-
-fn is_param_name_ref(expr: &Expr, name: &str) -> bool {
-    let Expr::NameRef(name_ref) = expr else {
-        return false;
-    };
-    name_ref.token().is_some_and(|token| token.text() == name)
 }
 
 fn normalize_string_literal_token(token_text: &str) -> String {
