@@ -84,6 +84,7 @@ pub enum RuntimeField {
 pub enum RuntimeMemberOp {
     Collect,
     Blob,
+    Which,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -604,6 +605,7 @@ struct BodyLowering<'a> {
     binding_initializers: HashMap<BridgeLocalBindingId, ExprId>,
     slot_by_binding: HashMap<BridgeLocalBindingId, SlotId>,
     runtime_node_by_expr: HashMap<ExprId, RuntimeNodeId>,
+    runtime_kind_by_expr: HashMap<ExprId, RuntimeBoundaryKind>,
     lowerable_bodies: BTreeSet<BodyId>,
     params: Vec<SlotId>,
     next_slot: u32,
@@ -696,9 +698,11 @@ impl<'a> BodyLowering<'a> {
         }
 
         let mut runtime_node_by_expr = HashMap::new();
+        let mut runtime_kind_by_expr = HashMap::new();
         for extracted in &analyzed.extracted_nodes {
-            if let crate::ExtractedNodeReason::RuntimeBoundary { kind: _ } = extracted.reason {
+            if let crate::ExtractedNodeReason::RuntimeBoundary { kind } = extracted.reason {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
+                runtime_kind_by_expr.insert(extracted.source.expr, kind);
             }
         }
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
@@ -725,6 +729,7 @@ impl<'a> BodyLowering<'a> {
             binding_initializers,
             slot_by_binding,
             runtime_node_by_expr,
+            runtime_kind_by_expr,
             lowerable_bodies: lowerable_bodies.clone(),
             params,
             next_slot,
@@ -835,11 +840,27 @@ impl<'a> BodyLowering<'a> {
                 self.lower_expr(inner_id)
             }
             Expr::Where(where_expr) => {
-                if where_expr.keywords().is_some() {
-                    return Err(UnsupportedShape(
-                        "where keywords/observer lowering is not supported in executable slice"
-                            .to_owned(),
-                    ));
+                if let Some(keywords) = where_expr.keywords() {
+                    let observer = extract_observer_closure(&keywords)?;
+                    if observer.parameters().next().is_some() {
+                        return Err(UnsupportedShape(
+                            "observer closures with parameters are unsupported until typed executor-local observer inputs are modeled".to_owned(),
+                        ));
+                    }
+                    let callee = where_expr.callee().ok_or_else(|| {
+                        UnsupportedShape("where expression missing callee".to_owned())
+                    })?;
+                    let callee_id = self
+                        .expr_id(&callee)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    let _ = self.lower_expr(callee_id)?;
+                    let body = observer
+                        .body()
+                        .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
+                    let body_id = self
+                        .expr_id(&body)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    return self.lower_expr(body_id);
                 }
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
                     let call = where_expr
@@ -1175,6 +1196,13 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Call(call) => {
                 if let Some(node) = self.runtime_node_by_expr.get(&expr_id).copied() {
+                    let runtime_kind = self.runtime_kind_by_expr.get(&expr_id).copied();
+                    if runtime_kind == Some(RuntimeBoundaryKind::Discover) {
+                        return Err(UnsupportedShape(
+                            "discover closure execution requires typed closure-parameter identity; currently unsupported".to_owned(),
+                        ));
+                    }
+
                     let positional_inputs = call
                         .positional_args()
                         .into_iter()
@@ -1447,8 +1475,30 @@ fn runtime_member_op_from_name(name: &str) -> Option<RuntimeMemberOp> {
     match name {
         "collect" => Some(RuntimeMemberOp::Collect),
         "blob" => Some(RuntimeMemberOp::Blob),
+        "which" => Some(RuntimeMemberOp::Which),
         _ => None,
     }
+}
+
+fn extract_observer_closure(keywords: &Expr) -> Result<vx_parser::ClosureExpr, ExecSliceError> {
+    let Expr::Record(record) = keywords else {
+        return Err(UnsupportedShape(
+            "where keywords must be a record for observer execution".to_owned(),
+        ));
+    };
+    let observer_expr = record
+        .fields()
+        .find_map(|field| {
+            let name = field.name()?;
+            (name.text() == "observer").then(|| field.value()).flatten()
+        })
+        .ok_or_else(|| UnsupportedShape("where observer keyword missing".to_owned()))?;
+    let Expr::Closure(closure) = observer_expr else {
+        return Err(UnsupportedShape(
+            "where observer must be a closure expression".to_owned(),
+        ));
+    };
+    Ok(closure)
 }
 
 fn is_param_name_ref(expr: &Expr, name: &str) -> bool {

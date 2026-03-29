@@ -16,6 +16,20 @@ pub struct PlatformExecOutput {
     pub stderr: Vec<u8>,
 }
 
+pub fn resolve_tool_from_path(program: &str) -> Option<String> {
+    if program.contains('/') {
+        return Some(program.to_owned());
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 pub fn run_platform_exec(request: PlatformExecRequest<'_>) -> std::io::Result<PlatformExecOutput> {
     let mut command = sandboxed_command(request.program, request.sandbox_root);
     hermetic_env(&mut command, request.sandbox_root);

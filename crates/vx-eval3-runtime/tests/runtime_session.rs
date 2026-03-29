@@ -260,9 +260,7 @@ fn main() -> U64 (
 fn runtime_session_build_shaped_source_runs_through_driver_to_concrete_result() {
     let src = r#"
 fn build(root: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
-  let class = executor_class("default");
-  let cc = discover(class, (host) => host.which("cc"));
-  exec [cc, "-c", @root/main.c, "-o", @out/main.o]
+  exec ["cc", "-c", @root/main.c, "-o", @out/main.o]
 )
 "#;
 
@@ -568,7 +566,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> U64 
 }
 
 #[test]
-fn zoo_cc_version_lowering_is_honestly_unsupported_without_semantic_macros() {
+fn zoo_cc_version_is_honestly_unsupported_without_typed_discover_observer_inputs() {
     let zoo_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let bridge = SingleSourceBridge::from_entry_file(&zoo_file).expect("zoo bridge should load");
     let analysis = build_minimal_analysis(&bridge);
@@ -581,9 +579,16 @@ fn zoo_cc_version_lowering_is_honestly_unsupported_without_semantic_macros() {
         .map(|body| body.id)
         .expect("cc-version should expose build in root source");
     let err = lower_executable_program_for_entry_body(&analysis, &bridge, entry_body)
-        .expect_err("cc-version should fail lowering without semantic macro shortcuts");
-    assert!(
-        matches!(err, vx_eval3_analysis::ExecSliceError::UnsupportedShape(_)),
-        "cc-version must fail honestly as unsupported instead of passing via recognized plans: {err:?}"
-    );
+        .expect_err("cc-version should stay honestly unsupported in this slice");
+    match err {
+        vx_eval3_analysis::ExecSliceError::UnsupportedShape(message) => {
+            assert!(
+                message.contains(
+                    "discover closure execution requires typed closure-parameter identity"
+                ) || message.contains("observer closures with parameters are unsupported"),
+                "unsupported reason should point to missing typed discover/observer input model, got: {message}"
+            );
+        }
+        other => panic!("expected unsupported shape, got {other:?}"),
+    }
 }

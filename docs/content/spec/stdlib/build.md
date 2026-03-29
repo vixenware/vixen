@@ -446,6 +446,25 @@ model, but they are not part of the core language syntax.
 > observed host fact. These operations are for discovery and rechecking
 > discovered facts, not for general network access.
 
+> r[exec.verifier.host.coarse]
+>
+> Host observations are intentionally weaker than ordinary VFS-backed
+> `exec` inputs. A `Tree`, `Blob`, or `ExecPath` mounted into the sandbox
+> is fine-grained runtime-visible content: reads and writes happen in the
+> VFS model, and dependency/provenance tracking can follow that content
+> precisely. By contrast, host paths discovered through `Host` are coarse
+> host facts: they refer to the executor's real filesystem outside the
+> VFS, and the runtime cannot in general track every file read that later
+> host-side execution may perform beneath such a path.
+>
+> Coarse host facts are therefore justified by discovery and verification,
+> not by ordinary VFS tracking. If a discovered value later authorizes
+> host-side access during `exec`, that access must be explained by the
+> carried observations attached to the value and rechecked on the concrete
+> runner. Implementations should derive any such coarse host access from
+> the relevant verified obligations rather than granting broad host roots
+> unconditionally.
+
 > r[exec.verifier.compose]
 >
 > When demanded discovery evaluation performs multiple host observations,

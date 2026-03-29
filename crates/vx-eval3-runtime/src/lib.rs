@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use vx_platform_exec::resolve_tool_from_path;
 
 use vx_eval3_analysis::{
     BodyId, BridgeLocalBindingId, DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError,
@@ -12,6 +13,7 @@ pub enum ExecValue {
     Int(i64),
     Bool(bool),
     String(String),
+    Host(HostValue),
     Blob(BlobValue),
     Tree(TreeValue),
     ProcessResult { exit_code: i64, stdout: String },
@@ -24,6 +26,11 @@ pub enum ExecValue {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CallableValue {
     AddConst(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HostValue {
+    Local,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -965,17 +972,51 @@ fn call_member(
     method: RuntimeMemberOp,
     args: &[ExecValue],
 ) -> Result<ExecValue, ExecSliceError> {
-    if !args.is_empty() {
-        return Err(ExecSliceError::UnsupportedShape(
-            "runtime member call with args is unsupported".to_owned(),
-        ));
-    }
     match (receiver, method) {
-        (ExecValue::String(text), RuntimeMemberOp::Collect) => Ok(ExecValue::String(text)),
-        (ExecValue::String(text), RuntimeMemberOp::Blob) => Ok(ExecValue::Blob(BlobValue {
-            bytes: text.into_bytes(),
-        })),
-        (ExecValue::Blob(blob), RuntimeMemberOp::Blob) => Ok(ExecValue::Blob(blob)),
+        (ExecValue::String(text), RuntimeMemberOp::Collect) => {
+            if !args.is_empty() {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "collect() does not take arguments".to_owned(),
+                ));
+            }
+            Ok(ExecValue::String(text))
+        }
+        (ExecValue::String(text), RuntimeMemberOp::Blob) => {
+            if !args.is_empty() {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "blob() does not take arguments".to_owned(),
+                ));
+            }
+            Ok(ExecValue::Blob(BlobValue {
+                bytes: text.into_bytes(),
+            }))
+        }
+        (ExecValue::Blob(blob), RuntimeMemberOp::Blob) => {
+            if !args.is_empty() {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "blob() does not take arguments".to_owned(),
+                ));
+            }
+            Ok(ExecValue::Blob(blob))
+        }
+        (ExecValue::Host(HostValue::Local), RuntimeMemberOp::Which) => {
+            if args.len() != 1 {
+                return Err(ExecSliceError::UnsupportedShape(
+                    "which(program) expects one argument".to_owned(),
+                ));
+            }
+            let ExecValue::String(program) = &args[0] else {
+                return Err(ExecSliceError::TypeMismatch(
+                    "which(program) expects string argument".to_owned(),
+                ));
+            };
+            let resolved = resolve_tool_from_path(program).ok_or_else(|| {
+                ExecSliceError::TypeMismatch(format!(
+                    "could not resolve tool `{program}` from PATH"
+                ))
+            })?;
+            Ok(ExecValue::String(resolved))
+        }
         (other, _) => Err(ExecSliceError::TypeMismatch(format!(
             "unsupported runtime member call on {:?}",
             other
