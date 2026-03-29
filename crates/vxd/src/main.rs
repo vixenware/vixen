@@ -30,7 +30,7 @@ use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_store_proto::StoreClient;
 use vxd_proto::{ProgressListenerClient, VxdDispatcher};
 
-use crate::service::{ActivityRegistry, BuildVxExecutors, VxdServiceDeps};
+use crate::service::{ActivityRegistry, VxdServiceDeps};
 pub use service::VxdService;
 
 pub type UpstreamCaller = DriverCaller;
@@ -253,10 +253,8 @@ async fn async_main() -> Result<()> {
                                 VxdServiceDeps {
                                     spawn_tracker,
                                     store: clients.store,
-                                    build_vx_executors: BuildVxExecutors::default(),
                                     store_handle: clients.store_handle,
                                     activity_registry: clients.activity_registry,
-                                    build_vx_config_path: None,
                                 },
                             )
                             .await,

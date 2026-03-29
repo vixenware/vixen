@@ -7,16 +7,10 @@
 use crate::SpawnTracker;
 use camino::Utf8PathBuf;
 use moire::sync::SyncMutex;
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use vx_io::boot::GracefulShutdown;
 use vx_io::spawn::ServiceHandle;
-use vx_runner_proto::RunnerClient;
 use vx_store_proto::{ServiceVersion, StoreClient};
 use vxd_proto::{
     BuildRequest, BuildResult, ProgressListenerClient, PsEntry, PsResult, UnpublishResult,
@@ -39,309 +33,20 @@ pub struct VxdService {
 pub(crate) struct VxdServiceDeps {
     pub(crate) spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
     pub(crate) store: Arc<StoreClient>,
-    pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
     pub(crate) activity_registry: ActivityRegistry,
-    pub(crate) build_vx_config_path: Option<Utf8PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BuildExecutorBackendKind {
-    Local,
-    Daemon,
-    SshBootstrap,
-}
-
-type BuildExecutorFuture =
-    Pin<Box<dyn Future<Output = std::result::Result<BuildVxExecutor, String>> + Send>>;
-type LocalExecutorFactory =
-    Arc<dyn Fn(Option<Arc<ProgressListenerClient>>) -> BuildExecutorFuture + Send + Sync>;
-type SshBootstrapFactory = Arc<
-    dyn Fn(String, String, Option<Arc<ProgressListenerClient>>) -> BuildExecutorFuture
-        + Send
-        + Sync,
->;
-
-#[derive(Clone)]
-pub(crate) struct BuildVxExecutor {
-    pub(crate) id: String,
-    pub(crate) backend: BuildExecutorBackendKind,
-    pub(crate) runner: Arc<RunnerClient>,
-    pub(crate) store: Option<Arc<StoreClient>>,
-    pub(crate) store_supports_readthrough: bool,
-    pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
-    pub(crate) store_handle: Option<Arc<ServiceHandle>>,
-}
-
-impl BuildVxExecutor {
-    pub(crate) fn local(
-        runner: Arc<RunnerClient>,
-        runner_handle: Option<Arc<ServiceHandle>>,
-    ) -> Self {
-        Self {
-            id: "local".to_string(),
-            backend: BuildExecutorBackendKind::Local,
-            runner,
-            store: None,
-            store_supports_readthrough: false,
-            runner_handle,
-            store_handle: None,
-        }
-    }
-
-    pub(crate) fn daemon(
-        id: String,
-        runner: Arc<RunnerClient>,
-        runner_handle: Option<Arc<ServiceHandle>>,
-    ) -> Self {
-        Self {
-            id,
-            backend: BuildExecutorBackendKind::Daemon,
-            runner,
-            store: None,
-            store_supports_readthrough: false,
-            runner_handle,
-            store_handle: None,
-        }
-    }
-
-    pub(crate) fn attach_store(&mut self, store: Arc<StoreClient>) {
-        self.store = Some(store);
-        self.store_supports_readthrough = true;
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct SshBootstrapExecutor {
-    pub(crate) id: String,
-    pub(crate) backend: BuildExecutorBackendKind,
-    pub(crate) runner: Arc<RunnerClient>,
-    pub(crate) store: Option<Arc<StoreClient>>,
-    pub(crate) store_supports_readthrough: bool,
-    pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
-    pub(crate) store_handle: Option<Arc<ServiceHandle>>,
-}
-
-impl From<SshBootstrapExecutor> for BuildVxExecutor {
-    fn from(value: SshBootstrapExecutor) -> Self {
-        Self {
-            id: value.id,
-            backend: value.backend,
-            runner: value.runner,
-            store: value.store,
-            store_supports_readthrough: value.store_supports_readthrough,
-            runner_handle: value.runner_handle,
-            store_handle: value.store_handle,
-        }
-    }
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct BuildVxExecutors {
-    local_factory: Option<LocalExecutorFactory>,
-    ssh_bootstrap_factory: Option<SshBootstrapFactory>,
-    class_aliases: BTreeMap<String, String>,
-    class_executors: BTreeMap<String, BuildVxExecutor>,
-    unavailable: BTreeMap<String, BuildExecutorUnavailable>,
-}
-
-#[derive(Clone)]
-struct BuildExecutorUnavailable {
-    id: String,
-    backend: BuildExecutorBackendKind,
-    reason: String,
-}
-
-impl BuildVxExecutors {
-    pub(crate) fn local_lazy<F>(factory: F) -> Self
-    where
-        F: Fn(Option<Arc<ProgressListenerClient>>) -> BuildExecutorFuture + Send + Sync + 'static,
-    {
-        Self {
-            local_factory: Some(Arc::new(factory)),
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn with_ssh_bootstrap_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(String, String, Option<Arc<ProgressListenerClient>>) -> BuildExecutorFuture
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.ssh_bootstrap_factory = Some(Arc::new(factory));
-        self
-    }
-
-    pub(crate) fn register_class_alias(
-        &mut self,
-        class_label: String,
-        target: &str,
-    ) -> std::result::Result<(), String> {
-        if class_label == target {
-            return Err(format!(
-                "build executor class {class_label:?} aliases itself"
-            ));
-        }
-        self.class_aliases.insert(class_label, target.to_string());
-        Ok(())
-    }
-
-    pub(crate) fn register_class_executor(
-        &mut self,
-        class_label: String,
-        executor: BuildVxExecutor,
-    ) {
-        self.class_executors.insert(class_label, executor);
-    }
-
-    pub(crate) fn register_class_unavailable(
-        &mut self,
-        class_label: String,
-        id: String,
-        backend: BuildExecutorBackendKind,
-        reason: String,
-    ) {
-        self.unavailable.insert(
-            class_label,
-            BuildExecutorUnavailable {
-                id,
-                backend,
-                reason,
-            },
-        );
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn local_factory(&self) -> Option<&LocalExecutorFactory> {
-        self.local_factory.as_ref()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn ssh_bootstrap_factory(&self) -> Option<&SshBootstrapFactory> {
-        self.ssh_bootstrap_factory.as_ref()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn class_executor(&self, class_label: &str) -> Option<&BuildVxExecutor> {
-        self.class_executors.get(class_label)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn class_alias(&self, class_label: &str) -> Option<&str> {
-        self.class_aliases.get(class_label).map(String::as_str)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn unavailable(&self, class_label: &str) -> Option<&str> {
-        self.unavailable
-            .get(class_label)
-            .map(|entry| entry.reason.as_str())
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ActivityRegistry {
-    next_id: Arc<AtomicU64>,
-    entries: Arc<SyncMutex<BTreeMap<u64, Arc<SyncMutex<ActivityState>>>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ActivityHandle {
-    inner: Arc<SyncMutex<ActivityState>>,
-}
-
-struct ActivityState {
-    id: u64,
-    kind: String,
-    label: String,
-    executor: Option<String>,
-    started_at: Instant,
-    last_update_at: Instant,
-    last_message: Option<String>,
-    remote_last_update_at: Option<Instant>,
-    last_remote_message: Option<String>,
-}
+pub(crate) struct ActivityRegistry;
 
 impl ActivityRegistry {
     pub(crate) fn new() -> Self {
-        Self {
-            next_id: Arc::new(AtomicU64::new(1)),
-            entries: Arc::new(SyncMutex::new("vxd/activity_entries", BTreeMap::new())),
-        }
-    }
-
-    pub(crate) fn start(
-        &self,
-        kind: impl Into<String>,
-        label: impl Into<String>,
-        executor: Option<String>,
-    ) -> ActivityHandle {
-        let now = Instant::now();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let state = Arc::new(SyncMutex::new(
-            "vxd/activity_state",
-            ActivityState {
-                id,
-                kind: kind.into(),
-                label: label.into(),
-                executor,
-                started_at: now,
-                last_update_at: now,
-                last_message: None,
-                remote_last_update_at: None,
-                last_remote_message: None,
-            },
-        ));
-        self.entries.lock().insert(id, Arc::clone(&state));
-        ActivityHandle { inner: state }
+        Self
     }
 
     pub(crate) fn snapshot(&self) -> Vec<PsEntry> {
-        self.entries
-            .lock()
-            .values()
-            .map(|entry| {
-                let state = entry.lock();
-                let age_ms = state.started_at.elapsed().as_millis() as u64;
-                let idle_ms = state.last_update_at.elapsed().as_millis() as u64;
-                let remote_idle_ms = state
-                    .remote_last_update_at
-                    .map(|instant| instant.elapsed().as_millis() as u64);
-                PsEntry {
-                    id: state.id,
-                    kind: state.kind.clone(),
-                    label: state.label.clone(),
-                    executor: state.executor.clone(),
-                    age_ms,
-                    idle_ms,
-                    last_message: state.last_message.clone(),
-                    remote_idle_ms,
-                    last_remote_message: state.last_remote_message.clone(),
-                }
-            })
-            .collect()
-    }
-}
-
-impl Default for ActivityRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ActivityHandle {
-    pub(crate) fn update(&self, message: impl Into<String>) {
-        let mut state = self.inner.lock();
-        state.last_update_at = Instant::now();
-        state.last_message = Some(message.into());
-    }
-
-    pub(crate) fn update_remote(&self, message: impl Into<String>) {
-        let mut state = self.inner.lock();
-        state.remote_last_update_at = Some(Instant::now());
-        state.last_remote_message = Some(message.into());
+        Vec::new()
     }
 }
 
@@ -354,10 +59,8 @@ impl VxdService {
         let VxdServiceDeps {
             spawn_tracker,
             store,
-            build_vx_executors: _,
             store_handle,
             activity_registry,
-            build_vx_config_path: _,
         } = deps;
 
         Self {
