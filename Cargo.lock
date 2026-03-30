@@ -1589,7 +1589,7 @@ dependencies = [
 [[package]]
 name = "kajit"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "facet",
  "itoa",
@@ -1615,12 +1615,12 @@ dependencies = [
 [[package]]
 name = "kajit-emit"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 
 [[package]]
 name = "kajit-emit-text"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "chumsky",
  "kajit-emit",
@@ -1630,7 +1630,7 @@ dependencies = [
 [[package]]
 name = "kajit-format"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "facet",
  "kajit-hir",
@@ -1639,7 +1639,7 @@ dependencies = [
 [[package]]
 name = "kajit-hir"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "kajit-ir",
 ]
@@ -1647,12 +1647,12 @@ dependencies = [
 [[package]]
 name = "kajit-ir"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 
 [[package]]
 name = "kajit-ir-text"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "chumsky",
  "kajit-ir",
@@ -1662,7 +1662,7 @@ dependencies = [
 [[package]]
 name = "kajit-json"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "facet",
  "kajit-format",
@@ -1672,7 +1672,7 @@ dependencies = [
 [[package]]
 name = "kajit-lir"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "kajit-ir",
 ]
@@ -1680,7 +1680,7 @@ dependencies = [
 [[package]]
 name = "kajit-malum"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "facet",
 ]
@@ -1688,7 +1688,7 @@ dependencies = [
 [[package]]
 name = "kajit-mir"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "indexmap",
  "kajit-ir",
@@ -1699,7 +1699,7 @@ dependencies = [
 [[package]]
 name = "kajit-mir-text"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "chumsky",
  "kajit-ir",
@@ -1711,7 +1711,7 @@ dependencies = [
 [[package]]
 name = "kajit-parse-util"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "chumsky",
 ]
@@ -1719,7 +1719,7 @@ dependencies = [
 [[package]]
 name = "kajit-postcard"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+source = "git+https://github.com/bearcove/kajit?rev=be5c0d93bd656c22925b4f4e1961c90a5e5d347a#be5c0d93bd656c22925b4f4e1961c90a5e5d347a"
 dependencies = [
  "facet",
  "kajit-format",
@@ -3004,7 +3004,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
