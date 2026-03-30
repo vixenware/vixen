@@ -1,54 +1,69 @@
 +++
 title = "vixen"
-description = "Experimental Rust build engine focused on hermetic builds and correct caching"
+description = "Experimental build system focused on hermetic builds and correct caching"
 +++
 
 ## Why? {#why}
 
-There's an unexplored middle ground between the "spell it all out" Bazel/Buck2
-universe and Cargo's "best-effort caching". vixen aims for hermetic execution
-without making day-to-day Rust work feel like operating heavy machinery.
+Vixen was born out of frustration with the existing solutions when it comes to
+building Rust code, which today mostly amount to `cargo build` and
+[Buck2](https://buck2.build/).
 
-To this end, vixen:
+The former is not built for hermeticity, remote execution, multi-language
+builds, precise caching, etc. The latter is, but hot damn that's a lot of BUCK
+files to write (or generate, ahead of time, with reindeer etc.)
 
-  * Treats orchestration, storage, and action execution as separate concerns
-    that do not have to run on the same node.
-  * Enforces a virtual filesystem and sandboxing layer on all supported
-    platforms (macOS, Linux, Windows).
+Originally designed as a "large Rust core" with a "small build language", Vixen
+has now progressed to the "small Rust core" with a "fully-featured build language"
+stage.
 
-Those constraints are exactly why vixen is not a Cargo successor. Cargo must
-work everywhere, for everyone, with minimal prerequisites.
+Due to this major design change, what little used to work in Vixen currently doesn't.
 
-Compared to other hermetic build systems, vixen is deliberately Rust-first:
+Because the language and the semantics are still in flux, there exists basically
+no public documentation about the language itself. It is, however, possible to
+list the design goals.
 
-  * A rule language designed to accommodate Rust's build-system shape without
-    requiring pre-build file generation.
-  * Support for a "Cargo.toml only" mode of operation.
-  * A planned "fixup package manager" for crates with special needs
-    (creative build scripts or proc macros), only if that becomes necessary.
+## What {#what}
 
-## Current status
+Vixen is a demand-driven language: any expression that is not demanded by the
+final build result is not evaluated. This means `a + b` doesn't "force
+evaluation" of `a`, and neither does `[a, b]`, neither does `some_func a`,
+or even `a.field`.
 
-vixen is in early development. Today it supports only a small slice of what
-Rust projects need in practice. The ambition is much larger, but the current
-focus is to make the fundamentals correct before broadening support.
+Vixen has value semantics, there are no mutable references (or immutable references,
+for that matter). It is strongly typed, has Rust-like structs, tuples and enums.
 
-If your project sits outside what vixen currently handles, it should fail
-clearly rather than attempt a partial build.
+Vixen is designed for distributed evaluation: closures can be passed over the network
+to be evaluated on other hosts.
 
-Important foundations are already in place (CAS, VFS, sandboxing), and the rest
-is being built incrementally. If you want to follow progress, join
-[the Discord](https://discord.gg/GJadP5ggXs).
+Vixen is designed to solve problems like version resolution (think Cargo.toml =>
+Cargo.lock), not by describing the algorithm to use to solve version resolution,
+but by describing the shape of the problem through usage of regular function
+application, annotations like `key`, `join`, and others (still under heavy research).
 
-## Getting started
+Vixen is designed to encourage fully hermetic setups, but takes a pragmatic
+approach to sandboxing and ambient toolchains via "fact discovery", "attached
+obligations", etc. (example: it's fine to use your local XCode as long as you've
+fingerprinted it).
 
-- [Prerequisites](/prerequisites/) - Platform requirements for Linux, macOS, and Windows
-- [Download](/download/) - Install the macOS app and CLI entrypoints
-- [GitHub](https://github.com/bearcove/vixen)
+Vixen is designed to provide a great code authoring experience, with first-class
+LSP support, and to keep a small standard library (essentially signature for
+intrinsics) with a package manager from day one (distributing vixen libraries
+for... finding C toolchains, etc. etc.)
 
-## Documentation
+The Vixen language is designed so that concurrency naturally falls out of
+regular, naively-written code — static analysis is used to divide the code into
+nodes of a graph: some are dependencies on an external task, some are built-ins
+(like `acquire`, etc.), and some are kernels of pure vixen code, that are
+meant to be JIT-compiled into native code.
 
-- [Specification](/spec/) - Current guarantees, support, and specification roadmap
-- [Internals](/internals/) - How vixen works under the hood
-- [Daemon topologies](/daemons/) - Local vs distributed daemon lifecycle model
-- [Vixen mac app](/vixen-mac-app/) - Why the app exists and how FSKit integration works
+It is a design goal of the Vixen language to be able to re-implement the
+domain-specific parts of cargo package resolution in Vixen itself (API
+endpoints, structs/enums into which JSON & YAML payloads are deserialized,
+etc.), while leaving the actual graph traversal problem to the Vixen runtime. 
+
+It is not a design goal of the Vixen language to avoid turing-completeness.
+
+## Stay tuned
+
+If you want to follow progress, join [the Discord](https://discord.gg/GJadP5ggXs).
