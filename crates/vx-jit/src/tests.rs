@@ -34,6 +34,34 @@ fn sparse_prefix(name: String) -> String (
 )
 "#;
 
+const SOURCE_STR_LEN: &str = r#"
+fn str_len(name: String) -> U64 (
+  name.len()
+)
+"#;
+
+const SOURCE_STR_SLICE: &str = r#"
+fn str_slice(name: String, start: U64, end: U64) -> String (
+  name.slice(start..end)
+)
+"#;
+
+const SOURCE_ONE: &str = r#"
+fn one() -> String (
+  "1"
+)
+"#;
+
+const SOURCE_PICK: &str = r#"
+fn pick(flag: U64) -> String (
+  if flag == 1 (
+    "yes"
+  ) else (
+    "no"
+  )
+)
+"#;
+
 #[test]
 fn lowers_u64_add_into_kajit_hir() {
     let module = lower_u64_add_hir().expect("u64 add should lower into Kajit HIR");
@@ -308,4 +336,91 @@ fn interprets_sparse_prefix() {
     )
     .expect("sparse_prefix should interpret for longer strings");
     assert_eq!(result, "se/rd");
+}
+
+#[test]
+fn compiles_and_executes_source_text_string_len() {
+    let function = lower_source_text_kernel(SOURCE_STR_LEN, "str_len")
+        .expect("str_len should lower into kernel IR");
+
+    let interpreted = crate::interpret(&function, &[KernelValue::String("serde".to_owned())])
+        .expect("str_len should interpret");
+    assert_eq!(interpreted, KernelValue::U64(5));
+
+    let compiled = crate::kajit_backend::compile(&function).expect("str_len should compile");
+    let str_len: unsafe extern "C" fn(u64, u64) -> u64 =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    let input = "serde";
+    let result = unsafe { str_len(input.as_ptr() as u64, input.len() as u64) };
+    assert_eq!(result, input.len() as u64);
+}
+
+#[test]
+fn compiles_and_executes_source_text_string_slice() {
+    let function = lower_source_text_kernel(SOURCE_STR_SLICE, "str_slice")
+        .expect("str_slice should lower into kernel IR");
+
+    let interpreted = crate::interpret(
+        &function,
+        &[
+            KernelValue::String("serde".to_owned()),
+            KernelValue::U64(1),
+            KernelValue::U64(4),
+        ],
+    )
+    .expect("str_slice should interpret");
+    assert_eq!(interpreted, KernelValue::String("erd".to_owned()));
+
+    let compiled = crate::kajit_backend::compile(&function).expect("str_slice should compile");
+    let str_slice: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    let input = "serde";
+    let (ptr, len) = unsafe { str_slice(input.as_ptr() as u64, input.len() as u64, 1, 4) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("slice result should be utf-8");
+    assert_eq!(output, "erd");
+}
+
+#[test]
+fn compiles_and_executes_source_text_string_literal_return() {
+    let function =
+        lower_source_text_kernel(SOURCE_ONE, "one").expect("one should lower into kernel IR");
+
+    let interpreted = crate::interpret(&function, &[]).expect("one should interpret");
+    assert_eq!(interpreted, KernelValue::String("1".to_owned()));
+
+    let compiled = crate::kajit_backend::compile(&function).expect("one should compile");
+    let one: unsafe extern "C" fn() -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    let (ptr, len) = unsafe { one() };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("literal result should be utf-8");
+    assert_eq!(output, "1");
+}
+
+#[test]
+fn compiles_and_executes_source_text_string_if_return() {
+    let function =
+        lower_source_text_kernel(SOURCE_PICK, "pick").expect("pick should lower into kernel IR");
+
+    let interpreted =
+        crate::interpret(&function, &[KernelValue::U64(1)]).expect("pick should interpret for yes");
+    assert_eq!(interpreted, KernelValue::String("yes".to_owned()));
+    let interpreted =
+        crate::interpret(&function, &[KernelValue::U64(0)]).expect("pick should interpret for no");
+    assert_eq!(interpreted, KernelValue::String("no".to_owned()));
+
+    let compiled = crate::kajit_backend::compile(&function).expect("pick should compile");
+    let pick: unsafe extern "C" fn(u64) -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+
+    let (ptr, len) = unsafe { pick(1) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("pick yes result should be utf-8");
+    assert_eq!(output, "yes");
+
+    let (ptr, len) = unsafe { pick(0) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("pick no result should be utf-8");
+    assert_eq!(output, "no");
 }
