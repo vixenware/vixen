@@ -30,6 +30,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "ar_archive_writer"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
+dependencies = [
+ "object 0.37.3",
+]
+
+[[package]]
 name = "arborium"
 version = "2.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -77,7 +86,7 @@ dependencies = [
  "arborium-sysroot",
  "cc",
  "regex",
- "regex-syntax",
+ "regex-syntax 0.8.10",
  "streaming-iterator",
  "tree-sitter-language",
 ]
@@ -289,6 +298,9 @@ name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+dependencies = [
+ "allocator-api2",
+]
 
 [[package]]
 name = "bytes"
@@ -325,6 +337,20 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chumsky"
+version = "1.0.0-alpha.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e82d74e6c83060ec269fe9e0d408d6de4a1645d525f9a0bbbb841ba4efd91ac"
+dependencies = [
+ "hashbrown 0.15.5",
+ "regex-automata 0.3.9",
+ "serde",
+ "stacker",
+ "unicode-ident",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "cmake"
@@ -1168,6 +1194,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1559,6 +1587,147 @@ dependencies = [
 ]
 
 [[package]]
+name = "kajit"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "facet",
+ "itoa",
+ "kajit-emit",
+ "kajit-emit-text",
+ "kajit-format",
+ "kajit-hir",
+ "kajit-ir",
+ "kajit-ir-text",
+ "kajit-json",
+ "kajit-lir",
+ "kajit-malum",
+ "kajit-mir",
+ "kajit-mir-text",
+ "kajit-postcard",
+ "object 0.36.7",
+ "regalloc2",
+ "serde",
+ "serde_json",
+ "zmij",
+]
+
+[[package]]
+name = "kajit-emit"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+
+[[package]]
+name = "kajit-emit-text"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "chumsky",
+ "kajit-emit",
+ "kajit-parse-util",
+]
+
+[[package]]
+name = "kajit-format"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "facet",
+ "kajit-hir",
+]
+
+[[package]]
+name = "kajit-hir"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "kajit-ir",
+]
+
+[[package]]
+name = "kajit-ir"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+
+[[package]]
+name = "kajit-ir-text"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "chumsky",
+ "kajit-ir",
+ "kajit-parse-util",
+]
+
+[[package]]
+name = "kajit-json"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "facet",
+ "kajit-format",
+ "kajit-hir",
+]
+
+[[package]]
+name = "kajit-lir"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "kajit-ir",
+]
+
+[[package]]
+name = "kajit-malum"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "facet",
+]
+
+[[package]]
+name = "kajit-mir"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "indexmap",
+ "kajit-ir",
+ "kajit-lir",
+ "regalloc2",
+]
+
+[[package]]
+name = "kajit-mir-text"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "chumsky",
+ "kajit-ir",
+ "kajit-lir",
+ "kajit-mir",
+ "kajit-parse-util",
+]
+
+[[package]]
+name = "kajit-parse-util"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "chumsky",
+]
+
+[[package]]
+name = "kajit-postcard"
+version = "0.1.0"
+source = "git+https://github.com/bearcove/kajit?rev=8ea9ca7fc6b5555b861b53049bda9f718f8540f2#8ea9ca7fc6b5555b861b53049bda9f718f8540f2"
+dependencies = [
+ "facet",
+ "kajit-format",
+ "kajit-hir",
+ "kajit-malum",
+]
+
+[[package]]
 name = "landlock"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1713,7 +1882,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
- "regex-automata",
+ "regex-automata 0.4.14",
 ]
 
 [[package]]
@@ -1901,6 +2070,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
+ "ruzstd",
+]
+
+[[package]]
+name = "object"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2210,6 +2402,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
+name = "psm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3852766467df634d74f0b2d7819bf8dc483a0eb2e3b0f50f756f9cfe8b0d18d8"
+dependencies = [
+ "ar_archive_writer",
+ "cc",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2269,6 +2471,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "regalloc2"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "952ddbfc6f9f64d006c3efd8c9851a6ba2f2b944ba94730db255d55006e0ffda"
+dependencies = [
+ "allocator-api2",
+ "bumpalo",
+ "hashbrown 0.15.5",
+ "log",
+ "rustc-hash 2.1.1",
+ "smallvec 1.15.1",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2276,8 +2492,19 @@ checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-automata",
- "regex-syntax",
+ "regex-automata 0.4.14",
+ "regex-syntax 0.8.10",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59b23e92ee4318893fa3fe3e6fb365258efbfe6ac6ab30f090cdcbb7aa37efa9"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax 0.7.5",
 ]
 
 [[package]]
@@ -2288,8 +2515,14 @@ checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-syntax",
+ "regex-syntax 0.8.10",
 ]
+
+[[package]]
+name = "regex-syntax"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbb5fb1acd8a1a18b3dd5be62d25485eb770e05afb408a9627d14d451bae12da"
 
 [[package]]
 name = "regex-syntax"
@@ -2550,6 +2783,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ruzstd"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fad02996bfc73da3e301efe90b1837be9ed8f4a462b6ed410aa35d00381de89f"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2751,6 +2993,26 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stacker"
+version = "0.1.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d74a23609d509411d10e2176dc2a4346e3b4aea2e7b1869f19fdedbc71c013"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "streaming-iterator"
@@ -3118,7 +3380,7 @@ dependencies = [
  "matchers",
  "nu-ansi-term",
  "once_cell",
- "regex-automata",
+ "regex-automata 0.4.14",
  "sharded-slab",
  "smallvec 1.15.1",
  "thread_local",
@@ -3160,6 +3422,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "static_assertions",
+]
+
+[[package]]
 name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3170,6 +3442,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"
@@ -3382,6 +3660,19 @@ dependencies = [
  "tokio",
  "tracing",
  "ur-taking-me-with-you",
+]
+
+[[package]]
+name = "vx-jit"
+version = "0.1.0"
+dependencies = [
+ "kajit",
+ "kajit-hir",
+ "thiserror 2.0.18",
+ "vx-analysis",
+ "vx-parser",
+ "vx-resolve",
+ "vx-types",
 ]
 
 [[package]]
@@ -3847,6 +4138,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

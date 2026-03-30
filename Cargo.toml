@@ -20,10 +20,13 @@ vx-http = { path = "crates/vx-http" }
 vx-tracing = { path = "crates/vx-tracing" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
+vx-analysis = { path = "crates/vx-analysis" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
+kajit = { git = "https://github.com/bearcove/kajit", rev = "8ea9ca7fc6b5555b861b53049bda9f718f8540f2" }
+kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "8ea9ca7fc6b5555b861b53049bda9f718f8540f2" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }
