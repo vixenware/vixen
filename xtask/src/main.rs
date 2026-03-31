@@ -160,9 +160,9 @@ fn vixenfs_codegen() -> Result<(), eyre::Error> {
         .to_path_buf();
 
     let service = vx_services::vfs_service_descriptor();
-    let swift = roam_codegen::targets::swift::generate_service_with_bindings(
+    let swift = vox_codegen::targets::swift::generate_service_with_bindings(
         service,
-        roam_codegen::targets::swift::SwiftBindings::Client,
+        vox_codegen::targets::swift::SwiftBindings::Client,
     );
 
     let output = workspace_root.join("apps/mac/xcode/VixenFS/VfsClient.swift");

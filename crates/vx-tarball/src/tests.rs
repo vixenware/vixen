@@ -1,4 +1,4 @@
-use super::{Compression, ExtractedFile, extract_to_tree};
+use super::{Compression, ExtractedFile};
 use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
 use std::sync::Arc;
