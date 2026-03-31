@@ -321,6 +321,6 @@ pub struct PsResult {
 
 /// The daemon service trait.
 #[vox::service]
-pub trait VxDaemon {
+pub trait Daemon {
     // TODO: eval?
 }

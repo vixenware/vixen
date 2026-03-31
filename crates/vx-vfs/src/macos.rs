@@ -17,12 +17,12 @@ use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use vox_core::BareConduit;
-use vox_core::acceptor;
+use vox::{BareConduit, acceptor_on};
 use vox_shm::bootstrap::{self, decode_request};
 use vox_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
 use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
+
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 const SHM_MAX_PAYLOAD_SIZE: u32 = 2_u32 * 1024 * 1024 * 1024;

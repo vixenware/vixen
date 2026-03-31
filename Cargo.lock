@@ -3810,6 +3810,8 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vox",
+ "vox-local",
+ "vox-stream",
  "vx-io",
  "vx-services",
  "vx-tracing",

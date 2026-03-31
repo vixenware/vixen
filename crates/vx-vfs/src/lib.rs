@@ -7,11 +7,12 @@ use vx_services::{Vfs, VfsDiskNotify};
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
+// #[cfg(target_os = "macos")]
+// mod macos;
 mod types;
 #[cfg(target_os = "windows")]
 mod windows;
+
 pub use types::{VfsConfig, VfsError, VfsStart};
 #[cfg(target_os = "macos")]
 pub use vx_vfs_types::{VIXEN_APP_PATH, VfsHealth};
@@ -28,7 +29,8 @@ where
     cfg_if! {
         if #[cfg(target_os = "macos")] {
             tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
-            macos::mount(config, vfs).await
+            // macos::mount(config, vfs).await
+            panic!("macos mount: temporarily disabled")
         } else if #[cfg(target_os = "linux")] {
             tracing::debug!(mount_path = %config.mount_path, "starting FUSE vfs");
             linux::mount(config, vfs).await

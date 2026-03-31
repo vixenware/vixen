@@ -6,29 +6,25 @@
 mod service;
 
 use eyre::Result;
-use figue as args;
-use moire::task::FutureExt;
-pub use service::VxdService;
-use std::sync::Arc;
+pub use service::DaemonService;
 use std::time::Duration;
-use tokio::time::sleep;
-use vox_core::{AcceptedConnection, BareConduit, DriverCaller};
-use vox_core::{ConnectionAcceptor, acceptor};
-use vox_stream::StreamLink;
-use vox_types::{
-    ConnectionAccept, ConnectionId, ConnectionSettings, MessageFamily, Metadata, MetadataEntry,
-    MetadataFlags, MetadataValue,
+use vox::ConnectionAcceptor;
+use vox::{AcceptedConnection, DriverCaller};
+use vox::{
+    ConnectionId, ConnectionSettings, Metadata, MetadataEntry, MetadataFlags, MetadataValue,
 };
-use vx_io::net::Listener;
+use vox_stream::{LocalLink, LocalLinkAcceptor};
 
 pub type UpstreamCaller = DriverCaller;
 
 /// Serve the VXD service
-pub async fn serve(listener: Listener) -> Result<()> {
+pub async fn serve() -> Result<()> {
+    let acceptor = LocalLinkAcceptor::bind("/tmp/vx-daemon.sock")?;
+
     loop {
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                moire::task::spawn(handle_conn(stream, peer_addr));
+        match acceptor.accept().await {
+            Ok(link) => {
+                moire::task::spawn(handle_conn(link));
             }
             Err(error) => {
                 tracing::debug!("vxd accept error: {error}");
@@ -37,13 +33,11 @@ pub async fn serve(listener: Listener) -> Result<()> {
     }
 }
 
-async fn handle_conn(stream: Stream, peer_addr: String) -> eyre::Result<()> {
-    tracing::info!("vxd connection from {peer_addr}");
-    let (reader, writer) = tokio::io::split(stream);
-
-    let (driver, sess_handle) = vox::acceptor_on(StreamLink::new(reader, writer))
-        .on_connection(acceptor)
-        .establish(VxdService)
+async fn handle_conn(link: LocalLink) -> eyre::Result<()> {
+    tracing::info!("local vxd connection");
+    let (driver, sess_handle) = vox::acceptor_on(link)
+        .on_connection(DaemonAcceptor {})
+        .establish::<DriverCaller>(DaemonService {})
         .await?;
 
     loop {
