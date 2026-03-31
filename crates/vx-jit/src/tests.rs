@@ -68,6 +68,18 @@ fn join(a: String, b: String) -> String (
 )
 "#;
 
+const CARGO_RESOLVE_SOURCE: &str = include_str!("../../../zoo/cargo-resolve.vx");
+
+fn cargo_resolve_function_source(function_name: &str) -> String {
+    let needle = format!("fn {function_name}(");
+    let start = CARGO_RESOLVE_SOURCE
+        .find(&needle)
+        .unwrap_or_else(|| panic!("missing {function_name} in cargo-resolve.vx"));
+    let tail = &CARGO_RESOLVE_SOURCE[start..];
+    let end = tail.find("\nfn ").unwrap_or(tail.len());
+    tail[..end].trim().to_owned() + "\n"
+}
+
 #[test]
 fn lowers_u64_add_into_kajit_hir() {
     let module = lower_u64_add_hir().expect("u64 add should lower into Kajit HIR");
@@ -492,4 +504,49 @@ fn compiles_and_executes_sparse_prefix() {
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let output = std::str::from_utf8(bytes).expect("sparse_prefix result should be utf-8");
     assert_eq!(output, "se/rd");
+}
+
+#[test]
+fn compiles_and_executes_registry_entry_key_from_cargo_resolve() {
+    let source = cargo_resolve_function_source("registry_entry_key");
+    let function = lower_source_text_kernel(&source, "registry_entry_key")
+        .expect("registry_entry_key should lower from cargo-resolve.vx");
+
+    let interpreted = crate::interpret(
+        &function,
+        &[
+            KernelValue::String("serde".to_owned()),
+            KernelValue::String("1.0.228".to_owned()),
+        ],
+    )
+    .expect("registry_entry_key should interpret");
+    assert_eq!(
+        interpreted,
+        KernelValue::String("entry:registry:serde@1.0.228".to_owned())
+    );
+
+    let compiled = crate::kajit_backend::compile(&function)
+        .expect("registry_entry_key should compile from cargo-resolve.vx");
+    let registry_entry_key: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    let package_name = "serde";
+    let version = "1.0.228";
+    let (ptr, len) = unsafe {
+        registry_entry_key(
+            package_name.as_ptr() as u64,
+            package_name.len() as u64,
+            version.as_ptr() as u64,
+            version.len() as u64,
+        )
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("registry_entry_key result should be utf-8");
+    assert_eq!(output, "entry:registry:serde@1.0.228");
+    unsafe {
+        std::alloc::dealloc(
+            ptr as *mut u8,
+            std::alloc::Layout::from_size_align(len as usize, 1)
+                .expect("registry_entry_key layout"),
+        );
+    }
 }

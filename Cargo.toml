@@ -25,8 +25,8 @@ vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
-kajit = { git = "https://github.com/bearcove/kajit", rev = "4207b3a" }
-kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "4207b3a" }
+kajit = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
+kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }
