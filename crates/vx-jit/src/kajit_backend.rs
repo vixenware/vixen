@@ -1,7 +1,8 @@
 use kajit::{CompiledFunction, ir::IrFunc};
 use kajit_hir::{
-    BinaryOp, FieldDef, LocalId, Module, Type, TypeDef, TypeDefId, TypeDefKind, VixenLoweringError,
-    VixenTypedExpr, VixenTypedFunction, VixenTypedLocal, VixenTypedParam, VixenTypedStmt,
+    BinaryOp, FieldDef, Literal, LocalId, Module, Type, TypeDef, TypeDefId, TypeDefKind,
+    VixenCallableRef, VixenLoweringError, VixenTypedExpr, VixenTypedFunction, VixenTypedLocal,
+    VixenTypedParam, VixenTypedStmt,
 };
 use thiserror::Error;
 
@@ -39,9 +40,15 @@ struct KajitLowerer {
     str_def: TypeDefId,
 }
 
+struct LoweringState {
+    synthetic_locals: Vec<VixenTypedLocal>,
+    next_local_id: u32,
+}
+
 impl KajitLowerer {
     fn new() -> Self {
         let mut module = Module::new();
+        let _ = module.install_runtime_memory_callables();
         let str_def = module.add_type_def(TypeDef {
             name: "Str".to_owned(),
             generic_params: Vec::new(),
@@ -73,6 +80,17 @@ impl KajitLowerer {
         &self,
         function: &KernelFunction,
     ) -> Result<VixenTypedFunction, KajitBackendError> {
+        let original_locals = self.collect_locals(function);
+        let mut state = LoweringState {
+            synthetic_locals: Vec::new(),
+            next_local_id: next_local_id(function),
+        };
+        let mut body = Vec::new();
+        for stmt in &function.body {
+            body.extend(self.lower_stmt(stmt, &mut state)?);
+        }
+        let mut locals = original_locals;
+        locals.extend(state.synthetic_locals);
         Ok(VixenTypedFunction {
             name: function.name.clone(),
             params: function
@@ -80,13 +98,9 @@ impl KajitLowerer {
                 .iter()
                 .map(|param| self.to_vixen_typed_param(param))
                 .collect(),
-            locals: self.collect_locals(function),
+            locals,
             return_type: self.to_vixen_type(function.return_type),
-            body: function
-                .body
-                .iter()
-                .map(|stmt| self.to_vixen_typed_stmt(stmt))
-                .collect::<Result<Vec<_>, _>>()?,
+            body,
             comment: Some("lowered from vx-jit kernel IR".to_owned()),
         })
     }
@@ -122,33 +136,39 @@ impl KajitLowerer {
         }
     }
 
-    fn to_vixen_typed_stmt(&self, stmt: &KernelStmt) -> Result<VixenTypedStmt, KajitBackendError> {
+    fn lower_stmt(
+        &self,
+        stmt: &KernelStmt,
+        state: &mut LoweringState,
+    ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
         match stmt {
-            KernelStmt::Let { local, value } => Ok(VixenTypedStmt::Let {
+            KernelStmt::Let { local, value } => Ok(vec![VixenTypedStmt::Let {
                 local: LocalId::new(local.local.0),
                 value: self.to_vixen_typed_expr(value)?,
-            }),
-            KernelStmt::Return(expr) => self.to_vixen_typed_return_stmt(expr),
+            }]),
+            KernelStmt::Return(expr) => self.lower_return_stmt(expr, state),
         }
     }
 
-    fn to_vixen_typed_return_stmt(
+    fn lower_return_stmt(
         &self,
         expr: &KernelExpr,
-    ) -> Result<VixenTypedStmt, KajitBackendError> {
+        state: &mut LoweringState,
+    ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
         match expr {
             KernelExpr::If {
                 condition,
                 then_expr,
                 else_expr,
-            } => Ok(VixenTypedStmt::If {
+            } => Ok(vec![VixenTypedStmt::If {
                 condition: self.to_vixen_typed_expr(condition)?,
-                then_body: vec![self.to_vixen_typed_return_stmt(then_expr)?],
-                else_body: vec![self.to_vixen_typed_return_stmt(else_expr)?],
-            }),
-            _ => Ok(VixenTypedStmt::Return(Some(
+                then_body: self.lower_return_stmt(then_expr, state)?,
+                else_body: self.lower_return_stmt(else_expr, state)?,
+            }]),
+            KernelExpr::Concat(parts) => self.lower_concat_return(parts, state),
+            _ => Ok(vec![VixenTypedStmt::Return(Some(
                 self.to_vixen_typed_expr(expr)?,
-            ))),
+            ))]),
         }
     }
 
@@ -158,9 +178,7 @@ impl KajitLowerer {
             KernelExpr::U64(value) => {
                 Ok(VixenTypedExpr::Literal(kajit_hir::Literal::Integer(*value)))
             }
-            KernelExpr::Bool(value) => {
-                Ok(VixenTypedExpr::Literal(kajit_hir::Literal::Bool(*value)))
-            }
+            KernelExpr::Bool(value) => Ok(VixenTypedExpr::Literal(Literal::Bool(*value))),
             KernelExpr::String(value) => Ok(self.lower_string_literal(value)),
             KernelExpr::Binary { op, lhs, rhs } => Ok(VixenTypedExpr::Binary {
                 op: to_vixen_binary_op(*op),
@@ -169,24 +187,141 @@ impl KajitLowerer {
             }),
             KernelExpr::Intrinsic { intrinsic, args } => self.lower_intrinsic(*intrinsic, args),
             KernelExpr::Concat(_) => Err(KajitBackendError::Unsupported("string concatenation")),
-            KernelExpr::If { .. } => Err(KajitBackendError::Unsupported("if expressions")),
+            KernelExpr::If { .. } => Ok(self.lower_if_expr(expr)?),
         }
     }
 
     fn lower_string_literal(&self, value: &str) -> VixenTypedExpr {
-        let leaked: &'static [u8] = Box::leak(value.as_bytes().to_vec().into_boxed_slice());
-        VixenTypedExpr::Struct {
+        VixenTypedExpr::TypedLiteral {
+            literal: Literal::String(value.to_owned()),
+            ty: self.str_type(),
+        }
+    }
+
+    fn lower_if_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+        let KernelExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } = expr
+        else {
+            unreachable!();
+        };
+        Ok(VixenTypedExpr::If {
+            condition: Box::new(self.to_vixen_typed_expr(condition)?),
+            then_expr: Box::new(self.to_vixen_typed_expr(then_expr)?),
+            else_expr: Box::new(self.to_vixen_typed_expr(else_expr)?),
+        })
+    }
+
+    fn lower_concat_return(
+        &self,
+        parts: &[KernelExpr],
+        state: &mut LoweringState,
+    ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
+        if parts.is_empty() {
+            return Ok(vec![VixenTypedStmt::Return(Some(
+                self.lower_string_literal(""),
+            ))]);
+        }
+
+        let total_len = state.new_temp(self, "__concat_total_len", KernelType::U64);
+        let buf = state.new_temp(self, "__concat_buf", KernelType::U64);
+        let mut stmts = vec![
+            VixenTypedStmt::Let {
+                local: total_len,
+                value: sum_expr(
+                    parts
+                        .iter()
+                        .map(|part| self.string_len_expr(part))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )?,
+            },
+            VixenTypedStmt::Let {
+                local: buf,
+                value: VixenTypedExpr::Call {
+                    callee: VixenCallableRef::Named("runtime.alloc_transient".to_owned()),
+                    args: vec![
+                        VixenTypedExpr::Local(total_len),
+                        VixenTypedExpr::Literal(Literal::Integer(1)),
+                    ],
+                },
+            },
+        ];
+
+        let mut cursor = VixenTypedExpr::Local(buf);
+        for (index, part) in parts.iter().enumerate() {
+            let next = state.new_temp(self, &format!("__concat_cursor_{index}"), KernelType::U64);
+            stmts.push(VixenTypedStmt::Let {
+                local: next,
+                value: VixenTypedExpr::Call {
+                    callee: VixenCallableRef::Named("runtime.memcpy".to_owned()),
+                    args: vec![
+                        cursor,
+                        self.string_ptr_expr(part)?,
+                        self.string_len_expr(part)?,
+                    ],
+                },
+            });
+            cursor = VixenTypedExpr::Local(next);
+        }
+
+        stmts.push(VixenTypedStmt::Return(Some(VixenTypedExpr::Struct {
             def: self.str_def,
             fields: vec![
-                (
-                    "ptr".to_owned(),
-                    VixenTypedExpr::Literal(kajit_hir::Literal::Integer(leaked.as_ptr() as u64)),
-                ),
-                (
-                    "len".to_owned(),
-                    VixenTypedExpr::Literal(kajit_hir::Literal::Integer(leaked.len() as u64)),
-                ),
+                ("ptr".to_owned(), VixenTypedExpr::Local(buf)),
+                ("len".to_owned(), VixenTypedExpr::Local(total_len)),
             ],
+        })));
+        Ok(stmts)
+    }
+
+    fn string_ptr_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+        match expr {
+            KernelExpr::String(value) => {
+                let leaked: &'static [u8] = Box::leak(value.as_bytes().to_vec().into_boxed_slice());
+                Ok(VixenTypedExpr::Literal(Literal::Integer(
+                    leaked.as_ptr() as u64
+                )))
+            }
+            KernelExpr::Intrinsic {
+                intrinsic: KernelIntrinsic::StringSlice,
+                args,
+            } => match args.as_slice() {
+                [value, start, _end] => Ok(VixenTypedExpr::Binary {
+                    op: BinaryOp::Add,
+                    lhs: Box::new(self.string_ptr_expr(value)?),
+                    rhs: Box::new(self.to_vixen_typed_expr(start)?),
+                }),
+                _ => Err(KajitBackendError::Unsupported("invalid StringSlice args")),
+            },
+            _ => Ok(VixenTypedExpr::Field {
+                base: Box::new(self.to_vixen_typed_expr(expr)?),
+                field: "ptr".to_owned(),
+            }),
+        }
+    }
+
+    fn string_len_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+        match expr {
+            KernelExpr::String(value) => Ok(VixenTypedExpr::Literal(Literal::Integer(
+                value.len() as u64
+            ))),
+            KernelExpr::Intrinsic {
+                intrinsic: KernelIntrinsic::StringSlice,
+                args,
+            } => match args.as_slice() {
+                [_value, start, end] => Ok(VixenTypedExpr::Binary {
+                    op: BinaryOp::Sub,
+                    lhs: Box::new(self.to_vixen_typed_expr(end)?),
+                    rhs: Box::new(self.to_vixen_typed_expr(start)?),
+                }),
+                _ => Err(KajitBackendError::Unsupported("invalid StringSlice args")),
+            },
+            _ => Ok(VixenTypedExpr::Field {
+                base: Box::new(self.to_vixen_typed_expr(expr)?),
+                field: "len".to_owned(),
+            }),
         }
     }
 
@@ -240,6 +375,49 @@ impl KajitLowerer {
             KernelType::String => self.str_type(),
         }
     }
+}
+
+impl LoweringState {
+    fn new_temp(&mut self, lowerer: &KajitLowerer, name: &str, ty: KernelType) -> LocalId {
+        let local = LocalId::new(self.next_local_id);
+        self.next_local_id += 1;
+        self.synthetic_locals.push(VixenTypedLocal {
+            local,
+            name: name.to_owned(),
+            ty: lowerer.to_vixen_type(ty),
+        });
+        local
+    }
+}
+
+fn next_local_id(function: &KernelFunction) -> u32 {
+    let mut max_id = function
+        .params
+        .iter()
+        .map(|param| param.local.0)
+        .max()
+        .unwrap_or(0);
+    for stmt in &function.body {
+        if let KernelStmt::Let { local, .. } = stmt {
+            max_id = max_id.max(local.local.0);
+        }
+    }
+    max_id + 1
+}
+
+fn sum_expr(mut exprs: Vec<VixenTypedExpr>) -> Result<VixenTypedExpr, KajitBackendError> {
+    if exprs.is_empty() {
+        return Err(KajitBackendError::Unsupported("empty concatenation"));
+    }
+    let mut expr = exprs.remove(0);
+    for rhs in exprs {
+        expr = VixenTypedExpr::Binary {
+            op: BinaryOp::Add,
+            lhs: Box::new(expr),
+            rhs: Box::new(rhs),
+        };
+    }
+    Ok(expr)
 }
 fn to_vixen_binary_op(op: KernelBinaryOp) -> BinaryOp {
     match op {

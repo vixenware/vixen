@@ -62,6 +62,12 @@ fn pick(flag: U64) -> String (
 )
 "#;
 
+const SOURCE_JOIN: &str = r#"
+fn join(a: String, b: String) -> String (
+  `{a}{b}`
+)
+"#;
+
 #[test]
 fn lowers_u64_add_into_kajit_hir() {
     let module = lower_u64_add_hir().expect("u64 add should lower into Kajit HIR");
@@ -423,4 +429,67 @@ fn compiles_and_executes_source_text_string_if_return() {
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let output = std::str::from_utf8(bytes).expect("pick no result should be utf-8");
     assert_eq!(output, "no");
+}
+
+#[test]
+fn compiles_and_executes_source_text_string_concat() {
+    let function =
+        lower_source_text_kernel(SOURCE_JOIN, "join").expect("join should lower into kernel IR");
+
+    let interpreted = crate::interpret(
+        &function,
+        &[
+            KernelValue::String("hello".to_owned()),
+            KernelValue::String(" world".to_owned()),
+        ],
+    )
+    .expect("join should interpret");
+    assert_eq!(interpreted, KernelValue::String("hello world".to_owned()));
+
+    let compiled = crate::kajit_backend::compile(&function).expect("join should compile");
+    let join: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    let a = "hello";
+    let b = " world";
+    let (ptr, len) = unsafe {
+        join(
+            a.as_ptr() as u64,
+            a.len() as u64,
+            b.as_ptr() as u64,
+            b.len() as u64,
+        )
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("join result should be utf-8");
+    assert_eq!(output, "hello world");
+    unsafe {
+        std::alloc::dealloc(
+            ptr as *mut u8,
+            std::alloc::Layout::from_size_align(len as usize, 1).expect("join layout"),
+        );
+    }
+}
+
+#[test]
+fn compiles_and_executes_sparse_prefix() {
+    let function = lower_source_text_kernel(SOURCE_SPARSE_PREFIX, "sparse_prefix")
+        .expect("sparse_prefix should lower into kernel IR");
+
+    let compiled = crate::kajit_backend::compile(&function).expect("sparse_prefix should compile");
+    let sparse_prefix: unsafe extern "C" fn(u64, u64) -> (u64, u64) =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+
+    let input = "abc";
+    let (ptr, len) = unsafe { sparse_prefix(input.as_ptr() as u64, input.len() as u64) };
+    eprintln!("abc -> ptr={ptr:#x} len={len}");
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("sparse_prefix result should be utf-8");
+    assert_eq!(output, "3/a");
+
+    let input = "serde";
+    let (ptr, len) = unsafe { sparse_prefix(input.as_ptr() as u64, input.len() as u64) };
+    eprintln!("serde -> ptr={ptr:#x} len={len}");
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let output = std::str::from_utf8(bytes).expect("sparse_prefix result should be utf-8");
+    assert_eq!(output, "se/rd");
 }
