@@ -6,7 +6,6 @@
 //! shell. The request and result payloads here are placeholders, not a stable
 //! execution model.
 
-use crate::store::{ServiceVersion, StoreProgress};
 use facet::Facet;
 
 /// Runner protocol version.
@@ -21,32 +20,31 @@ pub const RUNNER_PROTOCOL_VERSION: u32 = 20;
 // Runner Service Trait
 // =============================================================================
 
-/// Placeholder run request while the eval3 runner protocol is rebuilt.
 #[derive(Facet)]
-pub struct RunRequest {}
-/// Placeholder run result while the eval3 runner protocol is rebuilt.
+pub struct DiscoverProbeRequest {
+    // TODO: a closure?
+}
+
 #[derive(Facet)]
-pub struct RunResult {}
-/// Placeholder discover request while the eval3 runner protocol is rebuilt.
+pub struct DiscoverResult {
+    // TODO: design
+}
+
 #[derive(Facet)]
-pub struct DiscoverRequest {}
-/// Placeholder discover result while the eval3 runner protocol is rebuilt.
+pub struct ExecRequest {
+    // TODO: argv, envp, mounts, etc.
+}
+
 #[derive(Facet)]
-pub struct DiscoverResult {}
+pub struct ExecResult {
+    // TODO: design
+}
 
 /// Runner service trait
 ///
 /// A remote-capable worker shell.
 #[vox::service]
 pub trait Runner {
-    /// Get service version information (for health checks and compatibility)
-    async fn version(&self) -> ServiceVersion;
-
-    /// Run work on the runner. The payload shape is intentionally unspecified
-    /// until the eval3 execution protocol is defined.
-    async fn run(&self, request: RunRequest, progress: vox::Tx<StoreProgress>) -> RunResult;
-
-    /// Evaluate discovery work on the runner host. The payload shape is
-    /// intentionally unspecified until the eval3 execution protocol is defined.
-    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult;
+    async fn exec(&self, request: ExecRequest) -> ExecResult;
+    async fn discover_probe(&self, request: DiscoverProbeRequest) -> DiscoverResult;
 }

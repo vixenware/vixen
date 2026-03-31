@@ -9,7 +9,6 @@
 
 use std::fmt;
 
-use crate::{ServiceVersion, store::CacheKey};
 use camino::Utf8PathBuf;
 use facet::Facet;
 
@@ -323,39 +322,5 @@ pub struct PsResult {
 /// The daemon service trait.
 #[vox::service]
 pub trait VxDaemon {
-    /// Get service version information (for health checks and compatibility)
-    async fn version(&self) -> ServiceVersion;
-}
-
-/// Progress update for a running action.
-///
-/// When `current` and `total` are both set, the TUI renders a progress bar
-/// with percentage. When only `message` is set, it's shown as a status string.
-#[derive(Debug, Clone, Facet)]
-pub struct ActionProgress {
-    /// Human-readable phase description (e.g., "downloading rustc", "extracting")
-    pub message: String,
-    /// Bytes or items completed so far
-    pub current: Option<u64>,
-    /// Total bytes or items expected
-    pub total: Option<u64>,
-}
-
-/// Progress reporting service (implemented by vx CLI, called by daemon)
-#[vox::service]
-pub trait ProgressListener {
-    /// Set the total number of actions
-    async fn set_total(&self, total: u64);
-
-    /// Start tracking an action, returning its ID
-    async fn start_action(&self, action_type: ActionType) -> u64;
-
-    /// Update progress on a running action (download bytes, extraction files, etc.)
-    async fn update_progress(&self, action_id: u64, progress: ActionProgress);
-
-    /// Mark an action as completed
-    async fn complete_action(&self, action_id: u64);
-
-    /// Add a log message
-    async fn log_message(&self, message: String);
+    // TODO: eval?
 }
