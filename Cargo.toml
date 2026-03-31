@@ -178,7 +178,8 @@ debug = 1
 split-debuginfo = "unpacked"
 strip = "none"
 
-# [patch.crates-io]
+[patch.crates-io]
+
 # facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
@@ -193,8 +194,13 @@ strip = "none"
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
+vox = { path = "../vox/rust/vox" }
+vox-core = { path = "../vox/rust/vox-core" }
+vox-stream = { path = "../vox/rust/vox-stream" }
+vox-local = { path = "../vox/rust/vox-local" }
+vox-shm = { path = "../vox/rust/vox-shm" }
+vox-codegen = { path = "../vox/rust/vox-codegen" }
 
-[patch.crates-io]
 windows-projfs = { path = "vendor/windows-projfs" }
 
 [profile.samply]

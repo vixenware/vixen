@@ -556,7 +556,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -578,7 +578,7 @@ checksum = "9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -632,7 +632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -696,8 +696,6 @@ dependencies = [
 [[package]]
 name = "facet-cbor"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d83db9377113d74060b556c013eb83e101c608f54b314f36f26c37fbf5e17a85"
 dependencies = [
  "facet",
  "facet-core",
@@ -1015,7 +1013,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "libc",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nix",
  "tokio",
  "tracing",
@@ -1512,7 +1510,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1548,7 +1546,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1939,9 +1937,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac52dcc0ff5b4710a66626370b1bf85ba3d924fd8019e8cfa100e8dafffda4ad"
 dependencies = [
  "moire-macros",
- "moire-macros-noop",
- "moire-tokio",
- "moire-wasm",
+ "moire-macros-noop 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-tokio 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-wasm 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "moire"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "moire-macros-noop 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-tokio 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-wasm 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
 ]
 
 [[package]]
@@ -1962,6 +1970,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ccdc0bf403f5ecf29c09e8e9f178caed89a914ea032e0c2d99d3824b78892d"
 
 [[package]]
+name = "moire-macros-noop"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+
+[[package]]
 name = "moire-runtime"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1971,10 +1984,26 @@ dependencies = [
  "facet",
  "facet-json",
  "facet-value",
- "moire-trace-capture",
- "moire-trace-types",
- "moire-types",
- "moire-wire",
+ "moire-trace-capture 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-wire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+]
+
+[[package]]
+name = "moire-runtime"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "ctor",
+ "facet",
+ "facet-json",
+ "facet-value",
+ "moire-trace-capture 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-trace-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-wire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "tokio",
 ]
 
@@ -1985,8 +2014,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdb30c43038ce71c727da5a4ff01d09dd4c823486cc17b3b08661420d0ceda43"
 dependencies = [
  "ctor",
- "moire-runtime",
- "moire-types",
+ "moire-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "parking_lot",
+ "tokio",
+]
+
+[[package]]
+name = "moire-tokio"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "moire-runtime 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "parking_lot",
  "tokio",
 ]
@@ -1998,7 +2038,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6685ebbdee1253529c9074c41d8288504b640ffe8c21176ce464fef5c5c00c38"
 dependencies = [
  "libc",
- "moire-trace-types",
+ "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "moire-trace-capture"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "libc",
+ "moire-trace-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
 ]
 
 [[package]]
@@ -2011,6 +2060,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moire-trace-types"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "facet",
+]
+
+[[package]]
 name = "moire-types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2018,7 +2075,17 @@ checksum = "667b2fc41e30d3b0f7d0d29e978d3f473afaf0e0be355202eead317e35ace200"
 dependencies = [
  "facet",
  "facet-value",
- "moire-trace-types",
+ "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "moire-types"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "facet",
+ "facet-value",
+ "moire-trace-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
 ]
 
 [[package]]
@@ -2033,7 +2100,22 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "gloo-timers",
- "moire-types",
+ "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "moire-wasm"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "async-channel",
+ "async-lock",
+ "event-listener",
+ "futures-channel",
+ "futures-util",
+ "gloo-timers",
+ "moire-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "wasm-bindgen-futures",
 ]
 
@@ -2045,8 +2127,19 @@ checksum = "bf0ec84eeb2e23a83339cf5edc9d5a3a9ec5849416bd4051951fba416ea3e0f7"
 dependencies = [
  "facet",
  "facet-json",
- "moire-trace-types",
- "moire-types",
+ "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "moire-wire"
+version = "1.0.0"
+source = "git+https://github.com/bearcove/moire?rev=13eac79#13eac79c1b128282dd792a611319d0a1016ad15d"
+dependencies = [
+ "facet",
+ "facet-json",
+ "moire-trace-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
+ "moire-types 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
 ]
 
 [[package]]
@@ -2080,7 +2173,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2589,7 +2682,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2964,7 +3057,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3401,8 +3494,6 @@ checksum = "8d5208a9710a6ca1c2da0d64289a5dcca13deb05afdedf651f4e11bcd9fc53eb"
 [[package]]
 name = "vox"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59c952f9f78f2be0b2ab717afc3a68ed94106b594c55bb7539f44472177acabc"
 dependencies = [
  "facet",
  "facet-pretty",
@@ -3417,8 +3508,6 @@ dependencies = [
 [[package]]
 name = "vox-codegen"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef42b147b0b068ac72e494ce5777308be48b14dd55bedfad29508e14ea224bd5"
 dependencies = [
  "facet-cbor",
  "facet-core",
@@ -3429,8 +3518,6 @@ dependencies = [
 [[package]]
 name = "vox-core"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "275dfaa15b7f66328c850bf70ee30dc2a9c5eabdfc08566af75a8f39c9abcdb6"
 dependencies = [
  "facet",
  "facet-cbor",
@@ -3438,7 +3525,7 @@ dependencies = [
  "facet-error",
  "facet-reflect",
  "getrandom 0.3.4",
- "moire",
+ "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "smallvec 1.15.1",
  "tokio",
  "tracing",
@@ -3451,18 +3538,14 @@ dependencies = [
 [[package]]
 name = "vox-local"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e85621f664209fe7e1fdcb92878eb9c7fa1cd1d4d8f8c983a1a4fd98dea7c635"
 dependencies = [
- "moire",
+ "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "tokio",
 ]
 
 [[package]]
 name = "vox-macros-core"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "895a4da870700feee23852844527143a219a433d75b98010ea701543fb708f4f"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -3474,8 +3557,6 @@ dependencies = [
 [[package]]
 name = "vox-macros-parse"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd0ba2408b8dee42a97cee268ca04da8c1cc9c7a00d47902d30d8629271c69f"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -3484,8 +3565,6 @@ dependencies = [
 [[package]]
 name = "vox-postcard"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f16c80febde2f7836578a0f9e48eafb84526a1c20eb21b387b9be764dd3d21ea"
 dependencies = [
  "facet",
  "facet-core",
@@ -3496,8 +3575,6 @@ dependencies = [
 [[package]]
 name = "vox-schema"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "962e1ad832e7a0bcca7c30ee5a991298631bdca4487289a731cd2a99d98cf059"
 dependencies = [
  "blake3",
  "facet",
@@ -3509,8 +3586,6 @@ dependencies = [
 [[package]]
 name = "vox-service-macros"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a7a0109e58ed2e2a9cf8667061e81b77b8ba90819ccdcf58be0428828ced5f1"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
@@ -3519,10 +3594,8 @@ dependencies = [
 [[package]]
 name = "vox-stream"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "641f0615e21a019b47dff2fb8d559a0f3a99feb389e6bc99d5ddcc8e69bfdbc4"
 dependencies = [
- "moire",
+ "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "tokio",
  "vox-core",
  "vox-types",
@@ -3531,8 +3604,6 @@ dependencies = [
 [[package]]
 name = "vox-types"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f82be123df0a8fc7006e3e6dd809eb51c5e72d7878da953e2af5cd7952d8a09b"
 dependencies = [
  "bitflags 2.11.0",
  "blake3",
@@ -3544,7 +3615,7 @@ dependencies = [
  "futures-channel",
  "heck",
  "indexmap",
- "moire",
+ "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "smallvec 1.15.1",
  "structstruck",
  "tokio",
@@ -3576,7 +3647,7 @@ dependencies = [
  "libc",
  "margin",
  "margin-term",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "owo-colors",
  "strip-ansi-escapes",
  "tokio",
@@ -3623,7 +3694,7 @@ dependencies = [
  "facet-json",
  "jiff",
  "libc",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tracing",
 ]
@@ -3638,7 +3709,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror 2.0.18",
  "tracing",
  "vx-io",
@@ -3652,7 +3723,7 @@ dependencies = [
  "dirs",
  "eyre",
  "facet",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile",
  "tokio",
  "tracing",
@@ -3734,7 +3805,7 @@ dependencies = [
  "camino",
  "flate2",
  "futures-util",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tar",
  "thiserror 2.0.18",
  "tokio",
@@ -3772,7 +3843,7 @@ dependencies = [
  "fuse3",
  "futures-util",
  "libc",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "shm-primitives",
  "tokio",
  "tracing",
@@ -3804,7 +3875,7 @@ dependencies = [
  "eyre",
  "facet",
  "figue",
- "moire",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4421,3 +4492,7 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "vox-shm"
+version = "0.3.1"

@@ -8,12 +8,12 @@ mod service;
 use eyre::Result;
 pub use service::DaemonService;
 use std::time::Duration;
-use vox::ConnectionAcceptor;
-use vox::{AcceptedConnection, DriverCaller};
 use vox::{
-    ConnectionId, ConnectionSettings, Metadata, MetadataEntry, MetadataFlags, MetadataValue,
+    AcceptedConnection, Caller, ConnectionAcceptor, ConnectionId, ConnectionSettings, DriverCaller,
+    Metadata, MetadataEntry, MetadataFlags, MetadataValue,
 };
 use vox_stream::{LocalLink, LocalLinkAcceptor};
+use vx_services::DaemonDispatcher;
 
 pub type UpstreamCaller = DriverCaller;
 
@@ -35,14 +35,15 @@ pub async fn serve() -> Result<()> {
 
 async fn handle_conn(link: LocalLink) -> eyre::Result<()> {
     tracing::info!("local vxd connection");
-    let (driver, sess_handle) = vox::acceptor_on(link)
+    let (client, session) = vox::acceptor_on(link)
         .on_connection(DaemonAcceptor {})
-        .establish::<DriverCaller>(DaemonService {})
+        .establish::<DriverCaller>(DaemonDispatcher::new(DaemonService {}))
         .await?;
 
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await
-    }
+    let _session = session;
+    client.closed().await;
+    tracing::info!("vxd connection out");
+    Ok(())
 }
 
 /// A connection acceptor that can serve multiple sub-services:
