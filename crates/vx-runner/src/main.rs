@@ -9,11 +9,11 @@ use eyre::Result;
 use facet::Facet;
 use figue as args;
 use moire::task::FutureExt;
-use roam_core::acceptor;
-use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
-use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
+use vox_core::acceptor;
+use vox_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use vox_stream::StreamLink;
+use vox_types::{ConnectionSettings, Metadata};
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_services::RunnerDispatcher;
@@ -26,9 +26,9 @@ struct RunnerVirtualAcceptor {
 impl ConnectionAcceptor for RunnerVirtualAcceptor {
     fn accept(
         &self,
-        _conn_id: roam_types::ConnectionId,
+        _conn_id: vox_types::ConnectionId,
         peer_settings: &ConnectionSettings,
-        _metadata: &[roam_types::MetadataEntry],
+        _metadata: &[vox_types::MetadataEntry],
     ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
         let Some(exec) = self.boot_service.gate().service().cloned() else {
             return Err(vec![]);
@@ -130,7 +130,7 @@ async fn async_main() -> Result<()> {
                     async move {
                         tracing::debug!("Runner connection from {}", peer_addr);
                         let (reader, writer) = tokio::io::split(stream);
-                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                        let conduit = BareConduit::<vox_types::MessageFamily, _>::new(
                             StreamLink::new(reader, writer),
                         );
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
@@ -138,7 +138,7 @@ async fn async_main() -> Result<()> {
                             .on_connection(RunnerVirtualAcceptor {
                                 boot_service: boot_service.clone(),
                             })
-                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
+                            .establish::<vox_core::NoopCaller>(boot_dispatcher)
                             .await
                         {
                             Ok(parts) => parts,

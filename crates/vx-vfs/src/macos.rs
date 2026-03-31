@@ -2,7 +2,7 @@
 //!
 //! This module relies on the Vixen.app FSKit host in this repository (`apps/mac`).
 //!
-//! `Vixen` implements a `roam` bridge between:
+//! `Vixen` implements a `vox` bridge between:
 //! - an FSKit extension running in a sandboxed process, and
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
@@ -12,15 +12,15 @@ use moire::process::Command;
 use moire::sync::mpsc;
 use moire::sync::watch;
 use moire::task::FutureExt;
-use roam_core::BareConduit;
-use roam_core::acceptor;
-use roam_shm::bootstrap::{self, decode_request};
-use roam_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use shm_primitives::FileCleanup;
 use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use vox_core::BareConduit;
+use vox_core::acceptor;
+use vox_shm::bootstrap::{self, decode_request};
+use vox_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
 use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -362,10 +362,10 @@ where
                                     return;
                                 }
                             };
-                            let conduit: BareConduit<roam_types::MessageFamily, roam_shm::ShmLink> =
+                            let conduit: BareConduit<vox_types::MessageFamily, vox_shm::ShmLink> =
                                 BareConduit::new(link);
                             let (caller, session_handle) = match acceptor(conduit)
-                                .establish::<roam_core::NoopCaller>(vfs_dispatcher)
+                                .establish::<vox_core::NoopCaller>(vfs_dispatcher)
                                 .await
                             {
                                 Ok(parts) => parts,

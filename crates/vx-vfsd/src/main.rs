@@ -14,11 +14,11 @@ use camino::Utf8PathBuf;
 use facet::Facet;
 use figue as args;
 use moire::task::FutureExt;
-use roam_core::acceptor;
-use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
-use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
+use vox_core::acceptor;
+use vox_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use vox_stream::StreamLink;
+use vox_types::{ConnectionSettings, Metadata};
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_services::StoreClient;
@@ -32,7 +32,7 @@ use crate::protocol::VfsdDispatcher;
 use crate::service::VfsdService;
 use crate::vfs::CasVfs;
 
-pub type StoreCaller = roam_core::DriverCaller;
+pub type StoreCaller = vox_core::DriverCaller;
 
 /// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs.
 ///
@@ -245,9 +245,9 @@ struct VfsdVirtualAcceptor {
 impl ConnectionAcceptor for VfsdVirtualAcceptor {
     fn accept(
         &self,
-        _conn_id: roam_types::ConnectionId,
+        _conn_id: vox_types::ConnectionId,
         peer_settings: &ConnectionSettings,
-        _metadata: &[roam_types::MetadataEntry],
+        _metadata: &[vox_types::MetadataEntry],
     ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
         let Some(service) = self.boot_service.gate().service().cloned() else {
             return Err(vec![]);
@@ -395,7 +395,7 @@ async fn async_main() -> Result<()> {
 
                         // Root connection gets Boot service only.
                         let (reader, writer) = tokio::io::split(stream);
-                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                        let conduit = BareConduit::<vox_types::MessageFamily, _>::new(
                             StreamLink::new(reader, writer),
                         );
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
@@ -403,7 +403,7 @@ async fn async_main() -> Result<()> {
                             .on_connection(VfsdVirtualAcceptor {
                                 boot_service: boot_service.clone(),
                             })
-                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
+                            .establish::<vox_core::NoopCaller>(boot_dispatcher)
                             .await
                         {
                             Ok(parts) => parts,
@@ -432,11 +432,7 @@ async fn async_main() -> Result<()> {
 /// Connect to vx-store using the boot protocol.
 async fn connect_to_store(
     endpoint_str: &str,
-) -> Result<(
-    StoreClient,
-    roam_core::DriverCaller,
-    roam_core::SessionHandle,
-)> {
+) -> Result<(StoreClient, vox_core::DriverCaller, vox_core::SessionHandle)> {
     let endpoint = Endpoint::parse(endpoint_str)?;
     let (root_caller, session_handle) = vx_io::net::connect_session(&endpoint)
         .await

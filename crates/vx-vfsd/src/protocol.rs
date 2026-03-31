@@ -44,7 +44,7 @@ pub enum VfsTrackedObservation {
 ///
 /// Manages a FUSE-backed virtual filesystem for build sandboxes.
 /// Serves content from CAS (vx-store) and collects build outputs.
-#[roam::service]
+#[vox::service]
 #[allow(async_fn_in_trait)]
 pub trait Vfsd {
     /// Create a directory at the given path.

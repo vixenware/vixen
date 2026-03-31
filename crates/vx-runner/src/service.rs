@@ -14,7 +14,7 @@ impl RunnerService {
         }
     }
 
-    async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
+    async fn run(&self, _request: RunRequest, _progress: vox::Tx<StoreProgress>) -> RunResult {
         RunResult {}
     }
 
@@ -28,7 +28,7 @@ impl Runner for RunnerService {
         RunnerService::version(self).await
     }
 
-    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
+    async fn run(&self, request: RunRequest, progress: vox::Tx<StoreProgress>) -> RunResult {
         RunnerService::run(self, request, progress).await
     }
 

@@ -17,7 +17,7 @@ facet.workspace = true
 facet-postcard.workspace = true
 fastcdc.workspace = true
 hex.workspace = true
-roam.workspace = true
+vox.workspace = true
 tokio.workspace = true
 
 [lints]

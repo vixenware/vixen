@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [package.metadata.cargo-shear]
-ignored = ["roam-shm"]
+ignored = []
 
 [lib]
 name = "vx_vfsd"
@@ -25,11 +25,8 @@ vx-services.workspace = true
 vx-vfs = { workspace = true }
 
 # RPC
-roam = { workspace = true }
-roam-core = { workspace = true }
-roam-types = { workspace = true }
+vox = { workspace = true }
 moire = { workspace = true }
-roam-stream = { workspace = true }
 vx-io = { workspace = true }
 
 # Async runtime
@@ -59,16 +56,12 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
-[dependencies.roam-shm]
-workspace = true
-optional = true
-
 [target.'cfg(target_os = "macos")'.dependencies]
-roam-shm = { workspace = true }
+vox-shm = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "dep:roam-shm"]
+diagnostics = ["moire/diagnostics"]
 
 [lints]
 workspace = true

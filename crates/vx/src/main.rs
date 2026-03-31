@@ -14,10 +14,9 @@ use camino::Utf8PathBuf;
 use eyre::{Result, bail, eyre};
 use figue as args;
 use owo_colors::OwoColorize;
-use roam_core::Driver;
-use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
-use vx_io::spawn::{ServiceBuilder, ServiceHandle};
+use vox_core::Driver;
+use vox_types::{ConnectionSettings, Parity};
 use vx_services::{BuildRequest, PsResult, VxdClient};
 use vx_tracing::init_cli_stderr;
 
@@ -27,7 +26,6 @@ use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, EvalArgs, KillArgs, StartArgs},
     progress_listener::ProgressListenerImpl,
 };
-use vx_io::boot::BootStatusState;
 
 /// Initialize tracing with TUI layer
 fn init_tracing_with_tui(tui: tui::TuiHandle) {

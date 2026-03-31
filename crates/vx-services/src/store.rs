@@ -243,9 +243,6 @@ pub type BlobHash = Blake3Hash;
 /// Hash of a manifest — DEPRECATED, use NodeHash
 pub type ManifestHash = Blake3Hash;
 
-/// Hash of all inputs (cache lookup key)
-pub type CacheKey = Blake3Hash;
-
 // =============================================================================
 // CAS Node Types
 // =============================================================================
@@ -727,7 +724,7 @@ impl StoreProgress {
 /// The store is a validated key-value store accepting chunk-shaped and
 /// node-shaped requests. All chunking, assembly, and Merkle tree construction
 /// logic lives in shared library code used by clients.
-#[roam::service]
+#[vox::service]
 #[allow(async_fn_in_trait)]
 pub trait Store {
     // =========================================================================
@@ -799,78 +796,6 @@ pub trait Store {
     /// (they're content-addressed and harmless to keep).
     /// Used by ephemeral sessions to roll back cache entries on disconnect.
     async fn unpublish(&self, cache_key: CacheKey) -> bool;
-
-    // =========================================================================
-    // Toolchain operations (called by execd/daemon)
-    // =========================================================================
-
-    /// Ensure a Rust toolchain exists in the store. Downloads if needed.
-    /// Progress updates (download bytes, extraction files) are streamed to `progress`.
-    async fn ensure_rust_toolchain(
-        &self,
-        spec: RustToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult;
-
-    /// Download a single Rust toolchain component tarball.
-    async fn download_rust_toolchain_component(
-        &self,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult;
-
-    /// Extract a single Rust toolchain component tarball into a directory tree.
-    async fn extract_rust_toolchain_component(
-        &self,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        tarball: BlobRef,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult;
-
-    /// Finalize a Rust toolchain manifest from already extracted components.
-    /// This is a finalization point — validates the entire object graph.
-    async fn finalize_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult;
-
-    /// Ensure a Zig toolchain exists in the store. Downloads if needed.
-    /// Progress updates are streamed to `progress`.
-    async fn ensure_zig_toolchain(
-        &self,
-        spec: ZigToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult;
-
-    /// Get toolchain manifest by its node hash
-    async fn get_toolchain_manifest(&self, manifest_hash: NodeHash) -> Option<ToolchainManifest>;
-
-    /// Get materialization plan for a toolchain
-    async fn get_materialization_plan(
-        &self,
-        manifest_hash: NodeHash,
-    ) -> Option<MaterializationPlan>;
-
-    /// Lookup manifest hash by toolchain spec key
-    async fn lookup_toolchain_spec(&self, spec_key: ToolchainSpecKey) -> Option<NodeHash>;
-
-    // =========================================================================
-    // Registry operations (called by execd/daemon)
-    // =========================================================================
-
-    /// Ensure a registry crate exists in the store. Downloads if needed.
-    /// Progress updates are streamed to `progress`.
-    async fn ensure_registry_crate(
-        &self,
-        spec: RegistrySpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRegistryCrateResult;
-
-    /// Get a registry crate manifest by its node hash
-    async fn get_registry_manifest(&self, manifest_hash: NodeHash)
-    -> Option<RegistryCrateManifest>;
-
-    /// Lookup manifest hash by spec key
-    async fn lookup_registry_spec(&self, spec_key: Blake3Hash) -> Option<NodeHash>;
 }
 
 // =============================================================================

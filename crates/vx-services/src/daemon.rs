@@ -321,29 +321,10 @@ pub struct PsResult {
 }
 
 /// The daemon service trait.
-#[roam::service]
-pub trait Vxd {
+#[vox::service]
+pub trait VxDaemon {
     /// Get service version information (for health checks and compatibility)
     async fn version(&self) -> ServiceVersion;
-
-    /// Build a project.
-    ///
-    /// During the purge this may return an explicit "unavailable" result while
-    /// preserving the CLI-facing request/response shape.
-    async fn build(&self, request: BuildRequest) -> BuildResult;
-
-    /// Set a session ID for cache key namespacing. When set, all cache keys
-    /// computed during this connection include the session ID, providing
-    /// isolation between concurrent sessions (e.g., parallel tests).
-    /// An empty string means "session zero" (shared/global namespace).
-    async fn set_session(&self, session_id: String);
-
-    /// Remove cache key mappings from the store. Used by `vx clean --cache`
-    /// to invalidate specific cache entries without deleting blobs or manifests.
-    async fn unpublish_cache_keys(&self, cache_keys: Vec<CacheKey>) -> UnpublishResult;
-
-    /// Snapshot daemon-side in-flight activity.
-    async fn ps(&self) -> PsResult;
 }
 
 /// Progress update for a running action.
@@ -361,7 +342,7 @@ pub struct ActionProgress {
 }
 
 /// Progress reporting service (implemented by vx CLI, called by daemon)
-#[roam::service]
+#[vox::service]
 pub trait ProgressListener {
     /// Set the total number of actions
     async fn set_total(&self, total: u64);

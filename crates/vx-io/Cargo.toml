@@ -16,12 +16,10 @@ tokio = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
 facet = { workspace = true }
-roam = { workspace = true }
-roam-core = { workspace = true }
-roam-types = { workspace = true }
-roam-local = { workspace = true }
-roam-stream = { workspace = true }
+vox = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
+vox-local.workspace = true
+vox-stream.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

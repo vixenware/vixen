@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [package.metadata.cargo-shear]
-ignored = ["roam-stream", "vx-vfs"]
+ignored = ["vox-stream", "vx-vfs"]
 
 [dependencies]
 moire = { workspace = true }
@@ -24,9 +24,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 vx-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-roam-core = { workspace = true }
-roam-types = { workspace = true }
-roam-stream = { workspace = true }
+vox = { workspace = true }
 indicatif = { workspace = true }
 vx-services.workspace = true
 vx-io = { workspace = true }
@@ -39,7 +37,7 @@ unicode-width = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "roam-stream/diagnostics", "vx-vfs/diagnostics"]
+diagnostics = ["moire/diagnostics", "vx-vfs/diagnostics"]
 
 [dev-dependencies]
 concolor = { version = "0.1", features = ["api"] }

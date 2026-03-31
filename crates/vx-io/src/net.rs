@@ -4,6 +4,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use vox::{DriverCaller, SessionHandle};
 
 /// A network endpoint - either TCP or local IPC.
 #[derive(Debug, Clone)]
@@ -108,11 +109,11 @@ impl std::fmt::Display for Endpoint {
 /// A stream that can be either TCP or local IPC stream.
 pub enum Stream {
     Tcp(tokio::net::TcpStream),
-    Local(roam_local::LocalStream),
+    Local(vox_local::LocalStream),
     /// On Windows, the server side of a named pipe is a different type
     /// (`NamedPipeServer`) than the client side (`NamedPipeClient`).
     #[cfg(windows)]
-    LocalServer(roam_local::LocalServerStream),
+    LocalServer(vox_local::LocalServerStream),
 }
 
 impl AsyncRead for Stream {
@@ -177,11 +178,10 @@ async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
             #[cfg(unix)]
             let local_target = path.as_std_path().to_path_buf();
             #[cfg(windows)]
-            let local_target = roam_local::path_to_pipe_name(path.as_std_path());
+            let local_target = vox_local::path_to_pipe_name(path.as_std_path());
 
             let stream =
-                moire::net::connect(roam_local::connect(local_target), &ep_display, "local")
-                    .await?;
+                moire::net::connect(vox_local::connect(local_target), &ep_display, "local").await?;
             Ok(Stream::Local(stream))
         }
     }
@@ -212,7 +212,7 @@ pub async fn try_connect(endpoint: &Endpoint) -> Result<Option<Stream>> {
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
     Local {
-        listener: roam_local::LocalListener,
+        listener: vox_local::LocalListener,
         endpoint: camino::Utf8PathBuf,
     },
 }
@@ -230,7 +230,7 @@ impl Listener {
                 #[cfg(unix)]
                 {
                     if path.exists() {
-                        let _ = roam_local::remove_endpoint(path.as_std_path());
+                        let _ = vox_local::remove_endpoint(path.as_std_path());
                     }
                 }
 
@@ -241,9 +241,9 @@ impl Listener {
                 #[cfg(unix)]
                 let bind_target = path.as_std_path().to_path_buf();
                 #[cfg(windows)]
-                let bind_target = roam_local::path_to_pipe_name(path.as_std_path());
+                let bind_target = vox_local::path_to_pipe_name(path.as_std_path());
 
-                let listener = roam_local::LocalListener::bind(bind_target)?;
+                let listener = vox_local::LocalListener::bind(bind_target)?;
                 Ok(Listener::Local {
                     listener,
                     endpoint: path.clone(),
@@ -287,7 +287,7 @@ impl Listener {
     }
 }
 
-/// Connector used with roam-stream reconnecting clients.
+/// Connector used with vox-stream reconnecting clients.
 #[derive(Debug, Clone)]
 pub struct EndpointConnector {
     endpoint: Endpoint,
@@ -303,13 +303,10 @@ impl EndpointConnector {
     }
 }
 
-/// Connect to an endpoint and establish a roam session, returning a caller and session handle.
-pub async fn connect_session(
-    endpoint: &Endpoint,
-) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
-    use roam_core::{BareConduit, initiator};
-    use roam_stream::StreamLink;
-    use roam_types::MessageFamily;
+/// Connect to an endpoint and establish a vox session, returning a caller and session handle.
+pub async fn connect_session(endpoint: &Endpoint) -> Result<(DriverCaller, SessionHandle)> {
+    use vox::{BareConduit, MessageFamily, initiator};
+    use vox_stream::StreamLink;
 
     let stream = connect_io(endpoint).await?;
     let (r, w) = tokio::io::split(stream);
@@ -326,7 +323,7 @@ pub async fn connect_session(
 
 struct ParkSession<C> {
     _caller: C,
-    _session_handle: roam_core::SessionHandle,
+    _session_handle: vox_core::SessionHandle,
 }
 
 impl<C> std::future::Future for ParkSession<C> {
@@ -337,7 +334,7 @@ impl<C> std::future::Future for ParkSession<C> {
     }
 }
 
-pub async fn park_session<C>(caller: C, session_handle: roam_core::SessionHandle) {
+pub async fn park_session<C>(caller: C, session_handle: vox_core::SessionHandle) {
     ParkSession {
         _caller: caller,
         _session_handle: session_handle,
@@ -348,7 +345,7 @@ pub async fn park_session<C>(caller: C, session_handle: roam_core::SessionHandle
 /// Create a default local IPC endpoint for a service within VX_HOME.
 ///
 /// On Unix this resolves to a Unix domain socket; on Windows the path is
-/// mapped to a named pipe by `roam_local`.
+/// mapped to a named pipe by `vox_local`.
 pub fn default_local_endpoint(vx_home: &Utf8Path, service: &str) -> Endpoint {
     Endpoint::Local(vx_home.join(format!("{}.sock", service)))
 }

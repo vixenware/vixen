@@ -3,10 +3,8 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use tokio::io::AsyncWriteExt;
 
-pub mod boot;
 pub mod git;
 pub mod net;
-pub mod spawn;
 
 /// Resolve the VX_HOME directory: `$VX_HOME` if set, otherwise `~/.vx`.
 pub fn vx_home() -> Utf8PathBuf {

@@ -1,5 +1,42 @@
 [workspace]
-members = ["crates/*", "crates-plus/*", "xtask"]
+members = [
+  ## crates+
+  "crates-plus/*",
+
+  ## lang crates
+  "crates/vx-parser",
+  "crates/vx-resolve",
+  "crates/vx-stdlib",
+  "crates/vx-lsp",
+
+  ## eval crates
+  "crates/vx-analysis",
+  "crates/vx-jit",
+  "crates/vx-diagnostics",
+
+  ## runtime support
+  "crates/vx-http",
+  "crates/vx-tarball",
+  "crates/landlock-exec",
+
+  ## core crates
+  "crates/vx-types",
+  "crates/vx",
+  "crates/vx-daemon",
+  "crates/vx-io",
+  "crates/vx-services",
+  "crates/vx-tracing",
+
+  ## services
+  # "crates/vx-vfsd",
+  # "crates/vx-store",
+  # "crates/vx-runner",
+  # "crates/vx-vfs-types",
+  # "crates/vx-vfs",
+  # "crates/vx-fskit",
+
+  "xtask",
+]
 resolver = "2"
 
 [workspace.package]
@@ -38,16 +75,16 @@ facet-cargo-toml = { version = "0.44.0" }
 # cmdline parsing
 figue = { version = "2.0.0" }
 
-# RPC
-roam = "7.1.0"
-roam-core = "7.1.0"
-roam-types = "7.1.0"
-roam-stream = "7.1.0"
-roam-shm = "7.1.0"
+# vox RPC framework
 shm-primitives = "7.1.0"
-roam-local = "7.1.0"
-roam-codegen = "7.1.0"
 ur-taking-me-with-you = { version = "7.1.0", features = ["tokio"] }
+
+vox = { version = "0.3.1" }
+vox-core = { version = "0.3.1" }
+vox-stream = { version = "0.3.1" }
+vox-local = { version = "0.3.1" }
+vox-shm = { version = "0.3.1" }
+vox-codegen = { version = "0.3.1" }
 
 # config files
 facet-styx = { version = "3.0.0" }
@@ -158,15 +195,6 @@ strip = "none"
 
 
 [patch.crates-io]
-# roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
-# roam-core = { path = "/Users/amos/bearcove/roam/rust/roam-core" }
-# roam-types = { path = "/Users/amos/bearcove/roam/rust/roam-types" }
-# roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
-# roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
-# shm-primitives = { path = "/Users/amos/bearcove/roam/rust/shm-primitives" }
-# roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
-# roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
-# ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
 windows-projfs = { path = "vendor/windows-projfs" }
 
 [profile.samply]

@@ -18,12 +18,9 @@ vx-services.workspace = true
 cfg-if = "1"
 tracing = { workspace = true }
 vx-vfs-types = { workspace = true }
-roam-shm = { workspace = true, optional = true }
+vox = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-roam-shm = { workspace = true }
-roam-core = { workspace = true }
-roam-types = { workspace = true }
 shm-primitives = { workspace = true }
 libc = { workspace = true }
 fastrand = { workspace = true }
@@ -46,7 +43,7 @@ ignored = ["facet-error"]
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "dep:roam-shm"]
+diagnostics = ["moire/diagnostics"]
 
 [lints]
 workspace = true

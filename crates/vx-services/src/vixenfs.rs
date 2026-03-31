@@ -2,7 +2,7 @@
 //!
 //! VFS protocol for VixenFS filesystem implementations.
 //!
-//! This crate defines the roam service trait and types shared between:
+//! This crate defines the vox service trait and types shared between:
 //! - `Vixen.app` extension client code on macOS
 //! - VFS backends - servers implementing the filesystem
 
@@ -121,7 +121,7 @@ pub struct SetAttributesParams {
 
 /// The VFS service trait - defines the RPC interface between client and server.
 #[allow(async_fn_in_trait)]
-#[roam::service]
+#[vox::service]
 pub trait Vfs {
     /// Look up an item by name in a parent directory.
     async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult;

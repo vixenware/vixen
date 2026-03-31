@@ -20,12 +20,12 @@ const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
 const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+async fn send_progress_best_effort(progress: &vox::Tx<StoreProgress>, update: StoreProgress) {
     let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
     loop {
         match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
             Ok(Ok(())) => return,
-            Ok(Err(roam::TxError::Unbound)) if Instant::now() < deadline => {
+            Ok(Err(vox::TxError::Unbound)) if Instant::now() < deadline => {
                 tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
             }
             _ => return,
@@ -411,7 +411,7 @@ impl StoreService {
     async fn ensure_registry_crate(
         &self,
         spec: RegistrySpec,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureRegistryCrateResult {
         // Validate spec and compute spec_key
         let spec_key = match spec.spec_key() {
@@ -687,7 +687,7 @@ impl StoreRpc for StoreService {
     async fn ensure_rust_toolchain(
         &self,
         spec: RustToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
         StoreService::ensure_rust_toolchain(self, spec, progress).await
     }
@@ -696,7 +696,7 @@ impl StoreRpc for StoreService {
         &self,
         spec: RustToolchainSpec,
         component: RustComponent,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
         StoreService::download_rust_toolchain_component(self, spec, component, progress).await
     }
@@ -706,7 +706,7 @@ impl StoreRpc for StoreService {
         spec: RustToolchainSpec,
         component: RustComponent,
         tarball: BlobRef,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
         StoreService::extract_rust_toolchain_component(self, spec, component, tarball, progress)
             .await
@@ -719,7 +719,7 @@ impl StoreRpc for StoreService {
     async fn ensure_zig_toolchain(
         &self,
         spec: ZigToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
         StoreService::ensure_zig_toolchain(self, spec, progress).await
     }
@@ -742,7 +742,7 @@ impl StoreRpc for StoreService {
     async fn ensure_registry_crate(
         &self,
         spec: RegistrySpec,
-        progress: roam::Tx<StoreProgress>,
+        progress: vox::Tx<StoreProgress>,
     ) -> EnsureRegistryCrateResult {
         StoreService::ensure_registry_crate(self, spec, progress).await
     }

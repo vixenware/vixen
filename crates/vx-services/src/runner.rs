@@ -37,14 +37,14 @@ pub struct DiscoverResult {}
 /// Runner service trait
 ///
 /// A remote-capable worker shell.
-#[roam::service]
+#[vox::service]
 pub trait Runner {
     /// Get service version information (for health checks and compatibility)
     async fn version(&self) -> ServiceVersion;
 
     /// Run work on the runner. The payload shape is intentionally unspecified
     /// until the eval3 execution protocol is defined.
-    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
+    async fn run(&self, request: RunRequest, progress: vox::Tx<StoreProgress>) -> RunResult;
 
     /// Evaluate discovery work on the runner host. The payload shape is
     /// intentionally unspecified until the eval3 execution protocol is defined.

@@ -18,8 +18,8 @@ pub struct VfsdService {
 }
 
 struct StoreConnection {
-    _root_caller: roam_core::DriverCaller,
-    _session_handle: roam_core::SessionHandle,
+    _root_caller: vox_core::DriverCaller,
+    _session_handle: vox_core::SessionHandle,
 }
 
 impl vx_io::boot::GracefulShutdown for VfsdService {
@@ -39,8 +39,8 @@ impl VfsdService {
     pub fn new_with_store_connection(
         vfs: Arc<CasVfs>,
         access_path: Utf8PathBuf,
-        root_caller: Arc<roam_core::DriverCaller>,
-        session_handle: Arc<roam_core::SessionHandle>,
+        root_caller: Arc<vox_core::DriverCaller>,
+        session_handle: Arc<vox_core::SessionHandle>,
     ) -> Self {
         Self {
             vfs,
