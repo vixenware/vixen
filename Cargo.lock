@@ -3665,12 +3665,12 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "vox",
+ "vox-local",
  "vox-stream",
  "vx-daemon",
  "vx-diagnostics",
  "vx-io",
  "vx-services",
- "vx-tracing",
  "vx-vfs",
 ]
 
@@ -3708,7 +3708,6 @@ dependencies = [
  "vox-stream",
  "vx-io",
  "vx-services",
- "vx-tracing",
 ]
 
 [[package]]
@@ -3797,7 +3796,6 @@ dependencies = [
  "tracing",
  "vx-parser",
  "vx-resolve",
- "vx-tracing",
  "vx-types",
 ]
 
@@ -3852,13 +3850,6 @@ dependencies = [
  "tokio-tar",
  "tracing",
  "vx-services",
-]
-
-[[package]]
-name = "vx-tracing"
-version = "0.1.0"
-dependencies = [
- "tracing-subscriber",
 ]
 
 [[package]]

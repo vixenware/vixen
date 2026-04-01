@@ -17,15 +17,15 @@ pub(crate) struct Cli {
 #[repr(u8)]
 pub(crate) enum CliCommand {
     /// Quick health check
-    Doctor(DoctorArgs),
+    Health(HealthArgs),
+
     /// Start the vx daemon (auto-started by other commands if not running)
+    #[facet(args::short = 'd')]
     Daemon(DaemonArgs),
 }
 
-/// Arguments for the `doctor` subcommand
 #[derive(Facet, Debug)]
-pub(crate) struct DoctorArgs {}
+pub(crate) struct HealthArgs {}
 
-/// Arguments for the `daemon` subcommand
 #[derive(Facet, Debug)]
 pub(crate) struct DaemonArgs {}

@@ -45,7 +45,6 @@ futures-util = { workspace = true }
 cfg-if = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
-vx-tracing.workspace = true
 owo-colors.workspace = true
 strip-ansi-escapes.workspace = true
 

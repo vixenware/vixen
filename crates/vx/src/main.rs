@@ -38,9 +38,7 @@ async fn async_main() {
     .unwrap();
 
     match cli.command {
-        CliCommand::Doctor(_args) => {
-            eprintln!("All is looking good.");
-        }
+        CliCommand::Health(_args) => vox::initiator(vox_local::),
         CliCommand::Daemon(_args) => {
             let config = vxd::DaemonConfig {
                 listen: vec![vxd::ListenAddr::UnixSocket(vx_services::DAEMON_SOCK.into())],

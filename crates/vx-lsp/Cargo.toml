@@ -18,7 +18,6 @@ vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }
 vx-types = { path = "../vx-types" }
 rowan = "0.16"
-vx-tracing = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 eyre = { workspace = true }

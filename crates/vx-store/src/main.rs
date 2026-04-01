@@ -107,9 +107,6 @@ async fn async_main() -> Result<()> {
     // If spawned by parent, die when parent dies
     ur_taking_me_with_you::die_with_parent();
 
-    // Initialize tracing
-    vx_tracing::init_service("vx_store=info");
-
     // Initialize moire instrumentation
     tracing::info!("hello from vixen-store");
 

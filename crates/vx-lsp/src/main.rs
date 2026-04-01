@@ -12,8 +12,6 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    vx_tracing::init_service("vx_lsp=debug");
-
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 

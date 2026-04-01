@@ -90,7 +90,6 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
-    vx_tracing::init_service("vx_runner=info");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
