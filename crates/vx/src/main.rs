@@ -6,7 +6,7 @@ mod cli;
 
 use eyre::Result;
 use figue as args;
-use vox::{SessionHandle, TransportMode};
+use vox::{NoopCaller, SessionHandle, TransportMode};
 use vox_stream::LocalLink;
 use vx_services::DaemonClient;
 
@@ -37,55 +37,31 @@ async fn async_main() {
     .run()
     .unwrap();
 
-    match cli.command {
-        CliCommand::Health(_args) => vox::initiator(vox_local::),
+    let res = match cli.command {
+        CliCommand::Health(_args) => health().await,
         CliCommand::Daemon(_args) => {
             let config = vxd::DaemonConfig {
                 listen: vec![vxd::ListenAddr::UnixSocket(vx_services::DAEMON_SOCK.into())],
             };
-            if let Err(e) = vxd::serve(config).await {
-                eprintln!("vx daemon: {e}");
-                std::process::exit(1);
-            }
+            vxd::serve(config).await
         }
     };
+
+    if let Err(e) = res {
+        eprintln!("fatal error: {e}");
+        std::process::exit(1);
+    }
 }
 
-/// Connect to the daemon, auto-starting it if not running.
-///
-/// Returns the client and a session handle — drop the handle to close
-/// the connection.
-#[allow(dead_code)]
-async fn connect_or_start() -> Result<(DaemonClient, SessionHandle)> {
-    // Fast path: daemon already running
-    if let Ok(link) = LocalLink::connect(vx_services::DAEMON_SOCK).await {
-        return establish(link).await;
-    }
-
-    // Spawn the daemon detached and wait for the socket to appear
-    let vx_exe = std::env::current_exe()?;
-    tokio::process::Command::new(&vx_exe)
-        .arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-
-    for i in 0u64..20 {
-        tokio::time::sleep(std::time::Duration::from_millis(50 + i * 10)).await;
-        if let Ok(link) = LocalLink::connect(vx_services::DAEMON_SOCK).await {
-            return establish(link).await;
-        }
-    }
-
-    Err(eyre::eyre!("vx daemon failed to start within timeout"))
-}
-
-async fn establish(link: LocalLink) -> Result<(DaemonClient, SessionHandle)> {
-    let (client, session) = vox::initiator_on(link, TransportMode::Bare)
+async fn health() -> eyre::Result<()> {
+    let source = vox_stream::LocalLinkSource::new(vx_services::DAEMON_SOCK);
+    let (client, _sess) = vox::initiator(source, TransportMode::Bare)
+        .resumable()
         .establish::<DaemonClient>(())
         .await?;
-    Ok((client, session))
+    let status = client.status().await.map_err(|e| eyre::eyre!("{e:?}"))?;
+    tracing::info!("Daemon status: {status:?}");
+    Ok(())
 }
 
 /// Build the default EnvFilter for CLI processes that talk to multiple vx crates.
