@@ -8,11 +8,22 @@ use eyre::{Context, ContextCompat, Result};
 mod integration;
 mod registry_vx;
 
+enum InstallMode {
+    Release,
+    Dev,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(|s| s.as_str()) {
-        Some("install") => install(),
+        Some("install") => {
+            let mode = match args.get(1).map(|s| s.as_str()) {
+                Some("--dev") => InstallMode::Dev,
+                _ => InstallMode::Release,
+            };
+            install(mode)
+        }
         Some("vixenfs-codegen") => {
             if let Err(error) = vixenfs_codegen() {
                 eprintln!("{error:#}");
@@ -56,14 +67,13 @@ fn main() {
     }
 }
 
-fn install() {
+fn install(mode: InstallMode) {
     let binaries = vec![
         "vx",
         "vx-store",
         "vx-runner",
         "vx-vfsd",
         "vx-bootstrap",
-        "vxd",
         "vx-lsp",
     ];
 
@@ -71,8 +81,12 @@ fn install() {
     let workspace_root = find_workspace_root().expect("Could not find workspace root");
 
     println!("Building vixen binaries...");
+    let mut build_args = vec!["build"];
+    if matches!(mode, InstallMode::Release) {
+        build_args.push("--release");
+    }
     let status = Command::new("cargo")
-        .args(["build", "--release"])
+        .args(&build_args)
         .current_dir(&workspace_root)
         .status()
         .expect("Failed to run cargo build");
@@ -81,7 +95,10 @@ fn install() {
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    let release_dir = workspace_root.join("target/release");
+    let target_dir = match mode {
+        InstallMode::Release => workspace_root.join("target/release"),
+        InstallMode::Dev => workspace_root.join("target/debug"),
+    };
 
     // Determine installation directory
     let home = std::env::var("HOME")
@@ -91,9 +108,9 @@ fn install() {
 
     for binary_name in binaries {
         let src = if cfg!(windows) {
-            release_dir.join(format!("{binary_name}.exe"))
+            target_dir.join(format!("{binary_name}.exe"))
         } else {
-            release_dir.join(binary_name)
+            target_dir.join(binary_name)
         };
         let dst = if cfg!(windows) {
             install_dir.join(format!("{binary_name}.exe"))
@@ -103,8 +120,9 @@ fn install() {
 
         if !src.exists() {
             eprintln!(
-                "Warning: {} not found in target/release, skipping",
-                binary_name
+                "Warning: {} not found in {}, skipping",
+                binary_name,
+                target_dir.display()
             );
             continue;
         }
@@ -112,8 +130,6 @@ fn install() {
         fs::copy(&src, &dst).unwrap_or_else(|_| panic!("Failed to copy {}", binary_name));
         println!("Copied {} to {}", binary_name, dst.display());
 
-        // On macOS, codesign the installed binary to avoid AMFI issues
-        // (signing must happen AFTER copy, not before)
         #[cfg(target_os = "macos")]
         {
             let dst_str = dst.to_str().expect("non-UTF-8 path");
@@ -130,8 +146,6 @@ fn install() {
             }
         }
 
-        // Verify the installed binary works (only for binaries that support --version
-        // without needing environment variables like VX_HOME)
         if binary_name == "vx" {
             let output = Command::new(&dst)
                 .arg("--version")

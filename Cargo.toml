@@ -54,7 +54,6 @@ margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-http = { path = "crates/vx-http" }
-vx-tracing = { path = "crates/vx-tracing" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-analysis = { path = "crates/vx-analysis" }
@@ -62,7 +61,7 @@ vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
-vxd = { path = "crates/vx-daemon" }
+vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 vx-jit = { path = "crates/vx-jit" }
 kajit = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
@@ -149,6 +148,7 @@ camino = "1"
 strid = "9.0.0"
 
 # system
+fs4 = "0.13"
 libc = "0.2"
 cfg-if = "1"
 dirs = "6"

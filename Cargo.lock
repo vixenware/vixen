@@ -556,7 +556,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -578,7 +578,7 @@ checksum = "9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -632,7 +632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -995,6 +995,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
+dependencies = [
+ "rustix",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1510,7 +1520,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1546,7 +1556,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2173,7 +2183,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2682,7 +2692,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3057,7 +3067,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3656,12 +3666,12 @@ dependencies = [
  "unicode-width",
  "vox",
  "vox-stream",
+ "vx-daemon",
  "vx-diagnostics",
  "vx-io",
  "vx-services",
  "vx-tracing",
  "vx-vfs",
- "vxd",
 ]
 
 [[package]]
@@ -3671,6 +3681,34 @@ dependencies = [
  "vx-parser",
  "vx-resolve",
  "vx-types",
+]
+
+[[package]]
+name = "vx-daemon"
+version = "0.1.0"
+dependencies = [
+ "arborium",
+ "arborium-highlight",
+ "arborium-theme",
+ "ariadne",
+ "camino",
+ "concolor",
+ "eyre",
+ "facet",
+ "figue",
+ "fs4",
+ "futures-util",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tree-sitter-vixen",
+ "vox",
+ "vox-local",
+ "vox-stream",
+ "vx-io",
+ "vx-services",
+ "vx-tracing",
 ]
 
 [[package]]
@@ -3862,32 +3900,6 @@ name = "vx-vfs-types"
 version = "0.1.0"
 dependencies = [
  "facet",
-]
-
-[[package]]
-name = "vxd"
-version = "0.1.0"
-dependencies = [
- "arborium",
- "arborium-highlight",
- "arborium-theme",
- "ariadne",
- "camino",
- "concolor",
- "eyre",
- "facet",
- "figue",
- "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio",
- "tokio-util",
- "tracing",
- "tree-sitter-vixen",
- "vox",
- "vox-local",
- "vox-stream",
- "vx-io",
- "vx-services",
- "vx-tracing",
 ]
 
 [[package]]

@@ -13,6 +13,8 @@ use vx_services::DaemonClient;
 use crate::cli::{Cli, CliCommand};
 
 fn main() {
+    init_cli_stderr();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -40,7 +42,10 @@ async fn async_main() {
             eprintln!("All is looking good.");
         }
         CliCommand::Daemon(_args) => {
-            if let Err(e) = vxd::serve().await {
+            let config = vxd::DaemonConfig {
+                listen: vec![vxd::ListenAddr::UnixSocket(vx_services::DAEMON_SOCK.into())],
+            };
+            if let Err(e) = vxd::serve(config).await {
                 eprintln!("vx daemon: {e}");
                 std::process::exit(1);
             }
@@ -55,7 +60,7 @@ async fn async_main() {
 #[allow(dead_code)]
 async fn connect_or_start() -> Result<(DaemonClient, SessionHandle)> {
     // Fast path: daemon already running
-    if let Ok(link) = LocalLink::connect(vxd::DAEMON_SOCK).await {
+    if let Ok(link) = LocalLink::connect(vx_services::DAEMON_SOCK).await {
         return establish(link).await;
     }
 
@@ -70,7 +75,7 @@ async fn connect_or_start() -> Result<(DaemonClient, SessionHandle)> {
 
     for i in 0u64..20 {
         tokio::time::sleep(std::time::Duration::from_millis(50 + i * 10)).await;
-        if let Ok(link) = LocalLink::connect(vxd::DAEMON_SOCK).await {
+        if let Ok(link) = LocalLink::connect(vx_services::DAEMON_SOCK).await {
             return establish(link).await;
         }
     }
@@ -83,4 +88,24 @@ async fn establish(link: LocalLink) -> Result<(DaemonClient, SessionHandle)> {
         .establish::<DaemonClient>(())
         .await?;
     Ok((client, session))
+}
+
+/// Build the default EnvFilter for CLI processes that talk to multiple vx crates.
+pub fn cli_env_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "warn,vx=info,vxd=info,vx_store=info,vx_toolchain=info,vx_runner=info",
+        )
+    })
+}
+
+/// Initialize tracing for CLI with plain stderr output (non-TUI mode).
+pub fn init_cli_stderr() {
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .with_env_filter(cli_env_filter())
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_thread_ids(false)
+        .init();
 }

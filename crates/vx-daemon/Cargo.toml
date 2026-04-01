@@ -1,5 +1,5 @@
 [package]
-name = "vxd"
+name = "vx-daemon"
 version.workspace = true
 edition.workspace = true
 
@@ -17,6 +17,8 @@ moire = { workspace = true }
 tokio = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
+fs4 = { workspace = true }
+futures-util = { workspace = true }
 tracing = { workspace = true }
 tokio-util = { workspace = true }
 

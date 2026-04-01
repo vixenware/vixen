@@ -12,6 +12,9 @@ use std::fmt;
 use camino::Utf8PathBuf;
 use facet::Facet;
 
+/// Default Unix socket path for the daemon.
+pub const DAEMON_SOCK: &str = "/tmp/vx-daemon.sock";
+
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
 pub const VXD_PROTOCOL_VERSION: u32 = 6;
@@ -319,8 +322,15 @@ pub struct PsResult {
     pub entries: Vec<PsEntry>,
 }
 
+/// Status response from a running daemon.
+#[derive(Debug, Clone, Facet)]
+pub struct DaemonStatus {
+    /// How long the daemon has been running, in milliseconds.
+    pub uptime_ms: u64,
+}
+
 /// The daemon service trait.
 #[vox::service]
 pub trait Daemon {
-    // TODO: eval?
+    async fn status(&self) -> DaemonStatus;
 }
