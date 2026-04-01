@@ -3512,6 +3512,7 @@ dependencies = [
  "vox-core",
  "vox-postcard",
  "vox-service-macros",
+ "vox-stream",
  "vox-types",
 ]
 
@@ -3664,8 +3665,6 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "vox",
- "vox-local",
- "vox-stream",
  "vx-daemon",
  "vx-diagnostics",
  "vx-io",

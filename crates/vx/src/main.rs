@@ -4,10 +4,8 @@
 
 mod cli;
 
-use eyre::Result;
 use figue as args;
-use vox::{NoopCaller, SessionHandle, TransportMode};
-use vox_stream::LocalLink;
+use vox::TransportMode;
 use vx_services::DaemonClient;
 
 use crate::cli::{Cli, CliCommand};
@@ -54,12 +52,12 @@ async fn async_main() {
 }
 
 async fn health() -> eyre::Result<()> {
-    let source = vox_stream::LocalLinkSource::new(vx_services::DAEMON_SOCK);
+    let source = vox::transport::local::LocalLinkSource::new(vx_services::DAEMON_SOCK);
     let (client, _sess) = vox::initiator(source, TransportMode::Bare)
         .resumable()
         .establish::<DaemonClient>(())
         .await?;
-    let status = client.status().await.map_err(|e| eyre::eyre!("{e:?}"))?;
+    let status = client.status().await?;
     tracing::info!("Daemon status: {status:?}");
     Ok(())
 }
