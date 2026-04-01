@@ -62,6 +62,8 @@ vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
+vxd = { path = "crates/vx-daemon" }
+vx-jit = { path = "crates/vx-jit" }
 kajit = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 

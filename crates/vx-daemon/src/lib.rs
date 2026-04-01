@@ -7,7 +7,6 @@ mod service;
 
 use eyre::Result;
 pub use service::DaemonService;
-use std::time::Duration;
 use vox::{
     AcceptedConnection, Caller, ConnectionAcceptor, ConnectionId, ConnectionSettings, DriverCaller,
     Metadata, MetadataEntry, MetadataFlags, MetadataValue,
@@ -17,9 +16,22 @@ use vx_services::DaemonDispatcher;
 
 pub type UpstreamCaller = DriverCaller;
 
+pub const DAEMON_SOCK: &str = "/tmp/vx-daemon.sock";
+
 /// Serve the VXD service
 pub async fn serve() -> Result<()> {
-    let acceptor = LocalLinkAcceptor::bind("/tmp/vx-daemon.sock")?;
+    // Check for an existing socket
+    if std::path::Path::new(DAEMON_SOCK).exists() {
+        match LocalLink::connect(DAEMON_SOCK).await {
+            Ok(_) => return Err(eyre::eyre!("vx daemon already running at {DAEMON_SOCK}")),
+            Err(_) => {
+                // Stale socket — remove it so we can bind
+                std::fs::remove_file(DAEMON_SOCK)?;
+            }
+        }
+    }
+
+    let acceptor = LocalLinkAcceptor::bind(DAEMON_SOCK)?;
 
     loop {
         match acceptor.accept().await {

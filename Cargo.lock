@@ -3655,11 +3655,13 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "vox",
+ "vox-stream",
  "vx-diagnostics",
  "vx-io",
  "vx-services",
  "vx-tracing",
  "vx-vfs",
+ "vxd",
 ]
 
 [[package]]

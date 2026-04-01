@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [package.metadata.cargo-shear]
-ignored = ["vox-stream", "vx-vfs"]
+ignored = ["vx-vfs"]
 
 [dependencies]
 moire = { workspace = true }
@@ -27,6 +27,8 @@ tracing-subscriber = { workspace = true }
 vox = { workspace = true }
 indicatif = { workspace = true }
 vx-services.workspace = true
+vxd.workspace = true
+vox-stream.workspace = true
 vx-io = { workspace = true }
 vx-diagnostics = { workspace = true }
 vx-vfs = { workspace = true }
