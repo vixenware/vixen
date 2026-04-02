@@ -904,9 +904,9 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "figue"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f33f286df173a047e864b39279b14de5e08dc5c7c5c719f81e96a8602049d4dd"
+checksum = "b0ffdb761cf6aa5298efdef8ae22dac4057d492f85e1e7434864eb1ccbcfeae5"
 dependencies = [
  "ariadne",
  "camino",
@@ -930,9 +930,9 @@ dependencies = [
 
 [[package]]
 name = "figue-attrs"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b09be1cd2a5c7295aa5dae9dd5585db38b3ab59c751336ebd4d692b867415703"
+checksum = "a95509cd6139af9c281d9e4f163db7fce0da7101102ac555e677937248437e58"
 dependencies = [
  "facet",
 ]
@@ -3508,6 +3508,7 @@ dependencies = [
  "facet",
  "facet-pretty",
  "facet-reflect",
+ "tokio",
  "tracing",
  "vox-core",
  "vox-postcard",
@@ -3605,6 +3606,7 @@ dependencies = [
 name = "vox-stream"
 version = "0.3.1"
 dependencies = [
+ "libc",
  "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "tokio",
  "vox-core",
@@ -3702,8 +3704,6 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vox",
- "vox-local",
- "vox-stream",
  "vx-io",
  "vx-services",
 ]

@@ -6,7 +6,7 @@ mod cli;
 
 use figue as args;
 use vox::TransportMode;
-use vx_services::DaemonClient;
+use vx_services::{DAEMON_SOCK, DaemonClient};
 
 use crate::cli::{Cli, CliCommand};
 
@@ -39,7 +39,7 @@ async fn async_main() {
         CliCommand::Health(_args) => health().await,
         CliCommand::Daemon(_args) => {
             let config = vxd::DaemonConfig {
-                listen: vec![vxd::ListenAddr::UnixSocket(vx_services::DAEMON_SOCK.into())],
+                listen: vec![vx_services::DAEMON_SOCK.to_string()],
             };
             vxd::serve(config).await
         }
@@ -52,11 +52,7 @@ async fn async_main() {
 }
 
 async fn health() -> eyre::Result<()> {
-    let source = vox::transport::local::LocalLinkSource::new(vx_services::DAEMON_SOCK);
-    let (client, _sess) = vox::initiator(source, TransportMode::Bare)
-        .resumable()
-        .establish::<DaemonClient>(())
-        .await?;
+    let client: DaemonClient = vox::connect(DAEMON_SOCK).await?;
     let status = client.status().await?;
     tracing::info!("Daemon status: {status:?}");
     Ok(())

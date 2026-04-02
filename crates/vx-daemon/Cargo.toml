@@ -23,8 +23,6 @@ tokio-util = { workspace = true }
 
 vx-services.workspace = true
 vx-io = { workspace = true }
-vox-stream.workspace = true
-vox-local.workspace = true
 
 [features]
 default = []

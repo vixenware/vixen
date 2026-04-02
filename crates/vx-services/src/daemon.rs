@@ -13,11 +13,7 @@ use camino::Utf8PathBuf;
 use facet::Facet;
 
 /// Default Unix socket path for the daemon.
-pub const DAEMON_SOCK: &str = "/tmp/vx-daemon.sock";
-
-/// Daemon protocol version.
-/// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 6;
+pub const DAEMON_SOCK: &str = "local:///tmp/vixen.vox";
 
 /// Request to build a project.
 ///

@@ -72,7 +72,7 @@ facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-cargo-toml = { version = "0.44.0" }
 
 # cmdline parsing
-figue = { version = "2.0.0" }
+figue = { version = "2.0.1" }
 
 # vox RPC framework
 shm-primitives = "7.1.0"
