@@ -57,8 +57,15 @@ pub enum EvalStrictFunctionResult {
     Err(EvalStrictFunctionFailure),
 }
 
+pub type EvalFunctionRequest = EvalStrictFunctionRequest;
+pub type EvalFunctionSuccess = EvalStrictFunctionSuccess;
+pub type EvalFunctionFailure = EvalStrictFunctionFailure;
+pub type EvalFunctionResult = EvalStrictFunctionResult;
+
 #[vox::service]
 pub trait Orchestrator {
+    async fn eval_function(&self, request: EvalFunctionRequest) -> EvalFunctionResult;
+
     async fn eval_strict_function(
         &self,
         request: EvalStrictFunctionRequest,

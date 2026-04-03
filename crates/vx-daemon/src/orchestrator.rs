@@ -5,8 +5,9 @@ use vx_jit::{
     lower_source_text_strict_fragment,
 };
 use vx_services::{
-    EvalStrictFunctionFailure, EvalStrictFunctionRequest, EvalStrictFunctionResult,
-    EvalStrictFunctionSuccess, Orchestrator, RuntimeValue, StrictEvalBackend,
+    EvalFunctionRequest, EvalFunctionResult, EvalStrictFunctionFailure, EvalStrictFunctionRequest,
+    EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator, RuntimeValue,
+    StrictEvalBackend,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,6 +144,10 @@ impl OrchestratorService {
 }
 
 impl Orchestrator for OrchestratorService {
+    async fn eval_function(&self, request: EvalFunctionRequest) -> EvalFunctionResult {
+        self.eval_strict_function_impl(request).await
+    }
+
     async fn eval_strict_function(
         &self,
         request: EvalStrictFunctionRequest,
@@ -197,8 +202,8 @@ fn execute_with_kajit(
 #[cfg(test)]
 mod tests {
     use vx_services::{
-        EvalStrictFunctionRequest, EvalStrictFunctionResult, Orchestrator, RuntimeValue,
-        StrictEvalBackend,
+        EvalFunctionRequest, EvalFunctionResult, EvalStrictFunctionRequest,
+        EvalStrictFunctionResult, Orchestrator, RuntimeValue, StrictEvalBackend,
     };
 
     use super::{OrchestratorService, OrchestratorWiring};
@@ -227,7 +232,7 @@ fn one() -> String (
     async fn evals_u64_with_kajit() {
         let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
-            .eval_strict_function(EvalStrictFunctionRequest {
+            .eval_function(EvalFunctionRequest {
                 source_text: SOURCE_ADD_U64.to_owned(),
                 function_name: "add".to_owned(),
                 args: vec![RuntimeValue::U64(30), RuntimeValue::U64(12)],
@@ -239,7 +244,7 @@ fn one() -> String (
             .await;
 
         match result {
-            EvalStrictFunctionResult::Ok(success) => {
+            EvalFunctionResult::Ok(success) => {
                 assert_eq!(success.value, RuntimeValue::U64(42));
             }
             other => panic!("expected success, got {other:?}"),
@@ -273,7 +278,7 @@ fn one() -> String (
     async fn evals_string_with_kajit() {
         let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
-            .eval_strict_function(EvalStrictFunctionRequest {
+            .eval_function(EvalFunctionRequest {
                 source_text: SOURCE_ONE.to_owned(),
                 function_name: "one".to_owned(),
                 args: vec![],
@@ -285,7 +290,7 @@ fn one() -> String (
             .await;
 
         match result {
-            EvalStrictFunctionResult::Ok(success) => {
+            EvalFunctionResult::Ok(success) => {
                 assert_eq!(success.value, RuntimeValue::String("1".to_owned()));
             }
             other => panic!("expected success, got {other:?}"),
@@ -334,7 +339,7 @@ fn one() -> String (
     async fn rejects_non_strict_function_with_clear_message() {
         let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
-            .eval_strict_function(EvalStrictFunctionRequest {
+            .eval_function(EvalFunctionRequest {
                 source_text: CC_VERSION_SOURCE.to_owned(),
                 function_name: "build".to_owned(),
                 args: vec![RuntimeValue::String("hello".to_owned())],
@@ -346,7 +351,7 @@ fn one() -> String (
             .await;
 
         match result {
-            EvalStrictFunctionResult::Err(failure) => {
+            EvalFunctionResult::Err(failure) => {
                 assert!(
                     failure
                         .message

@@ -6,8 +6,8 @@ mod cli;
 
 use figue as args;
 use vx_services::{
-    DAEMON_SOCK, DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult,
-    OrchestratorClient, RuntimeValue, StrictEvalBackend,
+    DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient,
+    RuntimeValue, StrictEvalBackend,
 };
 
 use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs};
@@ -80,7 +80,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
     let address = resolve_daemon_address(&args.target)?;
     let client: OrchestratorClient = vox::connect(&address).await?;
     let result = client
-        .eval_strict_function(EvalStrictFunctionRequest {
+        .eval_function(EvalFunctionRequest {
             source_text,
             function_name: args.function,
             args: values,
@@ -92,7 +92,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         .await?;
 
     match result {
-        EvalStrictFunctionResult::Ok(success) => {
+        EvalFunctionResult::Ok(success) => {
             println!("{}", format_value(&success.value));
             if let Some(strict_fragment_dump) = success.strict_fragment_dump {
                 println!("\n** Strict Fragment\n{strict_fragment_dump}");
@@ -105,7 +105,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
             }
             Ok(())
         }
-        EvalStrictFunctionResult::Err(failure) => {
+        EvalFunctionResult::Err(failure) => {
             eprintln!("error: {}", failure.message);
             if let Some(strict_fragment_dump) = failure.strict_fragment_dump {
                 eprintln!("\n** Strict Fragment\n{strict_fragment_dump}");

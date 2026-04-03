@@ -523,8 +523,8 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::sleep;
     use vx_services::{
-        DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult, OrchestratorClient,
-        RuntimeValue, StrictEvalBackend,
+        DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient, RuntimeValue,
+        StrictEvalBackend,
     };
 
     use super::{
@@ -586,7 +586,7 @@ mod tests {
 
         let client = connect_orchestrator(&listen).await;
         let result = client
-            .eval_strict_function(EvalStrictFunctionRequest {
+            .eval_function(EvalFunctionRequest {
                 source_text: r#"
 fn add(lhs: U64, rhs: U64) -> U64 (
   lhs + rhs
@@ -607,7 +607,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
         let _ = daemon.await;
 
         match result {
-            EvalStrictFunctionResult::Ok(success) => {
+            EvalFunctionResult::Ok(success) => {
                 assert_eq!(success.value, RuntimeValue::U64(42));
             }
             other => panic!("expected success, got {other:?}"),
@@ -642,7 +642,7 @@ daemon {{
 
         let client = connect_orchestrator(&listen).await;
         let result = client
-            .eval_strict_function(EvalStrictFunctionRequest {
+            .eval_function(EvalFunctionRequest {
                 source_text: r#"
 fn add(lhs: U64, rhs: U64) -> U64 (
   lhs + rhs
@@ -663,7 +663,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
         let _ = daemon.await;
 
         match result {
-            EvalStrictFunctionResult::Ok(success) => {
+            EvalFunctionResult::Ok(success) => {
                 assert_eq!(success.value, RuntimeValue::U64(16));
             }
             other => panic!("expected success, got {other:?}"),
