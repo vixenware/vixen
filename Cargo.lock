@@ -998,16 +998,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs4"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
-dependencies = [
- "rustix",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1501,15 +1491,6 @@ dependencies = [
  "unicode-width",
  "unit-prefix",
  "web-time",
-]
-
-[[package]]
-name = "indoc"
-version = "2.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]
@@ -3463,17 +3444,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa66022bbd1ab992fad72bdedcfd07a0023b6f5ecc83d50121e39e3a3caed41"
 
 [[package]]
-name = "ur-taking-me-with-you"
-version = "7.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d936e4936d78c35785b886f489c527d843e360babe372190f99922f0859ea75"
-dependencies = [
- "libc",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3565,13 +3535,6 @@ dependencies = [
  "vox-types",
  "wasm-bindgen-futures",
  "zerocopy",
-]
-
-[[package]]
-name = "vox-local"
-version = "0.3.1"
-dependencies = [
- "vox-stream",
 ]
 
 [[package]]
@@ -3686,27 +3649,15 @@ name = "vx"
 version = "0.1.0"
 dependencies = [
  "camino",
- "concolor",
  "eyre",
  "facet",
- "facet-json",
  "figue",
- "indicatif",
- "indoc",
- "libc",
- "margin",
- "margin-term",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "owo-colors",
- "strip-ansi-escapes",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unicode-width",
  "vox",
  "vx-daemon",
- "vx-diagnostics",
- "vx-io",
  "vx-lsp",
  "vx-services",
  "vx-vfs",
@@ -3732,17 +3683,11 @@ dependencies = [
  "camino",
  "concolor",
  "eyre",
- "facet",
- "figue",
- "fs4",
- "futures-util",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
- "tokio-util",
  "tracing",
  "tree-sitter-vixen",
  "vox",
- "vx-io",
  "vx-services",
  "vx-store",
 ]
@@ -3797,16 +3742,9 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "dirs",
- "eyre",
- "facet",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile",
  "tokio",
- "tracing",
- "ur-taking-me-with-you",
- "vox",
- "vox-local",
- "vox-stream",
 ]
 
 [[package]]
@@ -3863,7 +3801,6 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
- "hex",
  "tokio",
  "vox",
 ]
@@ -3883,7 +3820,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vox",
  "vx-io",
  "vx-services",
 ]
@@ -3894,14 +3830,11 @@ version = "0.1.0"
 dependencies = [
  "async-compression",
  "camino",
- "flate2",
  "futures-util",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tar",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tar",
- "tracing",
  "vx-services",
 ]
 
@@ -4550,3 +4483,7 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "vox-local"
+version = "0.3.1"

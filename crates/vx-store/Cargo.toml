@@ -16,10 +16,7 @@ path = "src/lib.rs"
 camino = { workspace = true }
 eyre = { workspace = true }
 
-vox = { workspace = true }
 moire = { workspace = true }
-
-tokio = { workspace = true }
 
 tracing = { workspace = true }
 vx-services = { path = "../vx-services" }
@@ -29,6 +26,7 @@ vx-io = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# (tokio also needed for main deps via vx-daemon, but not directly in lib code)
 tracing-subscriber = { workspace = true }
 vx-io = { path = "../vx-io" }
 vx-services = { path = "../vx-services" }

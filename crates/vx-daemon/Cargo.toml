@@ -9,21 +9,15 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-facet = { workspace = true }
-figue = { workspace = true }
 vox = { workspace = true }
 moire = { workspace = true }
 tokio = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
-fs4 = { workspace = true }
-futures-util = { workspace = true }
 tracing = { workspace = true }
-tokio-util = { workspace = true }
 
 vx-services.workspace = true
 vx-store = { path = "../vx-store" }
-vx-io = { workspace = true }
 
 [features]
 default = []

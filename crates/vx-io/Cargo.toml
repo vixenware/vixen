@@ -11,15 +11,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 moire = { workspace = true }
 camino = { workspace = true }
-eyre = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
-tracing = { workspace = true }
-facet = { workspace = true }
-vox = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
-vox-local.workspace = true
-vox-stream.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

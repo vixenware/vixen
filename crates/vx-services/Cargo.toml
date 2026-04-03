@@ -16,7 +16,7 @@ camino.workspace = true
 facet.workspace = true
 facet-postcard.workspace = true
 fastcdc.workspace = true
-hex.workspace = true
+
 vox.workspace = true
 tokio.workspace = true
 

@@ -26,8 +26,8 @@ members = [
   "crates/vx-io",
   "crates/vx-services",
   ## services
+  "crates/vx-store",
   # "crates/vx-vfsd",
-  # "crates/vx-store",
   # "crates/vx-runner",
   # "crates/vx-vfs-types",
   # "crates/vx-vfs",
@@ -69,24 +69,18 @@ facet = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-error = { version = "0.44.1" }
 facet-json = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
-facet-cargo-toml = { version = "0.44.0" }
+
 
 # cmdline parsing
 figue = { version = "2.0.1" }
 
 # vox RPC framework
 shm-primitives = "7.1.0"
-ur-taking-me-with-you = { version = "7.1.0", features = ["tokio"] }
+
 
 vox = { version = "0.3.1", features = ["transport-tcp", "transport-local", "transport-shm"] }
-vox-core = { version = "0.3.1" }
-vox-stream = { version = "0.3.1" }
-vox-local = { version = "0.3.1" }
-vox-shm = { version = "0.3.1" }
-vox-codegen = { version = "0.3.1" }
 
-# config files
-facet-styx = { version = "3.0.0" }
+vox-codegen = { version = "0.3.1" }
 
 # process management
 
@@ -100,8 +94,6 @@ fastcdc = "3"
 # error handling
 eyre = "0.6"
 thiserror = "2"
-
-ulid = "1.2"
 
 # async
 tokio = { version = "1", features = [
@@ -128,25 +120,21 @@ windows-projfs = { version = "0.1", features = ["dynamic-import"] }
 
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
-strip-ansi-escapes = "0.2"
 unicode-width = "0.2"
 indicatif = "0.18"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
 tar = "0.4"
-tokio-util = { version = "0.7" }
-pin-project-lite = "0.2"
+
 
 # time
 jiff = "0.2"
 
 # paths
 camino = "1"
-strid = "9.0.0"
 
 # system
-fs4 = "0.13"
 libc = "0.2"
 cfg-if = "1"
 dirs = "6"

@@ -15,34 +15,22 @@ ignored = ["vx-vfs"]
 moire = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
-facet-json = { workspace = true }
 eyre = { workspace = true }
-libc = { workspace = true }
-owo-colors = { workspace = true }
 camino = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 vox = { workspace = true }
-indicatif = { workspace = true }
 vx-services.workspace = true
 vxd.workspace = true
-vx-io = { workspace = true }
 vx-lsp = { path = "../vx-lsp" }
-vx-diagnostics = { workspace = true }
 vx-vfs = { workspace = true }
-margin = { workspace = true }
-margin-term = { workspace = true }
-strip-ansi-escapes = { workspace = true }
-unicode-width = { workspace = true }
 
 [features]
 default = []
 diagnostics = ["moire/diagnostics", "vx-vfs/diagnostics"]
 
 [dev-dependencies]
-concolor = { version = "0.1", features = ["api"] }
-indoc = "2"
 
 [lints]
 workspace = true
