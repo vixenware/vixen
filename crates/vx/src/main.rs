@@ -64,7 +64,7 @@ async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
     let address = resolve_daemon_address(&target)?;
     let client: DaemonClient = vox::connect(&address).await?;
     let status = client.status().await?;
-    tracing::info!("Daemon status: {status:?}");
+    print!("{}", format_daemon_status(&address, &status));
     Ok(())
 }
 
@@ -152,6 +152,29 @@ fn format_value(value: &StrictValue) -> String {
         StrictValue::Bool(value) => value.to_string(),
         StrictValue::String(value) => value.clone(),
     }
+}
+
+fn format_daemon_status(address: &str, status: &vx_services::DaemonStatus) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("daemon: {address}\n"));
+    out.push_str(&format!("uptime_ms: {}\n", status.uptime_ms));
+    if status.listen.is_empty() {
+        out.push_str("listen: []\n");
+    } else {
+        out.push_str("listen:\n");
+        for address in &status.listen {
+            out.push_str(&format!("  - {address}\n"));
+        }
+    }
+    if status.hosted_services.is_empty() {
+        out.push_str("hosted_services: []\n");
+    } else {
+        out.push_str("hosted_services:\n");
+        for service in &status.hosted_services {
+            out.push_str(&format!("  - {service}\n"));
+        }
+    }
+    out
 }
 
 fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
@@ -279,12 +302,13 @@ mod tests {
     use std::ffi::OsStr;
 
     use tempfile::TempDir;
-    use vx_services::DAEMON_SOCK;
+    use vx_services::{DAEMON_SOCK, DaemonStatus};
 
     use crate::cli::ClientTargetArgs;
     use crate::{
         config_home_from_env, daemon_config_override_from_env, daemon_config_path_in,
-        resolve_daemon_address, resolve_store_root, state_home_from_env, store_root_in,
+        format_daemon_status, resolve_daemon_address, resolve_store_root, state_home_from_env,
+        store_root_in,
     };
 
     #[test]
@@ -396,5 +420,22 @@ daemon {
             store_root_in(&state_home),
             camino::Utf8PathBuf::from("/tmp/state/vx/store")
         );
+    }
+
+    #[test]
+    fn formats_daemon_status_with_inventory() {
+        let rendered = format_daemon_status(
+            "local:///tmp/vixen.vox",
+            &DaemonStatus {
+                uptime_ms: 42,
+                listen: vec!["local:///tmp/vixen.vox".to_owned()],
+                hosted_services: vec!["Daemon".to_owned(), "Orchestrator".to_owned()],
+            },
+        );
+
+        assert!(rendered.contains("daemon: local:///tmp/vixen.vox"));
+        assert!(rendered.contains("uptime_ms: 42"));
+        assert!(rendered.contains("listen:\n  - local:///tmp/vixen.vox"));
+        assert!(rendered.contains("hosted_services:\n  - Daemon\n  - Orchestrator"));
     }
 }

@@ -184,7 +184,6 @@ strip = "none"
 vox = { path = "../vox/rust/vox" }
 vox-core = { path = "../vox/rust/vox-core" }
 vox-stream = { path = "../vox/rust/vox-stream" }
-vox-local = { path = "../vox/rust/vox-local" }
 vox-shm = { path = "../vox/rust/vox-shm" }
 vox-codegen = { path = "../vox/rust/vox-codegen" }
 

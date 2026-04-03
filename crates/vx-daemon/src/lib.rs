@@ -6,7 +6,7 @@
 use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
-use vox::{ConnectionAcceptor, Metadata};
+use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_runner::RunnerService;
 use vx_services::{
     DAEMON_SOCK, DaemonDispatcher, OrchestratorDispatcher, RunnerDispatcher, StoreDispatcher,
@@ -79,12 +79,20 @@ impl DaemonConfig {
                     upstream: None,
                 }),
                 runner: Some(RunnerConfig::default()),
-                vfsd: Some(VfsdConfig {
-                    mount: vfs_mount,
-                    store: None,
-                }),
+                vfsd: default_local_vfsd(vfs_mount),
             },
         }
+    }
+}
+
+fn default_local_vfsd(vfs_mount: Utf8PathBuf) -> Option<VfsdConfig> {
+    if cfg!(target_os = "linux") || cfg!(target_os = "windows") {
+        Some(VfsdConfig {
+            mount: vfs_mount,
+            store: None,
+        })
+    } else {
+        None
     }
 }
 
@@ -207,13 +215,13 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 
     let store_service = if let Some(store_cfg) = services.store.clone() {
         let store_service = vx_store::open(store_cfg.root).await?;
-        if let Some(upstream_addr) = resolve_optional_dependency(
-            store_cfg.upstream.as_ref(),
-            false,
-            &local_addr,
-            "store.upstream",
-        )? {
-            let upstream = std::sync::Arc::new(vox::connect(&upstream_addr).await?);
+        if let Some(upstream_ref) = store_cfg.upstream.as_ref() {
+            let upstream = match upstream_ref {
+                ServiceRef::InProcess => {
+                    bail!("store.upstream cannot be @in_process; a store cannot upstream to itself")
+                }
+                ServiceRef::Rpc { address } => std::sync::Arc::new(vox::connect(address).await?),
+            };
             store_service.set_upstream(upstream);
         }
         Some(store_service)
@@ -222,27 +230,30 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     };
 
     let runner_service = if let Some(runner_cfg) = services.runner.clone() {
-        let store_addr = resolve_required_dependency(
-            runner_cfg.store.as_ref(),
-            store_service.is_some(),
-            &local_addr,
-            "runner.store",
-        )?;
-        let store = std::sync::Arc::new(vox::connect(&store_addr).await?);
+        let store = std::sync::Arc::new(
+            resolve_required_store_client(
+                runner_cfg.store.as_ref(),
+                store_service.as_ref(),
+                "runner.store",
+            )
+            .await?,
+        );
         Some(RunnerService::new(Some(store)))
     } else {
         None
     };
 
     let vfsd_service = if let Some(vfsd_cfg) = services.vfsd.clone() {
-        let store_addr = resolve_required_dependency(
-            vfsd_cfg.store.as_ref(),
-            store_service.is_some(),
-            &local_addr,
-            "vfsd.store",
-        )?;
+        let store = std::sync::Arc::new(
+            resolve_required_store_client(
+                vfsd_cfg.store.as_ref(),
+                store_service.as_ref(),
+                "vfsd.store",
+            )
+            .await?,
+        );
         let vfs_mount = vx_vfsd::effective_mount_path(&vfsd_cfg.mount);
-        Some(vx_vfsd::boot(&store_addr, &vfs_mount).await?)
+        Some(vx_vfsd::boot_with_store(store, &vfs_mount).await?)
     } else {
         None
     };
@@ -296,6 +307,60 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn resolve_required_store_client(
+    configured: Option<&ServiceRef>,
+    local_store: Option<&StoreService>,
+    label: &str,
+) -> Result<vx_services::StoreClient> {
+    match configured {
+        Some(ServiceRef::InProcess) => {
+            let Some(local_store) = local_store else {
+                bail!("{label} is configured as @in_process, but no local service is hosted");
+            };
+            connect_in_process_store(local_store.clone()).await
+        }
+        Some(ServiceRef::Rpc { address }) => Ok(vox::connect(address).await?),
+        None => {
+            if let Some(local_store) = local_store {
+                connect_in_process_store(local_store.clone()).await
+            } else {
+                bail!(
+                    "{label} is required, but no local service is hosted and no remote dependency was configured"
+                )
+            }
+        }
+    }
+}
+
+async fn connect_in_process_store(service: StoreService) -> Result<vx_services::StoreClient> {
+    let (client_link, server_link) = vox::memory_link_pair(64);
+    tokio::spawn(async move {
+        let acceptor = vox::acceptor_fn(
+            move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
+                match request.service() {
+                    "Store" => {
+                        connection.handle_with(StoreDispatcher::new(service.clone()));
+                        Ok(())
+                    }
+                    _ => Err(vec![]),
+                }
+            },
+        );
+
+        if let Err(error) = vox::acceptor_on(server_link)
+            .on_connection(acceptor)
+            .establish::<vox::NoopClient>()
+            .await
+        {
+            tracing::warn!(?error, "in-process store acceptor exited");
+        }
+    });
+
+    Ok(vox::initiator_on(client_link, TransportMode::Bare)
+        .establish::<vx_services::StoreClient>()
+        .await?)
 }
 
 fn resolve_optional_dependency(
@@ -458,8 +523,8 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::sleep;
     use vx_services::{
-        EvalStrictFunctionRequest, EvalStrictFunctionResult, OrchestratorClient, StrictEvalBackend,
-        StrictValue,
+        DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult, OrchestratorClient,
+        StrictEvalBackend, StrictValue,
     };
 
     use super::{
@@ -605,6 +670,55 @@ fn add(lhs: U64, rhs: U64) -> U64 (
         }
     }
 
+    #[tokio::test]
+    async fn local_all_in_one_daemon_boots_without_loopback_rpc() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let socket_path = temp_dir.path().join("vx-daemon.sock");
+        let listen = format!("local://{}", socket_path.display());
+        let store_root = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("store"))
+            .expect("utf-8 store root");
+        let vfs_mount = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vfs"))
+            .expect("utf-8 vfs mount");
+
+        let daemon = tokio::spawn(super::serve(DaemonConfig::local_all_in_one(
+            vec![listen.clone()],
+            store_root,
+            vfs_mount,
+        )));
+
+        let client = connect_daemon(&listen).await;
+        let status = client.status().await.expect("daemon status should succeed");
+
+        daemon.abort();
+        let _ = daemon.await;
+
+        assert!(
+            status
+                .hosted_services
+                .iter()
+                .any(|service| service == "Store")
+        );
+        assert!(
+            status
+                .hosted_services
+                .iter()
+                .any(|service| service == "Runner")
+        );
+        assert_eq!(
+            status
+                .hosted_services
+                .iter()
+                .any(|service| service == "Vfsd"),
+            cfg!(target_os = "linux") || cfg!(target_os = "windows")
+        );
+        assert!(
+            status
+                .hosted_services
+                .iter()
+                .any(|service| service == "Orchestrator")
+        );
+    }
+
     async fn connect_orchestrator(address: &str) -> OrchestratorClient {
         let mut last_error = None;
         for _ in 0..50 {
@@ -619,6 +733,24 @@ fn add(lhs: U64, rhs: U64) -> U64 (
 
         panic!(
             "failed to connect orchestrator client to {address}: {}",
+            last_error.expect("retry loop should record at least one connection error")
+        );
+    }
+
+    async fn connect_daemon(address: &str) -> DaemonClient {
+        let mut last_error = None;
+        for _ in 0..50 {
+            match vox::connect(address).await {
+                Ok(client) => return client,
+                Err(error) => {
+                    last_error = Some(error);
+                    sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+
+        panic!(
+            "failed to connect daemon client to {address}: {}",
             last_error.expect("retry loop should record at least one connection error")
         );
     }

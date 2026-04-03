@@ -238,22 +238,12 @@ impl vox::ConnectionAcceptor for VfsdAcceptor {
     }
 }
 
-/// Boot the VFS daemon: connect to the store at `store_addr`, mount the VFS
+/// Boot the VFS daemon from an already-connected store client, mount the VFS
 /// at `mount`, run the smoke test, and return a ready [`VfsdService`].
-///
-/// `store_addr` must be a `vox`-compatible address string (e.g. `local:///path/to/sock`)
-/// pointing at a server that routes `"Store"` connections.
-pub async fn boot(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> {
-    use vx_services::StoreClient;
-
-    // 1. Connect to store via high-level vox API.
-    tracing::debug!(%store_addr, "connecting to store");
-    let cas: StoreClient = vox::connect(store_addr)
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to store at {store_addr}: {e}"))?;
-    tracing::debug!("connected to store");
-    let cas = Arc::new(cas);
-
+pub async fn boot_with_store(
+    cas: Arc<vx_services::StoreClient>,
+    mount: &Utf8PathBuf,
+) -> Result<VfsdService> {
     // 2. Create VFS with optional L2 disk blob cache.
     let disk_cache_dir = std::env::var("VX_HOME")
         .ok()
@@ -405,4 +395,20 @@ pub async fn boot(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> 
     };
 
     Ok(VfsdService::new(vfs, access_path))
+}
+
+/// Boot the VFS daemon: connect to the store at `store_addr`, mount the VFS
+/// at `mount`, run the smoke test, and return a ready [`VfsdService`].
+///
+/// `store_addr` must be a `vox`-compatible address string (e.g. `local:///path/to/sock`)
+/// pointing at a server that routes `"Store"` connections.
+pub async fn boot(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> {
+    use vx_services::StoreClient;
+
+    tracing::debug!(%store_addr, "connecting to store");
+    let cas: StoreClient = vox::connect(store_addr)
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to store at {store_addr}: {e}"))?;
+    tracing::debug!("connected to store");
+    boot_with_store(Arc::new(cas), mount).await
 }
