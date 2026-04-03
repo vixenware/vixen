@@ -74,10 +74,7 @@ facet-styx = "3.0.0"
 figue = { version = "2.0.1" }
 
 # vox RPC framework
-shm-primitives = "7.1.0"
-
-
-vox = { version = "0.3.1", features = ["transport-tcp", "transport-local", "transport-shm"] }
+vox = { version = "0.3.1", features = ["transport-tcp", "transport-local"] }
 
 vox-codegen = { version = "0.3.1" }
 vox-stream = { path = "../vox/rust/vox-stream" }
@@ -185,7 +182,6 @@ strip = "none"
 vox = { path = "../vox/rust/vox" }
 vox-core = { path = "../vox/rust/vox-core" }
 vox-stream = { path = "../vox/rust/vox-stream" }
-vox-shm = { path = "../vox/rust/vox-shm" }
 vox-codegen = { path = "../vox/rust/vox-codegen" }
 
 windows-projfs = { path = "vendor/windows-projfs" }

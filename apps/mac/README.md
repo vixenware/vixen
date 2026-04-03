@@ -23,11 +23,9 @@ Or manual path:
    - `brew install xcodegen`
 2. Regenerate the VixenFS Swift bindings:
    - `cargo xtask vixenfs-codegen`
-3. Build the Vox SHM staticlib used by `VoxRuntime`:
-   - `cargo build --release -p vox-shm-ffi`
-4. Validate the Swift package:
+3. Validate the Swift package against the local Vox runtime:
+4. Generate the Xcode project:
    - `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
-5. Generate the Xcode project:
    - `cd apps/mac/xcode`
    - `xcodegen generate`
 6. Open the generated project in Xcode.

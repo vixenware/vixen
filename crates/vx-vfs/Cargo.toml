@@ -21,13 +21,11 @@ vx-vfs-types = { workspace = true }
 vox = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-shm-primitives = { workspace = true }
 libc = { workspace = true }
 fastrand = { workspace = true }
 facet-json = { workspace = true }
 vox-stream = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }
-vx-io = { path = "../vx-io" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }
