@@ -3706,7 +3706,6 @@ dependencies = [
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "vox",
  "vx-daemon",
@@ -3869,7 +3868,6 @@ name = "vx-services"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "camino",
  "facet",
  "facet-postcard",
  "fastcdc",
