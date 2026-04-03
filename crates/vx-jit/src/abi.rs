@@ -1,9 +1,9 @@
 //! Runtime/strict-fragment ABI bridge for compiled strict fragments.
 //!
 //! This is the narrow current bridge between host-side values and the compiled
-//! Kajit calling convention. It is intentionally explicit about unmanaged
-//! string returns: the bridge can copy them out, but it cannot yet prove
-//! ownership of the returned backing storage.
+//! Kajit calling convention. String returns may be surfaced either as raw
+//! frame-valid `[ptr, len]` payloads or as copied owned strings at the runtime
+//! boundary.
 
 use std::str::Utf8Error;
 
@@ -39,8 +39,9 @@ impl UnmanagedStrictFragmentString {
 
     /// Copies the returned string bytes into an owned Rust `String`.
     ///
-    /// This does not free the underlying backing storage. That ownership story
-    /// is still unresolved at the runtime/strict-fragment boundary.
+    /// The backing storage is treated as frame-valid and borrowed for the
+    /// duration of the boundary crossing. This helper performs the required
+    /// promotion into an owned runtime string.
     pub unsafe fn to_owned_string(&self) -> Result<String, Utf8Error> {
         let bytes = unsafe { self.as_bytes() };
         std::str::from_utf8(bytes).map(str::to_owned)
@@ -114,8 +115,8 @@ pub unsafe fn execute_compiled_unmanaged_strict_fragment(
     })
 }
 
-/// Executes a compiled strict fragment and copies string returns into owned Rust
-/// strings without attempting to free the underlying backing storage.
+/// Executes a compiled strict fragment and promotes frame-valid string returns
+/// into owned Rust strings for use outside the strict-fragment boundary.
 pub unsafe fn execute_compiled_copying_strict_fragment_strings(
     function: &StrictFragmentFunction,
     compiled: &CompiledFunction,

@@ -1,7 +1,7 @@
 use vx_jit::{
-    CompiledStrictFragmentOutput, StrictFragmentValue, compile_strict_fragment,
-    execute_compiled_unmanaged_strict_fragment, interpret_source_text_function,
-    lower_source_text_hir, lower_source_text_ir, lower_source_text_strict_fragment,
+    StrictFragmentValue, compile_strict_fragment, execute_compiled_copying_strict_fragment_strings,
+    interpret_source_text_function, lower_source_text_hir, lower_source_text_ir,
+    lower_source_text_strict_fragment,
 };
 use vx_services::{
     EvalStrictFunctionFailure, EvalStrictFunctionRequest, EvalStrictFunctionResult,
@@ -170,14 +170,8 @@ fn execute_with_kajit(
     let compiled = compile_strict_fragment(strict_fragment)
         .map_err(|error| format!("Kajit compile failed: {error}"))?;
 
-    match unsafe { execute_compiled_unmanaged_strict_fragment(strict_fragment, &compiled, args) } {
-        Ok(CompiledStrictFragmentOutput::Value(value)) => Ok(value),
-        Ok(CompiledStrictFragmentOutput::UnmanagedString(_)) => Err(
-            "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
-                .to_owned(),
-        ),
-        Err(error) => Err(format!("Kajit execution failed: {error}")),
-    }
+    unsafe { execute_compiled_copying_strict_fragment_strings(strict_fragment, &compiled, args) }
+        .map_err(|error| format!("Kajit execution failed: {error}"))
 }
 
 #[cfg(test)]
@@ -239,6 +233,29 @@ fn one() -> String (
                 function_name: "one".to_owned(),
                 args: vec![],
                 backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalStrictFunctionResult::Ok(success) => {
+                assert_eq!(success.value, StrictValue::String("1".to_owned()));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_string_with_kajit() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_strict_function(EvalStrictFunctionRequest {
+                source_text: SOURCE_ONE.to_owned(),
+                function_name: "one".to_owned(),
+                args: vec![],
+                backend: StrictEvalBackend::Kajit,
                 include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,
