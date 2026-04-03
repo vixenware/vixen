@@ -22,6 +22,9 @@ pub(crate) enum CliCommand {
     /// Start the vx daemon (auto-started by other commands if not running)
     #[facet(args::short = 'd')]
     Daemon(DaemonArgs),
+
+    /// Start the language server (communicates over stdin/stdout)
+    Lsp(LspArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -29,3 +32,6 @@ pub(crate) struct HealthArgs {}
 
 #[derive(Facet, Debug)]
 pub(crate) struct DaemonArgs {}
+
+#[derive(Facet, Debug)]
+pub(crate) struct LspArgs {}

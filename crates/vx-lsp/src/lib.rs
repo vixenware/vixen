@@ -3,15 +3,7 @@ use tower_lsp::{LspService, Server};
 
 mod server;
 
-fn main() -> Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()?;
-    rt.block_on(async_main())
-}
-
-async fn async_main() -> Result<()> {
+pub async fn serve() -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 

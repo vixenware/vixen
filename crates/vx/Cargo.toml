@@ -28,6 +28,7 @@ indicatif = { workspace = true }
 vx-services.workspace = true
 vxd.workspace = true
 vx-io = { workspace = true }
+vx-lsp = { path = "../vx-lsp" }
 vx-diagnostics = { workspace = true }
 vx-vfs = { workspace = true }
 margin = { workspace = true }

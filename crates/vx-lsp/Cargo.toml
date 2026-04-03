@@ -9,9 +9,10 @@ license.workspace = true
 [package.metadata."docs.rs"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
-[[bin]]
-name = "vx-lsp"
-path = "src/main.rs"
+[lib]
+name = "vx_lsp"
+path = "src/lib.rs"
+
 
 [dependencies]
 vx-parser = { path = "../vx-parser" }

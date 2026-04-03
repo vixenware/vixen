@@ -3707,6 +3707,7 @@ dependencies = [
  "vx-daemon",
  "vx-diagnostics",
  "vx-io",
+ "vx-lsp",
  "vx-services",
  "vx-vfs",
 ]
