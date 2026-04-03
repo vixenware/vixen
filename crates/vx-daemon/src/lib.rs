@@ -16,7 +16,7 @@ use vx_vfsd::{VfsdDispatcher, VfsdService};
 
 mod orchestrator;
 mod service;
-pub use orchestrator::OrchestratorService;
+pub use orchestrator::{OrchestratorService, OrchestratorWiring};
 pub use service::DaemonService;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,10 +204,6 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     let local_addr = config.listen[0].clone();
     let services = config.services;
     let service = DaemonService::new();
-    let orchestrator_service = services
-        .orchestrator
-        .as_ref()
-        .map(|_| OrchestratorService::new());
 
     let store_service = if let Some(store_cfg) = services.store.clone() {
         let store_service = vx_store::open(store_cfg.root).await?;
@@ -250,6 +246,21 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     } else {
         None
     };
+
+    let orchestrator_wiring = services
+        .orchestrator
+        .as_ref()
+        .map(|cfg| {
+            resolve_orchestrator_wiring(
+                cfg,
+                store_service.is_some(),
+                runner_service.is_some(),
+                vfsd_service.is_some(),
+                &local_addr,
+            )
+        })
+        .transpose()?;
+    let orchestrator_service = orchestrator_wiring.map(OrchestratorService::new);
 
     let acceptor = DaemonAcceptor {
         service,
@@ -310,6 +321,63 @@ fn resolve_required_dependency(
             "{label} is required, but no local service is hosted and no remote dependency was configured"
         ),
     }
+}
+
+fn resolve_orchestrator_wiring(
+    config: &OrchestratorConfig,
+    store_available: bool,
+    runner_available: bool,
+    vfsd_available: bool,
+    local_addr: &str,
+) -> Result<OrchestratorWiring> {
+    Ok(OrchestratorWiring {
+        store_addr: resolve_optional_dependency(
+            config.store.as_ref(),
+            store_available,
+            local_addr,
+            "orchestrator.store",
+        )?,
+        runner_addrs: resolve_many_dependencies(
+            &config.runners,
+            runner_available,
+            local_addr,
+            "orchestrator.runners",
+        )?,
+        vfsd_addr: resolve_optional_dependency(
+            config.vfsd.as_ref(),
+            vfsd_available,
+            local_addr,
+            "orchestrator.vfsd",
+        )?,
+    })
+}
+
+fn resolve_many_dependencies(
+    configured: &[ServiceRef],
+    local_available: bool,
+    local_addr: &str,
+    label: &str,
+) -> Result<Vec<String>> {
+    if configured.is_empty() {
+        return if local_available {
+            Ok(vec![local_addr.to_owned()])
+        } else {
+            Ok(vec![])
+        };
+    }
+
+    configured
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| {
+            resolve_required_dependency(
+                Some(reference),
+                local_available,
+                local_addr,
+                &format!("{label}[{index}]"),
+            )
+        })
+        .collect()
 }
 
 /// A connection acceptor that can serve multiple sub-services:
@@ -381,8 +449,9 @@ mod tests {
     };
 
     use super::{
-        DaemonConfig, HostedServices, OrchestratorConfig, ServiceRef, ServiceRefFile,
-        load_config_file, resolve_optional_dependency, resolve_required_dependency,
+        DaemonConfig, HostedServices, OrchestratorConfig, OrchestratorWiring, ServiceRef,
+        ServiceRefFile, load_config_file, resolve_optional_dependency, resolve_orchestrator_wiring,
+        resolve_required_dependency,
     };
 
     #[test]
@@ -461,6 +530,62 @@ fn add(lhs: U64, rhs: U64) -> U64 (
         match result {
             EvalStrictFunctionResult::Ok(success) => {
                 assert_eq!(success.value, StrictValue::U64(42));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_boots_from_styx_config_and_serves_orchestrator() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let socket_path = temp_dir.path().join("vx-daemon.sock");
+        let listen = format!("local://{}", socket_path.display());
+        let config_path = temp_dir.path().join("daemon.styx");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+daemon {{
+  listen ("{listen}")
+  services {{
+    orchestrator {{}}
+  }}
+}}
+"#
+            ),
+        )
+        .expect("failed to write config");
+
+        let config =
+            load_config_file(&camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"))
+                .expect("config should parse");
+        let daemon = tokio::spawn(super::serve(config));
+
+        let client = connect_orchestrator(&listen).await;
+        let result = client
+            .eval_strict_function(EvalStrictFunctionRequest {
+                source_text: r#"
+fn add(lhs: U64, rhs: U64) -> U64 (
+  lhs + rhs
+)
+"#
+                .to_owned(),
+                function_name: "add".to_owned(),
+                args: vec![StrictValue::U64(7), StrictValue::U64(9)],
+                backend: StrictEvalBackend::Kajit,
+                include_kernel_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await
+            .expect("rpc call should succeed");
+
+        daemon.abort();
+        let _ = daemon.await;
+
+        match result {
+            EvalStrictFunctionResult::Ok(success) => {
+                assert_eq!(success.value, StrictValue::U64(16));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -620,6 +745,66 @@ daemon {
         assert_eq!(
             ServiceRef::from(ServiceRefFile::InProcess),
             ServiceRef::InProcess
+        );
+    }
+
+    #[test]
+    fn orchestrator_wiring_defaults_to_local_services_when_hosted() {
+        let wiring = resolve_orchestrator_wiring(
+            &OrchestratorConfig::default(),
+            true,
+            true,
+            true,
+            "local:///tmp/vixen.vox",
+        )
+        .expect("wiring should resolve");
+
+        assert_eq!(
+            wiring,
+            OrchestratorWiring {
+                store_addr: Some("local:///tmp/vixen.vox".to_owned()),
+                runner_addrs: vec!["local:///tmp/vixen.vox".to_owned()],
+                vfsd_addr: Some("local:///tmp/vixen.vox".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn orchestrator_wiring_uses_explicit_remote_refs() {
+        let wiring = resolve_orchestrator_wiring(
+            &OrchestratorConfig {
+                store: Some(ServiceRef::Rpc {
+                    address: "tcp://store-a:5000".to_owned(),
+                }),
+                runners: vec![
+                    ServiceRef::Rpc {
+                        address: "tcp://runner-a:5000".to_owned(),
+                    },
+                    ServiceRef::Rpc {
+                        address: "tcp://runner-b:5000".to_owned(),
+                    },
+                ],
+                vfsd: Some(ServiceRef::Rpc {
+                    address: "tcp://vfsd-a:5000".to_owned(),
+                }),
+            },
+            false,
+            false,
+            false,
+            "local:///tmp/vixen.vox",
+        )
+        .expect("wiring should resolve");
+
+        assert_eq!(
+            wiring,
+            OrchestratorWiring {
+                store_addr: Some("tcp://store-a:5000".to_owned()),
+                runner_addrs: vec![
+                    "tcp://runner-a:5000".to_owned(),
+                    "tcp://runner-b:5000".to_owned(),
+                ],
+                vfsd_addr: Some("tcp://vfsd-a:5000".to_owned()),
+            }
         );
     }
 }

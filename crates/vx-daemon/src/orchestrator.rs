@@ -7,12 +7,25 @@ use vx_services::{
     EvalStrictFunctionSuccess, Orchestrator, StrictEvalBackend, StrictValue,
 };
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrchestratorWiring {
+    pub store_addr: Option<String>,
+    pub runner_addrs: Vec<String>,
+    pub vfsd_addr: Option<String>,
+}
+
 #[derive(Clone, Default)]
-pub struct OrchestratorService;
+pub struct OrchestratorService {
+    wiring: OrchestratorWiring,
+}
 
 impl OrchestratorService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(wiring: OrchestratorWiring) -> Self {
+        Self { wiring }
+    }
+
+    pub fn wiring(&self) -> &OrchestratorWiring {
+        &self.wiring
     }
 
     async fn eval_strict_function_impl(
@@ -215,7 +228,7 @@ mod tests {
         StrictValue,
     };
 
-    use super::OrchestratorService;
+    use super::{OrchestratorService, OrchestratorWiring};
 
     const SOURCE_ADD_U64: &str = r#"
 fn add(lhs: U64, rhs: U64) -> U64 (
@@ -237,7 +250,7 @@ fn one() -> String (
 
     #[tokio::test]
     async fn evals_u64_with_kajit() {
-        let service = OrchestratorService::new();
+        let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
             .eval_strict_function(EvalStrictFunctionRequest {
                 source_text: SOURCE_ADD_U64.to_owned(),
@@ -260,7 +273,7 @@ fn one() -> String (
 
     #[tokio::test]
     async fn evals_string_with_interpreter() {
-        let service = OrchestratorService::new();
+        let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
             .eval_strict_function(EvalStrictFunctionRequest {
                 source_text: SOURCE_ONE.to_owned(),
@@ -283,7 +296,7 @@ fn one() -> String (
 
     #[tokio::test]
     async fn lowers_hir_and_ir_when_requested() {
-        let service = OrchestratorService::new();
+        let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
             .eval_strict_function(EvalStrictFunctionRequest {
                 source_text: SOURCE_STR_LEN.to_owned(),
@@ -317,5 +330,19 @@ fn one() -> String (
             }
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn retains_resolved_wiring() {
+        let wiring = OrchestratorWiring {
+            store_addr: Some("tcp://store-a:5000".to_owned()),
+            runner_addrs: vec![
+                "tcp://runner-a:5000".to_owned(),
+                "tcp://runner-b:5000".to_owned(),
+            ],
+            vfsd_addr: Some("local:///tmp/vx-vfsd.vox".to_owned()),
+        };
+        let service = OrchestratorService::new(wiring.clone());
+        assert_eq!(service.wiring(), &wiring);
     }
 }
