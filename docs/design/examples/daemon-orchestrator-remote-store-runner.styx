@@ -1,0 +1,13 @@
+daemon {
+  listen ("local:///tmp/vixen.vox")
+
+  services {
+    orchestrator {
+      store @rpc{address "tcp://store-a:5000"}
+      runners (
+        @rpc{address "tcp://runner-a:5000"}
+        @rpc{address "tcp://runner-b:5000"}
+      )
+    }
+  }
+}

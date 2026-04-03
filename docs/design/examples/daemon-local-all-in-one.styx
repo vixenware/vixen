@@ -1,0 +1,17 @@
+daemon {
+  listen ("local:///tmp/vixen.vox")
+
+  services {
+    orchestrator {}
+
+    store {
+      root "/tmp/vx/store"
+    }
+
+    runner {}
+
+    vfsd {
+      mount "/tmp/vx/vfs"
+    }
+  }
+}

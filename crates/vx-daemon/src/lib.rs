@@ -32,7 +32,11 @@ pub struct StoreConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct OrchestratorConfig;
+pub struct OrchestratorConfig {
+    pub store: Option<ServiceRef>,
+    pub runners: Vec<ServiceRef>,
+    pub vfsd: Option<ServiceRef>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RunnerConfig {
@@ -69,7 +73,7 @@ impl DaemonConfig {
         Self {
             listen,
             services: HostedServices {
-                orchestrator: Some(OrchestratorConfig),
+                orchestrator: Some(OrchestratorConfig::default()),
                 store: Some(StoreConfig {
                     root: store_root,
                     upstream: None,
@@ -104,7 +108,11 @@ pub struct HostedServicesFile {
 }
 
 #[derive(Debug, Clone, Default, Facet)]
-pub struct OrchestratorFileConfig;
+pub struct OrchestratorFileConfig {
+    pub store: Option<ServiceRefFile>,
+    pub runners: Option<Vec<ServiceRefFile>>,
+    pub vfsd: Option<ServiceRefFile>,
+}
 
 #[derive(Debug, Clone, Facet)]
 pub struct StoreFileConfig {
@@ -143,7 +151,16 @@ impl From<ServiceRefFile> for ServiceRef {
 impl From<HostedServicesFile> for HostedServices {
     fn from(value: HostedServicesFile) -> Self {
         Self {
-            orchestrator: value.orchestrator.map(|_| OrchestratorConfig),
+            orchestrator: value.orchestrator.map(|orchestrator| OrchestratorConfig {
+                store: orchestrator.store.map(Into::into),
+                runners: orchestrator
+                    .runners
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                vfsd: orchestrator.vfsd.map(Into::into),
+            }),
             store: value.store.map(|store| StoreConfig {
                 root: store.root,
                 upstream: store.upstream.map(Into::into),
@@ -414,7 +431,7 @@ mod tests {
         let daemon = tokio::spawn(super::serve(DaemonConfig {
             listen: vec![listen.clone()],
             services: HostedServices {
-                orchestrator: Some(OrchestratorConfig),
+                orchestrator: Some(OrchestratorConfig::default()),
                 ..HostedServices::default()
             },
         }));
@@ -545,6 +562,56 @@ daemon {
             Some(ServiceRef::Rpc {
                 address: "tcp://store-a:5000".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn parses_styx_orchestrator_remote_dependencies() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config_path = temp_dir.path().join("vxd.styx");
+        std::fs::write(
+            &config_path,
+            r#"
+daemon {
+  services {
+    orchestrator {
+      store @rpc{address "tcp://store-a:5000"}
+      runners (
+        @rpc{address "tcp://runner-a:5000"}
+        @rpc{address "tcp://runner-b:5000"}
+      )
+    }
+  }
+}
+"#,
+        )
+        .expect("failed to write config");
+
+        let config =
+            load_config_file(&camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"))
+                .expect("config should parse");
+
+        let orchestrator = config
+            .services
+            .orchestrator
+            .as_ref()
+            .expect("orchestrator should exist");
+        assert_eq!(
+            orchestrator.store,
+            Some(ServiceRef::Rpc {
+                address: "tcp://store-a:5000".to_owned()
+            })
+        );
+        assert_eq!(
+            orchestrator.runners,
+            vec![
+                ServiceRef::Rpc {
+                    address: "tcp://runner-a:5000".to_owned()
+                },
+                ServiceRef::Rpc {
+                    address: "tcp://runner-b:5000".to_owned()
+                },
+            ]
         );
     }
 
