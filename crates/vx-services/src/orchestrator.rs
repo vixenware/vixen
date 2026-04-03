@@ -1,0 +1,66 @@
+//! Orchestrator service protocol definitions.
+//!
+//! This is the top-level evaluation/scheduling service surface. It is distinct
+//! from the tiny `Daemon` host-introspection service.
+
+use facet::Facet;
+
+/// Orchestrator protocol version.
+pub const ORCHESTRATOR_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum StrictEvalBackend {
+    Interpreter,
+    Kajit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum StrictValue {
+    U64(u64),
+    Bool(bool),
+    String(String),
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct EvalStrictFunctionRequest {
+    pub source_text: String,
+    pub function_name: String,
+    pub args: Vec<StrictValue>,
+    pub backend: StrictEvalBackend,
+    pub include_kernel_dump: bool,
+    pub include_hir: bool,
+    pub include_ir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct EvalStrictFunctionSuccess {
+    pub value: StrictValue,
+    pub kernel_dump: Option<String>,
+    pub hir: Option<String>,
+    pub ir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct EvalStrictFunctionFailure {
+    pub message: String,
+    pub kernel_dump: Option<String>,
+    pub hir: Option<String>,
+    pub ir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum EvalStrictFunctionResult {
+    Ok(EvalStrictFunctionSuccess),
+    Err(EvalStrictFunctionFailure),
+}
+
+#[vox::service]
+pub trait Orchestrator {
+    async fn eval_strict_function(
+        &self,
+        request: EvalStrictFunctionRequest,
+    ) -> EvalStrictFunctionResult;
+}

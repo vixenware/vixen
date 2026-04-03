@@ -19,6 +19,9 @@ pub(crate) enum CliCommand {
     /// Quick health check
     Health(HealthArgs),
 
+    /// Lower and evaluate one strict function through the orchestrator
+    Eval(EvalArgs),
+
     /// Start the vx daemon (auto-started by other commands if not running)
     #[facet(args::short = 'd')]
     Daemon(DaemonArgs),
@@ -29,6 +32,37 @@ pub(crate) enum CliCommand {
 
 #[derive(Facet, Debug)]
 pub(crate) struct HealthArgs {}
+
+#[derive(Facet, Debug)]
+pub(crate) struct EvalArgs {
+    /// Source file containing the function to evaluate
+    #[facet(args::named)]
+    pub(crate) file: camino::Utf8PathBuf,
+
+    /// Function name to evaluate
+    #[facet(args::named)]
+    pub(crate) function: String,
+
+    /// Backend to use: interpreter or kajit
+    #[facet(args::named, default = "interpreter")]
+    pub(crate) backend: String,
+
+    /// Include kernel IR dump in the response
+    #[facet(args::named)]
+    pub(crate) kernel_dump: bool,
+
+    /// Include Kajit HIR dump in the response
+    #[facet(args::named)]
+    pub(crate) hir: bool,
+
+    /// Include Kajit IR dump in the response
+    #[facet(args::named)]
+    pub(crate) ir: bool,
+
+    /// Function arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
+    /// Bare values are treated as strings.
+    pub(crate) args: Vec<String>,
+}
 
 #[derive(Facet, Debug)]
 pub(crate) struct DaemonArgs {

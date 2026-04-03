@@ -2,8 +2,9 @@
 
 mod analysis_adapter;
 pub use analysis_adapter::{
-    SourceLoweringError, compile_source_text_u64_add_function, interpret_source_text_function,
-    interpret_source_text_string_function, interpret_source_text_u64_add_function,
+    SourceLoweringError, compile_source_text_function, compile_source_text_u64_add_function,
+    interpret_source_text_function, interpret_source_text_string_function,
+    interpret_source_text_u64_add_function, lower_source_text_hir, lower_source_text_ir,
     lower_source_text_kernel, lower_source_text_u64_add_hir, lower_source_text_u64_add_ir,
     lower_source_text_u64_add_kernel, run_source_text_u64_add_function,
 };

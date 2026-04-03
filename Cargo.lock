@@ -3688,6 +3688,7 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vox",
+ "vx-jit",
  "vx-runner",
  "vx-services",
  "vx-store",

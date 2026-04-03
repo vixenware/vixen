@@ -3,6 +3,9 @@
 mod daemon;
 pub use daemon::*;
 
+mod orchestrator;
+pub use orchestrator::*;
+
 mod vixenfs;
 pub use vixenfs::*;
 

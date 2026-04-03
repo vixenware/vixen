@@ -33,7 +33,7 @@ pub struct StoreServiceInner {
 }
 
 impl StoreService {
-    pub(crate) fn set_upstream(&self, upstream: Arc<StoreClient>) {
+    pub fn set_upstream(&self, upstream: Arc<StoreClient>) {
         *self.upstream.lock() = Some(upstream);
     }
 

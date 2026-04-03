@@ -4,15 +4,22 @@
 
 pub(crate) mod service;
 
-use vx_services::RunnerDispatcher;
+use std::sync::Arc;
+use vx_services::{RunnerDispatcher, StoreClient};
 
 /// The runner service implementation.
 #[derive(Clone, Default)]
-pub struct RunnerService;
+pub struct RunnerService {
+    store: Option<Arc<StoreClient>>,
+}
 
 impl RunnerService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(store: Option<Arc<StoreClient>>) -> Self {
+        Self { store }
+    }
+
+    pub fn store(&self) -> Option<Arc<StoreClient>> {
+        self.store.clone()
     }
 }
 

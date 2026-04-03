@@ -5,9 +5,12 @@
 mod cli;
 
 use figue as args;
-use vx_services::{DAEMON_SOCK, DaemonClient};
+use vx_services::{
+    DAEMON_SOCK, DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult,
+    OrchestratorClient, StrictEvalBackend, StrictValue,
+};
 
-use crate::cli::{Cli, CliCommand};
+use crate::cli::{Cli, CliCommand, EvalArgs};
 
 fn main() {
     init_cli_stderr();
@@ -36,13 +39,14 @@ async fn async_main() {
 
     let res = match cli.command {
         CliCommand::Health(_args) => health().await,
+        CliCommand::Eval(args) => eval(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
-            let config = vxd::DaemonConfig {
-                listen: vec![vx_services::DAEMON_SOCK.to_string()],
-                store_root: args.store_root,
-                vfs_mount: args.vfs_mount,
-            };
+            let config = vxd::DaemonConfig::local_all_in_one(
+                vec![vx_services::DAEMON_SOCK.to_string()],
+                args.store_root,
+                args.vfs_mount,
+            );
             vxd::serve(config).await
         }
     };
@@ -58,6 +62,91 @@ async fn health() -> eyre::Result<()> {
     let status = client.status().await?;
     tracing::info!("Daemon status: {status:?}");
     Ok(())
+}
+
+async fn eval(args: EvalArgs) -> eyre::Result<()> {
+    let source_text = std::fs::read_to_string(args.file.as_std_path())?;
+    let backend = parse_backend(&args.backend)?;
+    let values = args
+        .args
+        .iter()
+        .map(|arg| parse_value(arg))
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+    let client: OrchestratorClient = vox::connect(DAEMON_SOCK).await?;
+    let result = client
+        .eval_strict_function(EvalStrictFunctionRequest {
+            source_text,
+            function_name: args.function,
+            args: values,
+            backend,
+            include_kernel_dump: args.kernel_dump,
+            include_hir: args.hir,
+            include_ir: args.ir,
+        })
+        .await?;
+
+    match result {
+        EvalStrictFunctionResult::Ok(success) => {
+            println!("{}", format_value(&success.value));
+            if let Some(kernel_dump) = success.kernel_dump {
+                println!("\n** Kernel\n{kernel_dump}");
+            }
+            if let Some(hir) = success.hir {
+                println!("\n** HIR\n{hir}");
+            }
+            if let Some(ir) = success.ir {
+                println!("\n** IR\n{ir}");
+            }
+            Ok(())
+        }
+        EvalStrictFunctionResult::Err(failure) => {
+            eprintln!("error: {}", failure.message);
+            if let Some(kernel_dump) = failure.kernel_dump {
+                eprintln!("\n** Kernel\n{kernel_dump}");
+            }
+            if let Some(hir) = failure.hir {
+                eprintln!("\n** HIR\n{hir}");
+            }
+            if let Some(ir) = failure.ir {
+                eprintln!("\n** IR\n{ir}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_backend(value: &str) -> eyre::Result<StrictEvalBackend> {
+    match value {
+        "interpreter" => Ok(StrictEvalBackend::Interpreter),
+        "kajit" => Ok(StrictEvalBackend::Kajit),
+        other => eyre::bail!("unsupported backend `{other}`; expected `interpreter` or `kajit`"),
+    }
+}
+
+fn parse_value(value: &str) -> eyre::Result<StrictValue> {
+    if let Some(rest) = value.strip_prefix("u64:") {
+        return Ok(StrictValue::U64(rest.parse()?));
+    }
+    if let Some(rest) = value.strip_prefix("bool:") {
+        return match rest {
+            "true" => Ok(StrictValue::Bool(true)),
+            "false" => Ok(StrictValue::Bool(false)),
+            other => eyre::bail!("invalid bool literal `{other}`"),
+        };
+    }
+    if let Some(rest) = value.strip_prefix("string:") {
+        return Ok(StrictValue::String(rest.to_owned()));
+    }
+    Ok(StrictValue::String(value.to_owned()))
+}
+
+fn format_value(value: &StrictValue) -> String {
+    match value {
+        StrictValue::U64(value) => value.to_string(),
+        StrictValue::Bool(value) => value.to_string(),
+        StrictValue::String(value) => value.clone(),
+    }
 }
 
 /// Build the default EnvFilter for CLI processes that talk to multiple vx crates.

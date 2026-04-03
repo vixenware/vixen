@@ -94,6 +94,13 @@ pub fn lower_source_text_u64_add_hir(
     source: &str,
     function_name: &str,
 ) -> Result<Module, SourceLoweringError> {
+    lower_source_text_hir(source, function_name)
+}
+
+pub fn lower_source_text_hir(
+    source: &str,
+    function_name: &str,
+) -> Result<Module, SourceLoweringError> {
     let function = lower_source_text_kernel(source, function_name)?;
     kajit_backend::lower_hir(&function).map_err(SourceLoweringError::Kajit)
 }
@@ -102,11 +109,25 @@ pub fn lower_source_text_u64_add_ir(
     source: &str,
     function_name: &str,
 ) -> Result<IrFunc, SourceLoweringError> {
+    lower_source_text_ir(source, function_name)
+}
+
+pub fn lower_source_text_ir(
+    source: &str,
+    function_name: &str,
+) -> Result<IrFunc, SourceLoweringError> {
     let function = lower_source_text_kernel(source, function_name)?;
     kajit_backend::lower_ir(&function).map_err(SourceLoweringError::Kajit)
 }
 
 pub fn compile_source_text_u64_add_function(
+    source: &str,
+    function_name: &str,
+) -> Result<CompiledFunction, SourceLoweringError> {
+    compile_source_text_function(source, function_name)
+}
+
+pub fn compile_source_text_function(
     source: &str,
     function_name: &str,
 ) -> Result<CompiledFunction, SourceLoweringError> {
