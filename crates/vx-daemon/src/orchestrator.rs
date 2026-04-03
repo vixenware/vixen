@@ -299,6 +299,15 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_EXEC_STDOUT: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello"] where {
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
     const CC_VERSION_SOURCE: &str = include_str!("../../../zoo/cc-version.vx");
 
     #[tokio::test]
@@ -532,6 +541,29 @@ fn probe() #discover -> String (
                 }
                 other => panic!("expected string path, got {other:?}"),
             },
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_local_exec_stdout_observer() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_EXEC_STDOUT.to_owned(),
+                function_name: "probe".to_owned(),
+                args: vec![],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => {
+                assert_eq!(success.value, RuntimeValue::String("hello".to_owned()));
+            }
             other => panic!("expected success, got {other:?}"),
         }
     }

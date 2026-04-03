@@ -4,7 +4,7 @@ use thiserror::Error;
 use vx_analysis::{
     AnalysisError, BodyId, ExecSliceError, ExecutableClosure, ExecutableProgram, KernelOp, Operand,
     ResultSource, RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload,
-    RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
+    RuntimeField, RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
 use vx_services::RuntimeValue;
@@ -18,6 +18,8 @@ enum EvalValue {
     Array(Vec<EvalValue>),
     CallableAddConst(Box<EvalValue>),
     Host,
+    Process { exit_code: u64, stdout: String },
+    ProcessStdout(String),
     Failure(String),
     Pending(String),
 }
@@ -339,6 +341,10 @@ impl<'a> ProgramEvaluator<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.eval_body(function_name, *callee, &args)
             }
+            KernelOp::ProjectField { value, field, .. } => {
+                let value = self.resolve_operand(function_name, producers, slots, value)?;
+                self.eval_project_field(function_name, value, *field)
+            }
             KernelOp::CallMember {
                 receiver,
                 method,
@@ -367,7 +373,6 @@ impl<'a> ProgramEvaluator<'a> {
             ),
             KernelOp::AssignHostLocal { .. }
             | KernelOp::AssignSandboxTreeRoot { .. }
-            | KernelOp::ProjectField { .. }
             | KernelOp::BuildTree { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!("op {op:?}"),
@@ -466,6 +471,15 @@ impl<'a> ProgramEvaluator<'a> {
         args: Vec<EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
         match (receiver, method) {
+            (EvalValue::ProcessStdout(stdout), RuntimeMemberOp::Collect) => {
+                let [] = args.as_slice() else {
+                    return Err(RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: "stdout.collect expects no arguments".to_owned(),
+                    });
+                };
+                Ok(EvalValue::String(stdout))
+            }
             (EvalValue::Host, RuntimeMemberOp::Which) => {
                 let [name] = args.as_slice() else {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
@@ -490,14 +504,37 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
+    fn eval_project_field(
+        &mut self,
+        function_name: &str,
+        value: EvalValue,
+        field: RuntimeField,
+    ) -> Result<EvalValue, RuntimeEvalError> {
+        match (value, field) {
+            (EvalValue::Process { exit_code, .. }, RuntimeField::ExitCode) => {
+                Ok(EvalValue::U64(exit_code))
+            }
+            (EvalValue::Process { stdout, .. }, RuntimeField::Stdout) => {
+                Ok(EvalValue::ProcessStdout(stdout))
+            }
+            (value, field) => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!(
+                    "unsupported field projection {field:?} on {}",
+                    value.kind_name()
+                ),
+            }),
+        }
+    }
+
     fn eval_runtime_boundary(
         &mut self,
         function_name: &str,
         node: vx_analysis::RuntimeNodeId,
         positional_inputs: &[RuntimeBoundaryInputSpec],
         coarse_mounts: &[RuntimeBoundaryInputSpec],
-        _producers: &HashMap<SlotId, &KernelOp>,
-        _slots: &mut BTreeMap<SlotId, EvalValue>,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
         if !coarse_mounts.is_empty() {
             return Err(RuntimeEvalError::UnsupportedBoundary {
@@ -514,6 +551,24 @@ impl<'a> ProgramEvaluator<'a> {
         })?;
 
         match (&runtime_node.kind, &runtime_node.payload) {
+            (RuntimeBoundaryKind::Exec, RuntimeBoundaryPayload::Exec(_payload)) => {
+                let argv = positional_inputs
+                    .first()
+                    .ok_or_else(|| RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: "exec boundary is missing argv input".to_owned(),
+                    })
+                    .and_then(|input| {
+                        self.resolve_exec_argv(function_name, input, producers, slots)
+                    })?;
+                if argv.is_empty() {
+                    return Err(RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: "exec argv must not be empty".to_owned(),
+                    });
+                }
+                self.run_local_exec(function_name, &argv)
+            }
             (RuntimeBoundaryKind::Discover, RuntimeBoundaryPayload::Discover(_payload)) => {
                 let closure = positional_inputs
                     .iter()
@@ -532,6 +587,64 @@ impl<'a> ProgramEvaluator<'a> {
                 detail: format!("runtime boundary {kind:?} with payload {payload:?}"),
             }),
         }
+    }
+
+    fn resolve_exec_argv(
+        &mut self,
+        function_name: &str,
+        input: &RuntimeBoundaryInputSpec,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+    ) -> Result<Vec<String>, RuntimeEvalError> {
+        let RuntimeBoundaryInputSpec::Array(items) = input else {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("exec argv must be an array input, got {input:?}"),
+            });
+        };
+        items
+            .iter()
+            .map(|item| self.resolve_runtime_string_input(function_name, item, producers, slots))
+            .collect()
+    }
+
+    fn resolve_runtime_string_input(
+        &mut self,
+        function_name: &str,
+        input: &RuntimeBoundaryInputSpec,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+    ) -> Result<String, RuntimeEvalError> {
+        match input {
+            RuntimeBoundaryInputSpec::Binding { slot, .. } => {
+                let value = self.read_slot(function_name, producers, slots, *slot)?;
+                Ok(self.expect_string(function_name, &value)?.to_owned())
+            }
+            RuntimeBoundaryInputSpec::IntLiteral(value) => Ok(value.to_string()),
+            RuntimeBoundaryInputSpec::StringLiteral(value) => Ok(value.clone()),
+            other => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("unsupported runtime string input {other:?}"),
+            }),
+        }
+    }
+
+    fn run_local_exec(
+        &mut self,
+        function_name: &str,
+        argv: &[String],
+    ) -> Result<EvalValue, RuntimeEvalError> {
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("local exec failed: {error}"),
+            })?;
+        Ok(EvalValue::Process {
+            exit_code: output.status.code().unwrap_or(1) as u64,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        })
     }
 
     fn int_to_value(&self, function_name: &str, value: i64) -> Result<EvalValue, RuntimeEvalError> {
@@ -595,6 +708,8 @@ impl EvalValue {
             Self::Array(_) => "array",
             Self::CallableAddConst(_) => "callable",
             Self::Host => "host",
+            Self::Process { .. } => "process",
+            Self::ProcessStdout(_) => "process-stdout",
             Self::Failure(_) => "failure",
             Self::Pending(_) => "pending",
         }
@@ -707,6 +822,15 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_EXEC_STDOUT: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello"] where {
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
     #[test]
     fn evaluates_non_strict_top_level_body_call() {
         let value = evaluate_source_text_function(
@@ -755,5 +879,13 @@ fn probe() #discover -> String (
             }
             other => panic!("expected string path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn evaluates_local_exec_stdout_observer() {
+        let value = evaluate_source_text_function(SOURCE_EXEC_STDOUT, "probe", &[])
+            .expect("probe should evaluate");
+
+        assert_eq!(value, RuntimeValue::String("hello".to_owned()));
     }
 }
