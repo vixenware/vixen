@@ -130,11 +130,13 @@ where
     let client = loop {
         match LocalLink::connect(&addr).await {
             Ok(link) => {
+                eprintln!("vx-vfs: raw local connect succeeded sid={sid} addr={addr}");
                 tracing::info!(%sid, %addr, "connected raw local link to VixenFS listener");
                 let metadata = vec![
                     MetadataEntry::str("vox-service", "Vfs"),
                     MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
                 ];
+                eprintln!("vx-vfs: beginning vox establish sid={sid} addr={addr}");
                 tracing::info!(%sid, %addr, "starting Vox session establish to VixenFS");
                 let client = initiator_on(link, TransportMode::Bare)
                     .metadata(metadata)
@@ -142,16 +144,22 @@ where
                     .establish::<NoopClient>()
                     .await
                     .map_err(|error| {
+                        eprintln!(
+                            "vx-vfs: vox establish failed sid={sid} addr={addr} error={error}"
+                        );
                         format!("failed to establish VFS session on {addr}: {error}")
                     })?;
+                eprintln!("vx-vfs: vox establish completed sid={sid} addr={addr}");
                 tracing::info!(%sid, %addr, "Vox session establish completed");
                 break client;
             }
             Err(error) if Instant::now() < connect_deadline => {
+                eprintln!("vx-vfs: waiting for listener sid={sid} addr={addr} error={error}");
                 tracing::debug!(%addr, %sid, %error, "waiting for VixenFS listener");
                 sleep(CONNECT_RETRY_INTERVAL).await;
             }
             Err(error) => {
+                eprintln!("vx-vfs: local connect failed sid={sid} addr={addr} error={error}");
                 return Err(format!(
                     "failed to connect to VixenFS listener {addr} for sid {sid}: {error}"
                 ));
