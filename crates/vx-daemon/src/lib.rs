@@ -202,8 +202,8 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     }
 
     let local_addr = config.listen[0].clone();
+    let listen_addrs = config.listen.clone();
     let services = config.services;
-    let service = DaemonService::new();
 
     let store_service = if let Some(store_cfg) = services.store.clone() {
         let store_service = vx_store::open(store_cfg.root).await?;
@@ -261,6 +261,20 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         })
         .transpose()?;
     let orchestrator_service = orchestrator_wiring.map(OrchestratorService::new);
+    let mut hosted_services = vec!["Daemon".to_owned()];
+    if orchestrator_service.is_some() {
+        hosted_services.push("Orchestrator".to_owned());
+    }
+    if store_service.is_some() {
+        hosted_services.push("Store".to_owned());
+    }
+    if runner_service.is_some() {
+        hosted_services.push("Runner".to_owned());
+    }
+    if vfsd_service.is_some() {
+        hosted_services.push("Vfsd".to_owned());
+    }
+    let service = DaemonService::new(listen_addrs, hosted_services);
 
     let acceptor = DaemonAcceptor {
         service,
