@@ -47,11 +47,9 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = { version = "1.0.0" }
 vx-services = { path = "crates/vx-services" }
-vx-report = { path = "crates/vx-report" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
-vx-http = { path = "crates/vx-http" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-analysis = { path = "crates/vx-analysis" }
@@ -60,7 +58,6 @@ vx-resolve = { path = "crates/vx-resolve" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
-vx-jit = { path = "crates/vx-jit" }
 kajit = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 
