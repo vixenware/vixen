@@ -190,6 +190,11 @@ pub enum KernelOp {
         source: SourceExpr,
         items: Vec<Operand>,
     },
+    ConcatStrings {
+        dst: SlotId,
+        source: SourceExpr,
+        parts: Vec<Operand>,
+    },
     Select {
         dst: SlotId,
         source: SourceExpr,
@@ -1352,6 +1357,36 @@ impl<'a> BodyLowering<'a> {
                     dst,
                     source: self.source_for(expr_id),
                     items,
+                });
+                Ok(Operand::Slot(dst))
+            }
+            Expr::InterpolatedString(interp) => {
+                let mut parts = Vec::new();
+                for part in interp.parts() {
+                    match part {
+                        vx_parser::StringPart::Text(token) => {
+                            if !token.text().is_empty() {
+                                parts.push(Operand::String(token.text().to_owned()));
+                            }
+                        }
+                        vx_parser::StringPart::Interpolation(interp) => {
+                            let expr = interp.expr().ok_or_else(|| {
+                                UnsupportedShape(
+                                    "string interpolation missing expression".to_owned(),
+                                )
+                            })?;
+                            let part_id = self
+                                .expr_id(&expr)
+                                .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                            parts.push(self.lower_expr(part_id)?);
+                        }
+                    }
+                }
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::ConcatStrings {
+                    dst,
+                    source: self.source_for(expr_id),
+                    parts,
                 });
                 Ok(Operand::Slot(dst))
             }

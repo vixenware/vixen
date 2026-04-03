@@ -301,6 +301,25 @@ impl<'a> ProgramEvaluator<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 slots.insert(*dst, EvalValue::Array(items));
             }
+            KernelOp::ConcatStrings { dst, parts, .. } => {
+                let mut out = String::new();
+                for part in parts {
+                    let value = self.resolve_operand(function_name, slots, part)?;
+                    match value {
+                        EvalValue::String(value) => out.push_str(&value),
+                        EvalValue::U64(value) => out.push_str(&value.to_string()),
+                        EvalValue::Bool(value) => out.push_str(&value.to_string()),
+                        other => {
+                            return Err(RuntimeEvalError::TypeMismatch {
+                                function: function_name.to_owned(),
+                                expected: "string-coercible",
+                                found: other.kind_name(),
+                            });
+                        }
+                    }
+                }
+                slots.insert(*dst, EvalValue::String(out));
+            }
             KernelOp::Select {
                 dst,
                 condition,
@@ -447,7 +466,7 @@ mod tests {
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
-  name
+  `hello {name}`
 )
 
 fn build(name: String) -> String (
@@ -464,6 +483,6 @@ fn build(name: String) -> String (
         )
         .expect("build should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("serde".to_owned()));
+        assert_eq!(value, RuntimeValue::String("hello serde".to_owned()));
     }
 }
