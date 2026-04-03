@@ -53,14 +53,14 @@ fn main() {
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
             eprintln!(
-                "Available commands: install, bump-roam, perfetto-proto, smoke, integration, registry-vx"
+                "Available commands: install, vixenfs-codegen, bump-roam, perfetto-proto, smoke, integration, registry-vx"
             );
             std::process::exit(1);
         }
         None => {
             eprintln!("Usage: cargo xtask <command>");
             eprintln!(
-                "Available commands: install, bump-roam, perfetto-proto, smoke, integration, registry-vx"
+                "Available commands: install, vixenfs-codegen, bump-roam, perfetto-proto, smoke, integration, registry-vx"
             );
             std::process::exit(1);
         }
@@ -162,7 +162,6 @@ fn install(mode: InstallMode) {
 fn vixenfs_codegen() -> Result<(), eyre::Error> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(|p| p.parent())
         .ok_or_else(|| eyre::eyre!("failed to locate workspace root"))?
         .to_path_buf();
 
