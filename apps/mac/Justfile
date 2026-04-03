@@ -22,9 +22,6 @@ build: generate
       -derivedDataPath build/DerivedData \
       -clonedSourcePackagesDirPath build/SourcePackages \
       -resolvePackageDependencies
-    cargo build --release -p roam-shm-ffi --manifest-path xcode/build/SourcePackages/checkouts/roam/Cargo.toml
-    mkdir -p xcode/build/DerivedData/Build/Products/Release
-    cp xcode/build/SourcePackages/checkouts/roam/target/release/libroam_shm_ffi.a xcode/build/DerivedData/Build/Products/Release/
     cd xcode && xcodebuild \
       -project Vixen.xcodeproj \
       -scheme Vixen \
