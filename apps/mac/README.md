@@ -21,11 +21,17 @@ Or manual path:
 
 1. Install [XcodeGen](https://github.com/yonaskolb/XcodeGen):
    - `brew install xcodegen`
-2. Generate the Xcode project:
+2. Regenerate the VixenFS Swift bindings:
+   - `cargo xtask vixenfs-codegen`
+3. Build the Vox SHM staticlib used by `VoxRuntime`:
+   - `cargo build --release -p vox-shm-ffi`
+4. Validate the Swift package:
+   - `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
+5. Generate the Xcode project:
    - `cd apps/mac/xcode`
    - `xcodegen generate`
-3. Open the generated project in Xcode.
-4. Build the `Vixen` scheme (this also builds `VixenFS`).
+6. Open the generated project in Xcode.
+7. Build the `Vixen` scheme (this also builds `VixenFS`).
 
 ## Release (local macOS)
 

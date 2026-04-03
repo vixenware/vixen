@@ -113,32 +113,29 @@ can give it submodules as
 
 1. Install `xcodegen` (`brew install xcodegen`)
 2. Generate project from `/Users/amos/.codex/worktrees/19d8/vixen/apps/mac/xcode` with `xcodegen generate`
-3. Build the `Vixen` scheme in Xcode
-4. Copy `/Applications/Vixen.app` and enable the extension in System Settings
+3. Regenerate the VFS Swift client bindings with `cargo xtask vixenfs-codegen`
+4. Build the Vox SHM staticlib used by `VoxRuntime`:
+   `cargo build --release -p vox-shm-ffi`
+5. Validate the Swift package against `VoxRuntime`:
+   `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
+6. Build the `Vixen` scheme in Xcode
+7. Copy `/Applications/Vixen.app` and enable the extension in System Settings
 
-## Bumping Roam
+## Updating Vox Swift Runtime
 
-When updating Vixen to a specific Roam revision:
+`apps/mac` now consumes the local Vox Swift runtime package instead of `RoamRuntime`.
 
-1. Ensure the Roam commit is pushed to GitHub first.
-   If the SHA only exists locally, Swift package resolution will fail.
-2. Get the Roam commit SHA (for example from your local checkout):
-   `git -C /Users/amos/bearcove/roam rev-parse HEAD`
-3. Run:
-   `cargo xtask bump-roam <sha>`
-4. This updates Swift-side pins only:
-   - `apps/mac/Package.swift`
-   - `apps/mac/xcode/project.yml`
-5. Rebuild and reinstall the macOS app/extension:
-   `just apps/mac/install`
-6. If install fails with write/lock errors under `apps/mac/xcode/build/`
-   (for example `.cargo-lock` permission issues), remove the build dir and retry:
-   `rm -rf apps/mac/xcode/build/`
-   `just apps/mac/install`
-7. If FSKit appears stuck on stale state, restart FSKit daemons:
-   `sudo killall fskitd fskit_agent`
-   This requires elevated privileges; it must be user-ran.
+If the generated Swift client surface changes:
 
-Rust-side bumping is usually not needed in local development here because
-`Cargo.toml` uses `[patch."https://github.com/bearcove/roam"]` path overrides
-to the local Roam checkout.
+1. Regenerate bindings:
+   `cargo xtask vixenfs-codegen`
+2. Rebuild the Rust staticlib used by `VoxRuntime`:
+   `cargo build --release -p vox-shm-ffi`
+3. Rebuild the Swift package:
+   `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
+4. Regenerate the Xcode project if package dependencies changed:
+   `cd apps/mac/xcode && xcodegen generate`
+
+If FSKit appears stuck on stale state, restart FSKit daemons:
+`sudo killall fskitd fskit_agent`
+This requires elevated privileges; it must be user-ran.

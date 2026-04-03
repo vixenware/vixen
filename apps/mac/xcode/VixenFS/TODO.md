@@ -30,8 +30,8 @@
   `preloadEnabled`, the `?preload=1` URL flag extraction, and simplify the read path to
   always do direct per-read RPCs.
 
-- [x] **Remove vfsCall, use roam built-in timeouts** — Roam now has call-level timeouts
-  (default 30s). Removed the manual task-group timeout wrapper entirely.
+- [x] **Remove vfsCall, use runtime built-in timeouts** — The generated RPC client now has
+  call-level timeouts (default 30s). Removed the manual task-group timeout wrapper entirely.
 
 - [x] **Unused Logger extensions** — `Logger.d()`, `Logger.e()`, `Logger.posixError()` are
   defined in VixenFS.swift but never called.
@@ -46,7 +46,7 @@
   reset() wipes the other volume's data. Should be per-volume.
 
 - [ ] **lookupItem makes two sequential RPCs** — Could be one if the protocol returned full
-  attributes in lookup. Requires protocol change (roam codegen).
+  attributes in lookup. Requires protocol/codegen change.
 
 - [ ] **Server-side dead code in VfsClient.swift** — ~300 lines of VfsHandler/dispatcher/
   serializers ship in the extension. Needs client-only codegen mode. (codegen issue, not
