@@ -175,6 +175,9 @@ fn discover_daemon_config_path(
 ) -> Option<camino::Utf8PathBuf> {
     explicit
         .cloned()
+        .or_else(|| {
+            daemon_config_override_from_env(std::env::var_os("VX_DAEMON_CONFIG").as_deref())
+        })
         .or_else(|| default_daemon_config_path().filter(|path| path.exists()))
 }
 
@@ -243,6 +246,10 @@ fn daemon_config_path_in(config_home: &camino::Utf8PathBuf) -> camino::Utf8PathB
     config_home.join("vx/daemon.styx")
 }
 
+fn daemon_config_override_from_env(value: Option<&std::ffi::OsStr>) -> Option<camino::Utf8PathBuf> {
+    value.and_then(|path| camino::Utf8PathBuf::from_path_buf(std::path::PathBuf::from(path)).ok())
+}
+
 fn store_root_in(state_home: &camino::Utf8PathBuf) -> camino::Utf8PathBuf {
     state_home.join("vx/store")
 }
@@ -276,8 +283,8 @@ mod tests {
 
     use crate::cli::ClientTargetArgs;
     use crate::{
-        config_home_from_env, daemon_config_path_in, resolve_daemon_address, resolve_store_root,
-        state_home_from_env, store_root_in,
+        config_home_from_env, daemon_config_override_from_env, daemon_config_path_in,
+        resolve_daemon_address, resolve_store_root, state_home_from_env, store_root_in,
     };
 
     #[test]
@@ -349,6 +356,14 @@ daemon {
         assert_eq!(
             config_home_from_env(None, Some(OsStr::new("/home/amos"))),
             Some(camino::Utf8PathBuf::from("/home/amos/.config"))
+        );
+    }
+
+    #[test]
+    fn daemon_config_override_comes_from_env_var() {
+        assert_eq!(
+            daemon_config_override_from_env(Some(OsStr::new("/tmp/vxd.styx"))),
+            Some(camino::Utf8PathBuf::from("/tmp/vxd.styx"))
         );
     }
 

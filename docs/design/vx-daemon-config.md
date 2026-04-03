@@ -3,6 +3,9 @@
 This is draft design material for hosting and wiring services inside one
 `vx-daemon` process.
 
+The canonical location for this file is user-level node config, not
+per-project config.
+
 Current implemented shape:
 
 - service blocks under `daemon.services` mean that service is hosted
@@ -11,8 +14,10 @@ Current implemented shape:
 - explicit remote deps use `@rpc{address "..."}`
 - client commands may resolve the daemon address from:
   1. explicit `--daemon`
-  2. `--config path/to/file.styx`
-  3. fallback `local:///tmp/vixen.vox`
+  2. explicit `--config path/to/file.styx`
+  3. `VX_DAEMON_CONFIG`
+  4. user config at `XDG_CONFIG_HOME/vx/daemon.styx` or `~/.config/vx/daemon.styx`
+  5. fallback `local:///tmp/vixen.vox`
 
 These examples are implementation-facing, not normative spec text.
 
