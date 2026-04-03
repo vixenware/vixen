@@ -320,6 +320,33 @@ impl<'a> ProgramEvaluator<'a> {
                 }
                 slots.insert(*dst, EvalValue::String(out));
             }
+            KernelOp::StringLen { dst, value, .. } => {
+                let value = self.resolve_operand(function_name, slots, value)?;
+                let value = self.expect_string(function_name, &value)?;
+                slots.insert(*dst, EvalValue::U64(value.len() as u64));
+            }
+            KernelOp::StringSlice {
+                dst,
+                value,
+                start,
+                end,
+                ..
+            } => {
+                let value = self.resolve_operand(function_name, slots, value)?;
+                let value = self.expect_string(function_name, &value)?;
+                let start = self.resolve_operand(function_name, slots, start)?;
+                let end = self.resolve_operand(function_name, slots, end)?;
+                let start = (self.expect_u64(function_name, &start)? as usize).min(value.len());
+                let end = (self.expect_u64(function_name, &end)? as usize).min(value.len());
+                let start = start.min(end);
+                let slice = value.get(start..end).ok_or_else(|| {
+                    RuntimeEvalError::UnsupportedOperation {
+                        function: function_name.to_owned(),
+                        detail: format!("string slice {start}..{end} must lie on utf-8 boundaries"),
+                    }
+                })?;
+                slots.insert(*dst, EvalValue::String(slice.to_owned()));
+            }
             KernelOp::Select {
                 dst,
                 condition,
@@ -441,6 +468,21 @@ impl<'a> ProgramEvaluator<'a> {
             }),
         }
     }
+
+    fn expect_string<'b>(
+        &self,
+        function_name: &str,
+        value: &'b EvalValue,
+    ) -> Result<&'b str, RuntimeEvalError> {
+        match value {
+            EvalValue::String(value) => Ok(value),
+            other => Err(RuntimeEvalError::TypeMismatch {
+                function: function_name.to_owned(),
+                expected: "string",
+                found: other.kind_name(),
+            }),
+        }
+    }
 }
 
 impl EvalValue {
@@ -474,6 +516,24 @@ fn build(name: String) -> String (
 )
 "#;
 
+    const SOURCE_NON_STRICT_STRING_HELPERS: &str = r#"
+fn measure(name: String) -> U64 (
+  name.len()
+)
+
+fn prefix(name: String) -> String (
+  name.slice(0..2)
+)
+
+fn build_len(name: String) -> U64 (
+  measure(name)
+)
+
+fn build_slice(name: String) -> String (
+  prefix(name)
+)
+"#;
+
     #[test]
     fn evaluates_non_strict_top_level_body_call() {
         let value = evaluate_source_text_function(
@@ -484,5 +544,29 @@ fn build(name: String) -> String (
         .expect("build should evaluate");
 
         assert_eq!(value, RuntimeValue::String("hello serde".to_owned()));
+    }
+
+    #[test]
+    fn evaluates_non_strict_string_len_via_local_call() {
+        let value = evaluate_source_text_function(
+            SOURCE_NON_STRICT_STRING_HELPERS,
+            "build_len",
+            &[RuntimeValue::String("serde".to_owned())],
+        )
+        .expect("build_len should evaluate");
+
+        assert_eq!(value, RuntimeValue::U64(5));
+    }
+
+    #[test]
+    fn evaluates_non_strict_string_slice_via_local_call() {
+        let value = evaluate_source_text_function(
+            SOURCE_NON_STRICT_STRING_HELPERS,
+            "build_slice",
+            &[RuntimeValue::String("serde".to_owned())],
+        )
+        .expect("build_slice should evaluate");
+
+        assert_eq!(value, RuntimeValue::String("se".to_owned()));
     }
 }

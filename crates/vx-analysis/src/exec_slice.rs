@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
+use vx_parser::{AstNode, CallExpr, Expr, FieldExpr, FnDecl, RangeExpr, Stmt, SyntaxKind};
 use vx_resolve::SourceSpan;
 
 use crate::{
@@ -194,6 +194,18 @@ pub enum KernelOp {
         dst: SlotId,
         source: SourceExpr,
         parts: Vec<Operand>,
+    },
+    StringLen {
+        dst: SlotId,
+        source: SourceExpr,
+        value: Operand,
+    },
+    StringSlice {
+        dst: SlotId,
+        source: SourceExpr,
+        value: Operand,
+        start: Operand,
+        end: Operand,
     },
     Select {
         dst: SlotId,
@@ -887,6 +899,121 @@ impl<'a> BodyLowering<'a> {
         let slot = SlotId(self.next_slot);
         self.next_slot += 1;
         slot
+    }
+
+    fn lower_string_member_call(
+        &mut self,
+        expr_id: ExprId,
+        source: &SourceExpr,
+        field: FieldExpr,
+        call: CallExpr,
+        method_name: &str,
+    ) -> Result<Option<Operand>, ExecSliceError> {
+        let receiver_expr = field
+            .receiver()
+            .ok_or_else(|| UnsupportedShape("member call receiver missing".to_owned()))?;
+        let receiver_id = self
+            .expr_id(&receiver_expr)
+            .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+        let receiver = self.lower_expr(receiver_id)?;
+        match method_name {
+            "len" => {
+                if !self.is_empty_call_arg(call.arg()) {
+                    return Err(UnsupportedShape(
+                        "String.len does not take positional arguments".to_owned(),
+                    ));
+                }
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::StringLen {
+                    dst,
+                    source: source.clone(),
+                    value: receiver,
+                });
+                Ok(Some(Operand::Slot(dst)))
+            }
+            "slice" => {
+                let range = self.extract_string_slice_range(call)?;
+                if range.is_inclusive() {
+                    return Err(UnsupportedShape(
+                        "inclusive string slice ranges are not supported".to_owned(),
+                    ));
+                }
+                let (start, end) = self.lower_slice_range(expr_id, range)?;
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::StringSlice {
+                    dst,
+                    source: source.clone(),
+                    value: receiver,
+                    start,
+                    end,
+                });
+                Ok(Some(Operand::Slot(dst)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn extract_string_slice_range(&self, call: CallExpr) -> Result<RangeExpr, ExecSliceError> {
+        let arg = call.arg().ok_or_else(|| {
+            UnsupportedShape("String.slice expects exactly one range argument".to_owned())
+        })?;
+        let arg = match arg {
+            Expr::Paren(paren) => paren.expr().ok_or_else(|| {
+                UnsupportedShape("String.slice range expression missing".to_owned())
+            })?,
+            other => other,
+        };
+        match arg {
+            Expr::Range(range) => Ok(range),
+            Expr::Tuple(tuple) => {
+                let mut items = tuple.items();
+                let first = items.next().ok_or_else(|| {
+                    UnsupportedShape("String.slice expects a range argument".to_owned())
+                })?;
+                if items.next().is_some() {
+                    return Err(UnsupportedShape(
+                        "String.slice expects exactly one range argument".to_owned(),
+                    ));
+                }
+                let Expr::Range(range) = first else {
+                    return Err(UnsupportedShape(
+                        "String.slice expects a range argument".to_owned(),
+                    ));
+                };
+                Ok(range)
+            }
+            _ => Err(UnsupportedShape(
+                "String.slice expects a range argument".to_owned(),
+            )),
+        }
+    }
+
+    fn is_empty_call_arg(&self, arg: Option<Expr>) -> bool {
+        match arg {
+            None => true,
+            Some(Expr::Tuple(tuple)) => tuple.items().next().is_none(),
+            _ => false,
+        }
+    }
+
+    fn lower_slice_range(
+        &mut self,
+        expr_id: ExprId,
+        range: RangeExpr,
+    ) -> Result<(Operand, Operand), ExecSliceError> {
+        let start_expr = range
+            .start()
+            .ok_or_else(|| UnsupportedShape("String.slice range start missing".to_owned()))?;
+        let end_expr = range
+            .end()
+            .ok_or_else(|| UnsupportedShape("String.slice range end missing".to_owned()))?;
+        let start_id = self
+            .expr_id(&start_expr)
+            .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+        let end_id = self
+            .expr_id(&end_expr)
+            .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+        Ok((self.lower_expr(start_id)?, self.lower_expr(end_id)?))
     }
 
     fn ensure_slot(&mut self, operand: Operand, source: SourceExpr) -> SlotId {
@@ -1603,34 +1730,45 @@ impl<'a> BodyLowering<'a> {
                 if let Expr::Field(field) = callee_expr.clone()
                     && let Some(method_name) =
                         field.field_name().map(|token| token.text().to_owned())
-                    && let Some(method) = runtime_member_op_from_name(&method_name)
                 {
-                    let receiver_expr = field.receiver().ok_or_else(|| {
-                        UnsupportedShape("member call receiver missing".to_owned())
-                    })?;
-                    let receiver_id = self
-                        .expr_id(&receiver_expr)
-                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    let receiver = self.lower_expr(receiver_id)?;
-                    let args = call
-                        .positional_args()
-                        .into_iter()
-                        .map(|arg| {
-                            let id = self
-                                .expr_id(&arg)
-                                .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                            self.lower_expr(id)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let dst = self.alloc_temp();
-                    self.ops.push(KernelOp::CallMember {
-                        dst,
-                        source,
-                        receiver,
-                        method,
-                        args,
-                    });
-                    return Ok(Operand::Slot(dst));
+                    if let Some(lowered) = self.lower_string_member_call(
+                        expr_id,
+                        &source,
+                        field.clone(),
+                        call.clone(),
+                        &method_name,
+                    )? {
+                        return Ok(lowered);
+                    }
+
+                    if let Some(method) = runtime_member_op_from_name(&method_name) {
+                        let receiver_expr = field.receiver().ok_or_else(|| {
+                            UnsupportedShape("member call receiver missing".to_owned())
+                        })?;
+                        let receiver_id = self
+                            .expr_id(&receiver_expr)
+                            .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                        let receiver = self.lower_expr(receiver_id)?;
+                        let args = call
+                            .positional_args()
+                            .into_iter()
+                            .map(|arg| {
+                                let id = self
+                                    .expr_id(&arg)
+                                    .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                                self.lower_expr(id)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let dst = self.alloc_temp();
+                        self.ops.push(KernelOp::CallMember {
+                            dst,
+                            source,
+                            receiver,
+                            method,
+                            args,
+                        });
+                        return Ok(Operand::Slot(dst));
+                    }
                 }
 
                 let args = call

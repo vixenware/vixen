@@ -267,11 +267,29 @@ fn one() -> String (
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
-  name
+  `hello {name}`
 )
 
 fn build(name: String) -> String (
   greet(name)
+)
+"#;
+
+    const SOURCE_NON_STRICT_STRING_HELPERS: &str = r#"
+fn measure(name: String) -> U64 (
+  name.len()
+)
+
+fn prefix(name: String) -> String (
+  name.slice(0..2)
+)
+
+fn build_len(name: String) -> U64 (
+  measure(name)
+)
+
+fn build_slice(name: String) -> String (
+  prefix(name)
 )
 "#;
 
@@ -401,7 +419,56 @@ fn build(name: String) -> String (
 
         match result {
             EvalFunctionResult::Ok(success) => {
-                assert_eq!(success.value, RuntimeValue::String("hello".to_owned()));
+                assert_eq!(
+                    success.value,
+                    RuntimeValue::String("hello hello".to_owned())
+                );
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_non_strict_string_len_via_local_body_calls() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_NON_STRICT_STRING_HELPERS.to_owned(),
+                function_name: "build_len".to_owned(),
+                args: vec![RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => {
+                assert_eq!(success.value, RuntimeValue::U64(5));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_non_strict_string_slice_via_local_body_calls() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_NON_STRICT_STRING_HELPERS.to_owned(),
+                function_name: "build_slice".to_owned(),
+                args: vec![RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => {
+                assert_eq!(success.value, RuntimeValue::String("se".to_owned()));
             }
             other => panic!("expected success, got {other:?}"),
         }

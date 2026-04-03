@@ -655,6 +655,50 @@ fn build(exe: Blob) {
 }
 
 #[test]
+fn method_call_argument_shapes_for_string_helpers() {
+    let parse = parse(
+        r#"
+fn demo(name: String) {
+  name.len();
+  name.slice(0..2);
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let statements = body.statements().collect::<Vec<_>>();
+
+    let len_call = match &statements[0] {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected len call expr, got {stmt:?}"),
+    };
+    let slice_call = match &statements[1] {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected slice call expr, got {stmt:?}"),
+    };
+
+    assert_eq!(
+        len_call.arg().map(|expr| expr.syntax().kind()),
+        Some(SyntaxKind::TUPLE_EXPR)
+    );
+    assert!(len_call.positional_args().is_empty());
+
+    assert_eq!(
+        slice_call.arg().map(|expr| expr.syntax().kind()),
+        Some(SyntaxKind::PAREN_EXPR)
+    );
+    let slice_args = slice_call.positional_args();
+    assert_eq!(slice_args.len(), 1);
+    assert!(matches!(&slice_args[0], Expr::Paren(_)));
+}
+
+#[test]
 fn record_and_map_literals_have_distinct_ast_nodes() {
     let parse = parse(
         r#"
