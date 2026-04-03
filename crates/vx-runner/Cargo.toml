@@ -29,7 +29,6 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 
 vx-services.workspace = true
-vx-io = { workspace = true }
 moire = { workspace = true }
 
 [lints]

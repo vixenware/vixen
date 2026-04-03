@@ -3804,7 +3804,6 @@ dependencies = [
  "tokio",
  "tracing",
  "vox",
- "vx-io",
  "vx-services",
 ]
 
