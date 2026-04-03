@@ -10,7 +10,7 @@ use vx_services::{
     OrchestratorClient, StrictEvalBackend, StrictValue,
 };
 
-use crate::cli::{Cli, CliCommand, EvalArgs};
+use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs};
 
 fn main() {
     init_cli_stderr();
@@ -41,7 +41,7 @@ async fn async_main() -> eyre::Result<()> {
     .unwrap();
 
     match cli.command {
-        CliCommand::Health(_args) => health().await,
+        CliCommand::Health(args) => health(args.target).await,
         CliCommand::Eval(args) => eval(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
@@ -59,8 +59,9 @@ async fn async_main() -> eyre::Result<()> {
     }
 }
 
-async fn health() -> eyre::Result<()> {
-    let client: DaemonClient = vox::connect(DAEMON_SOCK).await?;
+async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
+    let address = resolve_daemon_address(&target)?;
+    let client: DaemonClient = vox::connect(&address).await?;
     let status = client.status().await?;
     tracing::info!("Daemon status: {status:?}");
     Ok(())
@@ -75,7 +76,8 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         .map(|arg| parse_value(arg))
         .collect::<eyre::Result<Vec<_>>>()?;
 
-    let client: OrchestratorClient = vox::connect(DAEMON_SOCK).await?;
+    let address = resolve_daemon_address(&args.target)?;
+    let client: OrchestratorClient = vox::connect(&address).await?;
     let result = client
         .eval_strict_function(EvalStrictFunctionRequest {
             source_text,
@@ -151,6 +153,22 @@ fn format_value(value: &StrictValue) -> String {
     }
 }
 
+fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
+    if let Some(address) = &target.daemon {
+        return Ok(address.clone());
+    }
+
+    if let Some(config_path) = &target.config {
+        let config = vxd::load_config_file(config_path)?;
+        let Some(address) = config.listen.into_iter().next() else {
+            eyre::bail!("daemon config `{config_path}` did not declare any listen addresses");
+        };
+        return Ok(address);
+    }
+
+    Ok(DAEMON_SOCK.to_owned())
+}
+
 /// Build the default EnvFilter for CLI processes that talk to multiple vx crates.
 pub fn cli_env_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -169,4 +187,61 @@ pub fn init_cli_stderr() {
         .with_target(true)
         .with_thread_ids(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+    use vx_services::DAEMON_SOCK;
+
+    use crate::cli::ClientTargetArgs;
+    use crate::resolve_daemon_address;
+
+    #[test]
+    fn explicit_daemon_address_wins() {
+        let target = ClientTargetArgs {
+            daemon: Some("tcp://daemon-a:5000".to_owned()),
+            config: None,
+        };
+
+        let address = resolve_daemon_address(&target).expect("address should resolve");
+        assert_eq!(address, "tcp://daemon-a:5000");
+    }
+
+    #[test]
+    fn daemon_address_comes_from_config_when_present() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config_path = temp_dir.path().join("vxd.styx");
+        std::fs::write(
+            &config_path,
+            r#"
+daemon {
+  listen ("local:///tmp/custom.vx")
+  services {
+    orchestrator {}
+  }
+}
+"#,
+        )
+        .expect("failed to write config");
+
+        let target = ClientTargetArgs {
+            daemon: None,
+            config: Some(camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path")),
+        };
+
+        let address = resolve_daemon_address(&target).expect("address should resolve");
+        assert_eq!(address, "local:///tmp/custom.vx");
+    }
+
+    #[test]
+    fn daemon_address_defaults_to_standard_socket() {
+        let target = ClientTargetArgs {
+            daemon: None,
+            config: None,
+        };
+
+        let address = resolve_daemon_address(&target).expect("address should resolve");
+        assert_eq!(address, DAEMON_SOCK);
+    }
 }

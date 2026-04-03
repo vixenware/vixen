@@ -31,10 +31,27 @@ pub(crate) enum CliCommand {
 }
 
 #[derive(Facet, Debug)]
-pub(crate) struct HealthArgs {}
+pub(crate) struct ClientTargetArgs {
+    /// Daemon address to connect to
+    #[facet(args::named)]
+    pub(crate) daemon: Option<String>,
+
+    /// Daemon configuration file in STYX format
+    #[facet(args::named)]
+    pub(crate) config: Option<camino::Utf8PathBuf>,
+}
+
+#[derive(Facet, Debug)]
+pub(crate) struct HealthArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+}
 
 #[derive(Facet, Debug)]
 pub(crate) struct EvalArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+
     /// Source file containing the function to evaluate
     #[facet(args::named)]
     pub(crate) file: camino::Utf8PathBuf,
