@@ -14,9 +14,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
 
 packages:
-  roam:
-    url: https://github.com/bearcove/roam.git
-    revision: 5cabc262c48dfd16ca799157e19ff705ae02c71d
+  vox-runtime:
+    path: ../../../vox/swift/vox-runtime
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
@@ -85,7 +84,6 @@ targets:
         CURRENT_PROJECT_VERSION: 0.0.0
         CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
     dependencies:
-      - package: roam
-        product: RoamRuntime
-
+      - package: vox-runtime
+        product: VoxRuntime
 

@@ -11,10 +11,7 @@ let package = Package(
         .library(name: "VixenFS", targets: ["VixenFS"]),
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/bearcove/roam.git",
-            revision: "5cabc262c48dfd16ca799157e19ff705ae02c71d"
-        ),
+        .package(path: "../../vox/swift/vox-runtime"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
     ],
     targets: [
@@ -31,7 +28,7 @@ let package = Package(
         .target(
             name: "VixenFS",
             dependencies: [
-                .product(name: "RoamRuntime", package: "roam")
+                .product(name: "VoxRuntime", package: "vox-runtime")
             ],
             path: "xcode/VixenFS",
             linkerSettings: [
