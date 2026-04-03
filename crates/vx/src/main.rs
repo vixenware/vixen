@@ -45,15 +45,16 @@ async fn async_main() -> eyre::Result<()> {
         CliCommand::Eval(args) => eval(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
-            let config = if let Some(config_path) = args.config {
-                vxd::load_config_file(&config_path)?
-            } else {
-                vxd::DaemonConfig::local_all_in_one(
-                    vec![vx_services::DAEMON_SOCK.to_string()],
-                    args.store_root,
-                    args.vfs_mount,
-                )
-            };
+            let config =
+                if let Some(config_path) = discover_daemon_config_path(args.config.as_ref()) {
+                    vxd::load_config_file(&config_path)?
+                } else {
+                    vxd::DaemonConfig::local_all_in_one(
+                        vec![vx_services::DAEMON_SOCK.to_string()],
+                        resolve_store_root(args.store_root.as_ref())?,
+                        args.vfs_mount,
+                    )
+                };
             vxd::serve(config).await
         }
     }
@@ -158,8 +159,8 @@ fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
         return Ok(address.clone());
     }
 
-    if let Some(config_path) = &target.config {
-        let config = vxd::load_config_file(config_path)?;
+    if let Some(config_path) = discover_daemon_config_path(target.config.as_ref()) {
+        let config = vxd::load_config_file(&config_path)?;
         let Some(address) = config.listen.into_iter().next() else {
             eyre::bail!("daemon config `{config_path}` did not declare any listen addresses");
         };
@@ -167,6 +168,83 @@ fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
     }
 
     Ok(DAEMON_SOCK.to_owned())
+}
+
+fn discover_daemon_config_path(
+    explicit: Option<&camino::Utf8PathBuf>,
+) -> Option<camino::Utf8PathBuf> {
+    explicit
+        .cloned()
+        .or_else(|| default_daemon_config_path().filter(|path| path.exists()))
+}
+
+fn default_daemon_config_path() -> Option<camino::Utf8PathBuf> {
+    default_config_home().map(|root| daemon_config_path_in(&root))
+}
+
+fn resolve_store_root(explicit: Option<&camino::Utf8PathBuf>) -> eyre::Result<camino::Utf8PathBuf> {
+    explicit
+        .cloned()
+        .or_else(default_store_root)
+        .ok_or_else(|| {
+            eyre::eyre!("could not determine store root; pass --store-root or use a daemon config")
+        })
+}
+
+fn default_store_root() -> Option<camino::Utf8PathBuf> {
+    default_state_home().map(|root| store_root_in(&root))
+}
+
+fn default_config_home() -> Option<camino::Utf8PathBuf> {
+    config_home_from_env(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+fn default_state_home() -> Option<camino::Utf8PathBuf> {
+    state_home_from_env(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+fn config_home_from_env(
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<camino::Utf8PathBuf> {
+    xdg_config_home
+        .and_then(|path| camino::Utf8PathBuf::from_path_buf(path.into()).ok())
+        .or_else(|| {
+            home.and_then(|path| {
+                camino::Utf8PathBuf::from_path_buf(std::path::PathBuf::from(path))
+                    .ok()
+                    .map(|home| home.join(".config"))
+            })
+        })
+}
+
+fn state_home_from_env(
+    xdg_state_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<camino::Utf8PathBuf> {
+    xdg_state_home
+        .and_then(|path| camino::Utf8PathBuf::from_path_buf(path.into()).ok())
+        .or_else(|| {
+            home.and_then(|path| {
+                camino::Utf8PathBuf::from_path_buf(std::path::PathBuf::from(path))
+                    .ok()
+                    .map(|home| home.join(".local/state"))
+            })
+        })
+}
+
+fn daemon_config_path_in(config_home: &camino::Utf8PathBuf) -> camino::Utf8PathBuf {
+    config_home.join("vx/daemon.styx")
+}
+
+fn store_root_in(state_home: &camino::Utf8PathBuf) -> camino::Utf8PathBuf {
+    state_home.join("vx/store")
 }
 
 /// Build the default EnvFilter for CLI processes that talk to multiple vx crates.
@@ -191,11 +269,16 @@ pub fn init_cli_stderr() {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use tempfile::TempDir;
     use vx_services::DAEMON_SOCK;
 
     use crate::cli::ClientTargetArgs;
-    use crate::resolve_daemon_address;
+    use crate::{
+        config_home_from_env, daemon_config_path_in, resolve_daemon_address, resolve_store_root,
+        state_home_from_env, store_root_in,
+    };
 
     #[test]
     fn explicit_daemon_address_wins() {
@@ -243,5 +326,60 @@ daemon {
 
         let address = resolve_daemon_address(&target).expect("address should resolve");
         assert_eq!(address, DAEMON_SOCK);
+    }
+
+    #[test]
+    fn discovers_well_known_daemon_config_path() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config_home =
+            camino::Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).expect("utf-8 path");
+        assert_eq!(
+            daemon_config_path_in(&config_home),
+            camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vx/daemon.styx"))
+                .expect("utf-8 path")
+        );
+    }
+
+    #[test]
+    fn config_home_uses_xdg_then_home_fallback() {
+        assert_eq!(
+            config_home_from_env(Some(OsStr::new("/tmp/cfg")), Some(OsStr::new("/home/amos"))),
+            Some(camino::Utf8PathBuf::from("/tmp/cfg"))
+        );
+        assert_eq!(
+            config_home_from_env(None, Some(OsStr::new("/home/amos"))),
+            Some(camino::Utf8PathBuf::from("/home/amos/.config"))
+        );
+    }
+
+    #[test]
+    fn state_home_uses_xdg_then_home_fallback() {
+        assert_eq!(
+            state_home_from_env(
+                Some(OsStr::new("/tmp/state")),
+                Some(OsStr::new("/home/amos"))
+            ),
+            Some(camino::Utf8PathBuf::from("/tmp/state"))
+        );
+        assert_eq!(
+            state_home_from_env(None, Some(OsStr::new("/home/amos"))),
+            Some(camino::Utf8PathBuf::from("/home/amos/.local/state"))
+        );
+    }
+
+    #[test]
+    fn resolve_store_root_uses_explicit_value() {
+        let store_root = camino::Utf8PathBuf::from("/tmp/vx-store");
+        let resolved = resolve_store_root(Some(&store_root)).expect("store root should resolve");
+        assert_eq!(resolved, store_root);
+    }
+
+    #[test]
+    fn store_root_path_is_derived_from_state_home() {
+        let state_home = camino::Utf8PathBuf::from("/tmp/state");
+        assert_eq!(
+            store_root_in(&state_home),
+            camino::Utf8PathBuf::from("/tmp/state/vx/store")
+        );
     }
 }
