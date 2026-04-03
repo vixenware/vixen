@@ -1,5 +1,6 @@
 use vx_jit::{
-    StrictFragmentValue, compile_strict_fragment, execute_compiled_copying_strict_fragment_strings,
+    StrictFragmentClassification, StrictFragmentValue, classify_source_text_function,
+    compile_strict_fragment, execute_compiled_copying_strict_fragment_strings,
     interpret_source_text_function, lower_source_text_hir, lower_source_text_ir,
     lower_source_text_strict_fragment,
 };
@@ -37,6 +38,25 @@ impl OrchestratorService {
             match lower_source_text_strict_fragment(&request.source_text, &request.function_name) {
                 Ok(strict_fragment) => strict_fragment,
                 Err(error) => {
+                    if error.describes_non_strict_shape() {
+                        let function_name = request.function_name.clone();
+                        let reason = match classify_source_text_function(
+                            &request.source_text,
+                            &function_name,
+                        ) {
+                            Ok(StrictFragmentClassification::NotStrict { reason }) => reason,
+                            Ok(StrictFragmentClassification::StrictFragment) | Err(_) => {
+                                error.to_string()
+                            }
+                        };
+                        return EvalStrictFunctionResult::Err(failure(
+                            request,
+                            format!(
+                                "function `{}` is not a strict fragment: {reason}",
+                                function_name
+                            ),
+                        ));
+                    }
                     return EvalStrictFunctionResult::Err(failure(request, error.to_string()));
                 }
             };
@@ -201,6 +221,8 @@ fn one() -> String (
 )
 "#;
 
+    const CC_VERSION_SOURCE: &str = include_str!("../../../zoo/cc-version.vx");
+
     #[tokio::test]
     async fn evals_u64_with_kajit() {
         let service = OrchestratorService::new(OrchestratorWiring::default());
@@ -305,6 +327,35 @@ fn one() -> String (
                 assert!(success.ir.as_deref().unwrap_or_default().contains("lambda"));
             }
             other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_non_strict_function_with_clear_message() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_strict_function(EvalStrictFunctionRequest {
+                source_text: CC_VERSION_SOURCE.to_owned(),
+                function_name: "build".to_owned(),
+                args: vec![RuntimeValue::String("hello".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalStrictFunctionResult::Err(failure) => {
+                assert!(
+                    failure
+                        .message
+                        .contains("function `build` is not a strict fragment"),
+                    "unexpected error message: {}",
+                    failure.message
+                );
+            }
+            other => panic!("expected failure, got {other:?}"),
         }
     }
 

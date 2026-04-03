@@ -77,6 +77,46 @@ pub enum SourceLoweringError {
     Kajit(#[from] KajitBackendError),
 }
 
+impl SourceLoweringError {
+    pub const fn describes_non_strict_shape(&self) -> bool {
+        matches!(
+            self,
+            Self::Capability(_)
+                | Self::UnsupportedParameters(_)
+                | Self::UnsupportedReturnType(_)
+                | Self::UnsupportedBody(_, _)
+                | Self::UnsupportedStatement(_, _)
+                | Self::UnsupportedPattern(_)
+                | Self::UnsupportedExpr(_)
+                | Self::UnsupportedBinaryOperator(_)
+                | Self::UnsupportedMethod { .. }
+                | Self::UnsupportedRange(_)
+                | Self::UnsupportedType(_)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrictFragmentClassification {
+    StrictFragment,
+    NotStrict { reason: String },
+}
+
+pub fn classify_source_text_function(
+    source: &str,
+    function_name: &str,
+) -> Result<StrictFragmentClassification, SourceLoweringError> {
+    match lower_source_text_strict_fragment(source, function_name) {
+        Ok(_) => Ok(StrictFragmentClassification::StrictFragment),
+        Err(error) if error.describes_non_strict_shape() => {
+            Ok(StrictFragmentClassification::NotStrict {
+                reason: error.to_string(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn lower_source_text_strict_fragment(
     source: &str,
     function_name: &str,

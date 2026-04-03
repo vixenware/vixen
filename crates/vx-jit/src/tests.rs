@@ -1,15 +1,16 @@
 use kajit_hir::{BinaryOp, Expr, StmtKind, Type};
 
 use crate::{
-    StrictFragmentAbiLayout, StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentIntrinsic,
-    StrictFragmentLocal, StrictFragmentLocalId, StrictFragmentStmt, StrictFragmentType,
-    StrictFragmentValue, compile_source_text_u64_add_function, compile_strict_fragment,
-    compile_u64_add, execute_compiled_copying_strict_fragment_strings,
-    execute_compiled_unmanaged_strict_fragment, interpret_source_text_string_function,
-    interpret_source_text_u64_add_function, interpret_u64_add, lower_source_text_strict_fragment,
-    lower_source_text_u64_add_hir, lower_source_text_u64_add_ir, lower_u64_add_hir,
-    lower_u64_add_hir_text, lower_u64_add_ir, lower_u64_add_ir_text, lower_u64_add_strict_fragment,
-    run_source_text_u64_add_function, run_u64_add,
+    StrictFragmentAbiLayout, StrictFragmentBinaryOp, StrictFragmentClassification,
+    StrictFragmentExpr, StrictFragmentIntrinsic, StrictFragmentLocal, StrictFragmentLocalId,
+    StrictFragmentStmt, StrictFragmentType, StrictFragmentValue, classify_source_text_function,
+    compile_source_text_u64_add_function, compile_strict_fragment, compile_u64_add,
+    execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
+    interpret_source_text_string_function, interpret_source_text_u64_add_function,
+    interpret_u64_add, lower_source_text_strict_fragment, lower_source_text_u64_add_hir,
+    lower_source_text_u64_add_ir, lower_u64_add_hir, lower_u64_add_hir_text, lower_u64_add_ir,
+    lower_u64_add_ir_text, lower_u64_add_strict_fragment, run_source_text_u64_add_function,
+    run_u64_add,
 };
 
 const SOURCE_ADD_U64: &str = r#"
@@ -72,6 +73,7 @@ fn join(a: String, b: String) -> String (
 "#;
 
 const CARGO_RESOLVE_SOURCE: &str = include_str!("../../../zoo/cargo-resolve.vx");
+const CC_VERSION_SOURCE: &str = include_str!("../../../zoo/cc-version.vx");
 
 fn cargo_resolve_function_source(function_name: &str) -> String {
     let needle = format!("fn {function_name}(");
@@ -457,6 +459,17 @@ fn strict_fragment_abi_layout_matches_current_domain() {
         StrictFragmentAbiLayout::from_type(StrictFragmentType::String).word_count(),
         2
     );
+}
+
+#[test]
+fn classifies_non_strict_build_function() {
+    let classification = classify_source_text_function(CC_VERSION_SOURCE, "build")
+        .expect("classification should succeed");
+
+    assert!(matches!(
+        classification,
+        StrictFragmentClassification::NotStrict { .. }
+    ));
 }
 
 #[test]

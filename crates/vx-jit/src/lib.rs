@@ -9,7 +9,8 @@ pub use abi::{
 
 mod analysis_adapter;
 pub use analysis_adapter::{
-    SourceLoweringError, compile_source_text_function, compile_source_text_u64_add_function,
+    SourceLoweringError, StrictFragmentClassification, classify_source_text_function,
+    compile_source_text_function, compile_source_text_u64_add_function,
     interpret_source_text_function, interpret_source_text_string_function,
     interpret_source_text_u64_add_function, lower_source_text_hir, lower_source_text_ir,
     lower_source_text_strict_fragment, lower_source_text_u64_add_hir, lower_source_text_u64_add_ir,
