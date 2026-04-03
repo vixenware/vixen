@@ -5,7 +5,6 @@
 mod cli;
 
 use figue as args;
-use vox::TransportMode;
 use vx_services::{DAEMON_SOCK, DaemonClient};
 
 use crate::cli::{Cli, CliCommand};

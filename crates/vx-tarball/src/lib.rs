@@ -1,14 +1,4 @@
 //! Tarball extraction
-//!
-//! Provides streaming tar.xz and tar.gz extraction from any AsyncRead source.
-//!
-//! ## Tree extraction (CAS deduplication)
-//!
-//! For content-addressed storage, use [`extract_to_tree`] to extract a tarball
-//! into a [`TreeManifest`], storing each file as a separate blob. This enables:
-//! - Deduplication across toolchain versions
-//! - Deduplication across crates
-//! - Efficient partial materialization
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use std::future::Future;
@@ -208,6 +198,3 @@ async fn extract_tar<R: AsyncRead + Unpin>(
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

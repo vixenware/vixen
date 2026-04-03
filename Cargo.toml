@@ -78,7 +78,7 @@ figue = { version = "2.0.1" }
 shm-primitives = "7.1.0"
 ur-taking-me-with-you = { version = "7.1.0", features = ["tokio"] }
 
-vox = { version = "0.3.1" }
+vox = { version = "0.3.1", features = ["transport-tcp", "transport-local", "transport-shm"] }
 vox-core = { version = "0.3.1" }
 vox-stream = { version = "0.3.1" }
 vox-local = { version = "0.3.1" }

@@ -2889,12 +2889,31 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shm-primitives"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "loom",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "shm-primitives"
 version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65280d793410371a833fc87faebb0a9a7af64130b93a11532545f46ecc1a3503"
 dependencies = [
  "libc",
  "loom",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "shm-primitives-async"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "tokio",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -3513,6 +3532,7 @@ dependencies = [
  "vox-core",
  "vox-postcard",
  "vox-service-macros",
+ "vox-shm",
  "vox-stream",
  "vox-types",
 ]
@@ -3600,6 +3620,23 @@ version = "0.3.1"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
+]
+
+[[package]]
+name = "vox-shm"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "loom",
+ "shm-primitives 0.3.1",
+ "shm-primitives-async",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "vox-core",
+ "vox-postcard",
+ "vox-types",
+ "zerocopy",
 ]
 
 [[package]]
@@ -3873,7 +3910,7 @@ dependencies = [
  "futures-util",
  "libc",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "shm-primitives",
+ "shm-primitives 7.3.0",
  "tokio",
  "tracing",
  "vox",
@@ -4495,7 +4532,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "vox-shm"
-version = "0.3.1"

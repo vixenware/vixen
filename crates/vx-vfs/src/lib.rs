@@ -29,6 +29,7 @@ where
     cfg_if! {
         if #[cfg(target_os = "macos")] {
             tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
+            let _ = vfs;
             // macos::mount(config, vfs).await
             panic!("macos mount: temporarily disabled")
         } else if #[cfg(target_os = "linux")] {

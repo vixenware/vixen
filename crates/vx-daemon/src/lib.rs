@@ -4,8 +4,8 @@
 //! Can serve the store service, the runner service, the vfs service
 
 use eyre::Result;
-use vox::{ConnectionAcceptor, DriverCaller, Metadata};
-use vx_services::{DaemonClient, DaemonDispatcher, DaemonStatus};
+use vox::{ConnectionAcceptor, Metadata};
+use vx_services::DaemonDispatcher;
 
 mod service;
 pub use service::DaemonService;
@@ -26,6 +26,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 
     let mut listeners = tokio::task::JoinSet::new();
     for l in config.listen {
+        tracing::info!("listening on {}", l);
         let acceptor = acceptor.clone();
         listeners.spawn(async move { vox::serve(l, acceptor).await });
     }
