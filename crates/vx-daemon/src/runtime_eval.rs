@@ -192,119 +192,100 @@ impl<'a> ProgramEvaluator<'a> {
         for (slot, value) in body.params.iter().copied().zip(args.iter().cloned()) {
             slots.insert(slot, value);
         }
+        let producers = body
+            .ops
+            .iter()
+            .map(|op| (produced_slot(op), op))
+            .collect::<HashMap<_, _>>();
 
-        for op in &body.ops {
-            self.exec_op(function_name, body, &mut slots, op)?;
-        }
-
-        let value = self.read_result(function_name, body, &slots)?;
+        let value = self.read_result(function_name, body, &producers, &mut slots)?;
         self.memo.insert(cache_key, value.clone());
         Ok(value)
     }
 
-    fn exec_op(
+    fn eval_op(
         &mut self,
         function_name: &str,
-        _body: &ExecutableBody,
+        body: &ExecutableBody,
+        producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
         op: &KernelOp,
-    ) -> Result<(), RuntimeEvalError> {
+    ) -> Result<EvalValue, RuntimeEvalError> {
         match op {
-            KernelOp::AssignConstInt { dst, value, .. } => {
-                slots.insert(*dst, self.int_to_value(function_name, *value)?);
+            KernelOp::AssignConstInt { value, .. } => self.int_to_value(function_name, *value),
+            KernelOp::AssignConstString { value, .. } => Ok(EvalValue::String(value.clone())),
+            KernelOp::AssignAlias { value, .. } => {
+                self.resolve_operand(function_name, body, producers, slots, value)
             }
-            KernelOp::AssignConstString { dst, value, .. } => {
-                slots.insert(*dst, EvalValue::String(value.clone()));
+            KernelOp::AssignLazyPoison { label, .. } => Ok(EvalValue::Pending(label.clone())),
+            KernelOp::AssignCallableAddConst { addend, .. } => {
+                let addend = self.resolve_operand(function_name, body, producers, slots, addend)?;
+                Ok(EvalValue::CallableAddConst(Box::new(addend)))
             }
-            KernelOp::AssignAlias { dst, value, .. } => {
-                slots.insert(*dst, self.resolve_operand(function_name, slots, value)?);
-            }
-            KernelOp::AssignLazyPoison { dst, label, .. } => {
-                slots.insert(*dst, EvalValue::Pending(label.clone()));
-            }
-            KernelOp::AssignCallableAddConst { dst, addend, .. } => {
-                let addend = self.resolve_operand(function_name, slots, addend)?;
-                slots.insert(*dst, EvalValue::CallableAddConst(Box::new(addend)));
-            }
-            KernelOp::ApplyCallable {
-                dst, callable, arg, ..
-            } => {
-                let callable = self.resolve_operand(function_name, slots, callable)?;
-                let arg = self.resolve_operand(function_name, slots, arg)?;
-                let value = match callable {
-                    EvalValue::CallableAddConst(addend) => EvalValue::U64(
+            KernelOp::ApplyCallable { callable, arg, .. } => {
+                let callable =
+                    self.resolve_operand(function_name, body, producers, slots, callable)?;
+                let arg = self.resolve_operand(function_name, body, producers, slots, arg)?;
+                match callable {
+                    EvalValue::CallableAddConst(addend) => Ok(EvalValue::U64(
                         self.expect_u64(function_name, &arg)?
                             + self.expect_u64(function_name, &addend)?,
-                    ),
-                    other => {
-                        return Err(RuntimeEvalError::TypeMismatch {
-                            function: function_name.to_owned(),
-                            expected: "callable",
-                            found: other.kind_name(),
-                        });
-                    }
-                };
-                slots.insert(*dst, value);
+                    )),
+                    other => Err(RuntimeEvalError::TypeMismatch {
+                        function: function_name.to_owned(),
+                        expected: "callable",
+                        found: other.kind_name(),
+                    }),
+                }
             }
-            KernelOp::MakePair {
-                dst, first, second, ..
-            } => {
-                let first = self.resolve_operand(function_name, slots, first)?;
-                let second = self.resolve_operand(function_name, slots, second)?;
-                slots.insert(*dst, EvalValue::Pair(Box::new(first), Box::new(second)));
+            KernelOp::MakePair { first, second, .. } => {
+                let first = self.resolve_operand(function_name, body, producers, slots, first)?;
+                let second = self.resolve_operand(function_name, body, producers, slots, second)?;
+                Ok(EvalValue::Pair(Box::new(first), Box::new(second)))
             }
-            KernelOp::ProjectIndex {
-                dst, pair, index, ..
-            } => {
-                let pair = self.resolve_operand(function_name, slots, pair)?;
-                let value = match pair {
+            KernelOp::ProjectIndex { pair, index, .. } => {
+                let pair = self.resolve_operand(function_name, body, producers, slots, pair)?;
+                match pair {
                     EvalValue::Pair(first, second) => match index {
-                        0 => *first,
-                        1 => *second,
-                        other => {
-                            return Err(RuntimeEvalError::UnsupportedOperation {
-                                function: function_name.to_owned(),
-                                detail: format!("pair index {other} out of bounds"),
-                            });
-                        }
-                    },
-                    other => {
-                        return Err(RuntimeEvalError::TypeMismatch {
+                        0 => Ok(*first),
+                        1 => Ok(*second),
+                        other => Err(RuntimeEvalError::UnsupportedOperation {
                             function: function_name.to_owned(),
-                            expected: "pair",
-                            found: other.kind_name(),
-                        });
-                    }
-                };
-                slots.insert(*dst, value);
+                            detail: format!("pair index {other} out of bounds"),
+                        }),
+                    },
+                    other => Err(RuntimeEvalError::TypeMismatch {
+                        function: function_name.to_owned(),
+                        expected: "pair",
+                        found: other.kind_name(),
+                    }),
+                }
             }
-            KernelOp::Add { dst, lhs, rhs, .. } => {
-                let lhs = self.resolve_operand(function_name, slots, lhs)?;
-                let rhs = self.resolve_operand(function_name, slots, rhs)?;
-                slots.insert(
-                    *dst,
-                    EvalValue::U64(
-                        self.expect_u64(function_name, &lhs)?
-                            .wrapping_add(self.expect_u64(function_name, &rhs)?),
-                    ),
-                );
+            KernelOp::Add { lhs, rhs, .. } => {
+                let lhs = self.resolve_operand(function_name, body, producers, slots, lhs)?;
+                let rhs = self.resolve_operand(function_name, body, producers, slots, rhs)?;
+                Ok(EvalValue::U64(
+                    self.expect_u64(function_name, &lhs)?
+                        .wrapping_add(self.expect_u64(function_name, &rhs)?),
+                ))
             }
-            KernelOp::NotEqual { dst, lhs, rhs, .. } => {
-                let lhs = self.resolve_operand(function_name, slots, lhs)?;
-                let rhs = self.resolve_operand(function_name, slots, rhs)?;
-                slots.insert(*dst, EvalValue::Bool(lhs != rhs));
+            KernelOp::NotEqual { lhs, rhs, .. } => {
+                let lhs = self.resolve_operand(function_name, body, producers, slots, lhs)?;
+                let rhs = self.resolve_operand(function_name, body, producers, slots, rhs)?;
+                Ok(EvalValue::Bool(lhs != rhs))
             }
-            KernelOp::MakeArray { dst, items, .. } => {
+            KernelOp::MakeArray { items, .. } => {
                 let items = items
                     .iter()
-                    .map(|item| self.resolve_operand(function_name, slots, item))
+                    .map(|item| self.resolve_operand(function_name, body, producers, slots, item))
                     .collect::<Result<Vec<_>, _>>()?;
-                slots.insert(*dst, EvalValue::Array(items));
+                Ok(EvalValue::Array(items))
             }
-            KernelOp::ConcatStrings { dst, parts, .. } => {
+            KernelOp::ConcatStrings { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
-                    let value = self.resolve_operand(function_name, slots, part)?;
+                    let value =
+                        self.resolve_operand(function_name, body, producers, slots, part)?;
                     match value {
                         EvalValue::String(value) => out.push_str(&value),
                         EvalValue::U64(value) => out.push_str(&value.to_string()),
@@ -318,24 +299,20 @@ impl<'a> ProgramEvaluator<'a> {
                         }
                     }
                 }
-                slots.insert(*dst, EvalValue::String(out));
+                Ok(EvalValue::String(out))
             }
-            KernelOp::StringLen { dst, value, .. } => {
-                let value = self.resolve_operand(function_name, slots, value)?;
+            KernelOp::StringLen { value, .. } => {
+                let value = self.resolve_operand(function_name, body, producers, slots, value)?;
                 let value = self.expect_string(function_name, &value)?;
-                slots.insert(*dst, EvalValue::U64(value.len() as u64));
+                Ok(EvalValue::U64(value.len() as u64))
             }
             KernelOp::StringSlice {
-                dst,
-                value,
-                start,
-                end,
-                ..
+                value, start, end, ..
             } => {
-                let value = self.resolve_operand(function_name, slots, value)?;
+                let value = self.resolve_operand(function_name, body, producers, slots, value)?;
                 let value = self.expect_string(function_name, &value)?;
-                let start = self.resolve_operand(function_name, slots, start)?;
-                let end = self.resolve_operand(function_name, slots, end)?;
+                let start = self.resolve_operand(function_name, body, producers, slots, start)?;
+                let end = self.resolve_operand(function_name, body, producers, slots, end)?;
                 let start = (self.expect_u64(function_name, &start)? as usize).min(value.len());
                 let end = (self.expect_u64(function_name, &end)? as usize).min(value.len());
                 let start = start.min(end);
@@ -345,60 +322,51 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: format!("string slice {start}..{end} must lie on utf-8 boundaries"),
                     }
                 })?;
-                slots.insert(*dst, EvalValue::String(slice.to_owned()));
+                Ok(EvalValue::String(slice.to_owned()))
             }
             KernelOp::Select {
-                dst,
                 condition,
                 then_value,
                 else_value,
                 ..
             } => {
-                let condition = self.resolve_operand(function_name, slots, condition)?;
-                let value = if self.expect_bool(function_name, &condition)? {
-                    self.resolve_operand(function_name, slots, then_value)?
+                let condition =
+                    self.resolve_operand(function_name, body, producers, slots, condition)?;
+                if self.expect_bool(function_name, &condition)? {
+                    self.resolve_operand(function_name, body, producers, slots, then_value)
                 } else {
-                    self.resolve_operand(function_name, slots, else_value)?
-                };
-                slots.insert(*dst, value);
+                    self.resolve_operand(function_name, body, producers, slots, else_value)
+                }
             }
-            KernelOp::AssignFailure { dst, message, .. } => {
-                slots.insert(*dst, EvalValue::Failure(message.clone()));
-            }
-            KernelOp::CallBody {
-                dst, callee, args, ..
-            } => {
+            KernelOp::AssignFailure { message, .. } => Ok(EvalValue::Failure(message.clone())),
+            KernelOp::CallBody { callee, args, .. } => {
                 let args = args
                     .iter()
-                    .map(|arg| self.resolve_operand(function_name, slots, arg))
+                    .map(|arg| self.resolve_operand(function_name, body, producers, slots, arg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let value = self.eval_body(function_name, *callee, &args)?;
-                slots.insert(*dst, value);
+                self.eval_body(function_name, *callee, &args)
             }
             KernelOp::AssignHostLocal { .. }
             | KernelOp::AssignSandboxTreeRoot { .. }
             | KernelOp::ProjectField { .. }
             | KernelOp::CallMember { .. }
             | KernelOp::BuildTree { .. }
-            | KernelOp::AwaitRuntime { .. } => {
-                return Err(RuntimeEvalError::UnsupportedBoundary {
-                    function: function_name.to_owned(),
-                    detail: format!("op {op:?}"),
-                });
-            }
+            | KernelOp::AwaitRuntime { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("op {op:?}"),
+            }),
         }
-
-        Ok(())
     }
 
     fn read_result(
-        &self,
+        &mut self,
         function_name: &str,
         body: &ExecutableBody,
-        slots: &BTreeMap<SlotId, EvalValue>,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
         match body.result_source {
-            ResultSource::Slot(slot) => self.read_slot(function_name, slots, slot),
+            ResultSource::Slot(slot) => self.read_slot(function_name, body, producers, slots, slot),
             ResultSource::PendingRuntimeBoundary => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: "pending runtime boundary result".to_owned(),
@@ -407,31 +375,41 @@ impl<'a> ProgramEvaluator<'a> {
     }
 
     fn resolve_operand(
-        &self,
+        &mut self,
         function_name: &str,
-        slots: &BTreeMap<SlotId, EvalValue>,
+        body: &ExecutableBody,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
         operand: &Operand,
     ) -> Result<EvalValue, RuntimeEvalError> {
         match operand {
-            Operand::Slot(slot) => self.read_slot(function_name, slots, *slot),
+            Operand::Slot(slot) => self.read_slot(function_name, body, producers, slots, *slot),
             Operand::Int(value) => self.int_to_value(function_name, *value),
             Operand::String(value) => Ok(EvalValue::String(value.clone())),
         }
     }
 
     fn read_slot(
-        &self,
+        &mut self,
         function_name: &str,
-        slots: &BTreeMap<SlotId, EvalValue>,
+        body: &ExecutableBody,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
         slot: SlotId,
     ) -> Result<EvalValue, RuntimeEvalError> {
-        slots
+        if let Some(value) = slots.get(&slot).cloned() {
+            return Ok(value);
+        }
+        let op = producers
             .get(&slot)
-            .cloned()
+            .copied()
             .ok_or_else(|| RuntimeEvalError::MissingSlot {
                 function: function_name.to_owned(),
                 slot: slot.0,
-            })
+            })?;
+        let value = self.eval_op(function_name, body, producers, slots, op)?;
+        slots.insert(slot, value.clone());
+        Ok(value)
     }
 
     fn int_to_value(&self, function_name: &str, value: i64) -> Result<EvalValue, RuntimeEvalError> {
@@ -497,6 +475,34 @@ impl EvalValue {
             Self::Failure(_) => "failure",
             Self::Pending(_) => "pending",
         }
+    }
+}
+
+fn produced_slot(op: &KernelOp) -> SlotId {
+    match op {
+        KernelOp::AssignHostLocal { dst, .. }
+        | KernelOp::AssignSandboxTreeRoot { dst, .. }
+        | KernelOp::AssignConstInt { dst, .. }
+        | KernelOp::AssignConstString { dst, .. }
+        | KernelOp::AssignAlias { dst, .. }
+        | KernelOp::AssignLazyPoison { dst, .. }
+        | KernelOp::AssignCallableAddConst { dst, .. }
+        | KernelOp::ApplyCallable { dst, .. }
+        | KernelOp::MakePair { dst, .. }
+        | KernelOp::ProjectIndex { dst, .. }
+        | KernelOp::Add { dst, .. }
+        | KernelOp::NotEqual { dst, .. }
+        | KernelOp::ProjectField { dst, .. }
+        | KernelOp::CallMember { dst, .. }
+        | KernelOp::BuildTree { dst, .. }
+        | KernelOp::MakeArray { dst, .. }
+        | KernelOp::ConcatStrings { dst, .. }
+        | KernelOp::StringLen { dst, .. }
+        | KernelOp::StringSlice { dst, .. }
+        | KernelOp::Select { dst, .. }
+        | KernelOp::AssignFailure { dst, .. }
+        | KernelOp::CallBody { dst, .. }
+        | KernelOp::AwaitRuntime { dst, .. } => *dst,
     }
 }
 
