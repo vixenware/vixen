@@ -3688,6 +3688,7 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vox",
+ "vx-runner",
  "vx-services",
  "vx-store",
 ]
@@ -3790,6 +3791,21 @@ dependencies = [
  "vx-diagnostics",
  "vx-parser",
  "vx-types",
+]
+
+[[package]]
+name = "vx-runner"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "facet",
+ "figue",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "tracing",
+ "vox",
+ "vx-io",
+ "vx-services",
 ]
 
 [[package]]

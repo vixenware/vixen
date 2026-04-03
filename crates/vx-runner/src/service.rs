@@ -1,38 +1,23 @@
-use vx_services::{
-    DiscoverRequest, DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner,
-};
-use vx_services::{ServiceVersion, StoreProgress};
+use vx_services::{DiscoverProbeRequest, DiscoverResult, ExecRequest, ExecResult, Runner};
 
 use crate::RunnerService;
 
 impl RunnerService {
-    async fn version(&self) -> ServiceVersion {
-        ServiceVersion {
-            service: "vx-runner".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol_version: RUNNER_PROTOCOL_VERSION,
-        }
+    async fn exec(&self, _request: ExecRequest) -> ExecResult {
+        ExecResult {}
     }
 
-    async fn run(&self, _request: RunRequest, _progress: vox::Tx<StoreProgress>) -> RunResult {
-        RunResult {}
-    }
-
-    async fn discover(&self, _request: DiscoverRequest) -> DiscoverResult {
+    async fn discover_probe(&self, _request: DiscoverProbeRequest) -> DiscoverResult {
         DiscoverResult {}
     }
 }
 
 impl Runner for RunnerService {
-    async fn version(&self) -> ServiceVersion {
-        RunnerService::version(self).await
+    async fn exec(&self, request: ExecRequest) -> ExecResult {
+        RunnerService::exec(self, request).await
     }
 
-    async fn run(&self, request: RunRequest, progress: vox::Tx<StoreProgress>) -> RunResult {
-        RunnerService::run(self, request, progress).await
-    }
-
-    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult {
-        RunnerService::discover(self, request).await
+    async fn discover_probe(&self, request: DiscoverProbeRequest) -> DiscoverResult {
+        RunnerService::discover_probe(self, request).await
     }
 }

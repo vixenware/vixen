@@ -28,7 +28,7 @@ members = [
   ## services
   "crates/vx-store",
   # "crates/vx-vfsd",
-  # "crates/vx-runner",
+  "crates/vx-runner",
   # "crates/vx-vfs-types",
   # "crates/vx-vfs",
   # "crates/vx-fskit",

@@ -3,6 +3,14 @@ name = "vx-runner"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "vx_runner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vx-runner"
+path = "src/main.rs"
+
 [features]
 default = []
 diagnostics = ["moire/diagnostics"]
@@ -13,14 +21,13 @@ diagnostics = ["moire/diagnostics"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-
 facet = { workspace = true }
 figue = { workspace = true }
 vox = { workspace = true }
 tokio = { workspace = true }
 eyre = { workspace = true }
 tracing = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
+
 vx-services.workspace = true
 vx-io = { workspace = true }
 moire = { workspace = true }

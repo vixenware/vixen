@@ -6,7 +6,8 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
 use vox::{ConnectionAcceptor, Metadata};
-use vx_services::{DaemonDispatcher, StoreDispatcher};
+use vx_runner::RunnerService;
+use vx_services::{DaemonDispatcher, RunnerDispatcher, StoreDispatcher};
 use vx_store::StoreService;
 
 mod service;
@@ -27,9 +28,11 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 
     let service = DaemonService::new();
     let store_service = vx_store::open(config.store_root).await?;
+    let runner_service = RunnerService::new();
     let acceptor = DaemonAcceptor {
         service,
         store_service,
+        runner_service,
     };
 
     let mut listeners = tokio::task::JoinSet::new();
@@ -52,6 +55,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 struct DaemonAcceptor {
     service: DaemonService,
     store_service: StoreService,
+    runner_service: RunnerService,
 }
 
 impl ConnectionAcceptor for DaemonAcceptor {
@@ -64,6 +68,7 @@ impl ConnectionAcceptor for DaemonAcceptor {
         match request.service() {
             "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
             "Store" => connection.handle_with(StoreDispatcher::new(self.store_service.clone())),
+            "Runner" => connection.handle_with(RunnerDispatcher::new(self.runner_service.clone())),
             other => {
                 tracing::warn!("unknown service requested: {}", other);
                 return Err(vec![]);
