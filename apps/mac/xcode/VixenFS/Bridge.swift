@@ -1,14 +1,12 @@
 import CryptoKit
 import FSKit
 import Foundation
-import RoamRuntime
+import VoxRuntime
 import os
 
 enum VixenFSConstants {
     static let subsystem = "eu.bearcove.vixenfs"
     static let appGroupIdentifier = "B2N6FSRTPV.vixenfs"
-    static let shmBootstrapMaxAttempts = 1
-    static let shmBootstrapRetryDelayNs: UInt64 = 0
 }
 
 func vixenPOSIXCode(for error: Error) -> Int32 {
@@ -53,7 +51,7 @@ func vixenPOSIXCode(for error: Error) -> Int32 {
         }
     }
 
-    if let err = error as? RoamError {
+    if let err = error as? VoxError {
         switch err {
         case .unknownMethod, .notImplemented:
             return POSIXError.ENOSYS.rawValue
@@ -65,35 +63,8 @@ func vixenPOSIXCode(for error: Error) -> Int32 {
             return POSIXError.ETIMEDOUT.rawValue
         case .cancelled:
             return POSIXError.ECANCELED.rawValue
-        }
-    }
-
-    if let err = error as? ShmBootstrapError {
-        switch err {
-        case .invalidSid, .invalidSocketPath, .invalidRequestEncoding:
-            return POSIXError.EINVAL.rawValue
-        case .unsupportedPlatform:
-            return POSIXError.ENOTSUP.rawValue
-        case .socketCreateFailed(let errno), .connectFailed(let errno), .writeFailed(let errno),
-            .readFailed(let errno):
-            return errno
-        case .eof:
-            return POSIXError.EPIPE.rawValue
-        case .invalidResponseMagic, .protocolError, .missingFileDescriptor:
-            return POSIXError.EPROTO.rawValue
-        }
-    }
-
-    if let err = error as? ShmRegionError {
-        switch err {
-        case .invalidSize, .invalidOffset, .resizeShrinkUnsupported:
-            return POSIXError.EINVAL.rawValue
-        case .createFailed(let errno), .openFailed(let errno), .statFailed(let errno),
-            .mmapFailed(let errno), .munmapFailed(let errno), .ftruncateFailed(let errno),
-            .fchmodFailed(let errno):
-            return errno
-        case .emptyFile:
-            return POSIXError.ENOENT.rawValue
+        case .indeterminate:
+            return POSIXError.EIO.rawValue
         }
     }
 
@@ -114,8 +85,6 @@ func vixenMappedFSError(_ error: Error, operation: StaticString, logger: Logger)
     return fs_errorForPOSIXError(code)
 }
 
-extension VfsClient: @unchecked Sendable {}
-
 actor LifecycleTrace {
     static let shared = LifecycleTrace()
 
@@ -134,51 +103,24 @@ actor LifecycleTrace {
 }
 
 final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
-    // Compatibility with older RoamRuntime protocol shape (no channels argument).
-    func preregister(
-        methodId: UInt64,
-        payload: [UInt8],
-        registry: ChannelRegistry
-    ) async {
+    func preregister(methodId: UInt64, payload: [UInt8], registry: ChannelRegistry) async {
         _ = methodId
         _ = payload
         _ = registry
     }
 
-    // Compatibility with newer RoamRuntime protocol shape (channels argument).
-    func preregister(
-        methodId: UInt64,
-        payload: [UInt8],
-        channels: [UInt64],
-        registry: ChannelRegistry
-    ) async {
-        _ = channels
-    }
-
-    // Compatibility with older RoamRuntime protocol shape (no channels argument).
     func dispatch(
         methodId: UInt64,
         payload: [UInt8],
         requestId: UInt64,
         registry: ChannelRegistry,
+        schemaSendTracker: SchemaSendTracker,
         taskTx: @escaping @Sendable (TaskMessage) -> Void
     ) async {
         _ = methodId
         _ = payload
         _ = registry
-        taskTx(.response(requestId: requestId, payload: encodeUnknownMethodError()))
-    }
-
-    // Compatibility with newer RoamRuntime protocol shape (channels argument).
-    func dispatch(
-        methodId: UInt64,
-        payload: [UInt8],
-        channels: [UInt64],
-        requestId: UInt64,
-        registry: ChannelRegistry,
-        taskTx: @escaping @Sendable (TaskMessage) -> Void
-    ) async {
-        _ = channels
+        _ = schemaSendTracker
         taskTx(.response(requestId: requestId, payload: encodeUnknownMethodError()))
     }
 }
@@ -227,8 +169,8 @@ actor ConnectionHealth {
     }
 
     func snapshot() -> ConnectionHealthSnapshot {
-        let connectedAtString = connectedAt.map { Self.iso8601Formatter.string(from: $0) }
-        let disconnectedAtString = disconnectedAt.map { Self.iso8601Formatter.string(from: $0) }
+        let connectedAtString = connectedAt.map(Self.iso8601String)
+        let disconnectedAtString = disconnectedAt.map(Self.iso8601String)
 
         let uptimeSeconds: Double?
         if currentlyConnected, let start = connectedAt {
@@ -262,11 +204,11 @@ actor ConnectionHealth {
         }
     }
 
-    private static let iso8601Formatter: ISO8601DateFormatter = {
+    private static func iso8601String(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 
     private func resolveAppGroupPath() -> String? {
         FileManager.default.containerURL(
@@ -281,6 +223,7 @@ actor VfsConnection {
 
     private struct PeerConnection {
         var client: VfsClient?
+        var session: Session?
         var driverTask: Task<Void, Never>?
         var terminalError: NSError?
     }
@@ -323,6 +266,7 @@ actor VfsConnection {
         await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
 
         for (sid, peer) in peers {
+            peer.session?.handle.shutdown()
             peer.driverTask?.cancel()
             notifySessionDeath(sid: sid)
         }
@@ -341,12 +285,12 @@ actor VfsConnection {
 
         if let existing = peers[targetSid], let terminalError = existing.terminalError {
             log.notice(
-                "Refusing SHM reconnect for terminal sid=\(targetSid, privacy: .public): \(terminalError.localizedDescription, privacy: .public)"
+                "Refusing reconnect for terminal sid=\(targetSid, privacy: .public): \(terminalError.localizedDescription, privacy: .public)"
             )
             throw terminalError
         }
 
-        log.info("Connecting over SHM sid=\(targetSid, privacy: .public)")
+        log.info("Connecting over local socket sid=\(targetSid, privacy: .public)")
         let client = try await establishClient(for: targetSid)
         await ConnectionHealth.shared.recordConnected()
         return client
@@ -368,40 +312,29 @@ actor VfsConnection {
     }
 
     private func establishClient(for sid: String) async throws -> VfsClient {
-        let ticket = try await requestTicket(sid: sid)
-        debugLog("bootstrap control socket established sid=\(sid)")
-        log.info(
-            "SHM bootstrap ticket sid=\(sid, privacy: .public) hubPath=\(ticket.hubPath, privacy: .public) peerId=\(ticket.peerId, privacy: .public)"
-        )
-        debugLog("ticket doorbellFd=\(ticket.doorbellFd) hubPathLen=\(ticket.hubPath.count)")
-        logPathState(path: ticket.hubPath, label: "hubPath")
+        let socketPath = try resolveSocketPath(sid: sid)
+        debugLog("local socket path resolved sid=\(sid) path=\(socketPath)")
+        logPathState(path: socketPath, label: "vfsSocketPath")
 
-        let transport: ShmGuestTransport
-        do {
-            transport = try ShmGuestTransport.attach(ticket: ticket)
-        } catch {
-            log.error(
-                "SHM attach failed sid=\(sid, privacy: .public): \(self.describe(error: error), privacy: .public)"
-            )
-            throw error
-        }
-
-        let (handle, driver) = try await establishShmGuest(
-            transport: transport,
-            dispatcher: NoopDispatcher()
+        let session = try await Session.initiator(
+            UnixConnector(path: socketPath),
+            dispatcher: NoopDispatcher(),
+            acceptConnections: false,
+            resumable: false
         )
 
         let logger = log
         let driverTask = Task { [weak self] in
             do {
-                try await driver.run()
-                logger.error("Roam driver exited cleanly — server is gone")
-                NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
+                try await session.run()
+                logger.error("Vox driver exited cleanly — server is gone")
+                NSLog("VixenFS: Vox local driver exited cleanly (server gone)")
                 await self?.handleDriverExit(sid: sid, reason: "driver_exit_clean")
             } catch {
                 logger.error(
-                    "Roam driver exited with error: \(String(describing: error), privacy: .public)")
-                NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
+                    "Vox driver exited with error: \(String(describing: error), privacy: .public)"
+                )
+                NSLog("VixenFS: Vox local driver exited with error: \(String(describing: error))")
                 await self?.handleDriverExit(
                     sid: sid,
                     reason: "driver_exit_error:\(String(describing: error))"
@@ -410,7 +343,8 @@ actor VfsConnection {
         }
 
         peers[sid] = PeerConnection(
-            client: VfsClient(connection: handle, timeout: 28.0),
+            client: VfsClient(connection: session.connection, timeout: 28.0),
+            session: session,
             driverTask: driverTask,
             terminalError: nil
         )
@@ -424,7 +358,7 @@ actor VfsConnection {
 
         if disconnectRequested {
             log.info("VFS connection closed during normal unload sid=\(sid, privacy: .public)")
-            NSLog("VixenFS: SHM connection closed during unload")
+            NSLog("VixenFS: local Vox connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
             peers.removeValue(forKey: sid)
         } else {
@@ -437,7 +371,7 @@ actor VfsConnection {
             log.error(
                 "Connection to VFS server lost for sid=\(sid, privacy: .public); waiting for FSKit to unload/deactivate"
             )
-            NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
+            NSLog("VixenFS: local Vox connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
 
@@ -454,7 +388,7 @@ actor VfsConnection {
         }
     }
 
-    private func requestTicket(sid: String) async throws -> ShmBootstrapTicket {
+    private func resolveSocketPath(sid: String) throws -> String {
         guard
             let appGroupURL = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: VixenFSConstants.appGroupIdentifier)
@@ -467,83 +401,20 @@ actor VfsConnection {
                 ])
         }
 
-        let controlSockURL = appGroupURL.appendingPathComponent("c-\(sid).sock", isDirectory: false)
-        let controlSockPath = controlSockURL.path
+        let socketURL = appGroupURL.appendingPathComponent("c-\(sid).sock", isDirectory: false)
+        let socketPath = socketURL.path
         debugLog("appGroupPath=\(appGroupURL.path) len=\(appGroupURL.path.count)")
-        debugLog("controlSockPath=\(controlSockPath) len=\(controlSockPath.count)")
-        logPathState(path: controlSockPath, label: "controlSockPath")
-
-        do {
-            return try requestShmBootstrapTicket(controlSocketPath: controlSockPath, sid: sid)
-        } catch {
-            log.error(
-                "SHM bootstrap attempt 1 failed for sid=\(sid, privacy: .public): \(self.describe(error: error), privacy: .public)"
-            )
+        debugLog("socketPath=\(socketPath) len=\(socketPath.count)")
+        logPathState(path: socketPath, label: "socketPath")
+        guard FileManager.default.fileExists(atPath: socketPath) else {
             throw NSError(
                 domain: "VFS", code: -1,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Failed SHM bootstrap for sid=\(sid): \(self.describe(error: error))"
+                        "VFS socket missing for sid=\(sid): \(socketPath)"
                 ])
         }
-    }
-
-    private func describe(error: Error) -> String {
-        if let err = error as? ShmRegionError {
-            switch err {
-            case .invalidSize:
-                return "ShmRegionError.invalidSize"
-            case .invalidOffset:
-                return "ShmRegionError.invalidOffset"
-            case .createFailed(let errno):
-                return "ShmRegionError.createFailed(errno=\(errno))"
-            case .openFailed(let errno):
-                return "ShmRegionError.openFailed(errno=\(errno))"
-            case .statFailed(let errno):
-                return "ShmRegionError.statFailed(errno=\(errno))"
-            case .mmapFailed(let errno):
-                return "ShmRegionError.mmapFailed(errno=\(errno))"
-            case .munmapFailed(let errno):
-                return "ShmRegionError.munmapFailed(errno=\(errno))"
-            case .ftruncateFailed(let errno):
-                return "ShmRegionError.ftruncateFailed(errno=\(errno))"
-            case .fchmodFailed(let errno):
-                return "ShmRegionError.fchmodFailed(errno=\(errno))"
-            case .resizeShrinkUnsupported:
-                return "ShmRegionError.resizeShrinkUnsupported"
-            case .emptyFile:
-                return "ShmRegionError.emptyFile"
-            }
-        }
-        if let err = error as? ShmBootstrapError {
-            switch err {
-            case .invalidSid:
-                return "ShmBootstrapError.invalidSid"
-            case .unsupportedPlatform:
-                return "ShmBootstrapError.unsupportedPlatform"
-            case .invalidSocketPath:
-                return "ShmBootstrapError.invalidSocketPath"
-            case .socketCreateFailed(let errno):
-                return "ShmBootstrapError.socketCreateFailed(errno=\(errno))"
-            case .connectFailed(let errno):
-                return "ShmBootstrapError.connectFailed(errno=\(errno))"
-            case .writeFailed(let errno):
-                return "ShmBootstrapError.writeFailed(errno=\(errno))"
-            case .readFailed(let errno):
-                return "ShmBootstrapError.readFailed(errno=\(errno))"
-            case .eof:
-                return "ShmBootstrapError.eof"
-            case .invalidRequestEncoding:
-                return "ShmBootstrapError.invalidRequestEncoding"
-            case .invalidResponseMagic:
-                return "ShmBootstrapError.invalidResponseMagic"
-            case .protocolError(let message):
-                return "ShmBootstrapError.protocolError(\(message))"
-            case .missingFileDescriptor:
-                return "ShmBootstrapError.missingFileDescriptor"
-            }
-        }
-        return String(describing: error)
+        return socketPath
     }
 
     private struct MountOptions {

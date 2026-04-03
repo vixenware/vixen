@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "VixenFS", targets: ["VixenFS"]),
     ],
     dependencies: [
-        .package(path: "../../vox/swift/vox-runtime"),
+        .package(path: "../../../vox/swift/vox-runtime"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
     ],
     targets: [

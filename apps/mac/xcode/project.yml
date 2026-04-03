@@ -15,7 +15,7 @@ settings:
 
 packages:
   vox-runtime:
-    path: ../../../vox/swift/vox-runtime
+    path: ../../../../vox/swift/vox-runtime
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
@@ -86,4 +86,3 @@ targets:
     dependencies:
       - package: vox-runtime
         product: VoxRuntime
-
