@@ -66,6 +66,10 @@ pub(crate) struct EvalArgs {
 
 #[derive(Facet, Debug)]
 pub(crate) struct DaemonArgs {
+    /// Daemon configuration file in STYX format
+    #[facet(args::named)]
+    pub(crate) config: Option<camino::Utf8PathBuf>,
+
     /// Storage root directory
     #[facet(args::named)]
     pub(crate) store_root: camino::Utf8PathBuf,

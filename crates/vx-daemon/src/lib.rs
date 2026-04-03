@@ -5,9 +5,12 @@
 
 use camino::Utf8PathBuf;
 use eyre::{Result, bail};
+use facet::Facet;
 use vox::{ConnectionAcceptor, Metadata};
 use vx_runner::RunnerService;
-use vx_services::{DaemonDispatcher, OrchestratorDispatcher, RunnerDispatcher, StoreDispatcher};
+use vx_services::{
+    DAEMON_SOCK, DaemonDispatcher, OrchestratorDispatcher, RunnerDispatcher, StoreDispatcher,
+};
 use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
 
@@ -79,6 +82,100 @@ impl DaemonConfig {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct DaemonFile {
+    pub daemon: DaemonFileConfig,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct DaemonFileConfig {
+    pub listen: Option<Vec<String>>,
+    pub services: HostedServicesFile,
+}
+
+#[derive(Debug, Clone, Default, Facet)]
+pub struct HostedServicesFile {
+    pub orchestrator: Option<OrchestratorFileConfig>,
+    pub store: Option<StoreFileConfig>,
+    pub runner: Option<RunnerFileConfig>,
+    pub vfsd: Option<VfsdFileConfig>,
+}
+
+#[derive(Debug, Clone, Default, Facet)]
+pub struct OrchestratorFileConfig;
+
+#[derive(Debug, Clone, Facet)]
+pub struct StoreFileConfig {
+    pub root: Utf8PathBuf,
+    pub upstream: Option<ServiceRefFile>,
+}
+
+#[derive(Debug, Clone, Default, Facet)]
+pub struct RunnerFileConfig {
+    pub store: Option<ServiceRefFile>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct VfsdFileConfig {
+    pub mount: Utf8PathBuf,
+    pub store: Option<ServiceRefFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ServiceRefFile {
+    InProcess,
+    Rpc { address: String },
+}
+
+impl From<ServiceRefFile> for ServiceRef {
+    fn from(value: ServiceRefFile) -> Self {
+        match value {
+            ServiceRefFile::InProcess => ServiceRef::InProcess,
+            ServiceRefFile::Rpc { address } => ServiceRef::Rpc { address },
+        }
+    }
+}
+
+impl From<HostedServicesFile> for HostedServices {
+    fn from(value: HostedServicesFile) -> Self {
+        Self {
+            orchestrator: value.orchestrator.map(|_| OrchestratorConfig),
+            store: value.store.map(|store| StoreConfig {
+                root: store.root,
+                upstream: store.upstream.map(Into::into),
+            }),
+            runner: value.runner.map(|runner| RunnerConfig {
+                store: runner.store.map(Into::into),
+            }),
+            vfsd: value.vfsd.map(|vfsd| VfsdConfig {
+                mount: vfsd.mount,
+                store: vfsd.store.map(Into::into),
+            }),
+        }
+    }
+}
+
+impl From<DaemonFile> for DaemonConfig {
+    fn from(value: DaemonFile) -> Self {
+        Self {
+            listen: value
+                .daemon
+                .listen
+                .unwrap_or_else(|| vec![DAEMON_SOCK.to_owned()]),
+            services: value.daemon.services.into(),
+        }
+    }
+}
+
+pub fn load_config_file(path: &Utf8PathBuf) -> Result<DaemonConfig> {
+    let text = std::fs::read_to_string(path)?;
+    let parsed: DaemonFile = facet_styx::from_str(&text)
+        .map_err(|error| eyre::eyre!("failed to parse daemon config `{path}`: {error}"))?;
+    Ok(parsed.into())
 }
 
 /// Serve the VXD service on all configured listen addresses.
@@ -267,8 +364,8 @@ mod tests {
     };
 
     use super::{
-        DaemonConfig, HostedServices, OrchestratorConfig, ServiceRef, resolve_optional_dependency,
-        resolve_required_dependency,
+        DaemonConfig, HostedServices, OrchestratorConfig, ServiceRef, ServiceRefFile,
+        load_config_file, resolve_optional_dependency, resolve_required_dependency,
     };
 
     #[test]
@@ -367,6 +464,95 @@ fn add(lhs: U64, rhs: U64) -> U64 (
         panic!(
             "failed to connect orchestrator client to {address}: {}",
             last_error.expect("retry loop should record at least one connection error")
+        );
+    }
+
+    #[test]
+    fn parses_styx_config_with_in_process_defaults() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config_path = temp_dir.path().join("vxd.styx");
+        std::fs::write(
+            &config_path,
+            r#"
+daemon {
+  services {
+    orchestrator {}
+    store { root "/tmp/vx/store" }
+    runner {}
+    vfsd { mount "/tmp/vx/vfs" }
+  }
+}
+"#,
+        )
+        .expect("failed to write config");
+
+        let config =
+            load_config_file(&camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"))
+                .expect("config should parse");
+
+        assert_eq!(config.listen, vec![vx_services::DAEMON_SOCK.to_owned()]);
+        assert!(config.services.orchestrator.is_some());
+        assert_eq!(
+            config
+                .services
+                .store
+                .as_ref()
+                .expect("store should exist")
+                .root,
+            camino::Utf8PathBuf::from("/tmp/vx/store")
+        );
+        assert!(config.services.runner.is_some());
+        assert_eq!(
+            config
+                .services
+                .vfsd
+                .as_ref()
+                .expect("vfsd should exist")
+                .mount,
+            camino::Utf8PathBuf::from("/tmp/vx/vfs")
+        );
+    }
+
+    #[test]
+    fn parses_styx_rpc_dependency_ref() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config_path = temp_dir.path().join("vxd.styx");
+        std::fs::write(
+            &config_path,
+            r#"
+daemon {
+  services {
+    runner {
+      store @rpc{address "tcp://store-a:5000"}
+    }
+  }
+}
+"#,
+        )
+        .expect("failed to write config");
+
+        let config =
+            load_config_file(&camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"))
+                .expect("config should parse");
+
+        assert_eq!(
+            config
+                .services
+                .runner
+                .as_ref()
+                .expect("runner should exist")
+                .store,
+            Some(ServiceRef::Rpc {
+                address: "tcp://store-a:5000".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn service_ref_file_in_process_tag_maps_to_runtime_ref() {
+        assert_eq!(
+            ServiceRef::from(ServiceRefFile::InProcess),
+            ServiceRef::InProcess
         );
     }
 }

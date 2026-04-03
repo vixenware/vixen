@@ -20,10 +20,13 @@ fn main() {
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
-    rt.block_on(async_main());
+    if let Err(e) = rt.block_on(async_main()) {
+        eprintln!("fatal error: {e}");
+        std::process::exit(1);
+    }
 }
 
-async fn async_main() {
+async fn async_main() -> eyre::Result<()> {
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
             .expect("failed to build CLI")
@@ -37,23 +40,22 @@ async fn async_main() {
     .run()
     .unwrap();
 
-    let res = match cli.command {
+    match cli.command {
         CliCommand::Health(_args) => health().await,
         CliCommand::Eval(args) => eval(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
-            let config = vxd::DaemonConfig::local_all_in_one(
-                vec![vx_services::DAEMON_SOCK.to_string()],
-                args.store_root,
-                args.vfs_mount,
-            );
+            let config = if let Some(config_path) = args.config {
+                vxd::load_config_file(&config_path)?
+            } else {
+                vxd::DaemonConfig::local_all_in_one(
+                    vec![vx_services::DAEMON_SOCK.to_string()],
+                    args.store_root,
+                    args.vfs_mount,
+                )
+            };
             vxd::serve(config).await
         }
-    };
-
-    if let Err(e) = res {
-        eprintln!("fatal error: {e}");
-        std::process::exit(1);
     }
 }
 

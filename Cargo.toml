@@ -67,6 +67,7 @@ facet = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-error = { version = "0.44.1" }
 facet-json = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
+facet-styx = "3.0.0"
 
 
 # cmdline parsing
