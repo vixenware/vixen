@@ -293,6 +293,12 @@ fn build_slice(name: String) -> String (
 )
 "#;
 
+    const SOURCE_DISCOVER_WHICH: &str = r#"
+fn probe() #discover -> String (
+  discover(executor_class("default"), (host) => host.which("sh"))
+)
+"#;
+
     const CC_VERSION_SOURCE: &str = include_str!("../../../zoo/cc-version.vx");
 
     #[tokio::test]
@@ -500,6 +506,33 @@ fn build_slice(name: String) -> String (
                 );
             }
             other => panic!("expected failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_local_discover_host_which() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_DISCOVER_WHICH.to_owned(),
+                function_name: "probe".to_owned(),
+                args: vec![],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => match success.value {
+                RuntimeValue::String(path) => {
+                    assert!(path.starts_with('/'), "expected absolute path, got {path}");
+                    assert!(path.ends_with("sh"), "expected shell path, got {path}");
+                }
+                other => panic!("expected string path, got {other:?}"),
+            },
+            other => panic!("expected success, got {other:?}"),
         }
     }
 
