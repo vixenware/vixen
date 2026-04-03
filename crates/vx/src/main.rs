@@ -7,7 +7,7 @@ mod cli;
 use figue as args;
 use vx_services::{
     DAEMON_SOCK, DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult,
-    OrchestratorClient, StrictEvalBackend, StrictValue,
+    OrchestratorClient, RuntimeValue, StrictEvalBackend,
 };
 
 use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs};
@@ -129,28 +129,28 @@ fn parse_backend(value: &str) -> eyre::Result<StrictEvalBackend> {
     }
 }
 
-fn parse_value(value: &str) -> eyre::Result<StrictValue> {
+fn parse_value(value: &str) -> eyre::Result<RuntimeValue> {
     if let Some(rest) = value.strip_prefix("u64:") {
-        return Ok(StrictValue::U64(rest.parse()?));
+        return Ok(RuntimeValue::U64(rest.parse()?));
     }
     if let Some(rest) = value.strip_prefix("bool:") {
         return match rest {
-            "true" => Ok(StrictValue::Bool(true)),
-            "false" => Ok(StrictValue::Bool(false)),
+            "true" => Ok(RuntimeValue::Bool(true)),
+            "false" => Ok(RuntimeValue::Bool(false)),
             other => eyre::bail!("invalid bool literal `{other}`"),
         };
     }
     if let Some(rest) = value.strip_prefix("string:") {
-        return Ok(StrictValue::String(rest.to_owned()));
+        return Ok(RuntimeValue::String(rest.to_owned()));
     }
-    Ok(StrictValue::String(value.to_owned()))
+    Ok(RuntimeValue::String(value.to_owned()))
 }
 
-fn format_value(value: &StrictValue) -> String {
+fn format_value(value: &RuntimeValue) -> String {
     match value {
-        StrictValue::U64(value) => value.to_string(),
-        StrictValue::Bool(value) => value.to_string(),
-        StrictValue::String(value) => value.clone(),
+        RuntimeValue::U64(value) => value.to_string(),
+        RuntimeValue::Bool(value) => value.to_string(),
+        RuntimeValue::String(value) => value.clone(),
     }
 }
 

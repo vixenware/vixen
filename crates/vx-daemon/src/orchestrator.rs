@@ -5,7 +5,7 @@ use vx_jit::{
 };
 use vx_services::{
     EvalStrictFunctionFailure, EvalStrictFunctionRequest, EvalStrictFunctionResult,
-    EvalStrictFunctionSuccess, Orchestrator, StrictEvalBackend, StrictValue,
+    EvalStrictFunctionSuccess, Orchestrator, RuntimeValue, StrictEvalBackend,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl OrchestratorService {
             .args
             .iter()
             .cloned()
-            .map(strict_fragment_value_from_rpc)
+            .map(strict_fragment_value_from_runtime)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(args) => args,
@@ -114,7 +114,7 @@ impl OrchestratorService {
         };
 
         EvalStrictFunctionResult::Ok(EvalStrictFunctionSuccess {
-            value: rpc_value_from_strict_fragment(value),
+            value: runtime_value_from_strict_fragment(value),
             strict_fragment_dump,
             hir,
             ir,
@@ -147,19 +147,19 @@ fn failure_with_dump(
     }
 }
 
-fn strict_fragment_value_from_rpc(value: StrictValue) -> Result<StrictFragmentValue, String> {
+fn strict_fragment_value_from_runtime(value: RuntimeValue) -> Result<StrictFragmentValue, String> {
     Ok(match value {
-        StrictValue::U64(value) => StrictFragmentValue::U64(value),
-        StrictValue::Bool(value) => StrictFragmentValue::Bool(value),
-        StrictValue::String(value) => StrictFragmentValue::String(value),
+        RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
+        RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
+        RuntimeValue::String(value) => StrictFragmentValue::String(value),
     })
 }
 
-fn rpc_value_from_strict_fragment(value: StrictFragmentValue) -> StrictValue {
+fn runtime_value_from_strict_fragment(value: StrictFragmentValue) -> RuntimeValue {
     match value {
-        StrictFragmentValue::U64(value) => StrictValue::U64(value),
-        StrictFragmentValue::Bool(value) => StrictValue::Bool(value),
-        StrictFragmentValue::String(value) => StrictValue::String(value),
+        StrictFragmentValue::U64(value) => RuntimeValue::U64(value),
+        StrictFragmentValue::Bool(value) => RuntimeValue::Bool(value),
+        StrictFragmentValue::String(value) => RuntimeValue::String(value),
     }
 }
 
@@ -177,8 +177,8 @@ fn execute_with_kajit(
 #[cfg(test)]
 mod tests {
     use vx_services::{
-        EvalStrictFunctionRequest, EvalStrictFunctionResult, Orchestrator, StrictEvalBackend,
-        StrictValue,
+        EvalStrictFunctionRequest, EvalStrictFunctionResult, Orchestrator, RuntimeValue,
+        StrictEvalBackend,
     };
 
     use super::{OrchestratorService, OrchestratorWiring};
@@ -208,7 +208,7 @@ fn one() -> String (
             .eval_strict_function(EvalStrictFunctionRequest {
                 source_text: SOURCE_ADD_U64.to_owned(),
                 function_name: "add".to_owned(),
-                args: vec![StrictValue::U64(30), StrictValue::U64(12)],
+                args: vec![RuntimeValue::U64(30), RuntimeValue::U64(12)],
                 backend: StrictEvalBackend::Kajit,
                 include_strict_fragment_dump: false,
                 include_hir: false,
@@ -218,7 +218,7 @@ fn one() -> String (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::U64(42));
+                assert_eq!(success.value, RuntimeValue::U64(42));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -241,7 +241,7 @@ fn one() -> String (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::String("1".to_owned()));
+                assert_eq!(success.value, RuntimeValue::String("1".to_owned()));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -264,7 +264,7 @@ fn one() -> String (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::String("1".to_owned()));
+                assert_eq!(success.value, RuntimeValue::String("1".to_owned()));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -277,7 +277,7 @@ fn one() -> String (
             .eval_strict_function(EvalStrictFunctionRequest {
                 source_text: SOURCE_STR_LEN.to_owned(),
                 function_name: "str_len".to_owned(),
-                args: vec![StrictValue::String("serde".to_owned())],
+                args: vec![RuntimeValue::String("serde".to_owned())],
                 backend: StrictEvalBackend::Interpreter,
                 include_strict_fragment_dump: true,
                 include_hir: true,
@@ -287,7 +287,7 @@ fn one() -> String (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::U64(5));
+                assert_eq!(success.value, RuntimeValue::U64(5));
                 assert!(
                     success
                         .strict_fragment_dump

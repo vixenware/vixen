@@ -17,7 +17,7 @@ pub enum StrictEvalBackend {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(C)]
-pub enum StrictValue {
+pub enum RuntimeValue {
     U64(u64),
     Bool(bool),
     String(String),
@@ -27,7 +27,7 @@ pub enum StrictValue {
 pub struct EvalStrictFunctionRequest {
     pub source_text: String,
     pub function_name: String,
-    pub args: Vec<StrictValue>,
+    pub args: Vec<RuntimeValue>,
     pub backend: StrictEvalBackend,
     pub include_strict_fragment_dump: bool,
     pub include_hir: bool,
@@ -36,7 +36,7 @@ pub struct EvalStrictFunctionRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionSuccess {
-    pub value: StrictValue,
+    pub value: RuntimeValue,
     pub strict_fragment_dump: Option<String>,
     pub hir: Option<String>,
     pub ir: Option<String>,

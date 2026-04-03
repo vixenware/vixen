@@ -524,7 +524,7 @@ mod tests {
     use tokio::time::sleep;
     use vx_services::{
         DaemonClient, EvalStrictFunctionRequest, EvalStrictFunctionResult, OrchestratorClient,
-        StrictEvalBackend, StrictValue,
+        RuntimeValue, StrictEvalBackend,
     };
 
     use super::{
@@ -594,7 +594,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
 "#
                 .to_owned(),
                 function_name: "add".to_owned(),
-                args: vec![StrictValue::U64(30), StrictValue::U64(12)],
+                args: vec![RuntimeValue::U64(30), RuntimeValue::U64(12)],
                 backend: StrictEvalBackend::Kajit,
                 include_strict_fragment_dump: false,
                 include_hir: false,
@@ -608,7 +608,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::U64(42));
+                assert_eq!(success.value, RuntimeValue::U64(42));
             }
             other => panic!("expected success, got {other:?}"),
         }
@@ -650,7 +650,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
 "#
                 .to_owned(),
                 function_name: "add".to_owned(),
-                args: vec![StrictValue::U64(7), StrictValue::U64(9)],
+                args: vec![RuntimeValue::U64(7), RuntimeValue::U64(9)],
                 backend: StrictEvalBackend::Kajit,
                 include_strict_fragment_dump: false,
                 include_hir: false,
@@ -664,7 +664,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
 
         match result {
             EvalStrictFunctionResult::Ok(success) => {
-                assert_eq!(success.value, StrictValue::U64(16));
+                assert_eq!(success.value, RuntimeValue::U64(16));
             }
             other => panic!("expected success, got {other:?}"),
         }
