@@ -1,9 +1,8 @@
 //! vx-vfsd - VFS daemon library.
 //!
-//! Exposes [`VfsdService`] for use by the daemon (in-process),
-//! or standalone via the `vx-vfsd` binary using [`boot`] + [`VfsdAcceptor`].
+//! Exposes [`VfsdService`] and [`VfsdAcceptor`] for use by the daemon (in-process).
 
-pub mod platform;
+pub(crate) mod platform;
 pub mod protocol;
 pub(crate) mod service;
 pub(crate) mod vfs;

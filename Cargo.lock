@@ -3444,16 +3444,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa66022bbd1ab992fad72bdedcfd07a0023b6f5ecc83d50121e39e3a3caed41"
 
 [[package]]
-name = "ur-taking-me-with-you"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f3f8d8a8d9b4ebf7caca0f098798e832807f7c53219cf7e99675f11b6ffbe4"
-dependencies = [
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3808,11 +3798,7 @@ dependencies = [
 name = "vx-runner"
 version = "0.1.0"
 dependencies = [
- "eyre",
- "facet",
- "figue",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio",
  "tracing",
  "vox",
  "vx-services",
@@ -3914,7 +3900,6 @@ dependencies = [
  "eyre",
  "facet",
  "fastrand",
- "figue",
  "futures-util",
  "libc",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3924,7 +3909,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "ur-taking-me-with-you",
  "vox",
  "vx-io",
  "vx-services",
