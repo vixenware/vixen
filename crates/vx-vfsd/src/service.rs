@@ -14,42 +14,11 @@ use vx_services::{
 pub struct VfsdService {
     vfs: Arc<CasVfs>,
     access_path: Utf8PathBuf,
-    _retained_store_connection: Option<Arc<StoreConnection>>,
-}
-
-struct StoreConnection {
-    _root_caller: vox_core::DriverCaller,
-    _session_handle: vox_core::SessionHandle,
-}
-
-impl vx_io::boot::GracefulShutdown for VfsdService {
-    async fn graceful_shutdown(&self) {}
 }
 
 impl VfsdService {
-    #[allow(dead_code)]
     pub fn new(vfs: Arc<CasVfs>, access_path: Utf8PathBuf) -> Self {
-        Self {
-            vfs,
-            access_path,
-            _retained_store_connection: None,
-        }
-    }
-
-    pub fn new_with_store_connection(
-        vfs: Arc<CasVfs>,
-        access_path: Utf8PathBuf,
-        root_caller: Arc<vox_core::DriverCaller>,
-        session_handle: Arc<vox_core::SessionHandle>,
-    ) -> Self {
-        Self {
-            vfs,
-            access_path,
-            _retained_store_connection: Some(Arc::new(StoreConnection {
-                _root_caller: Arc::unwrap_or_clone(root_caller),
-                _session_handle: Arc::unwrap_or_clone(session_handle),
-            })),
-        }
+        Self { vfs, access_path }
     }
 
     /// Parse an absolute VFS path into (prefix_id, relative_path)

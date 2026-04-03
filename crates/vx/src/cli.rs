@@ -35,6 +35,10 @@ pub(crate) struct DaemonArgs {
     /// Storage root directory
     #[facet(args::named)]
     pub(crate) store_root: camino::Utf8PathBuf,
+
+    /// VFS mount point
+    #[facet(args::named, default = "/tmp/vx/vfs")]
+    pub(crate) vfs_mount: camino::Utf8PathBuf,
 }
 
 #[derive(Facet, Debug)]

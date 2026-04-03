@@ -22,6 +22,7 @@ tracing = { workspace = true }
 vx-services.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
+vx-vfsd = { path = "../vx-vfsd" }
 
 [features]
 default = []

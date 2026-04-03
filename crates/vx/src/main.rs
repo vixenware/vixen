@@ -41,6 +41,7 @@ async fn async_main() {
             let config = vxd::DaemonConfig {
                 listen: vec![vx_services::DAEMON_SOCK.to_string()],
                 store_root: args.store_root,
+                vfs_mount: args.vfs_mount,
             };
             vxd::serve(config).await
         }

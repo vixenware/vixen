@@ -9,6 +9,7 @@ use vox::{ConnectionAcceptor, Metadata};
 use vx_runner::RunnerService;
 use vx_services::{DaemonDispatcher, RunnerDispatcher, StoreDispatcher};
 use vx_store::StoreService;
+use vx_vfsd::{VfsdDispatcher, VfsdService};
 
 mod service;
 pub use service::DaemonService;
@@ -18,6 +19,8 @@ pub struct DaemonConfig {
     pub listen: Vec<String>,
     /// Storage root directory
     pub store_root: Utf8PathBuf,
+    /// VFS mount point
+    pub vfs_mount: Utf8PathBuf,
 }
 
 /// Serve the VXD service on all configured listen addresses.
@@ -29,10 +32,18 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     let service = DaemonService::new();
     let store_service = vx_store::open(config.store_root).await?;
     let runner_service = RunnerService::new();
+
+    // vfsd connects back to the daemon socket to get a StoreClient.
+    // Use the first listen address as the store endpoint.
+    let store_addr = config.listen[0].clone();
+    let vfs_mount = vx_vfsd::effective_mount_path(&config.vfs_mount);
+    let vfsd_service = vx_vfsd::boot(&store_addr, &vfs_mount).await?;
+
     let acceptor = DaemonAcceptor {
         service,
         store_service,
         runner_service,
+        vfsd_service,
     };
 
     let mut listeners = tokio::task::JoinSet::new();
@@ -56,6 +67,7 @@ struct DaemonAcceptor {
     service: DaemonService,
     store_service: StoreService,
     runner_service: RunnerService,
+    vfsd_service: VfsdService,
 }
 
 impl ConnectionAcceptor for DaemonAcceptor {
@@ -69,6 +81,7 @@ impl ConnectionAcceptor for DaemonAcceptor {
             "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
             "Store" => connection.handle_with(StoreDispatcher::new(self.store_service.clone())),
             "Runner" => connection.handle_with(RunnerDispatcher::new(self.runner_service.clone())),
+            "Vfsd" => connection.handle_with(VfsdDispatcher::new(self.vfsd_service.clone())),
             other => {
                 tracing::warn!("unknown service requested: {}", other);
                 return Err(vec![]);

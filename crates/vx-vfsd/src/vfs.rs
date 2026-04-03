@@ -41,8 +41,8 @@ use vx_services::{
 };
 use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
-    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
-    errno, mode,
+    ReadDirResult, ReadResult, SetAttributesParams, VfsDiskNotify, VfsResult, WriteResult, errno,
+    mode,
 };
 
 use crate::protocol::{VfsPrefixStateSummary, VfsTrackedObservation};
@@ -1914,48 +1914,6 @@ impl CasVfs {
 
     pub(crate) async fn ping(&self) -> String {
         "pong from vx-runner CAS VFS".to_string()
-    }
-}
-
-impl Vfs for CasVfs {
-    async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
-        CasVfs::lookup(self, parent_id, name).await
-    }
-
-    async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
-        CasVfs::get_attributes(self, item_id).await
-    }
-
-    async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
-        CasVfs::read_dir(self, item_id, cookie, verifier).await
-    }
-
-    async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
-        CasVfs::read(self, item_id, offset, len).await
-    }
-
-    async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
-        CasVfs::write(self, item_id, offset, data).await
-    }
-
-    async fn create(&self, parent_id: ItemId, name: String, item_type: ItemType) -> CreateResult {
-        CasVfs::create(self, parent_id, name, item_type).await
-    }
-
-    async fn delete(&self, item_id: ItemId) -> VfsResult {
-        CasVfs::delete(self, item_id).await
-    }
-
-    async fn rename(&self, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult {
-        CasVfs::rename(self, item_id, new_parent_id, new_name).await
-    }
-
-    async fn set_attributes(&self, item_id: ItemId, params: SetAttributesParams) -> VfsResult {
-        CasVfs::set_attributes(self, item_id, params).await
-    }
-
-    async fn ping(&self) -> String {
-        CasVfs::ping(self).await
     }
 }
 
