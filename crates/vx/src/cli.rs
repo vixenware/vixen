@@ -31,7 +31,11 @@ pub(crate) enum CliCommand {
 pub(crate) struct HealthArgs {}
 
 #[derive(Facet, Debug)]
-pub(crate) struct DaemonArgs {}
+pub(crate) struct DaemonArgs {
+    /// Storage root directory
+    #[facet(args::named)]
+    pub(crate) store_root: camino::Utf8PathBuf,
+}
 
 #[derive(Facet, Debug)]
 pub(crate) struct LspArgs {}

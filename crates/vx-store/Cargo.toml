@@ -8,25 +8,22 @@ edition.workspace = true
 [package.metadata."docs.rs"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
+[lib]
+name = "vx_store"
+path = "src/lib.rs"
+
 [dependencies]
 camino = { workspace = true }
 eyre = { workspace = true }
-facet = { workspace = true }
-figue = { workspace = true }
-futures-util = { workspace = true }
-hex = { workspace = true }
-http-body-util = "0.1"
-pin-project-lite = { workspace = true }
+
 vox = { workspace = true }
 moire = { workspace = true }
-sha2 = "0.10"
-thiserror = { workspace = true }
+
 tokio = { workspace = true }
-tokio-util = { workspace = true, features = ["io"] }
+
 tracing = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
 vx-services = { path = "../vx-services" }
-vx-http = { workspace = true }
+
 vx-io = { workspace = true }
 
 [dev-dependencies]

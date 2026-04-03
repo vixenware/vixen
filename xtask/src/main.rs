@@ -68,7 +68,7 @@ fn main() {
 }
 
 fn install(mode: InstallMode) {
-    let binaries = vec!["vx", "vx-store", "vx-runner", "vx-vfsd", "vx-bootstrap"];
+    let binaries = vec!["vx", "vx-runner", "vx-vfsd"];
 
     // Find workspace root
     let workspace_root = find_workspace_root().expect("Could not find workspace root");

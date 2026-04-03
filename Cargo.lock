@@ -3744,6 +3744,7 @@ dependencies = [
  "vox",
  "vx-io",
  "vx-services",
+ "vx-store",
 ]
 
 [[package]]
@@ -3870,6 +3871,22 @@ dependencies = [
 [[package]]
 name = "vx-stdlib"
 version = "0.1.0"
+
+[[package]]
+name = "vx-store"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "eyre",
+ "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vox",
+ "vx-io",
+ "vx-services",
+]
 
 [[package]]
 name = "vx-tarball"

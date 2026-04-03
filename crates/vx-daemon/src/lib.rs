@@ -3,9 +3,11 @@
 //!
 //! Can serve the store service, the runner service, the vfs service
 
+use camino::Utf8PathBuf;
 use eyre::Result;
 use vox::{ConnectionAcceptor, Metadata};
-use vx_services::DaemonDispatcher;
+use vx_services::{DaemonDispatcher, StoreDispatcher};
+use vx_store::StoreService;
 
 mod service;
 pub use service::DaemonService;
@@ -13,6 +15,8 @@ pub use service::DaemonService;
 pub struct DaemonConfig {
     /// All addresses to listen on
     pub listen: Vec<String>,
+    /// Storage root directory
+    pub store_root: Utf8PathBuf,
 }
 
 /// Serve the VXD service on all configured listen addresses.
@@ -22,7 +26,11 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     }
 
     let service = DaemonService::new();
-    let acceptor = DaemonAcceptor { service };
+    let store_service = vx_store::open(config.store_root).await?;
+    let acceptor = DaemonAcceptor {
+        service,
+        store_service,
+    };
 
     let mut listeners = tokio::task::JoinSet::new();
     for l in config.listen {
@@ -43,6 +51,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 #[derive(Clone)]
 struct DaemonAcceptor {
     service: DaemonService,
+    store_service: StoreService,
 }
 
 impl ConnectionAcceptor for DaemonAcceptor {
@@ -52,8 +61,14 @@ impl ConnectionAcceptor for DaemonAcceptor {
         connection: vox::PendingConnection,
     ) -> std::result::Result<(), Metadata<'static>> {
         tracing::info!("daemon got request for service: {}", request.service());
-        connection.handle_with(DaemonDispatcher::new(self.service.clone()));
-
+        match request.service() {
+            "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
+            "Store" => connection.handle_with(StoreDispatcher::new(self.store_service.clone())),
+            other => {
+                tracing::warn!("unknown service requested: {}", other);
+                return Err(vec![]);
+            }
+        }
         Ok(())
     }
 }

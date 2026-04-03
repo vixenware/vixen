@@ -37,9 +37,10 @@ async fn async_main() {
     let res = match cli.command {
         CliCommand::Health(_args) => health().await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
-        CliCommand::Daemon(_args) => {
+        CliCommand::Daemon(args) => {
             let config = vxd::DaemonConfig {
                 listen: vec![vx_services::DAEMON_SOCK.to_string()],
+                store_root: args.store_root,
             };
             vxd::serve(config).await
         }
