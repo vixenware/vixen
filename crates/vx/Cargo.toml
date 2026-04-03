@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [package.metadata.cargo-shear]
-ignored = ["vx-vfs"]
+ignored = ["vx-vfs", "moire"]
 
 [dependencies]
 moire = { workspace = true }

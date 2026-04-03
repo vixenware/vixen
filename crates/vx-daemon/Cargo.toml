@@ -3,6 +3,9 @@ name = "vx-daemon"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-shear]
+ignored = ["moire"]
+
 [package.metadata]
 
 [package.metadata."docs.rs"]
