@@ -18,6 +18,85 @@ use crate::{
 pub const MAX_STRICT_FRAGMENT_ABI_WORDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictFragmentAbiLayout {
+    U64,
+    Bool,
+    String,
+}
+
+impl StrictFragmentAbiLayout {
+    pub const fn from_type(ty: StrictFragmentType) -> Self {
+        match ty {
+            StrictFragmentType::U64 => Self::U64,
+            StrictFragmentType::Bool => Self::Bool,
+            StrictFragmentType::String => Self::String,
+        }
+    }
+
+    pub const fn word_count(self) -> usize {
+        match self {
+            Self::U64 | Self::Bool => 1,
+            Self::String => 2,
+        }
+    }
+
+    pub const fn strict_fragment_type(self) -> StrictFragmentType {
+        match self {
+            Self::U64 => StrictFragmentType::U64,
+            Self::Bool => StrictFragmentType::Bool,
+            Self::String => StrictFragmentType::String,
+        }
+    }
+
+    fn flatten_arg(
+        self,
+        index: usize,
+        value: &StrictFragmentValue,
+        words: &mut Vec<u64>,
+    ) -> Result<(), StrictFragmentAbiError> {
+        match (self, value) {
+            (Self::U64, StrictFragmentValue::U64(value)) => words.push(*value),
+            (Self::Bool, StrictFragmentValue::Bool(value)) => words.push(u64::from(*value)),
+            (Self::String, StrictFragmentValue::String(value)) => {
+                words.push(value.as_ptr() as u64);
+                words.push(value.len() as u64);
+            }
+            (layout, found) => {
+                return Err(StrictFragmentAbiError::ArgumentTypeMismatch {
+                    index,
+                    expected: layout.strict_fragment_type(),
+                    found: found.kind(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn lift_return_words(
+        self,
+        words: [u64; 2],
+    ) -> Result<CompiledStrictFragmentOutput, StrictFragmentAbiError> {
+        Ok(match self {
+            Self::U64 => CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(words[0])),
+            Self::Bool => {
+                CompiledStrictFragmentOutput::Value(StrictFragmentValue::Bool(match words[0] {
+                    0 => false,
+                    1 => true,
+                    other => return Err(StrictFragmentAbiError::InvalidBoolWord(other)),
+                }))
+            }
+            Self::String => {
+                CompiledStrictFragmentOutput::UnmanagedString(UnmanagedStrictFragmentString {
+                    ptr: words[0],
+                    len: words[1],
+                })
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnmanagedStrictFragmentString {
     pub ptr: u64,
     pub len: u64,
@@ -86,7 +165,8 @@ pub unsafe fn execute_compiled_unmanaged_strict_fragment(
     args: &[StrictFragmentValue],
 ) -> Result<CompiledStrictFragmentOutput, StrictFragmentAbiError> {
     let arg_words = flatten_args(function, args)?;
-    let ret_words = return_word_count(function.return_type);
+    let return_layout = StrictFragmentAbiLayout::from_type(function.return_type);
+    let ret_words = return_layout.word_count();
     if arg_words.len() > MAX_STRICT_FRAGMENT_ABI_WORDS {
         return Err(StrictFragmentAbiError::TooManyAbiWords {
             actual: arg_words.len(),
@@ -95,24 +175,7 @@ pub unsafe fn execute_compiled_unmanaged_strict_fragment(
     }
 
     let words = unsafe { call_compiled_words(compiled, &arg_words, ret_words) };
-    Ok(match function.return_type {
-        StrictFragmentType::U64 => {
-            CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(words[0]))
-        }
-        StrictFragmentType::Bool => {
-            CompiledStrictFragmentOutput::Value(StrictFragmentValue::Bool(match words[0] {
-                0 => false,
-                1 => true,
-                other => return Err(StrictFragmentAbiError::InvalidBoolWord(other)),
-            }))
-        }
-        StrictFragmentType::String => {
-            CompiledStrictFragmentOutput::UnmanagedString(UnmanagedStrictFragmentString {
-                ptr: words[0],
-                len: words[1],
-            })
-        }
-    })
+    return_layout.lift_return_words(words)
 }
 
 /// Executes a compiled strict fragment and promotes frame-valid string returns
@@ -145,33 +208,10 @@ fn flatten_args(
 
     let mut words = Vec::new();
     for (index, (param, value)) in function.params.iter().zip(args).enumerate() {
-        match (&param.ty, value) {
-            (StrictFragmentType::U64, StrictFragmentValue::U64(value)) => words.push(*value),
-            (StrictFragmentType::Bool, StrictFragmentValue::Bool(value)) => {
-                words.push(u64::from(*value))
-            }
-            (StrictFragmentType::String, StrictFragmentValue::String(value)) => {
-                words.push(value.as_ptr() as u64);
-                words.push(value.len() as u64);
-            }
-            (expected, found) => {
-                return Err(StrictFragmentAbiError::ArgumentTypeMismatch {
-                    index,
-                    expected: *expected,
-                    found: found.kind(),
-                });
-            }
-        }
+        StrictFragmentAbiLayout::from_type(param.ty).flatten_arg(index, value, &mut words)?;
     }
 
     Ok(words)
-}
-
-const fn return_word_count(ty: StrictFragmentType) -> usize {
-    match ty {
-        StrictFragmentType::U64 | StrictFragmentType::Bool => 1,
-        StrictFragmentType::String => 2,
-    }
 }
 
 unsafe fn call_compiled_words(

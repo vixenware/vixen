@@ -3,7 +3,7 @@
 mod abi;
 pub use abi::{
     CompiledStrictFragmentOutput, MAX_STRICT_FRAGMENT_ABI_WORDS, StrictFragmentAbiError,
-    UnmanagedStrictFragmentString, compile_strict_fragment,
+    StrictFragmentAbiLayout, UnmanagedStrictFragmentString, compile_strict_fragment,
     execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
 };
 

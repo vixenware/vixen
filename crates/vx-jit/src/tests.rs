@@ -1,15 +1,15 @@
 use kajit_hir::{BinaryOp, Expr, StmtKind, Type};
 
 use crate::{
-    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentIntrinsic, StrictFragmentLocal,
-    StrictFragmentLocalId, StrictFragmentStmt, StrictFragmentType, StrictFragmentValue,
-    compile_source_text_u64_add_function, compile_strict_fragment, compile_u64_add,
-    execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
-    interpret_source_text_string_function, interpret_source_text_u64_add_function,
-    interpret_u64_add, lower_source_text_strict_fragment, lower_source_text_u64_add_hir,
-    lower_source_text_u64_add_ir, lower_u64_add_hir, lower_u64_add_hir_text, lower_u64_add_ir,
-    lower_u64_add_ir_text, lower_u64_add_strict_fragment, run_source_text_u64_add_function,
-    run_u64_add,
+    StrictFragmentAbiLayout, StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentIntrinsic,
+    StrictFragmentLocal, StrictFragmentLocalId, StrictFragmentStmt, StrictFragmentType,
+    StrictFragmentValue, compile_source_text_u64_add_function, compile_strict_fragment,
+    compile_u64_add, execute_compiled_copying_strict_fragment_strings,
+    execute_compiled_unmanaged_strict_fragment, interpret_source_text_string_function,
+    interpret_source_text_u64_add_function, interpret_u64_add, lower_source_text_strict_fragment,
+    lower_source_text_u64_add_hir, lower_source_text_u64_add_ir, lower_u64_add_hir,
+    lower_u64_add_hir_text, lower_u64_add_ir, lower_u64_add_ir_text, lower_u64_add_strict_fragment,
+    run_source_text_u64_add_function, run_u64_add,
 };
 
 const SOURCE_ADD_U64: &str = r#"
@@ -440,6 +440,22 @@ fn executes_compiled_u64_add_via_abi_bridge() {
     assert_eq!(
         result,
         crate::CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(42))
+    );
+}
+
+#[test]
+fn strict_fragment_abi_layout_matches_current_domain() {
+    assert_eq!(
+        StrictFragmentAbiLayout::from_type(StrictFragmentType::U64).word_count(),
+        1
+    );
+    assert_eq!(
+        StrictFragmentAbiLayout::from_type(StrictFragmentType::Bool).word_count(),
+        1
+    );
+    assert_eq!(
+        StrictFragmentAbiLayout::from_type(StrictFragmentType::String).word_count(),
+        2
     );
 }
 
