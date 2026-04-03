@@ -163,6 +163,82 @@ Current ABI layout:
 - size in ABI words: `2`
 - word sequence: `[ptr, len]`
 
+## String Target Model
+
+`String` is the first fragment-visible type that needs an explicit ownership
+story, so the target model is stated here directly.
+
+### Canonical payload
+
+The canonical payload representation of `String` is:
+
+- `ptr: u64`
+- `len: u64`
+
+meaning:
+
+- `ptr` points to immutable UTF-8 bytes
+- `len` is the byte length
+
+This payload representation is the same inside and outside compiled strict
+fragments.
+
+The runtime may carry additional tracking data around that payload, but not
+replace it with a different fragment-visible shape.
+
+### Runtime envelope
+
+Outside compiled strict fragments, a runtime string value may additionally
+carry envelope metadata such as:
+
+- static/literal provenance
+- borrowed provenance
+- transient-region provenance
+- retained/reference-counted provenance
+
+That metadata is outside the canonical payload.
+
+### Parameter rule
+
+When a `String` crosses into a strict fragment as a parameter:
+
+- the caller passes the canonical payload `[ptr, len]`
+- the bytes are borrowed for the duration of the strict fragment call
+- the fragment must treat them as immutable
+- the fragment must not retain raw pointers past the call boundary
+
+### Return rule
+
+When a strict fragment returns a `String`, the returned payload is guaranteed
+to remain valid until the end of the current evaluation frame.
+
+This is the core ownership rule.
+
+That means a returned string may be backed by:
+
+- static bytes
+- bytes borrowed from an input that remains live for the frame
+- bytes allocated in the current transient evaluation region
+
+The caller may immediately:
+
+- treat the result as a valid runtime `String`
+- copy/promote it if longer retention is needed
+
+The caller does not need to distinguish those backing cases just to consume the
+result within the current frame.
+
+### Consequence
+
+This removes the need for the strict fragment ABI itself to encode a separate
+ownership handle in the `String` payload.
+
+The ABI remains:
+
+- `[ptr, len]`
+
+and ownership/lifetime is supplied by the surrounding evaluation frame.
+
 #### Parameter semantics
 
 For string parameters:
@@ -176,15 +252,19 @@ For string parameters:
 For string returns:
 
 - the compiled fragment returns `[ptr, len]`
-- this is currently treated as an **unmanaged returned string**
+- the returned payload is valid until the end of the current evaluation frame
 
 That means:
 
-- the caller may copy the bytes into an owned runtime string
-- the caller cannot yet generally prove who owns the backing storage
-- the caller cannot yet generally free that storage safely
+- the caller may use the result immediately as a runtime string
+- the caller may copy/promote it if it must outlive the frame
+- the caller does not need a separate ownership token at the ABI layer
 
-This is the main unresolved part of the current ABI.
+The remaining unresolved part is the exact implementation strategy for:
+
+- transient evaluation regions
+- promotion out of the frame
+- retained/reference-counted ownership when longer lifetime is needed
 
 ## Current Execution Model
 
@@ -306,21 +386,13 @@ These are different concerns.
 
 ### 1. Returned string ownership
 
-This is the biggest unresolved ABI question today.
+The frame-valid rule above is the intended semantic rule.
 
-We need a formal rule for string results returned by compiled strict fragments:
+What remains unresolved is the implementation strategy underneath that rule:
 
-- borrowed return
-- transient owned return
-- caller-freed return
-- allocator-paired return
-- or another explicit ownership model
-
-Right now we only have:
-
-- unmanaged `[ptr, len]`
-- copy-out is possible
-- ownership is not yet formalized
+- exact transient region mechanism
+- promotion/retention mechanism
+- how runtime envelope metadata records provenance when needed
 
 ### 2. Full layout descriptors
 
