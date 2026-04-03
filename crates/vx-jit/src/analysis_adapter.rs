@@ -13,15 +13,17 @@ use vx_types::{Scalar, Ty};
 
 use crate::interpreter;
 use crate::kajit_backend::{self, KajitBackendError};
-use crate::kernel::{
-    KernelBinaryOp, KernelExpr, KernelFunction, KernelInterpretError, KernelIntrinsic, KernelLocal,
-    KernelLocalId, KernelParam, KernelStmt, KernelType, KernelValue,
+use crate::strict_fragment::{
+    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentFunction,
+    StrictFragmentInterpretError, StrictFragmentIntrinsic, StrictFragmentLocal,
+    StrictFragmentLocalId, StrictFragmentParam, StrictFragmentStmt, StrictFragmentType,
+    StrictFragmentValue,
 };
 
 #[derive(Debug, Clone, Copy)]
 struct BoundLocal {
-    local: KernelLocalId,
-    ty: KernelType,
+    local: StrictFragmentLocalId,
+    ty: StrictFragmentType,
 }
 
 #[derive(Debug, Error)]
@@ -57,7 +59,7 @@ pub enum SourceLoweringError {
     #[error("unsupported method `{method}` on {receiver:?}")]
     UnsupportedMethod {
         method: String,
-        receiver: KernelType,
+        receiver: StrictFragmentType,
     },
     #[error("unsupported range expression `{0}`")]
     UnsupportedRange(String),
@@ -70,24 +72,24 @@ pub enum SourceLoweringError {
     #[error("unsupported type in `{0}`")]
     UnsupportedType(String),
     #[error("interpreter failed: {0}")]
-    Interpret(KernelInterpretError),
+    Interpret(StrictFragmentInterpretError),
     #[error("Kajit backend failed: {0}")]
     Kajit(#[from] KajitBackendError),
 }
 
-pub fn lower_source_text_kernel(
+pub fn lower_source_text_strict_fragment(
     source: &str,
     function_name: &str,
-) -> Result<KernelFunction, SourceLoweringError> {
+) -> Result<StrictFragmentFunction, SourceLoweringError> {
     let bridge = checked_bridge(source)?;
     lower_bridge_function(&bridge, function_name)
 }
 
-pub fn lower_source_text_u64_add_kernel(
+pub fn lower_source_text_u64_add_strict_fragment(
     source: &str,
     function_name: &str,
-) -> Result<KernelFunction, SourceLoweringError> {
-    lower_source_text_kernel(source, function_name)
+) -> Result<StrictFragmentFunction, SourceLoweringError> {
+    lower_source_text_strict_fragment(source, function_name)
 }
 
 pub fn lower_source_text_u64_add_hir(
@@ -101,7 +103,7 @@ pub fn lower_source_text_hir(
     source: &str,
     function_name: &str,
 ) -> Result<Module, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     kajit_backend::lower_hir(&function).map_err(SourceLoweringError::Kajit)
 }
 
@@ -116,7 +118,7 @@ pub fn lower_source_text_ir(
     source: &str,
     function_name: &str,
 ) -> Result<IrFunc, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     kajit_backend::lower_ir(&function).map_err(SourceLoweringError::Kajit)
 }
 
@@ -131,25 +133,25 @@ pub fn compile_source_text_function(
     source: &str,
     function_name: &str,
 ) -> Result<CompiledFunction, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     kajit_backend::compile(&function).map_err(SourceLoweringError::Kajit)
 }
 
 pub fn interpret_source_text_function(
     source: &str,
     function_name: &str,
-    args: &[KernelValue],
-) -> Result<KernelValue, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    args: &[StrictFragmentValue],
+) -> Result<StrictFragmentValue, SourceLoweringError> {
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     interpreter::interpret(&function, args).map_err(SourceLoweringError::Interpret)
 }
 
 pub fn interpret_source_text_string_function(
     source: &str,
     function_name: &str,
-    args: &[KernelValue],
+    args: &[StrictFragmentValue],
 ) -> Result<String, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     interpreter::interpret_string(&function, args).map_err(SourceLoweringError::Interpret)
 }
 
@@ -159,7 +161,7 @@ pub fn interpret_source_text_u64_add_function(
     lhs: u64,
     rhs: u64,
 ) -> Result<u64, SourceLoweringError> {
-    let function = lower_source_text_kernel(source, function_name)?;
+    let function = lower_source_text_strict_fragment(source, function_name)?;
     interpreter::interpret_u64(&function, &[lhs, rhs]).map_err(SourceLoweringError::Interpret)
 }
 
@@ -201,7 +203,7 @@ fn checked_bridge(source: &str) -> Result<SingleSourceBridge, SourceLoweringErro
 fn lower_bridge_function(
     bridge: &SingleSourceBridge,
     function_name: &str,
-) -> Result<KernelFunction, SourceLoweringError> {
+) -> Result<StrictFragmentFunction, SourceLoweringError> {
     let body = bridge
         .bodies
         .iter()
@@ -231,7 +233,7 @@ fn lower_bridge_function(
         &mut next_local,
     )?;
 
-    Ok(KernelFunction {
+    Ok(StrictFragmentFunction {
         name: function_name.to_owned(),
         params,
         return_type,
@@ -244,7 +246,7 @@ fn lower_params(
     function_name: &str,
     locals_by_name: &mut HashMap<String, BoundLocal>,
     next_local: &mut u32,
-) -> Result<Vec<KernelParam>, SourceLoweringError> {
+) -> Result<Vec<StrictFragmentParam>, SourceLoweringError> {
     let mut params = Vec::new();
     for param in fn_decl.parameters() {
         let name = param
@@ -255,11 +257,11 @@ fn lower_params(
             .slot_type()
             .and_then(|slot| slot.ty())
             .ok_or_else(|| SourceLoweringError::UnsupportedParameters(function_name.to_owned()))?;
-        let ty = kernel_type_from_parser_type(&ty)
+        let ty = strict_fragment_type_from_parser_type(&ty)
             .ok_or_else(|| SourceLoweringError::UnsupportedParameters(function_name.to_owned()))?;
-        let local = KernelLocalId(*next_local);
+        let local = StrictFragmentLocalId(*next_local);
         *next_local += 1;
-        params.push(KernelParam {
+        params.push(StrictFragmentParam {
             local,
             name: name.clone(),
             ty,
@@ -272,12 +274,12 @@ fn lower_params(
 fn lower_return_type(
     fn_decl: &FnDecl,
     function_name: &str,
-) -> Result<KernelType, SourceLoweringError> {
+) -> Result<StrictFragmentType, SourceLoweringError> {
     let return_ty = fn_decl
         .return_type()
         .and_then(|ret| ret.ty())
         .ok_or_else(|| SourceLoweringError::UnsupportedReturnType(function_name.to_owned()))?;
-    kernel_type_from_parser_type(&return_ty)
+    strict_fragment_type_from_parser_type(&return_ty)
         .ok_or_else(|| SourceLoweringError::UnsupportedReturnType(function_name.to_owned()))
 }
 
@@ -288,7 +290,7 @@ fn lower_function_body(
     function_name: &str,
     locals_by_name: &mut HashMap<String, BoundLocal>,
     next_local: &mut u32,
-) -> Result<Vec<KernelStmt>, SourceLoweringError> {
+) -> Result<Vec<StrictFragmentStmt>, SourceLoweringError> {
     if let Some(block) = fn_decl.body() {
         return lower_block_body(
             &block,
@@ -304,7 +306,7 @@ fn lower_function_body(
         SourceLoweringError::UnsupportedBody(function_name.to_owned(), "missing body".to_owned())
     })?;
     let body_expr = peel_expr_wrappers(body_expr, function_name)?;
-    Ok(vec![KernelStmt::Return(lower_expr(
+    Ok(vec![StrictFragmentStmt::Return(lower_expr(
         &body_expr,
         bridge,
         expr_ids,
@@ -320,7 +322,7 @@ fn lower_block_body(
     function_name: &str,
     locals_by_name: &mut HashMap<String, BoundLocal>,
     next_local: &mut u32,
-) -> Result<Vec<KernelStmt>, SourceLoweringError> {
+) -> Result<Vec<StrictFragmentStmt>, SourceLoweringError> {
     let statements = block
         .syntax()
         .children()
@@ -353,7 +355,7 @@ fn lower_stmt(
     function_name: &str,
     locals_by_name: &mut HashMap<String, BoundLocal>,
     next_local: &mut u32,
-    out: &mut Vec<KernelStmt>,
+    out: &mut Vec<StrictFragmentStmt>,
 ) -> Result<(), SourceLoweringError> {
     match stmt {
         Stmt::Let(let_stmt) => {
@@ -375,7 +377,7 @@ fn lower_stmt(
                 )
             })?;
             let expr = peel_expr_wrappers(expr, function_name)?;
-            out.push(KernelStmt::Return(lower_expr(
+            out.push(StrictFragmentStmt::Return(lower_expr(
                 &expr,
                 bridge,
                 expr_ids,
@@ -386,7 +388,7 @@ fn lower_stmt(
         }
         Stmt::Expr(expr) if is_last => {
             let expr = peel_expr_wrappers(expr.clone(), function_name)?;
-            out.push(KernelStmt::Return(lower_expr(
+            out.push(StrictFragmentStmt::Return(lower_expr(
                 &expr,
                 bridge,
                 expr_ids,
@@ -413,7 +415,7 @@ fn lower_let_stmt(
     function_name: &str,
     locals_by_name: &mut HashMap<String, BoundLocal>,
     next_local: &mut u32,
-) -> Result<KernelStmt, SourceLoweringError> {
+) -> Result<StrictFragmentStmt, SourceLoweringError> {
     let Some(vx_parser::Pattern::Binding(pattern)) = let_stmt.pattern() else {
         return Err(SourceLoweringError::UnsupportedPattern(
             function_name.to_owned(),
@@ -433,11 +435,11 @@ fn lower_let_stmt(
     let ty = let_stmt
         .slot_type()
         .and_then(|slot| slot.ty())
-        .and_then(|ty| kernel_type_from_parser_type(&ty))
-        .or_else(|| kernel_type_for_expr(&expr, bridge, expr_ids, locals_by_name))
+        .and_then(|ty| strict_fragment_type_from_parser_type(&ty))
+        .or_else(|| strict_fragment_type_for_expr(&expr, bridge, expr_ids, locals_by_name))
         .ok_or_else(|| SourceLoweringError::UnsupportedType(expr.syntax().text().to_string()))?;
-    let local = KernelLocal {
-        local: KernelLocalId(*next_local),
+    let local = StrictFragmentLocal {
+        local: StrictFragmentLocalId(*next_local),
         name: name.clone(),
         ty,
     };
@@ -450,7 +452,7 @@ fn lower_let_stmt(
             ty: local.ty,
         },
     );
-    Ok(KernelStmt::Let { local, value })
+    Ok(StrictFragmentStmt::Let { local, value })
 }
 
 fn lower_expr(
@@ -459,7 +461,7 @@ fn lower_expr(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<KernelExpr, SourceLoweringError> {
+) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let expr = peel_expr_wrappers(expr.clone(), function_name)?;
 
     match expr {
@@ -474,7 +476,7 @@ fn lower_expr(
                 .get(&name)
                 .map(|binding| binding.local)
                 .ok_or_else(|| SourceLoweringError::UnknownLocal(name.clone()))?;
-            Ok(KernelExpr::Local(local))
+            Ok(StrictFragmentExpr::Local(local))
         }
         Expr::Literal(literal) => lower_literal_expr(&literal),
         Expr::Binary(binary) => {
@@ -493,7 +495,7 @@ fn lower_expr(
     }
 }
 
-fn lower_literal_expr(literal: &LiteralExpr) -> Result<KernelExpr, SourceLoweringError> {
+fn lower_literal_expr(literal: &LiteralExpr) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let token = literal
         .token()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("missing literal token".to_owned()))?;
@@ -505,14 +507,16 @@ fn lower_literal_expr(literal: &LiteralExpr) -> Result<KernelExpr, SourceLowerin
                     token.text()
                 ))
             })?;
-            Ok(KernelExpr::U64(value))
+            Ok(StrictFragmentExpr::U64(value))
         }
         SyntaxKind::STRING => {
             let text = token.text();
-            Ok(KernelExpr::String(text[1..text.len() - 1].to_owned()))
+            Ok(StrictFragmentExpr::String(
+                text[1..text.len() - 1].to_owned(),
+            ))
         }
-        SyntaxKind::TRUE_KW => Ok(KernelExpr::Bool(true)),
-        SyntaxKind::FALSE_KW => Ok(KernelExpr::Bool(false)),
+        SyntaxKind::TRUE_KW => Ok(StrictFragmentExpr::Bool(true)),
+        SyntaxKind::FALSE_KW => Ok(StrictFragmentExpr::Bool(false)),
         _ => Err(SourceLoweringError::UnsupportedExpr(format!(
             "unsupported literal `{}`",
             token.text()
@@ -526,7 +530,7 @@ fn lower_binary_expr(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<KernelExpr, SourceLoweringError> {
+) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let lhs = binary
         .lhs()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("binary lhs missing".to_owned()))?;
@@ -534,7 +538,7 @@ fn lower_binary_expr(
         .rhs()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("binary rhs missing".to_owned()))?;
     let op = lower_binary_op(binary)?;
-    Ok(KernelExpr::Binary {
+    Ok(StrictFragmentExpr::Binary {
         op,
         lhs: Box::new(lower_expr(
             &lhs,
@@ -553,7 +557,7 @@ fn lower_binary_expr(
     })
 }
 
-fn lower_binary_op(binary: &BinaryExpr) -> Result<KernelBinaryOp, SourceLoweringError> {
+fn lower_binary_op(binary: &BinaryExpr) -> Result<StrictFragmentBinaryOp, SourceLoweringError> {
     let token = binary
         .syntax()
         .children_with_tokens()
@@ -564,8 +568,8 @@ fn lower_binary_op(binary: &BinaryExpr) -> Result<KernelBinaryOp, SourceLowering
         })?;
 
     match token.kind() {
-        SyntaxKind::PLUS => Ok(KernelBinaryOp::Add),
-        SyntaxKind::EQ2 => Ok(KernelBinaryOp::Eq),
+        SyntaxKind::PLUS => Ok(StrictFragmentBinaryOp::Add),
+        SyntaxKind::EQ2 => Ok(StrictFragmentBinaryOp::Eq),
         _ => Err(SourceLoweringError::UnsupportedBinaryOperator(
             binary.syntax().text().to_string(),
         )),
@@ -578,7 +582,7 @@ fn lower_if_expr(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<KernelExpr, SourceLoweringError> {
+) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let condition = if_expr
         .condition()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("if condition missing".to_owned()))?;
@@ -589,7 +593,7 @@ fn lower_if_expr(
         .else_branch()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("if else branch missing".to_owned()))?;
 
-    Ok(KernelExpr::If {
+    Ok(StrictFragmentExpr::If {
         condition: Box::new(lower_expr(
             &condition,
             bridge,
@@ -620,7 +624,7 @@ fn lower_call_expr(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<KernelExpr, SourceLoweringError> {
+) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let callee = call
         .callee()
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("call without callee".to_owned()))?;
@@ -637,10 +641,11 @@ fn lower_call_expr(
         .field_name()
         .map(|token| token.text().to_string())
         .ok_or_else(|| SourceLoweringError::UnsupportedExpr("field name missing".to_owned()))?;
-    let receiver_type = kernel_type_for_expr(&receiver_expr, bridge, expr_ids, locals_by_name)
-        .ok_or_else(|| {
-            SourceLoweringError::UnsupportedType(receiver_expr.syntax().text().to_string())
-        })?;
+    let receiver_type =
+        strict_fragment_type_for_expr(&receiver_expr, bridge, expr_ids, locals_by_name)
+            .ok_or_else(|| {
+                SourceLoweringError::UnsupportedType(receiver_expr.syntax().text().to_string())
+            })?;
     let receiver = lower_expr(
         &receiver_expr,
         bridge,
@@ -651,15 +656,15 @@ fn lower_call_expr(
     let args = call.positional_args();
 
     match (receiver_type, method.as_str(), args.as_slice()) {
-        (KernelType::String, "len", []) => Ok(KernelExpr::Intrinsic {
-            intrinsic: KernelIntrinsic::StringLen,
+        (StrictFragmentType::String, "len", []) => Ok(StrictFragmentExpr::Intrinsic {
+            intrinsic: StrictFragmentIntrinsic::StringLen,
             args: vec![receiver],
         }),
-        (KernelType::String, "slice", [range]) => {
+        (StrictFragmentType::String, "slice", [range]) => {
             let (start, end) =
                 lower_slice_range(range, bridge, expr_ids, locals_by_name, function_name)?;
-            Ok(KernelExpr::Intrinsic {
-                intrinsic: KernelIntrinsic::StringSlice,
+            Ok(StrictFragmentExpr::Intrinsic {
+                intrinsic: StrictFragmentIntrinsic::StringSlice,
                 args: vec![receiver, start, end],
             })
         }
@@ -676,7 +681,7 @@ fn lower_slice_range(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<(KernelExpr, KernelExpr), SourceLoweringError> {
+) -> Result<(StrictFragmentExpr, StrictFragmentExpr), SourceLoweringError> {
     let Expr::Range(range) = peel_expr_wrappers(expr.clone(), function_name)? else {
         return Err(SourceLoweringError::UnsupportedRange(
             expr.syntax().text().to_string(),
@@ -705,13 +710,13 @@ fn lower_interpolated_string(
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
     function_name: &str,
-) -> Result<KernelExpr, SourceLoweringError> {
+) -> Result<StrictFragmentExpr, SourceLoweringError> {
     let mut parts = Vec::new();
     for part in interp.parts() {
         match part {
             vx_parser::StringPart::Text(token) => {
                 if !token.text().is_empty() {
-                    parts.push(KernelExpr::String(token.text().to_owned()));
+                    parts.push(StrictFragmentExpr::String(token.text().to_owned()));
                 }
             }
             vx_parser::StringPart::Interpolation(interp) => {
@@ -730,7 +735,7 @@ fn lower_interpolated_string(
             }
         }
     }
-    Ok(KernelExpr::Concat(parts))
+    Ok(StrictFragmentExpr::Concat(parts))
 }
 
 fn peel_expr_wrappers(expr: Expr, function_name: &str) -> Result<Expr, SourceLoweringError> {
@@ -768,12 +773,12 @@ fn peel_expr_wrappers(expr: Expr, function_name: &str) -> Result<Expr, SourceLow
     }
 }
 
-fn kernel_type_for_expr(
+fn strict_fragment_type_for_expr(
     expr: &Expr,
     bridge: &SingleSourceBridge,
     expr_ids: &HashMap<SourceSpan, ExprId>,
     locals_by_name: &HashMap<String, BoundLocal>,
-) -> Option<KernelType> {
+) -> Option<StrictFragmentType> {
     if let Expr::NameRef(name_ref) = expr {
         let name = name_ref.token()?.text().to_string();
         if let Some(binding) = locals_by_name.get(&name) {
@@ -782,10 +787,10 @@ fn kernel_type_for_expr(
     }
     let expr_id = expr_id_for_expr(bridge.source_id, expr, expr_ids).ok()?;
     let ty = bridge.expr_types.get(&expr_id)?;
-    kernel_type_from_ty(ty)
+    strict_fragment_type_from_ty(ty)
 }
 
-fn kernel_type_from_parser_type(ty: &vx_parser::Type) -> Option<KernelType> {
+fn strict_fragment_type_from_parser_type(ty: &vx_parser::Type) -> Option<StrictFragmentType> {
     let vx_parser::Type::Path(path) = ty else {
         return None;
     };
@@ -793,18 +798,18 @@ fn kernel_type_from_parser_type(ty: &vx_parser::Type) -> Option<KernelType> {
         return None;
     }
     match path.segments().next()?.text() {
-        "U64" => Some(KernelType::U64),
-        "Bool" => Some(KernelType::Bool),
-        "String" => Some(KernelType::String),
+        "U64" => Some(StrictFragmentType::U64),
+        "Bool" => Some(StrictFragmentType::Bool),
+        "String" => Some(StrictFragmentType::String),
         _ => None,
     }
 }
 
-fn kernel_type_from_ty(ty: &Ty) -> Option<KernelType> {
+fn strict_fragment_type_from_ty(ty: &Ty) -> Option<StrictFragmentType> {
     match ty {
-        Ty::Scalar(Scalar::U64) => Some(KernelType::U64),
-        Ty::Scalar(Scalar::Bool) => Some(KernelType::Bool),
-        Ty::Scalar(Scalar::String) => Some(KernelType::String),
+        Ty::Scalar(Scalar::U64) => Some(StrictFragmentType::U64),
+        Ty::Scalar(Scalar::Bool) => Some(StrictFragmentType::Bool),
+        Ty::Scalar(Scalar::String) => Some(StrictFragmentType::String),
         _ => None,
     }
 }

@@ -64,9 +64,9 @@ pub(crate) struct EvalArgs {
     #[facet(args::named, default = "interpreter")]
     pub(crate) backend: String,
 
-    /// Include kernel IR dump in the response
+    /// Include strict fragment IR dump in the response
     #[facet(args::named)]
-    pub(crate) kernel_dump: bool,
+    pub(crate) strict_fragment_dump: bool,
 
     /// Include Kajit HIR dump in the response
     #[facet(args::named)]

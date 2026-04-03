@@ -6,20 +6,20 @@ use kajit_hir::{
 };
 use thiserror::Error;
 
-use crate::kernel::{
-    KernelBinaryOp, KernelExpr, KernelFunction, KernelIntrinsic, KernelLocal, KernelParam,
-    KernelStmt, KernelType,
+use crate::strict_fragment::{
+    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentFunction, StrictFragmentIntrinsic,
+    StrictFragmentLocal, StrictFragmentParam, StrictFragmentStmt, StrictFragmentType,
 };
 
 #[derive(Debug, Error)]
 pub enum KajitBackendError {
-    #[error("kernel IR feature not yet supported by Kajit backend: {0}")]
+    #[error("strict fragment IR feature not yet supported by Kajit backend: {0}")]
     Unsupported(&'static str),
     #[error("Kajit lowering failed: {0:?}")]
     Kajit(VixenLoweringError),
 }
 
-pub fn lower_hir(function: &KernelFunction) -> Result<Module, KajitBackendError> {
+pub fn lower_hir(function: &StrictFragmentFunction) -> Result<Module, KajitBackendError> {
     let lowerer = KajitLowerer::new();
     lowerer
         .module
@@ -27,11 +27,11 @@ pub fn lower_hir(function: &KernelFunction) -> Result<Module, KajitBackendError>
         .map_err(KajitBackendError::Kajit)
 }
 
-pub fn lower_ir(function: &KernelFunction) -> Result<IrFunc, KajitBackendError> {
+pub fn lower_ir(function: &StrictFragmentFunction) -> Result<IrFunc, KajitBackendError> {
     lower_hir(function).map(|module| kajit::lower_hir_module(&module))
 }
 
-pub fn compile(function: &KernelFunction) -> Result<CompiledFunction, KajitBackendError> {
+pub fn compile(function: &StrictFragmentFunction) -> Result<CompiledFunction, KajitBackendError> {
     lower_hir(function).map(|module| kajit::compile_hir_module(&module))
 }
 
@@ -78,7 +78,7 @@ impl KajitLowerer {
 
     fn to_vixen_typed_function(
         &self,
-        function: &KernelFunction,
+        function: &StrictFragmentFunction,
     ) -> Result<VixenTypedFunction, KajitBackendError> {
         let original_locals = self.collect_locals(function);
         let mut state = LoweringState {
@@ -101,26 +101,30 @@ impl KajitLowerer {
             locals,
             return_type: self.to_vixen_type(function.return_type),
             body,
-            comment: Some("lowered from vx-jit kernel IR".to_owned()),
+            comment: Some("lowered from vx-jit strict fragment IR".to_owned()),
         })
     }
 
-    fn collect_locals(&self, function: &KernelFunction) -> Vec<VixenTypedLocal> {
+    fn collect_locals(&self, function: &StrictFragmentFunction) -> Vec<VixenTypedLocal> {
         let mut locals = Vec::new();
         self.collect_locals_from_stmts(&function.body, &mut locals);
         locals
     }
 
-    fn collect_locals_from_stmts(&self, stmts: &[KernelStmt], out: &mut Vec<VixenTypedLocal>) {
+    fn collect_locals_from_stmts(
+        &self,
+        stmts: &[StrictFragmentStmt],
+        out: &mut Vec<VixenTypedLocal>,
+    ) {
         for stmt in stmts {
             match stmt {
-                KernelStmt::Let { local, .. } => out.push(self.to_vixen_typed_local(local)),
-                KernelStmt::Return(_) => {}
+                StrictFragmentStmt::Let { local, .. } => out.push(self.to_vixen_typed_local(local)),
+                StrictFragmentStmt::Return(_) => {}
             }
         }
     }
 
-    fn to_vixen_typed_param(&self, param: &KernelParam) -> VixenTypedParam {
+    fn to_vixen_typed_param(&self, param: &StrictFragmentParam) -> VixenTypedParam {
         VixenTypedParam {
             local: LocalId::new(param.local.0),
             name: param.name.clone(),
@@ -128,7 +132,7 @@ impl KajitLowerer {
         }
     }
 
-    fn to_vixen_typed_local(&self, local: &KernelLocal) -> VixenTypedLocal {
+    fn to_vixen_typed_local(&self, local: &StrictFragmentLocal) -> VixenTypedLocal {
         VixenTypedLocal {
             local: LocalId::new(local.local.0),
             name: local.name.clone(),
@@ -138,25 +142,25 @@ impl KajitLowerer {
 
     fn lower_stmt(
         &self,
-        stmt: &KernelStmt,
+        stmt: &StrictFragmentStmt,
         state: &mut LoweringState,
     ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
         match stmt {
-            KernelStmt::Let { local, value } => Ok(vec![VixenTypedStmt::Let {
+            StrictFragmentStmt::Let { local, value } => Ok(vec![VixenTypedStmt::Let {
                 local: LocalId::new(local.local.0),
                 value: self.to_vixen_typed_expr(value)?,
             }]),
-            KernelStmt::Return(expr) => self.lower_return_stmt(expr, state),
+            StrictFragmentStmt::Return(expr) => self.lower_return_stmt(expr, state),
         }
     }
 
     fn lower_return_stmt(
         &self,
-        expr: &KernelExpr,
+        expr: &StrictFragmentExpr,
         state: &mut LoweringState,
     ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
         match expr {
-            KernelExpr::If {
+            StrictFragmentExpr::If {
                 condition,
                 then_expr,
                 else_expr,
@@ -165,29 +169,36 @@ impl KajitLowerer {
                 then_body: self.lower_return_stmt(then_expr, state)?,
                 else_body: self.lower_return_stmt(else_expr, state)?,
             }]),
-            KernelExpr::Concat(parts) => self.lower_concat_return(parts, state),
+            StrictFragmentExpr::Concat(parts) => self.lower_concat_return(parts, state),
             _ => Ok(vec![VixenTypedStmt::Return(Some(
                 self.to_vixen_typed_expr(expr)?,
             ))]),
         }
     }
 
-    fn to_vixen_typed_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+    fn to_vixen_typed_expr(
+        &self,
+        expr: &StrictFragmentExpr,
+    ) -> Result<VixenTypedExpr, KajitBackendError> {
         match expr {
-            KernelExpr::Local(local) => Ok(VixenTypedExpr::Local(LocalId::new(local.0))),
-            KernelExpr::U64(value) => {
+            StrictFragmentExpr::Local(local) => Ok(VixenTypedExpr::Local(LocalId::new(local.0))),
+            StrictFragmentExpr::U64(value) => {
                 Ok(VixenTypedExpr::Literal(kajit_hir::Literal::Integer(*value)))
             }
-            KernelExpr::Bool(value) => Ok(VixenTypedExpr::Literal(Literal::Bool(*value))),
-            KernelExpr::String(value) => Ok(self.lower_string_literal(value)),
-            KernelExpr::Binary { op, lhs, rhs } => Ok(VixenTypedExpr::Binary {
+            StrictFragmentExpr::Bool(value) => Ok(VixenTypedExpr::Literal(Literal::Bool(*value))),
+            StrictFragmentExpr::String(value) => Ok(self.lower_string_literal(value)),
+            StrictFragmentExpr::Binary { op, lhs, rhs } => Ok(VixenTypedExpr::Binary {
                 op: to_vixen_binary_op(*op),
                 lhs: Box::new(self.to_vixen_typed_expr(lhs)?),
                 rhs: Box::new(self.to_vixen_typed_expr(rhs)?),
             }),
-            KernelExpr::Intrinsic { intrinsic, args } => self.lower_intrinsic(*intrinsic, args),
-            KernelExpr::Concat(_) => Err(KajitBackendError::Unsupported("string concatenation")),
-            KernelExpr::If { .. } => Ok(self.lower_if_expr(expr)?),
+            StrictFragmentExpr::Intrinsic { intrinsic, args } => {
+                self.lower_intrinsic(*intrinsic, args)
+            }
+            StrictFragmentExpr::Concat(_) => {
+                Err(KajitBackendError::Unsupported("string concatenation"))
+            }
+            StrictFragmentExpr::If { .. } => Ok(self.lower_if_expr(expr)?),
         }
     }
 
@@ -198,8 +209,11 @@ impl KajitLowerer {
         }
     }
 
-    fn lower_if_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
-        let KernelExpr::If {
+    fn lower_if_expr(
+        &self,
+        expr: &StrictFragmentExpr,
+    ) -> Result<VixenTypedExpr, KajitBackendError> {
+        let StrictFragmentExpr::If {
             condition,
             then_expr,
             else_expr,
@@ -216,7 +230,7 @@ impl KajitLowerer {
 
     fn lower_concat_return(
         &self,
-        parts: &[KernelExpr],
+        parts: &[StrictFragmentExpr],
         state: &mut LoweringState,
     ) -> Result<Vec<VixenTypedStmt>, KajitBackendError> {
         if parts.is_empty() {
@@ -225,8 +239,8 @@ impl KajitLowerer {
             ))]);
         }
 
-        let total_len = state.new_temp(self, "__concat_total_len", KernelType::U64);
-        let buf = state.new_temp(self, "__concat_buf", KernelType::U64);
+        let total_len = state.new_temp(self, "__concat_total_len", StrictFragmentType::U64);
+        let buf = state.new_temp(self, "__concat_buf", StrictFragmentType::U64);
         let mut stmts = vec![
             VixenTypedStmt::Let {
                 local: total_len,
@@ -251,7 +265,11 @@ impl KajitLowerer {
 
         let mut cursor = VixenTypedExpr::Local(buf);
         for (index, part) in parts.iter().enumerate() {
-            let next = state.new_temp(self, &format!("__concat_cursor_{index}"), KernelType::U64);
+            let next = state.new_temp(
+                self,
+                &format!("__concat_cursor_{index}"),
+                StrictFragmentType::U64,
+            );
             stmts.push(VixenTypedStmt::Let {
                 local: next,
                 value: VixenTypedExpr::Call {
@@ -276,16 +294,19 @@ impl KajitLowerer {
         Ok(stmts)
     }
 
-    fn string_ptr_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+    fn string_ptr_expr(
+        &self,
+        expr: &StrictFragmentExpr,
+    ) -> Result<VixenTypedExpr, KajitBackendError> {
         match expr {
-            KernelExpr::String(value) => {
+            StrictFragmentExpr::String(value) => {
                 let leaked: &'static [u8] = Box::leak(value.as_bytes().to_vec().into_boxed_slice());
                 Ok(VixenTypedExpr::Literal(Literal::Integer(
                     leaked.as_ptr() as u64
                 )))
             }
-            KernelExpr::Intrinsic {
-                intrinsic: KernelIntrinsic::StringSlice,
+            StrictFragmentExpr::Intrinsic {
+                intrinsic: StrictFragmentIntrinsic::StringSlice,
                 args,
             } => match args.as_slice() {
                 [value, start, _end] => Ok(VixenTypedExpr::Binary {
@@ -302,13 +323,16 @@ impl KajitLowerer {
         }
     }
 
-    fn string_len_expr(&self, expr: &KernelExpr) -> Result<VixenTypedExpr, KajitBackendError> {
+    fn string_len_expr(
+        &self,
+        expr: &StrictFragmentExpr,
+    ) -> Result<VixenTypedExpr, KajitBackendError> {
         match expr {
-            KernelExpr::String(value) => Ok(VixenTypedExpr::Literal(Literal::Integer(
-                value.len() as u64
+            StrictFragmentExpr::String(value) => Ok(VixenTypedExpr::Literal(Literal::Integer(
+                value.len() as u64,
             ))),
-            KernelExpr::Intrinsic {
-                intrinsic: KernelIntrinsic::StringSlice,
+            StrictFragmentExpr::Intrinsic {
+                intrinsic: StrictFragmentIntrinsic::StringSlice,
                 args,
             } => match args.as_slice() {
                 [_value, start, end] => Ok(VixenTypedExpr::Binary {
@@ -327,18 +351,18 @@ impl KajitLowerer {
 
     fn lower_intrinsic(
         &self,
-        intrinsic: KernelIntrinsic,
-        args: &[KernelExpr],
+        intrinsic: StrictFragmentIntrinsic,
+        args: &[StrictFragmentExpr],
     ) -> Result<VixenTypedExpr, KajitBackendError> {
         match intrinsic {
-            KernelIntrinsic::StringLen => match args {
+            StrictFragmentIntrinsic::StringLen => match args {
                 [value] => Ok(VixenTypedExpr::Field {
                     base: Box::new(self.to_vixen_typed_expr(value)?),
                     field: "len".to_owned(),
                 }),
                 _ => Err(KajitBackendError::Unsupported("invalid StringLen args")),
             },
-            KernelIntrinsic::StringSlice => match args {
+            StrictFragmentIntrinsic::StringSlice => match args {
                 [value, start, end] => Ok(VixenTypedExpr::Struct {
                     def: self.str_def,
                     fields: vec![
@@ -368,17 +392,17 @@ impl KajitLowerer {
         }
     }
 
-    fn to_vixen_type(&self, ty: KernelType) -> Type {
+    fn to_vixen_type(&self, ty: StrictFragmentType) -> Type {
         match ty {
-            KernelType::U64 => Type::u(64),
-            KernelType::Bool => Type::bool(),
-            KernelType::String => self.str_type(),
+            StrictFragmentType::U64 => Type::u(64),
+            StrictFragmentType::Bool => Type::bool(),
+            StrictFragmentType::String => self.str_type(),
         }
     }
 }
 
 impl LoweringState {
-    fn new_temp(&mut self, lowerer: &KajitLowerer, name: &str, ty: KernelType) -> LocalId {
+    fn new_temp(&mut self, lowerer: &KajitLowerer, name: &str, ty: StrictFragmentType) -> LocalId {
         let local = LocalId::new(self.next_local_id);
         self.next_local_id += 1;
         self.synthetic_locals.push(VixenTypedLocal {
@@ -390,7 +414,7 @@ impl LoweringState {
     }
 }
 
-fn next_local_id(function: &KernelFunction) -> u32 {
+fn next_local_id(function: &StrictFragmentFunction) -> u32 {
     let mut max_id = function
         .params
         .iter()
@@ -398,7 +422,7 @@ fn next_local_id(function: &KernelFunction) -> u32 {
         .max()
         .unwrap_or(0);
     for stmt in &function.body {
-        if let KernelStmt::Let { local, .. } = stmt {
+        if let StrictFragmentStmt::Let { local, .. } = stmt {
             max_id = max_id.max(local.local.0);
         }
     }
@@ -419,9 +443,9 @@ fn sum_expr(mut exprs: Vec<VixenTypedExpr>) -> Result<VixenTypedExpr, KajitBacke
     }
     Ok(expr)
 }
-fn to_vixen_binary_op(op: KernelBinaryOp) -> BinaryOp {
+fn to_vixen_binary_op(op: StrictFragmentBinaryOp) -> BinaryOp {
     match op {
-        KernelBinaryOp::Add => BinaryOp::Add,
-        KernelBinaryOp::Eq => BinaryOp::Eq,
+        StrictFragmentBinaryOp::Add => BinaryOp::Add,
+        StrictFragmentBinaryOp::Eq => BinaryOp::Eq,
     }
 }

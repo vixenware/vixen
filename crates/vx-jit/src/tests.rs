@@ -1,13 +1,15 @@
 use kajit_hir::{BinaryOp, Expr, StmtKind, Type};
 
 use crate::{
-    KernelBinaryOp, KernelExpr, KernelIntrinsic, KernelLocal, KernelLocalId, KernelStmt,
-    KernelType, KernelValue, compile_kernel, compile_source_text_u64_add_function, compile_u64_add,
-    execute_compiled_copying_strings, execute_compiled_unmanaged,
+    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentIntrinsic, StrictFragmentLocal,
+    StrictFragmentLocalId, StrictFragmentStmt, StrictFragmentType, StrictFragmentValue,
+    compile_source_text_u64_add_function, compile_strict_fragment, compile_u64_add,
+    execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
     interpret_source_text_string_function, interpret_source_text_u64_add_function,
-    interpret_u64_add, lower_source_text_kernel, lower_source_text_u64_add_hir,
+    interpret_u64_add, lower_source_text_strict_fragment, lower_source_text_u64_add_hir,
     lower_source_text_u64_add_ir, lower_u64_add_hir, lower_u64_add_hir_text, lower_u64_add_ir,
-    lower_u64_add_ir_text, lower_u64_add_kernel, run_source_text_u64_add_function, run_u64_add,
+    lower_u64_add_ir_text, lower_u64_add_strict_fragment, run_source_text_u64_add_function,
+    run_u64_add,
 };
 
 const SOURCE_ADD_U64: &str = r#"
@@ -103,16 +105,16 @@ fn lowers_u64_add_into_kajit_hir() {
 }
 
 #[test]
-fn lowers_u64_add_into_kernel_ir() {
-    let function = lower_u64_add_kernel();
+fn lowers_u64_add_into_strict_fragment_ir() {
+    let function = lower_u64_add_strict_fragment();
 
     assert_eq!(function.name, "add_u64");
     assert_eq!(
         function.body,
-        vec![KernelStmt::Return(KernelExpr::Binary {
-            op: KernelBinaryOp::Add,
-            lhs: Box::new(KernelExpr::Local(KernelLocalId(0))),
-            rhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
+        vec![StrictFragmentStmt::Return(StrictFragmentExpr::Binary {
+            op: StrictFragmentBinaryOp::Add,
+            lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(0))),
+            rhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
         })]
     );
 }
@@ -173,17 +175,17 @@ fn executes_u64_add() {
 }
 
 #[test]
-fn lowers_source_text_u64_add_into_kernel_ir() {
-    let function = lower_source_text_kernel(SOURCE_ADD_U64, "add")
-        .expect("source text u64 add should lower into kernel IR");
+fn lowers_source_text_u64_add_into_strict_fragment_ir() {
+    let function = lower_source_text_strict_fragment(SOURCE_ADD_U64, "add")
+        .expect("source text u64 add should lower into strict fragment IR");
 
     assert_eq!(function.name, "add");
     assert_eq!(
         function.body,
-        vec![KernelStmt::Return(KernelExpr::Binary {
-            op: KernelBinaryOp::Add,
-            lhs: Box::new(KernelExpr::Local(KernelLocalId(0))),
-            rhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
+        vec![StrictFragmentStmt::Return(StrictFragmentExpr::Binary {
+            op: StrictFragmentBinaryOp::Add,
+            lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(0))),
+            rhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
         })]
     );
 }
@@ -245,73 +247,73 @@ fn compiles_and_executes_source_text_u64_add() {
 }
 
 #[test]
-fn lowers_sparse_prefix_into_kernel_ir() {
-    let function = lower_source_text_kernel(SOURCE_SPARSE_PREFIX, "sparse_prefix")
-        .expect("sparse_prefix should lower into kernel IR");
+fn lowers_sparse_prefix_into_strict_fragment_ir() {
+    let function = lower_source_text_strict_fragment(SOURCE_SPARSE_PREFIX, "sparse_prefix")
+        .expect("sparse_prefix should lower into strict fragment IR");
 
     assert_eq!(function.name, "sparse_prefix");
-    assert_eq!(function.return_type, KernelType::String);
+    assert_eq!(function.return_type, StrictFragmentType::String);
     assert_eq!(
         function.body,
         vec![
-            KernelStmt::Let {
-                local: KernelLocal {
-                    local: KernelLocalId(1),
+            StrictFragmentStmt::Let {
+                local: StrictFragmentLocal {
+                    local: StrictFragmentLocalId(1),
                     name: "len".to_owned(),
-                    ty: KernelType::U64,
+                    ty: StrictFragmentType::U64,
                 },
-                value: KernelExpr::Intrinsic {
-                    intrinsic: KernelIntrinsic::StringLen,
-                    args: vec![KernelExpr::Local(KernelLocalId(0))],
+                value: StrictFragmentExpr::Intrinsic {
+                    intrinsic: StrictFragmentIntrinsic::StringLen,
+                    args: vec![StrictFragmentExpr::Local(StrictFragmentLocalId(0))],
                 },
             },
-            KernelStmt::Return(KernelExpr::If {
-                condition: Box::new(KernelExpr::Binary {
-                    op: KernelBinaryOp::Eq,
-                    lhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
-                    rhs: Box::new(KernelExpr::U64(1)),
+            StrictFragmentStmt::Return(StrictFragmentExpr::If {
+                condition: Box::new(StrictFragmentExpr::Binary {
+                    op: StrictFragmentBinaryOp::Eq,
+                    lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
+                    rhs: Box::new(StrictFragmentExpr::U64(1)),
                 }),
-                then_expr: Box::new(KernelExpr::String("1".to_owned())),
-                else_expr: Box::new(KernelExpr::If {
-                    condition: Box::new(KernelExpr::Binary {
-                        op: KernelBinaryOp::Eq,
-                        lhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
-                        rhs: Box::new(KernelExpr::U64(2)),
+                then_expr: Box::new(StrictFragmentExpr::String("1".to_owned())),
+                else_expr: Box::new(StrictFragmentExpr::If {
+                    condition: Box::new(StrictFragmentExpr::Binary {
+                        op: StrictFragmentBinaryOp::Eq,
+                        lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
+                        rhs: Box::new(StrictFragmentExpr::U64(2)),
                     }),
-                    then_expr: Box::new(KernelExpr::String("2".to_owned())),
-                    else_expr: Box::new(KernelExpr::If {
-                        condition: Box::new(KernelExpr::Binary {
-                            op: KernelBinaryOp::Eq,
-                            lhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
-                            rhs: Box::new(KernelExpr::U64(3)),
+                    then_expr: Box::new(StrictFragmentExpr::String("2".to_owned())),
+                    else_expr: Box::new(StrictFragmentExpr::If {
+                        condition: Box::new(StrictFragmentExpr::Binary {
+                            op: StrictFragmentBinaryOp::Eq,
+                            lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
+                            rhs: Box::new(StrictFragmentExpr::U64(3)),
                         }),
-                        then_expr: Box::new(KernelExpr::Concat(vec![
-                            KernelExpr::String("3/".to_owned()),
-                            KernelExpr::Intrinsic {
-                                intrinsic: KernelIntrinsic::StringSlice,
+                        then_expr: Box::new(StrictFragmentExpr::Concat(vec![
+                            StrictFragmentExpr::String("3/".to_owned()),
+                            StrictFragmentExpr::Intrinsic {
+                                intrinsic: StrictFragmentIntrinsic::StringSlice,
                                 args: vec![
-                                    KernelExpr::Local(KernelLocalId(0)),
-                                    KernelExpr::U64(0),
-                                    KernelExpr::U64(1),
+                                    StrictFragmentExpr::Local(StrictFragmentLocalId(0)),
+                                    StrictFragmentExpr::U64(0),
+                                    StrictFragmentExpr::U64(1),
                                 ],
                             },
                         ])),
-                        else_expr: Box::new(KernelExpr::Concat(vec![
-                            KernelExpr::Intrinsic {
-                                intrinsic: KernelIntrinsic::StringSlice,
+                        else_expr: Box::new(StrictFragmentExpr::Concat(vec![
+                            StrictFragmentExpr::Intrinsic {
+                                intrinsic: StrictFragmentIntrinsic::StringSlice,
                                 args: vec![
-                                    KernelExpr::Local(KernelLocalId(0)),
-                                    KernelExpr::U64(0),
-                                    KernelExpr::U64(2),
+                                    StrictFragmentExpr::Local(StrictFragmentLocalId(0)),
+                                    StrictFragmentExpr::U64(0),
+                                    StrictFragmentExpr::U64(2),
                                 ],
                             },
-                            KernelExpr::String("/".to_owned()),
-                            KernelExpr::Intrinsic {
-                                intrinsic: KernelIntrinsic::StringSlice,
+                            StrictFragmentExpr::String("/".to_owned()),
+                            StrictFragmentExpr::Intrinsic {
+                                intrinsic: StrictFragmentIntrinsic::StringSlice,
                                 args: vec![
-                                    KernelExpr::Local(KernelLocalId(0)),
-                                    KernelExpr::U64(2),
-                                    KernelExpr::U64(4),
+                                    StrictFragmentExpr::Local(StrictFragmentLocalId(0)),
+                                    StrictFragmentExpr::U64(2),
+                                    StrictFragmentExpr::U64(4),
                                 ],
                             },
                         ])),
@@ -327,7 +329,7 @@ fn interprets_sparse_prefix() {
     let result = interpret_source_text_string_function(
         SOURCE_SPARSE_PREFIX,
         "sparse_prefix",
-        &[KernelValue::String("a".to_owned())],
+        &[StrictFragmentValue::String("a".to_owned())],
     )
     .expect("sparse_prefix should interpret for len=1");
     assert_eq!(result, "1");
@@ -335,7 +337,7 @@ fn interprets_sparse_prefix() {
     let result = interpret_source_text_string_function(
         SOURCE_SPARSE_PREFIX,
         "sparse_prefix",
-        &[KernelValue::String("ab".to_owned())],
+        &[StrictFragmentValue::String("ab".to_owned())],
     )
     .expect("sparse_prefix should interpret for len=2");
     assert_eq!(result, "2");
@@ -343,7 +345,7 @@ fn interprets_sparse_prefix() {
     let result = interpret_source_text_string_function(
         SOURCE_SPARSE_PREFIX,
         "sparse_prefix",
-        &[KernelValue::String("abc".to_owned())],
+        &[StrictFragmentValue::String("abc".to_owned())],
     )
     .expect("sparse_prefix should interpret for len=3");
     assert_eq!(result, "3/a");
@@ -351,7 +353,7 @@ fn interprets_sparse_prefix() {
     let result = interpret_source_text_string_function(
         SOURCE_SPARSE_PREFIX,
         "sparse_prefix",
-        &[KernelValue::String("serde".to_owned())],
+        &[StrictFragmentValue::String("serde".to_owned())],
     )
     .expect("sparse_prefix should interpret for longer strings");
     assert_eq!(result, "se/rd");
@@ -359,12 +361,15 @@ fn interprets_sparse_prefix() {
 
 #[test]
 fn compiles_and_executes_source_text_string_len() {
-    let function = lower_source_text_kernel(SOURCE_STR_LEN, "str_len")
-        .expect("str_len should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_STR_LEN, "str_len")
+        .expect("str_len should lower into strict fragment IR");
 
-    let interpreted = crate::interpret(&function, &[KernelValue::String("serde".to_owned())])
-        .expect("str_len should interpret");
-    assert_eq!(interpreted, KernelValue::U64(5));
+    let interpreted = crate::interpret(
+        &function,
+        &[StrictFragmentValue::String("serde".to_owned())],
+    )
+    .expect("str_len should interpret");
+    assert_eq!(interpreted, StrictFragmentValue::U64(5));
 
     let compiled = crate::kajit_backend::compile(&function).expect("str_len should compile");
     let str_len: unsafe extern "C" fn(u64, u64) -> u64 =
@@ -376,19 +381,19 @@ fn compiles_and_executes_source_text_string_len() {
 
 #[test]
 fn compiles_and_executes_source_text_string_slice() {
-    let function = lower_source_text_kernel(SOURCE_STR_SLICE, "str_slice")
-        .expect("str_slice should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_STR_SLICE, "str_slice")
+        .expect("str_slice should lower into strict fragment IR");
 
     let interpreted = crate::interpret(
         &function,
         &[
-            KernelValue::String("serde".to_owned()),
-            KernelValue::U64(1),
-            KernelValue::U64(4),
+            StrictFragmentValue::String("serde".to_owned()),
+            StrictFragmentValue::U64(1),
+            StrictFragmentValue::U64(4),
         ],
     )
     .expect("str_slice should interpret");
-    assert_eq!(interpreted, KernelValue::String("erd".to_owned()));
+    assert_eq!(interpreted, StrictFragmentValue::String("erd".to_owned()));
 
     let compiled = crate::kajit_backend::compile(&function).expect("str_slice should compile");
     let str_slice: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
@@ -402,11 +407,11 @@ fn compiles_and_executes_source_text_string_slice() {
 
 #[test]
 fn compiles_and_executes_source_text_string_literal_return() {
-    let function =
-        lower_source_text_kernel(SOURCE_ONE, "one").expect("one should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_ONE, "one")
+        .expect("one should lower into strict fragment IR");
 
     let interpreted = crate::interpret(&function, &[]).expect("one should interpret");
-    assert_eq!(interpreted, KernelValue::String("1".to_owned()));
+    assert_eq!(interpreted, StrictFragmentValue::String("1".to_owned()));
 
     let compiled = crate::kajit_backend::compile(&function).expect("one should compile");
     let one: unsafe extern "C" fn() -> (u64, u64) =
@@ -419,35 +424,35 @@ fn compiles_and_executes_source_text_string_literal_return() {
 
 #[test]
 fn executes_compiled_u64_add_via_abi_bridge() {
-    let function =
-        lower_source_text_kernel(SOURCE_ADD_U64, "add").expect("add should lower into kernel IR");
-    let compiled = compile_kernel(&function).expect("add should compile");
+    let function = lower_source_text_strict_fragment(SOURCE_ADD_U64, "add")
+        .expect("add should lower into strict fragment IR");
+    let compiled = compile_strict_fragment(&function).expect("add should compile");
 
     let result = unsafe {
-        execute_compiled_unmanaged(
+        execute_compiled_unmanaged_strict_fragment(
             &function,
             &compiled,
-            &[KernelValue::U64(30), KernelValue::U64(12)],
+            &[StrictFragmentValue::U64(30), StrictFragmentValue::U64(12)],
         )
     }
     .expect("abi bridge should execute add");
 
     assert_eq!(
         result,
-        crate::CompiledKernelOutput::Value(KernelValue::U64(42))
+        crate::CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(42))
     );
 }
 
 #[test]
 fn executes_compiled_string_literal_via_abi_bridge() {
-    let function =
-        lower_source_text_kernel(SOURCE_ONE, "one").expect("one should lower into kernel IR");
-    let compiled = compile_kernel(&function).expect("one should compile");
+    let function = lower_source_text_strict_fragment(SOURCE_ONE, "one")
+        .expect("one should lower into strict fragment IR");
+    let compiled = compile_strict_fragment(&function).expect("one should compile");
 
-    let result = unsafe { execute_compiled_unmanaged(&function, &compiled, &[]) }
+    let result = unsafe { execute_compiled_unmanaged_strict_fragment(&function, &compiled, &[]) }
         .expect("abi bridge should execute one");
 
-    let crate::CompiledKernelOutput::UnmanagedString(result) = result else {
+    let crate::CompiledStrictFragmentOutput::UnmanagedString(result) = result else {
         panic!("expected unmanaged string return");
     };
     let output = unsafe { result.to_owned_string() }.expect("result should be utf-8");
@@ -456,37 +461,37 @@ fn executes_compiled_string_literal_via_abi_bridge() {
 
 #[test]
 fn executes_compiled_string_slice_via_abi_bridge() {
-    let function = lower_source_text_kernel(SOURCE_STR_SLICE, "str_slice")
-        .expect("str_slice should lower into kernel IR");
-    let compiled = compile_kernel(&function).expect("str_slice should compile");
+    let function = lower_source_text_strict_fragment(SOURCE_STR_SLICE, "str_slice")
+        .expect("str_slice should lower into strict fragment IR");
+    let compiled = compile_strict_fragment(&function).expect("str_slice should compile");
 
     let result = unsafe {
-        execute_compiled_copying_strings(
+        execute_compiled_copying_strict_fragment_strings(
             &function,
             &compiled,
             &[
-                KernelValue::String("serde".to_owned()),
-                KernelValue::U64(1),
-                KernelValue::U64(4),
+                StrictFragmentValue::String("serde".to_owned()),
+                StrictFragmentValue::U64(1),
+                StrictFragmentValue::U64(4),
             ],
         )
     }
     .expect("abi bridge should execute str_slice");
 
-    assert_eq!(result, KernelValue::String("erd".to_owned()));
+    assert_eq!(result, StrictFragmentValue::String("erd".to_owned()));
 }
 
 #[test]
 fn compiles_and_executes_source_text_string_if_return() {
-    let function =
-        lower_source_text_kernel(SOURCE_PICK, "pick").expect("pick should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_PICK, "pick")
+        .expect("pick should lower into strict fragment IR");
 
-    let interpreted =
-        crate::interpret(&function, &[KernelValue::U64(1)]).expect("pick should interpret for yes");
-    assert_eq!(interpreted, KernelValue::String("yes".to_owned()));
-    let interpreted =
-        crate::interpret(&function, &[KernelValue::U64(0)]).expect("pick should interpret for no");
-    assert_eq!(interpreted, KernelValue::String("no".to_owned()));
+    let interpreted = crate::interpret(&function, &[StrictFragmentValue::U64(1)])
+        .expect("pick should interpret for yes");
+    assert_eq!(interpreted, StrictFragmentValue::String("yes".to_owned()));
+    let interpreted = crate::interpret(&function, &[StrictFragmentValue::U64(0)])
+        .expect("pick should interpret for no");
+    assert_eq!(interpreted, StrictFragmentValue::String("no".to_owned()));
 
     let compiled = crate::kajit_backend::compile(&function).expect("pick should compile");
     let pick: unsafe extern "C" fn(u64) -> (u64, u64) =
@@ -505,18 +510,21 @@ fn compiles_and_executes_source_text_string_if_return() {
 
 #[test]
 fn compiles_and_executes_source_text_string_concat() {
-    let function =
-        lower_source_text_kernel(SOURCE_JOIN, "join").expect("join should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_JOIN, "join")
+        .expect("join should lower into strict fragment IR");
 
     let interpreted = crate::interpret(
         &function,
         &[
-            KernelValue::String("hello".to_owned()),
-            KernelValue::String(" world".to_owned()),
+            StrictFragmentValue::String("hello".to_owned()),
+            StrictFragmentValue::String(" world".to_owned()),
         ],
     )
     .expect("join should interpret");
-    assert_eq!(interpreted, KernelValue::String("hello world".to_owned()));
+    assert_eq!(
+        interpreted,
+        StrictFragmentValue::String("hello world".to_owned())
+    );
 
     let compiled = crate::kajit_backend::compile(&function).expect("join should compile");
     let join: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
@@ -544,8 +552,8 @@ fn compiles_and_executes_source_text_string_concat() {
 
 #[test]
 fn compiles_and_executes_sparse_prefix() {
-    let function = lower_source_text_kernel(SOURCE_SPARSE_PREFIX, "sparse_prefix")
-        .expect("sparse_prefix should lower into kernel IR");
+    let function = lower_source_text_strict_fragment(SOURCE_SPARSE_PREFIX, "sparse_prefix")
+        .expect("sparse_prefix should lower into strict fragment IR");
 
     let compiled = crate::kajit_backend::compile(&function).expect("sparse_prefix should compile");
     let sparse_prefix: unsafe extern "C" fn(u64, u64) -> (u64, u64) =
@@ -569,20 +577,20 @@ fn compiles_and_executes_sparse_prefix() {
 #[test]
 fn compiles_and_executes_registry_entry_key_from_cargo_resolve() {
     let source = cargo_resolve_function_source("registry_entry_key");
-    let function = lower_source_text_kernel(&source, "registry_entry_key")
+    let function = lower_source_text_strict_fragment(&source, "registry_entry_key")
         .expect("registry_entry_key should lower from cargo-resolve.vx");
 
     let interpreted = crate::interpret(
         &function,
         &[
-            KernelValue::String("serde".to_owned()),
-            KernelValue::String("1.0.228".to_owned()),
+            StrictFragmentValue::String("serde".to_owned()),
+            StrictFragmentValue::String("1.0.228".to_owned()),
         ],
     )
     .expect("registry_entry_key should interpret");
     assert_eq!(
         interpreted,
-        KernelValue::String("entry:registry:serde@1.0.228".to_owned())
+        StrictFragmentValue::String("entry:registry:serde@1.0.228".to_owned())
     );
 
     let compiled = crate::kajit_backend::compile(&function)

@@ -85,7 +85,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
             function_name: args.function,
             args: values,
             backend,
-            include_kernel_dump: args.kernel_dump,
+            include_strict_fragment_dump: args.strict_fragment_dump,
             include_hir: args.hir,
             include_ir: args.ir,
         })
@@ -94,8 +94,8 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
     match result {
         EvalStrictFunctionResult::Ok(success) => {
             println!("{}", format_value(&success.value));
-            if let Some(kernel_dump) = success.kernel_dump {
-                println!("\n** Kernel\n{kernel_dump}");
+            if let Some(strict_fragment_dump) = success.strict_fragment_dump {
+                println!("\n** Strict Fragment\n{strict_fragment_dump}");
             }
             if let Some(hir) = success.hir {
                 println!("\n** HIR\n{hir}");
@@ -107,8 +107,8 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         }
         EvalStrictFunctionResult::Err(failure) => {
             eprintln!("error: {}", failure.message);
-            if let Some(kernel_dump) = failure.kernel_dump {
-                eprintln!("\n** Kernel\n{kernel_dump}");
+            if let Some(strict_fragment_dump) = failure.strict_fragment_dump {
+                eprintln!("\n** Strict Fragment\n{strict_fragment_dump}");
             }
             if let Some(hir) = failure.hir {
                 eprintln!("\n** HIR\n{hir}");

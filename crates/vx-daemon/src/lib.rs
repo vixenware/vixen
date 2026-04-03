@@ -596,7 +596,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
                 function_name: "add".to_owned(),
                 args: vec![StrictValue::U64(30), StrictValue::U64(12)],
                 backend: StrictEvalBackend::Kajit,
-                include_kernel_dump: false,
+                include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,
             })
@@ -652,7 +652,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
                 function_name: "add".to_owned(),
                 args: vec![StrictValue::U64(7), StrictValue::U64(9)],
                 backend: StrictEvalBackend::Kajit,
-                include_kernel_dump: false,
+                include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,
             })

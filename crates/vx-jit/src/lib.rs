@@ -2,8 +2,9 @@
 
 mod abi;
 pub use abi::{
-    CompiledKernelOutput, KernelAbiError, MAX_ABI_WORDS, UnmanagedKernelString, compile_kernel,
-    execute_compiled_copying_strings, execute_compiled_unmanaged,
+    CompiledStrictFragmentOutput, MAX_STRICT_FRAGMENT_ABI_WORDS, StrictFragmentAbiError,
+    UnmanagedStrictFragmentString, compile_strict_fragment,
+    execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
 };
 
 mod analysis_adapter;
@@ -11,8 +12,8 @@ pub use analysis_adapter::{
     SourceLoweringError, compile_source_text_function, compile_source_text_u64_add_function,
     interpret_source_text_function, interpret_source_text_string_function,
     interpret_source_text_u64_add_function, lower_source_text_hir, lower_source_text_ir,
-    lower_source_text_kernel, lower_source_text_u64_add_hir, lower_source_text_u64_add_ir,
-    lower_source_text_u64_add_kernel, run_source_text_u64_add_function,
+    lower_source_text_strict_fragment, lower_source_text_u64_add_hir, lower_source_text_u64_add_ir,
+    lower_source_text_u64_add_strict_fragment, run_source_text_u64_add_function,
 };
 
 mod interpreter;
@@ -21,41 +22,43 @@ pub use interpreter::{interpret, interpret_string, interpret_u64};
 mod kajit_backend;
 pub use kajit_backend::KajitBackendError;
 
-mod kernel;
-pub use kernel::{
-    KernelBinaryOp, KernelExpr, KernelFunction, KernelInterpretError, KernelIntrinsic, KernelLocal,
-    KernelLocalId, KernelParam, KernelStmt, KernelType, KernelValue, KernelValueKind,
+mod strict_fragment;
+pub use strict_fragment::{
+    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentFunction,
+    StrictFragmentInterpretError, StrictFragmentIntrinsic, StrictFragmentLocal,
+    StrictFragmentLocalId, StrictFragmentParam, StrictFragmentStmt, StrictFragmentType,
+    StrictFragmentValue, StrictFragmentValueKind,
 };
 
 use kajit::{CompiledFunction, ir::IrFunc};
 use kajit_hir::Module;
 
-pub fn lower_u64_add_kernel() -> KernelFunction {
-    KernelFunction {
+pub fn lower_u64_add_strict_fragment() -> StrictFragmentFunction {
+    StrictFragmentFunction {
         name: "add_u64".to_owned(),
         params: vec![
-            KernelParam {
-                local: KernelLocalId(0),
+            StrictFragmentParam {
+                local: StrictFragmentLocalId(0),
                 name: "lhs".to_owned(),
-                ty: KernelType::U64,
+                ty: StrictFragmentType::U64,
             },
-            KernelParam {
-                local: KernelLocalId(1),
+            StrictFragmentParam {
+                local: StrictFragmentLocalId(1),
                 name: "rhs".to_owned(),
-                ty: KernelType::U64,
+                ty: StrictFragmentType::U64,
             },
         ],
-        return_type: KernelType::U64,
-        body: vec![KernelStmt::Return(KernelExpr::Binary {
-            op: KernelBinaryOp::Add,
-            lhs: Box::new(KernelExpr::Local(KernelLocalId(0))),
-            rhs: Box::new(KernelExpr::Local(KernelLocalId(1))),
+        return_type: StrictFragmentType::U64,
+        body: vec![StrictFragmentStmt::Return(StrictFragmentExpr::Binary {
+            op: StrictFragmentBinaryOp::Add,
+            lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(0))),
+            rhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
         })],
     }
 }
 
 pub fn lower_u64_add_hir() -> Result<Module, KajitBackendError> {
-    kajit_backend::lower_hir(&lower_u64_add_kernel())
+    kajit_backend::lower_hir(&lower_u64_add_strict_fragment())
 }
 
 pub fn lower_u64_add_hir_text() -> Result<String, KajitBackendError> {
@@ -63,7 +66,7 @@ pub fn lower_u64_add_hir_text() -> Result<String, KajitBackendError> {
 }
 
 pub fn lower_u64_add_ir() -> Result<IrFunc, KajitBackendError> {
-    kajit_backend::lower_ir(&lower_u64_add_kernel())
+    kajit_backend::lower_ir(&lower_u64_add_strict_fragment())
 }
 
 pub fn lower_u64_add_ir_text() -> Result<String, KajitBackendError> {
@@ -71,11 +74,11 @@ pub fn lower_u64_add_ir_text() -> Result<String, KajitBackendError> {
 }
 
 pub fn compile_u64_add() -> Result<CompiledFunction, KajitBackendError> {
-    kajit_backend::compile(&lower_u64_add_kernel())
+    kajit_backend::compile(&lower_u64_add_strict_fragment())
 }
 
-pub fn interpret_u64_add(lhs: u64, rhs: u64) -> Result<u64, KernelInterpretError> {
-    interpret_u64(&lower_u64_add_kernel(), &[lhs, rhs])
+pub fn interpret_u64_add(lhs: u64, rhs: u64) -> Result<u64, StrictFragmentInterpretError> {
+    interpret_u64(&lower_u64_add_strict_fragment(), &[lhs, rhs])
 }
 
 pub unsafe fn run_u64_add(lhs: u64, rhs: u64) -> Result<u64, KajitBackendError> {

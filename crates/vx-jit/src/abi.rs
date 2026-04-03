@@ -1,4 +1,4 @@
-//! Runtime/kernel ABI bridge for compiled strict kernels.
+//! Runtime/strict-fragment ABI bridge for compiled strict fragments.
 //!
 //! This is the narrow current bridge between host-side values and the compiled
 //! Kajit calling convention. It is intentionally explicit about unmanaged
@@ -10,17 +10,20 @@ use std::str::Utf8Error;
 use kajit::CompiledFunction;
 use thiserror::Error;
 
-use crate::{KajitBackendError, KernelFunction, KernelType, KernelValue, KernelValueKind};
+use crate::{
+    KajitBackendError, StrictFragmentFunction, StrictFragmentType, StrictFragmentValue,
+    StrictFragmentValueKind,
+};
 
-pub const MAX_ABI_WORDS: usize = 8;
+pub const MAX_STRICT_FRAGMENT_ABI_WORDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnmanagedKernelString {
+pub struct UnmanagedStrictFragmentString {
     pub ptr: u64,
     pub len: u64,
 }
 
-impl UnmanagedKernelString {
+impl UnmanagedStrictFragmentString {
     pub fn len(&self) -> usize {
         self.len as usize
     }
@@ -37,7 +40,7 @@ impl UnmanagedKernelString {
     /// Copies the returned string bytes into an owned Rust `String`.
     ///
     /// This does not free the underlying backing storage. That ownership story
-    /// is still unresolved at the runtime/kernel boundary.
+    /// is still unresolved at the runtime/strict-fragment boundary.
     pub unsafe fn to_owned_string(&self) -> Result<String, Utf8Error> {
         let bytes = unsafe { self.as_bytes() };
         std::str::from_utf8(bytes).map(str::to_owned)
@@ -45,20 +48,20 @@ impl UnmanagedKernelString {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompiledKernelOutput {
-    Value(KernelValue),
-    UnmanagedString(UnmanagedKernelString),
+pub enum CompiledStrictFragmentOutput {
+    Value(StrictFragmentValue),
+    UnmanagedString(UnmanagedStrictFragmentString),
 }
 
 #[derive(Debug, Error)]
-pub enum KernelAbiError {
+pub enum StrictFragmentAbiError {
     #[error("arity mismatch: expected {expected} args, got {actual}")]
     ArityMismatch { expected: usize, actual: usize },
     #[error("parameter {index} expected {expected:?}, got {found:?}")]
     ArgumentTypeMismatch {
         index: usize,
-        expected: KernelType,
-        found: KernelValueKind,
+        expected: StrictFragmentType,
+        found: StrictFragmentValueKind,
     },
     #[error("compiled signature uses {actual} ABI words, max supported is {max}")]
     TooManyAbiWords { actual: usize, max: usize },
@@ -70,60 +73,70 @@ pub enum KernelAbiError {
     Compile(#[from] KajitBackendError),
 }
 
-pub fn compile_kernel(function: &KernelFunction) -> Result<CompiledFunction, KernelAbiError> {
+pub fn compile_strict_fragment(
+    function: &StrictFragmentFunction,
+) -> Result<CompiledFunction, StrictFragmentAbiError> {
     Ok(crate::kajit_backend::compile(function)?)
 }
 
-pub unsafe fn execute_compiled_unmanaged(
-    function: &KernelFunction,
+pub unsafe fn execute_compiled_unmanaged_strict_fragment(
+    function: &StrictFragmentFunction,
     compiled: &CompiledFunction,
-    args: &[KernelValue],
-) -> Result<CompiledKernelOutput, KernelAbiError> {
+    args: &[StrictFragmentValue],
+) -> Result<CompiledStrictFragmentOutput, StrictFragmentAbiError> {
     let arg_words = flatten_args(function, args)?;
     let ret_words = return_word_count(function.return_type);
-    if arg_words.len() > MAX_ABI_WORDS {
-        return Err(KernelAbiError::TooManyAbiWords {
+    if arg_words.len() > MAX_STRICT_FRAGMENT_ABI_WORDS {
+        return Err(StrictFragmentAbiError::TooManyAbiWords {
             actual: arg_words.len(),
-            max: MAX_ABI_WORDS,
+            max: MAX_STRICT_FRAGMENT_ABI_WORDS,
         });
     }
 
     let words = unsafe { call_compiled_words(compiled, &arg_words, ret_words) };
     Ok(match function.return_type {
-        KernelType::U64 => CompiledKernelOutput::Value(KernelValue::U64(words[0])),
-        KernelType::Bool => CompiledKernelOutput::Value(KernelValue::Bool(match words[0] {
-            0 => false,
-            1 => true,
-            other => return Err(KernelAbiError::InvalidBoolWord(other)),
-        })),
-        KernelType::String => CompiledKernelOutput::UnmanagedString(UnmanagedKernelString {
-            ptr: words[0],
-            len: words[1],
-        }),
+        StrictFragmentType::U64 => {
+            CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(words[0]))
+        }
+        StrictFragmentType::Bool => {
+            CompiledStrictFragmentOutput::Value(StrictFragmentValue::Bool(match words[0] {
+                0 => false,
+                1 => true,
+                other => return Err(StrictFragmentAbiError::InvalidBoolWord(other)),
+            }))
+        }
+        StrictFragmentType::String => {
+            CompiledStrictFragmentOutput::UnmanagedString(UnmanagedStrictFragmentString {
+                ptr: words[0],
+                len: words[1],
+            })
+        }
     })
 }
 
-/// Executes a compiled kernel and copies string returns into owned Rust
+/// Executes a compiled strict fragment and copies string returns into owned Rust
 /// strings without attempting to free the underlying backing storage.
-pub unsafe fn execute_compiled_copying_strings(
-    function: &KernelFunction,
+pub unsafe fn execute_compiled_copying_strict_fragment_strings(
+    function: &StrictFragmentFunction,
     compiled: &CompiledFunction,
-    args: &[KernelValue],
-) -> Result<KernelValue, KernelAbiError> {
-    match unsafe { execute_compiled_unmanaged(function, compiled, args)? } {
-        CompiledKernelOutput::Value(value) => Ok(value),
-        CompiledKernelOutput::UnmanagedString(value) => {
-            Ok(KernelValue::String(unsafe { value.to_owned_string()? }))
+    args: &[StrictFragmentValue],
+) -> Result<StrictFragmentValue, StrictFragmentAbiError> {
+    match unsafe { execute_compiled_unmanaged_strict_fragment(function, compiled, args)? } {
+        CompiledStrictFragmentOutput::Value(value) => Ok(value),
+        CompiledStrictFragmentOutput::UnmanagedString(value) => {
+            Ok(StrictFragmentValue::String(unsafe {
+                value.to_owned_string()?
+            }))
         }
     }
 }
 
 fn flatten_args(
-    function: &KernelFunction,
-    args: &[KernelValue],
-) -> Result<Vec<u64>, KernelAbiError> {
+    function: &StrictFragmentFunction,
+    args: &[StrictFragmentValue],
+) -> Result<Vec<u64>, StrictFragmentAbiError> {
     if function.params.len() != args.len() {
-        return Err(KernelAbiError::ArityMismatch {
+        return Err(StrictFragmentAbiError::ArityMismatch {
             expected: function.params.len(),
             actual: args.len(),
         });
@@ -132,14 +145,16 @@ fn flatten_args(
     let mut words = Vec::new();
     for (index, (param, value)) in function.params.iter().zip(args).enumerate() {
         match (&param.ty, value) {
-            (KernelType::U64, KernelValue::U64(value)) => words.push(*value),
-            (KernelType::Bool, KernelValue::Bool(value)) => words.push(u64::from(*value)),
-            (KernelType::String, KernelValue::String(value)) => {
+            (StrictFragmentType::U64, StrictFragmentValue::U64(value)) => words.push(*value),
+            (StrictFragmentType::Bool, StrictFragmentValue::Bool(value)) => {
+                words.push(u64::from(*value))
+            }
+            (StrictFragmentType::String, StrictFragmentValue::String(value)) => {
                 words.push(value.as_ptr() as u64);
                 words.push(value.len() as u64);
             }
             (expected, found) => {
-                return Err(KernelAbiError::ArgumentTypeMismatch {
+                return Err(StrictFragmentAbiError::ArgumentTypeMismatch {
                     index,
                     expected: *expected,
                     found: found.kind(),
@@ -151,10 +166,10 @@ fn flatten_args(
     Ok(words)
 }
 
-const fn return_word_count(ty: KernelType) -> usize {
+const fn return_word_count(ty: StrictFragmentType) -> usize {
     match ty {
-        KernelType::U64 | KernelType::Bool => 1,
-        KernelType::String => 2,
+        StrictFragmentType::U64 | StrictFragmentType::Bool => 1,
+        StrictFragmentType::String => 2,
     }
 }
 

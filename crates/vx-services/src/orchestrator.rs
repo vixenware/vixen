@@ -29,7 +29,7 @@ pub struct EvalStrictFunctionRequest {
     pub function_name: String,
     pub args: Vec<StrictValue>,
     pub backend: StrictEvalBackend,
-    pub include_kernel_dump: bool,
+    pub include_strict_fragment_dump: bool,
     pub include_hir: bool,
     pub include_ir: bool,
 }
@@ -37,7 +37,7 @@ pub struct EvalStrictFunctionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionSuccess {
     pub value: StrictValue,
-    pub kernel_dump: Option<String>,
+    pub strict_fragment_dump: Option<String>,
     pub hir: Option<String>,
     pub ir: Option<String>,
 }
@@ -45,7 +45,7 @@ pub struct EvalStrictFunctionSuccess {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionFailure {
     pub message: String,
-    pub kernel_dump: Option<String>,
+    pub strict_fragment_dump: Option<String>,
     pub hir: Option<String>,
     pub ir: Option<String>,
 }

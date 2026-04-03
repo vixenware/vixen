@@ -1,7 +1,7 @@
 use vx_jit::{
-    CompiledKernelOutput, KernelValue, compile_kernel, execute_compiled_unmanaged,
-    interpret_source_text_function, lower_source_text_hir, lower_source_text_ir,
-    lower_source_text_kernel,
+    CompiledStrictFragmentOutput, StrictFragmentValue, compile_strict_fragment,
+    execute_compiled_unmanaged_strict_fragment, interpret_source_text_function,
+    lower_source_text_hir, lower_source_text_ir, lower_source_text_strict_fragment,
 };
 use vx_services::{
     EvalStrictFunctionFailure, EvalStrictFunctionRequest, EvalStrictFunctionResult,
@@ -33,31 +33,34 @@ impl OrchestratorService {
         &self,
         request: EvalStrictFunctionRequest,
     ) -> EvalStrictFunctionResult {
-        let kernel = match lower_source_text_kernel(&request.source_text, &request.function_name) {
-            Ok(kernel) => kernel,
-            Err(error) => {
-                return EvalStrictFunctionResult::Err(failure(request, error.to_string()));
-            }
-        };
+        let strict_fragment =
+            match lower_source_text_strict_fragment(&request.source_text, &request.function_name) {
+                Ok(strict_fragment) => strict_fragment,
+                Err(error) => {
+                    return EvalStrictFunctionResult::Err(failure(request, error.to_string()));
+                }
+            };
 
         let args = match request
             .args
             .iter()
             .cloned()
-            .map(kernel_value_from_rpc)
+            .map(strict_fragment_value_from_rpc)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(args) => args,
             Err(message) => return EvalStrictFunctionResult::Err(failure(request, message)),
         };
 
-        let kernel_dump = request.include_kernel_dump.then(|| format!("{kernel:#?}"));
+        let strict_fragment_dump = request
+            .include_strict_fragment_dump
+            .then(|| format!("{strict_fragment:#?}"));
         let hir = if request.include_hir {
             match lower_source_text_hir(&request.source_text, &request.function_name) {
                 Ok(hir) => Some(hir.to_string()),
                 Err(error) => {
                     return EvalStrictFunctionResult::Err(failure_with_dump(
-                        kernel_dump,
+                        strict_fragment_dump,
                         format!("failed to lower HIR: {error}"),
                     ));
                 }
@@ -71,7 +74,7 @@ impl OrchestratorService {
                 Err(error) => {
                     return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
                         message: format!("failed to lower IR: {error}"),
-                        kernel_dump,
+                        strict_fragment_dump,
                         hir,
                         ir: None,
                     });
@@ -91,18 +94,18 @@ impl OrchestratorService {
                 Err(error) => {
                     return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
                         message: format!("interpreter failed: {error}"),
-                        kernel_dump,
+                        strict_fragment_dump,
                         hir,
                         ir,
                     });
                 }
             },
-            StrictEvalBackend::Kajit => match execute_with_kajit(&kernel, &args) {
+            StrictEvalBackend::Kajit => match execute_with_kajit(&strict_fragment, &args) {
                 Ok(value) => value,
                 Err(message) => {
                     return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
                         message,
-                        kernel_dump,
+                        strict_fragment_dump,
                         hir,
                         ir,
                     });
@@ -111,8 +114,8 @@ impl OrchestratorService {
         };
 
         EvalStrictFunctionResult::Ok(EvalStrictFunctionSuccess {
-            value: rpc_value_from_kernel(value),
-            kernel_dump,
+            value: rpc_value_from_strict_fragment(value),
+            strict_fragment_dump,
             hir,
             ir,
         })
@@ -132,41 +135,44 @@ fn failure(_request: EvalStrictFunctionRequest, message: String) -> EvalStrictFu
     failure_with_dump(None, message)
 }
 
-fn failure_with_dump(kernel_dump: Option<String>, message: String) -> EvalStrictFunctionFailure {
+fn failure_with_dump(
+    strict_fragment_dump: Option<String>,
+    message: String,
+) -> EvalStrictFunctionFailure {
     EvalStrictFunctionFailure {
         message,
-        kernel_dump,
+        strict_fragment_dump,
         hir: None,
         ir: None,
     }
 }
 
-fn kernel_value_from_rpc(value: StrictValue) -> Result<KernelValue, String> {
+fn strict_fragment_value_from_rpc(value: StrictValue) -> Result<StrictFragmentValue, String> {
     Ok(match value {
-        StrictValue::U64(value) => KernelValue::U64(value),
-        StrictValue::Bool(value) => KernelValue::Bool(value),
-        StrictValue::String(value) => KernelValue::String(value),
+        StrictValue::U64(value) => StrictFragmentValue::U64(value),
+        StrictValue::Bool(value) => StrictFragmentValue::Bool(value),
+        StrictValue::String(value) => StrictFragmentValue::String(value),
     })
 }
 
-fn rpc_value_from_kernel(value: KernelValue) -> StrictValue {
+fn rpc_value_from_strict_fragment(value: StrictFragmentValue) -> StrictValue {
     match value {
-        KernelValue::U64(value) => StrictValue::U64(value),
-        KernelValue::Bool(value) => StrictValue::Bool(value),
-        KernelValue::String(value) => StrictValue::String(value),
+        StrictFragmentValue::U64(value) => StrictValue::U64(value),
+        StrictFragmentValue::Bool(value) => StrictValue::Bool(value),
+        StrictFragmentValue::String(value) => StrictValue::String(value),
     }
 }
 
 fn execute_with_kajit(
-    kernel: &vx_jit::KernelFunction,
-    args: &[KernelValue],
-) -> Result<KernelValue, String> {
-    let compiled =
-        compile_kernel(kernel).map_err(|error| format!("Kajit compile failed: {error}"))?;
+    strict_fragment: &vx_jit::StrictFragmentFunction,
+    args: &[StrictFragmentValue],
+) -> Result<StrictFragmentValue, String> {
+    let compiled = compile_strict_fragment(strict_fragment)
+        .map_err(|error| format!("Kajit compile failed: {error}"))?;
 
-    match unsafe { execute_compiled_unmanaged(kernel, &compiled, args) } {
-        Ok(CompiledKernelOutput::Value(value)) => Ok(value),
-        Ok(CompiledKernelOutput::UnmanagedString(_)) => Err(
+    match unsafe { execute_compiled_unmanaged_strict_fragment(strict_fragment, &compiled, args) } {
+        Ok(CompiledStrictFragmentOutput::Value(value)) => Ok(value),
+        Ok(CompiledStrictFragmentOutput::UnmanagedString(_)) => Err(
             "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
                 .to_owned(),
         ),
@@ -210,7 +216,7 @@ fn one() -> String (
                 function_name: "add".to_owned(),
                 args: vec![StrictValue::U64(30), StrictValue::U64(12)],
                 backend: StrictEvalBackend::Kajit,
-                include_kernel_dump: false,
+                include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,
             })
@@ -233,7 +239,7 @@ fn one() -> String (
                 function_name: "one".to_owned(),
                 args: vec![],
                 backend: StrictEvalBackend::Interpreter,
-                include_kernel_dump: false,
+                include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,
             })
@@ -256,7 +262,7 @@ fn one() -> String (
                 function_name: "str_len".to_owned(),
                 args: vec![StrictValue::String("serde".to_owned())],
                 backend: StrictEvalBackend::Interpreter,
-                include_kernel_dump: true,
+                include_strict_fragment_dump: true,
                 include_hir: true,
                 include_ir: true,
             })
@@ -267,10 +273,10 @@ fn one() -> String (
                 assert_eq!(success.value, StrictValue::U64(5));
                 assert!(
                     success
-                        .kernel_dump
+                        .strict_fragment_dump
                         .as_deref()
                         .unwrap_or_default()
-                        .contains("KernelFunction")
+                        .contains("StrictFragmentFunction")
                 );
                 assert!(
                     success

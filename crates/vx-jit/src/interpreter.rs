@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
-use crate::kernel::{
-    KernelBinaryOp, KernelExpr, KernelFunction, KernelInterpretError, KernelIntrinsic, KernelLocal,
-    KernelLocalId, KernelStmt, KernelType, KernelValue, KernelValueKind,
+use crate::strict_fragment::{
+    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentFunction,
+    StrictFragmentInterpretError, StrictFragmentIntrinsic, StrictFragmentLocal,
+    StrictFragmentLocalId, StrictFragmentStmt, StrictFragmentType, StrictFragmentValue,
+    StrictFragmentValueKind,
 };
 
 pub fn interpret(
-    function: &KernelFunction,
-    args: &[KernelValue],
-) -> Result<KernelValue, KernelInterpretError> {
+    function: &StrictFragmentFunction,
+    args: &[StrictFragmentValue],
+) -> Result<StrictFragmentValue, StrictFragmentInterpretError> {
     if function.params.len() != args.len() {
-        return Err(KernelInterpretError::ArityMismatch {
+        return Err(StrictFragmentInterpretError::ArityMismatch {
             expected: function.params.len(),
             actual: args.len(),
         });
@@ -22,50 +24,53 @@ pub fn interpret(
         locals.insert(param.local, value);
     }
 
-    eval_block(&function.body, &mut locals)?.ok_or(KernelInterpretError::MissingReturn)
+    eval_block(&function.body, &mut locals)?.ok_or(StrictFragmentInterpretError::MissingReturn)
 }
 
-pub fn interpret_u64(function: &KernelFunction, args: &[u64]) -> Result<u64, KernelInterpretError> {
+pub fn interpret_u64(
+    function: &StrictFragmentFunction,
+    args: &[u64],
+) -> Result<u64, StrictFragmentInterpretError> {
     let args = args
         .iter()
         .copied()
-        .map(KernelValue::U64)
+        .map(StrictFragmentValue::U64)
         .collect::<Vec<_>>();
     match interpret(function, &args)? {
-        KernelValue::U64(value) => Ok(value),
-        other => Err(KernelInterpretError::TypeMismatch {
-            local: KernelLocalId(u32::MAX),
-            expected: KernelType::U64,
+        StrictFragmentValue::U64(value) => Ok(value),
+        other => Err(StrictFragmentInterpretError::TypeMismatch {
+            local: StrictFragmentLocalId(u32::MAX),
+            expected: StrictFragmentType::U64,
             found: other.kind(),
         }),
     }
 }
 
 pub fn interpret_string(
-    function: &KernelFunction,
-    args: &[KernelValue],
-) -> Result<String, KernelInterpretError> {
+    function: &StrictFragmentFunction,
+    args: &[StrictFragmentValue],
+) -> Result<String, StrictFragmentInterpretError> {
     match interpret(function, args)? {
-        KernelValue::String(value) => Ok(value),
-        other => Err(KernelInterpretError::TypeMismatch {
-            local: KernelLocalId(u32::MAX),
-            expected: KernelType::String,
+        StrictFragmentValue::String(value) => Ok(value),
+        other => Err(StrictFragmentInterpretError::TypeMismatch {
+            local: StrictFragmentLocalId(u32::MAX),
+            expected: StrictFragmentType::String,
             found: other.kind(),
         }),
     }
 }
 
 fn eval_block(
-    stmts: &[KernelStmt],
-    locals: &mut BTreeMap<KernelLocalId, KernelValue>,
-) -> Result<Option<KernelValue>, KernelInterpretError> {
+    stmts: &[StrictFragmentStmt],
+    locals: &mut BTreeMap<StrictFragmentLocalId, StrictFragmentValue>,
+) -> Result<Option<StrictFragmentValue>, StrictFragmentInterpretError> {
     for stmt in stmts {
         match stmt {
-            KernelStmt::Let { local, value } => {
+            StrictFragmentStmt::Let { local, value } => {
                 let value = eval_expr(value, locals)?;
                 bind_local(local, value, locals)?;
             }
-            KernelStmt::Return(expr) => {
+            StrictFragmentStmt::Return(expr) => {
                 return eval_expr(expr, locals).map(Some);
             }
         }
@@ -75,49 +80,53 @@ fn eval_block(
 }
 
 fn eval_expr(
-    expr: &KernelExpr,
-    locals: &BTreeMap<KernelLocalId, KernelValue>,
-) -> Result<KernelValue, KernelInterpretError> {
+    expr: &StrictFragmentExpr,
+    locals: &BTreeMap<StrictFragmentLocalId, StrictFragmentValue>,
+) -> Result<StrictFragmentValue, StrictFragmentInterpretError> {
     match expr {
-        KernelExpr::Local(local) => locals
+        StrictFragmentExpr::Local(local) => locals
             .get(local)
             .cloned()
-            .ok_or(KernelInterpretError::MissingLocal(*local)),
-        KernelExpr::U64(value) => Ok(KernelValue::U64(*value)),
-        KernelExpr::Bool(value) => Ok(KernelValue::Bool(*value)),
-        KernelExpr::String(value) => Ok(KernelValue::String(value.clone())),
-        KernelExpr::Binary { op, lhs, rhs } => {
+            .ok_or(StrictFragmentInterpretError::MissingLocal(*local)),
+        StrictFragmentExpr::U64(value) => Ok(StrictFragmentValue::U64(*value)),
+        StrictFragmentExpr::Bool(value) => Ok(StrictFragmentValue::Bool(*value)),
+        StrictFragmentExpr::String(value) => Ok(StrictFragmentValue::String(value.clone())),
+        StrictFragmentExpr::Binary { op, lhs, rhs } => {
             let lhs = eval_expr(lhs, locals)?;
             let rhs = eval_expr(rhs, locals)?;
             eval_binary(*op, lhs, rhs)
         }
-        KernelExpr::Intrinsic { intrinsic, args } => {
+        StrictFragmentExpr::Intrinsic { intrinsic, args } => {
             let args = args
                 .iter()
                 .map(|arg| eval_expr(arg, locals))
                 .collect::<Result<Vec<_>, _>>()?;
             eval_intrinsic(*intrinsic, args)
         }
-        KernelExpr::Concat(parts) => {
+        StrictFragmentExpr::Concat(parts) => {
             let mut out = String::new();
             for part in parts {
                 let value = eval_expr(part, locals)?;
                 match value {
-                    KernelValue::String(value) => out.push_str(&value),
-                    KernelValue::U64(value) => out.push_str(&value.to_string()),
-                    KernelValue::Bool(value) => out.push_str(if value { "true" } else { "false" }),
+                    StrictFragmentValue::String(value) => out.push_str(&value),
+                    StrictFragmentValue::U64(value) => out.push_str(&value.to_string()),
+                    StrictFragmentValue::Bool(value) => {
+                        out.push_str(if value { "true" } else { "false" })
+                    }
                 }
             }
-            Ok(KernelValue::String(out))
+            Ok(StrictFragmentValue::String(out))
         }
-        KernelExpr::If {
+        StrictFragmentExpr::If {
             condition,
             then_expr,
             else_expr,
         } => {
             let condition = eval_expr(condition, locals)?;
-            let KernelValue::Bool(condition) = condition else {
-                return Err(KernelInterpretError::InvalidCondition(condition.kind()));
+            let StrictFragmentValue::Bool(condition) = condition else {
+                return Err(StrictFragmentInterpretError::InvalidCondition(
+                    condition.kind(),
+                ));
             };
             if condition {
                 eval_expr(then_expr, locals)
@@ -129,18 +138,22 @@ fn eval_expr(
 }
 
 fn eval_binary(
-    op: KernelBinaryOp,
-    lhs: KernelValue,
-    rhs: KernelValue,
-) -> Result<KernelValue, KernelInterpretError> {
+    op: StrictFragmentBinaryOp,
+    lhs: StrictFragmentValue,
+    rhs: StrictFragmentValue,
+) -> Result<StrictFragmentValue, StrictFragmentInterpretError> {
     match (op, lhs, rhs) {
-        (KernelBinaryOp::Add, KernelValue::U64(lhs), KernelValue::U64(rhs)) => {
-            Ok(KernelValue::U64(lhs.wrapping_add(rhs)))
-        }
-        (KernelBinaryOp::Eq, KernelValue::U64(lhs), KernelValue::U64(rhs)) => {
-            Ok(KernelValue::Bool(lhs == rhs))
-        }
-        (op, lhs, rhs) => Err(KernelInterpretError::InvalidBinaryOp {
+        (
+            StrictFragmentBinaryOp::Add,
+            StrictFragmentValue::U64(lhs),
+            StrictFragmentValue::U64(rhs),
+        ) => Ok(StrictFragmentValue::U64(lhs.wrapping_add(rhs))),
+        (
+            StrictFragmentBinaryOp::Eq,
+            StrictFragmentValue::U64(lhs),
+            StrictFragmentValue::U64(rhs),
+        ) => Ok(StrictFragmentValue::Bool(lhs == rhs)),
+        (op, lhs, rhs) => Err(StrictFragmentInterpretError::InvalidBinaryOp {
             op,
             lhs: lhs.kind(),
             rhs: rhs.kind(),
@@ -149,62 +162,64 @@ fn eval_binary(
 }
 
 fn eval_intrinsic(
-    intrinsic: KernelIntrinsic,
-    args: Vec<KernelValue>,
-) -> Result<KernelValue, KernelInterpretError> {
+    intrinsic: StrictFragmentIntrinsic,
+    args: Vec<StrictFragmentValue>,
+) -> Result<StrictFragmentValue, StrictFragmentInterpretError> {
     match intrinsic {
-        KernelIntrinsic::StringLen => match args.as_slice() {
-            [KernelValue::String(value)] => Ok(KernelValue::U64(value.len() as u64)),
-            _ => Err(KernelInterpretError::InvalidIntrinsicArgs {
+        StrictFragmentIntrinsic::StringLen => match args.as_slice() {
+            [StrictFragmentValue::String(value)] => {
+                Ok(StrictFragmentValue::U64(value.len() as u64))
+            }
+            _ => Err(StrictFragmentInterpretError::InvalidIntrinsicArgs {
                 intrinsic,
-                args: args.iter().map(KernelValue::kind).collect(),
+                args: args.iter().map(StrictFragmentValue::kind).collect(),
             }),
         },
-        KernelIntrinsic::StringSlice => match args.as_slice() {
+        StrictFragmentIntrinsic::StringSlice => match args.as_slice() {
             [
-                KernelValue::String(value),
-                KernelValue::U64(start),
-                KernelValue::U64(end),
+                StrictFragmentValue::String(value),
+                StrictFragmentValue::U64(start),
+                StrictFragmentValue::U64(end),
             ] => {
                 let start = (*start as usize).min(value.len());
                 let end = (*end as usize).min(value.len());
                 let start = start.min(end);
-                Ok(KernelValue::String(value[start..end].to_owned()))
+                Ok(StrictFragmentValue::String(value[start..end].to_owned()))
             }
-            _ => Err(KernelInterpretError::InvalidIntrinsicArgs {
+            _ => Err(StrictFragmentInterpretError::InvalidIntrinsicArgs {
                 intrinsic,
-                args: args.iter().map(KernelValue::kind).collect(),
+                args: args.iter().map(StrictFragmentValue::kind).collect(),
             }),
         },
     }
 }
 
 fn bind_local(
-    local: &KernelLocal,
-    value: KernelValue,
-    locals: &mut BTreeMap<KernelLocalId, KernelValue>,
-) -> Result<(), KernelInterpretError> {
+    local: &StrictFragmentLocal,
+    value: StrictFragmentValue,
+    locals: &mut BTreeMap<StrictFragmentLocalId, StrictFragmentValue>,
+) -> Result<(), StrictFragmentInterpretError> {
     ensure_value_type(local.local, local.ty, &value)?;
     locals.insert(local.local, value);
     Ok(())
 }
 
 fn ensure_value_type(
-    local: KernelLocalId,
-    expected: KernelType,
-    value: &KernelValue,
-) -> Result<(), KernelInterpretError> {
+    local: StrictFragmentLocalId,
+    expected: StrictFragmentType,
+    value: &StrictFragmentValue,
+) -> Result<(), StrictFragmentInterpretError> {
     let found = value.kind();
     let matches = match (expected, found) {
-        (KernelType::U64, KernelValueKind::U64) => true,
-        (KernelType::Bool, KernelValueKind::Bool) => true,
-        (KernelType::String, KernelValueKind::String) => true,
+        (StrictFragmentType::U64, StrictFragmentValueKind::U64) => true,
+        (StrictFragmentType::Bool, StrictFragmentValueKind::Bool) => true,
+        (StrictFragmentType::String, StrictFragmentValueKind::String) => true,
         _ => false,
     };
     if matches {
         Ok(())
     } else {
-        Err(KernelInterpretError::TypeMismatch {
+        Err(StrictFragmentInterpretError::TypeMismatch {
             local,
             expected,
             found,
