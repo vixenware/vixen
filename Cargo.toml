@@ -80,6 +80,7 @@ shm-primitives = "7.1.0"
 vox = { version = "0.3.1", features = ["transport-tcp", "transport-local", "transport-shm"] }
 
 vox-codegen = { version = "0.3.1" }
+vox-stream = { path = "../vox/rust/vox-stream" }
 
 # process management
 

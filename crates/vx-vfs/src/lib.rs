@@ -7,8 +7,8 @@ use vx_services::{Vfs, VfsDiskNotify};
 
 #[cfg(target_os = "linux")]
 mod linux;
-// #[cfg(target_os = "macos")]
-// mod macos;
+#[cfg(target_os = "macos")]
+mod macos;
 mod types;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -29,9 +29,7 @@ where
     cfg_if! {
         if #[cfg(target_os = "macos")] {
             tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
-            let _ = vfs;
-            // macos::mount(config, vfs).await
-            panic!("macos mount: temporarily disabled")
+            macos::mount(config, vfs).await
         } else if #[cfg(target_os = "linux")] {
             tracing::debug!(mount_path = %config.mount_path, "starting FUSE vfs");
             linux::mount(config, vfs).await
