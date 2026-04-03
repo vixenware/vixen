@@ -42,6 +42,48 @@ It is trying to provide:
 2. a formal lowering/lifting boundary between runtime values and compiled code
 3. a layout model that can grow to structs and enums without more ad hoc cases
 
+## Representation Goal
+
+The goal is **not** to invent one representation for the runtime and a
+different representation for compiled strict fragments.
+
+The goal is:
+
+- for every type admitted to the strict fragment ABI, define one canonical
+  **payload representation**
+- have both the runtime and compiled strict fragments use that same payload
+  representation
+- allow the runtime to carry additional tracking data **outside** that payload
+  representation when needed
+
+So the intended model is:
+
+- shared payload layout
+- optional runtime-only envelope
+
+Examples of runtime-only envelope data might include:
+
+- reference counts
+- tracing/GC metadata
+- dynamic type tags
+- provenance/debug metadata
+- pending/lazy bookkeeping
+
+Compiled strict fragments should not need to know about that envelope if they
+can operate directly on the payload representation.
+
+This means the preferred direction is:
+
+- minimize semantic reshaping at the strict fragment boundary
+- keep ABI lowering/lifting mostly structural
+- avoid separate “runtime layout” versus “JIT layout” for the same fragment-visible type
+
+In short:
+
+> strict-fragment-visible types should have a shared canonical payload
+> representation across the runtime and JIT; runtime-only tracking may exist
+> around that payload, but not redefine it.
+
 ## Cost Model
 
 Yes, there is marshaling cost at this boundary if the strict fragment ABI does
@@ -61,6 +103,15 @@ It is:
 - make each crossing explicit and mechanically simple
 - compile larger strict fragments so the boundary is crossed rarely
 - keep the ABI layout rules stable and predictable
+
+Given the representation goal above, the preferred end state is actually
+stronger than “accept marshaling cost”:
+
+- use the same payload representation inside and outside compiled strict fragments
+- pay boundary cost only for:
+  - dynamic envelope handling
+  - ownership transitions
+  - forcing/copying where semantics require it
 
 In practice:
 
@@ -237,6 +288,13 @@ The runtime may use:
 - dynamic tagged values
 - content-addressed tree/blob handles
 
+But “separate” here should not be read as “unrelated”.
+
+The intended direction is:
+
+- runtime representation may include a richer envelope
+- fragment-visible payload layout should still match the strict fragment ABI
+
 The strict fragment ABI only defines:
 
 - how selected values cross into compiled strict fragments
@@ -284,4 +342,3 @@ of letting the orchestrator own ad hoc conversions.
 3. define layout descriptors for structs and enums
 4. move the runtime value lowering/lifting logic behind a dedicated bridge layer
 5. use that bridge from the orchestrator when calling compiled strict fragments
-
