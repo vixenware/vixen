@@ -130,10 +130,12 @@ where
     let client = loop {
         match LocalLink::connect(&addr).await {
             Ok(link) => {
+                tracing::info!(%sid, %addr, "connected raw local link to VixenFS listener");
                 let metadata = vec![
                     MetadataEntry::str("vox-service", "Vfs"),
                     MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
                 ];
+                tracing::info!(%sid, %addr, "starting Vox session establish to VixenFS");
                 let client = initiator_on(link, TransportMode::Bare)
                     .metadata(metadata)
                     .on_connection(VfsDispatcher::new(vfs.clone()))
@@ -142,6 +144,7 @@ where
                     .map_err(|error| {
                         format!("failed to establish VFS session on {addr}: {error}")
                     })?;
+                tracing::info!(%sid, %addr, "Vox session establish completed");
                 break client;
             }
             Err(error) if Instant::now() < connect_deadline => {

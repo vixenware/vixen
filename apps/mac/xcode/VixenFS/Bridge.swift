@@ -369,14 +369,17 @@ actor VfsConnection {
         self.listenerTask = Task { [weak self] in
             for await link in listener.acceptConnections() {
                 guard let self else { break }
+                self.log.notice("listener accepted raw VFS peer")
                 await self.acceptIncoming(link: link)
             }
+            self?.log.notice("listener accept loop ended")
         }
         log.notice("Listening for VFS peers on \(socketPath, privacy: .public)")
     }
 
     private func acceptIncoming(link: NIOFrameLink) async {
         do {
+            log.notice("beginning Session.acceptorOn for raw VFS peer")
             let session = try await Session.acceptorOn(
                 link,
                 transport: .bare,
@@ -384,6 +387,7 @@ actor VfsConnection {
                 acceptConnections: false,
                 resumable: false
             )
+            log.notice("Session.acceptorOn completed for VFS peer")
             guard let sid = metadataString(
                 session.peerMetadata,
                 key: VixenFSConstants.sidMetadataKey
