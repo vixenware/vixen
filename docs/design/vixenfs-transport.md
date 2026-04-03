@@ -115,7 +115,7 @@ The backend initiator includes metadata that names the requested session.
 
 At minimum this metadata includes:
 
-- `sid`
+- `vixenfs-sid`
 
 Possible future metadata could include:
 
@@ -234,7 +234,7 @@ Reason:
 
 ## Open Questions
 
-1. What exact metadata key should carry `sid`?
+1. The session id is carried in connect metadata under `vixenfs-sid`.
 2. Should `VixenFS` accept multiple simultaneous session-bound connections on
    one mounted instance, or is one active session enough initially?
 3. Where should the stable app-group socket path be published and validated?
