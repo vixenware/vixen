@@ -257,7 +257,19 @@ impl ConnectionAcceptor for DaemonAcceptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceRef, resolve_optional_dependency, resolve_required_dependency};
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tokio::time::sleep;
+    use vx_services::{
+        EvalStrictFunctionRequest, EvalStrictFunctionResult, OrchestratorClient, StrictEvalBackend,
+        StrictValue,
+    };
+
+    use super::{
+        DaemonConfig, HostedServices, OrchestratorConfig, ServiceRef, resolve_optional_dependency,
+        resolve_required_dependency,
+    };
 
     #[test]
     fn omitted_dependency_defaults_to_local_when_available() {
@@ -294,5 +306,67 @@ mod tests {
             resolve_optional_dependency(None, false, "local:///tmp/vixen.vox", "store.upstream")
                 .expect("optional dependency should resolve");
         assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn orchestrator_round_trips_over_local_rpc() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let socket_path = temp_dir.path().join("vx-daemon.sock");
+        let listen = format!("local://{}", socket_path.display());
+
+        let daemon = tokio::spawn(super::serve(DaemonConfig {
+            listen: vec![listen.clone()],
+            services: HostedServices {
+                orchestrator: Some(OrchestratorConfig),
+                ..HostedServices::default()
+            },
+        }));
+
+        let client = connect_orchestrator(&listen).await;
+        let result = client
+            .eval_strict_function(EvalStrictFunctionRequest {
+                source_text: r#"
+fn add(lhs: U64, rhs: U64) -> U64 (
+  lhs + rhs
+)
+"#
+                .to_owned(),
+                function_name: "add".to_owned(),
+                args: vec![StrictValue::U64(30), StrictValue::U64(12)],
+                backend: StrictEvalBackend::Kajit,
+                include_kernel_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await
+            .expect("rpc call should succeed");
+
+        daemon.abort();
+        let _ = daemon.await;
+
+        match result {
+            EvalStrictFunctionResult::Ok(success) => {
+                assert_eq!(success.value, StrictValue::U64(42));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    async fn connect_orchestrator(address: &str) -> OrchestratorClient {
+        let mut last_error = None;
+        for _ in 0..50 {
+            match vox::connect(address).await {
+                Ok(client) => return client,
+                Err(error) => {
+                    last_error = Some(error);
+                    sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+
+        panic!(
+            "failed to connect orchestrator client to {address}: {}",
+            last_error.expect("retry loop should record at least one connection error")
+        );
     }
 }

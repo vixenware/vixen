@@ -3684,6 +3684,7 @@ dependencies = [
  "concolor",
  "eyre",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tempfile",
  "tokio",
  "tracing",
  "tree-sitter-vixen",
