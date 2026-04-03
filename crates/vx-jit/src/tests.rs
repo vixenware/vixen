@@ -2,7 +2,8 @@ use kajit_hir::{BinaryOp, Expr, StmtKind, Type};
 
 use crate::{
     KernelBinaryOp, KernelExpr, KernelIntrinsic, KernelLocal, KernelLocalId, KernelStmt,
-    KernelType, KernelValue, compile_source_text_u64_add_function, compile_u64_add,
+    KernelType, KernelValue, compile_kernel, compile_source_text_u64_add_function, compile_u64_add,
+    execute_compiled_copying_strings, execute_compiled_unmanaged,
     interpret_source_text_string_function, interpret_source_text_u64_add_function,
     interpret_u64_add, lower_source_text_kernel, lower_source_text_u64_add_hir,
     lower_source_text_u64_add_ir, lower_u64_add_hir, lower_u64_add_hir_text, lower_u64_add_ir,
@@ -414,6 +415,65 @@ fn compiles_and_executes_source_text_string_literal_return() {
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let output = std::str::from_utf8(bytes).expect("literal result should be utf-8");
     assert_eq!(output, "1");
+}
+
+#[test]
+fn executes_compiled_u64_add_via_abi_bridge() {
+    let function =
+        lower_source_text_kernel(SOURCE_ADD_U64, "add").expect("add should lower into kernel IR");
+    let compiled = compile_kernel(&function).expect("add should compile");
+
+    let result = unsafe {
+        execute_compiled_unmanaged(
+            &function,
+            &compiled,
+            &[KernelValue::U64(30), KernelValue::U64(12)],
+        )
+    }
+    .expect("abi bridge should execute add");
+
+    assert_eq!(
+        result,
+        crate::CompiledKernelOutput::Value(KernelValue::U64(42))
+    );
+}
+
+#[test]
+fn executes_compiled_string_literal_via_abi_bridge() {
+    let function =
+        lower_source_text_kernel(SOURCE_ONE, "one").expect("one should lower into kernel IR");
+    let compiled = compile_kernel(&function).expect("one should compile");
+
+    let result = unsafe { execute_compiled_unmanaged(&function, &compiled, &[]) }
+        .expect("abi bridge should execute one");
+
+    let crate::CompiledKernelOutput::UnmanagedString(result) = result else {
+        panic!("expected unmanaged string return");
+    };
+    let output = unsafe { result.to_owned_string() }.expect("result should be utf-8");
+    assert_eq!(output, "1");
+}
+
+#[test]
+fn executes_compiled_string_slice_via_abi_bridge() {
+    let function = lower_source_text_kernel(SOURCE_STR_SLICE, "str_slice")
+        .expect("str_slice should lower into kernel IR");
+    let compiled = compile_kernel(&function).expect("str_slice should compile");
+
+    let result = unsafe {
+        execute_compiled_copying_strings(
+            &function,
+            &compiled,
+            &[
+                KernelValue::String("serde".to_owned()),
+                KernelValue::U64(1),
+                KernelValue::U64(4),
+            ],
+        )
+    }
+    .expect("abi bridge should execute str_slice");
+
+    assert_eq!(result, KernelValue::String("erd".to_owned()));
 }
 
 #[test]

@@ -1,5 +1,11 @@
 //! Tiny Vixen -> Kajit JIT experiments.
 
+mod abi;
+pub use abi::{
+    CompiledKernelOutput, KernelAbiError, MAX_ABI_WORDS, UnmanagedKernelString, compile_kernel,
+    execute_compiled_copying_strings, execute_compiled_unmanaged,
+};
+
 mod analysis_adapter;
 pub use analysis_adapter::{
     SourceLoweringError, compile_source_text_function, compile_source_text_u64_add_function,

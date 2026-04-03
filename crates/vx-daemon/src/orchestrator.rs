@@ -1,6 +1,7 @@
 use vx_jit::{
-    KernelType, KernelValue, compile_source_text_function, interpret_source_text_function,
-    lower_source_text_hir, lower_source_text_ir, lower_source_text_kernel,
+    CompiledKernelOutput, KernelValue, compile_kernel, execute_compiled_unmanaged,
+    interpret_source_text_function, lower_source_text_hir, lower_source_text_ir,
+    lower_source_text_kernel,
 };
 use vx_services::{
     EvalStrictFunctionFailure, EvalStrictFunctionRequest, EvalStrictFunctionResult,
@@ -96,7 +97,7 @@ impl OrchestratorService {
                     });
                 }
             },
-            StrictEvalBackend::Kajit => match execute_with_kajit(&kernel, &request, &args) {
+            StrictEvalBackend::Kajit => match execute_with_kajit(&kernel, &args) {
                 Ok(value) => value,
                 Err(message) => {
                     return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
@@ -158,66 +159,18 @@ fn rpc_value_from_kernel(value: KernelValue) -> StrictValue {
 
 fn execute_with_kajit(
     kernel: &vx_jit::KernelFunction,
-    request: &EvalStrictFunctionRequest,
     args: &[KernelValue],
 ) -> Result<KernelValue, String> {
-    let compiled = compile_source_text_function(&request.source_text, &request.function_name)
-        .map_err(|error| format!("Kajit compile failed: {error}"))?;
+    let compiled =
+        compile_kernel(kernel).map_err(|error| format!("Kajit compile failed: {error}"))?;
 
-    match (kernel.return_type, kernel.params.as_slice()) {
-        (KernelType::U64, []) => {
-            let f: unsafe extern "C" fn() -> u64 = unsafe { core::mem::transmute(compiled.as_ptr()) };
-            Ok(KernelValue::U64(unsafe { f() }))
-        }
-        (KernelType::U64, [a]) if a.ty == KernelType::U64 => {
-            let [KernelValue::U64(a0)] = args else {
-                return Err("Kajit backend expected one U64 argument".to_owned());
-            };
-            let f: unsafe extern "C" fn(u64) -> u64 =
-                unsafe { core::mem::transmute(compiled.as_ptr()) };
-            Ok(KernelValue::U64(unsafe { f(*a0) }))
-        }
-        (KernelType::U64, [a]) if a.ty == KernelType::String => {
-            let [KernelValue::String(a0)] = args else {
-                return Err("Kajit backend expected one String argument".to_owned());
-            };
-            let f: unsafe extern "C" fn(u64, u64) -> u64 =
-                unsafe { core::mem::transmute(compiled.as_ptr()) };
-            Ok(KernelValue::U64(unsafe { f(a0.as_ptr() as u64, a0.len() as u64) }))
-        }
-        (KernelType::U64, [a, b]) if a.ty == KernelType::U64 && b.ty == KernelType::U64 => {
-            let [KernelValue::U64(a0), KernelValue::U64(a1)] = args else {
-                return Err("Kajit backend expected two U64 arguments".to_owned());
-            };
-            let f: unsafe extern "C" fn(u64, u64) -> u64 =
-                unsafe { core::mem::transmute(compiled.as_ptr()) };
-            Ok(KernelValue::U64(unsafe { f(*a0, *a1) }))
-        }
-        (KernelType::String, []) => Err(
+    match unsafe { execute_compiled_unmanaged(kernel, &compiled, args) } {
+        Ok(CompiledKernelOutput::Value(value)) => Ok(value),
+        Ok(CompiledKernelOutput::UnmanagedString(_)) => Err(
             "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
                 .to_owned(),
         ),
-        (KernelType::String, [a]) if a.ty == KernelType::U64 => Err(
-            "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
-                .to_owned(),
-        ),
-        (KernelType::String, [a]) if a.ty == KernelType::String => Err(
-            "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
-                .to_owned(),
-        ),
-        (KernelType::String, [a, b])
-            if a.ty == KernelType::String && b.ty == KernelType::String =>
-        {
-            Err(
-                "Kajit backend string returns are not yet exposed safely over RPC because ownership is unresolved"
-                    .to_owned(),
-            )
-        }
-        _ => Err(format!(
-            "Kajit backend does not yet support RPC execution for signature {:?} -> {:?}",
-            kernel.params.iter().map(|param| param.ty).collect::<Vec<_>>(),
-            kernel.return_type
-        )),
+        Err(error) => Err(format!("Kajit execution failed: {error}")),
     }
 }
 
