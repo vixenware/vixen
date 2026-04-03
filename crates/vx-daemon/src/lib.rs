@@ -15,6 +15,7 @@ use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
 
 mod orchestrator;
+mod runtime_eval;
 mod service;
 pub use orchestrator::{OrchestratorService, OrchestratorWiring};
 pub use service::DaemonService;

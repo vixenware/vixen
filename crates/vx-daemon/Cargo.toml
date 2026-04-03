@@ -20,9 +20,13 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 facet = { workspace = true }
 facet-styx = { workspace = true }
+thiserror = { workspace = true }
 
+vx-parser.workspace = true
+vx-resolve.workspace = true
 vx-services.workspace = true
 vx-jit.workspace = true
+vx-analysis.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
 vx-vfsd = { path = "../vx-vfsd" }

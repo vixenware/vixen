@@ -10,6 +10,8 @@ use vx_services::{
     StrictEvalBackend,
 };
 
+use crate::runtime_eval::evaluate_source_text_function;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrchestratorWiring {
     pub store_addr: Option<String>,
@@ -141,11 +143,48 @@ impl OrchestratorService {
             ir,
         })
     }
+
+    async fn eval_function_impl(&self, request: EvalFunctionRequest) -> EvalFunctionResult {
+        match classify_source_text_function(&request.source_text, &request.function_name) {
+            Ok(StrictFragmentClassification::StrictFragment) => {
+                self.eval_strict_function_impl(request).await
+            }
+            Ok(StrictFragmentClassification::NotStrict { reason }) => {
+                match evaluate_source_text_function(
+                    &request.source_text,
+                    &request.function_name,
+                    &request.args,
+                ) {
+                    Ok(value) => EvalFunctionResult::Ok(EvalStrictFunctionSuccess {
+                        value,
+                        strict_fragment_dump: None,
+                        hir: None,
+                        ir: None,
+                    }),
+                    Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
+                        message: format!(
+                            "non-strict evaluation not fully implemented for `{}`: {error} (classification: {reason})",
+                            request.function_name
+                        ),
+                        strict_fragment_dump: None,
+                        hir: None,
+                        ir: None,
+                    }),
+                }
+            }
+            Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
+                message: error.to_string(),
+                strict_fragment_dump: None,
+                hir: None,
+                ir: None,
+            }),
+        }
+    }
 }
 
 impl Orchestrator for OrchestratorService {
     async fn eval_function(&self, request: EvalFunctionRequest) -> EvalFunctionResult {
-        self.eval_strict_function_impl(request).await
+        self.eval_function_impl(request).await
     }
 
     async fn eval_strict_function(
@@ -223,6 +262,16 @@ fn str_len(name: String) -> U64 (
     const SOURCE_ONE: &str = r#"
 fn one() -> String (
   "1"
+)
+"#;
+
+    const SOURCE_NON_STRICT_CALL: &str = r#"
+fn greet(name: String) -> String (
+  name
+)
+
+fn build(name: String) -> String (
+  greet(name)
 )
 "#;
 
@@ -336,7 +385,30 @@ fn one() -> String (
     }
 
     #[tokio::test]
-    async fn rejects_non_strict_function_with_clear_message() {
+    async fn evals_non_strict_function_with_local_body_calls() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_NON_STRICT_CALL.to_owned(),
+                function_name: "build".to_owned(),
+                args: vec![RuntimeValue::String("hello".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => {
+                assert_eq!(success.value, RuntimeValue::String("hello".to_owned()));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_runtime_boundary_gap_for_build_function() {
         let service = OrchestratorService::new(OrchestratorWiring::default());
         let result = service
             .eval_function(EvalFunctionRequest {
@@ -355,7 +427,7 @@ fn one() -> String (
                 assert!(
                     failure
                         .message
-                        .contains("function `build` is not a strict fragment"),
+                        .contains("non-strict evaluation not fully implemented"),
                     "unexpected error message: {}",
                     failure.message
                 );
