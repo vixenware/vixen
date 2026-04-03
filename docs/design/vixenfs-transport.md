@@ -22,6 +22,7 @@ to:
 - Vox
 - `local://...` Unix domain socket transport on macOS
 - one stable listener endpoint in the app group container
+- a fixed listener socket path of `vixenfs.sock` under the app group root
 
 without redesigning the `Vfs` RPC trait.
 
@@ -96,7 +97,7 @@ container.
 Examples of the intended shape:
 
 - app group root discovered via `/.vixenfs/status.json`
-- stable socket path underneath that root
+- stable socket path is `<app-group-root>/vixenfs.sock`
 - transport address represented as `local://<socket-path>` on the Rust side
 
 The important property is:
@@ -237,7 +238,7 @@ Reason:
 1. The session id is carried in connect metadata under `vixenfs-sid`.
 2. Should `VixenFS` accept multiple simultaneous session-bound connections on
    one mounted instance, or is one active session enough initially?
-3. Where should the stable app-group socket path be published and validated?
+3. The stable listener path is by convention `<app-group-root>/vixenfs.sock`, where `app-group-root` comes from `/.vixenfs/status.json`.
    Current likely answer:
    - app group path remains discoverable via `/.vixenfs/status.json`
    - socket path is derived from that root by convention
