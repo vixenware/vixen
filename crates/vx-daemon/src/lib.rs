@@ -350,12 +350,17 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
             },
         );
 
-        if let Err(error) = vox::acceptor_on(server_link)
+        match vox::acceptor_on(server_link)
             .on_connection(acceptor)
             .establish::<vox::NoopClient>()
             .await
         {
-            tracing::warn!(?error, "in-process store acceptor exited");
+            Ok(client) => {
+                client.caller.closed().await;
+            }
+            Err(error) => {
+                tracing::warn!(?error, "in-process store acceptor exited");
+            }
         }
     });
 
