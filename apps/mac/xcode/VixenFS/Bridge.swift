@@ -8,7 +8,6 @@ enum VixenFSConstants {
     static let subsystem = "eu.bearcove.vixenfs"
     static let appGroupIdentifier = "B2N6FSRTPV.vixenfs"
     static let vfsSocketName = "vixenfs.sock"
-    static let sidMetadataKey = "vixenfs-sid"
 }
 
 func vixenPOSIXCode(for error: Error) -> Int32 {
@@ -227,20 +226,20 @@ actor ConnectionHealth {
 actor VfsConnection {
     static let shared = VfsConnection()
 
-    private struct PeerConnection {
+    private struct RootConnection {
         var client: VfsClient?
         var session: Session?
         var driverTask: Task<Void, Never>?
         var terminalError: NSError?
     }
 
-    private var peers: [String: PeerConnection] = [:]
+    private var root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
     private var disconnectRequested = false
     private var debugEnabled = false
     private var listener: UnixListener?
     private var listenerTask: Task<Void, Never>?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
-    private var sessionDeathObservers: [UUID: @Sendable (String) -> Void] = [:]
+    private var disconnectObservers: [UUID: @Sendable () -> Void] = [:]
 
     func connect(url: URL) async throws {
         await LifecycleTrace.shared.mark(
@@ -277,12 +276,10 @@ actor VfsConnection {
         debugEnabled = false
         await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
 
-        for (sid, peer) in peers {
-            peer.session?.handle.shutdown()
-            peer.driverTask?.cancel()
-            notifySessionDeath(sid: sid)
-        }
-        peers.removeAll()
+        root.session?.handle.shutdown()
+        root.driverTask?.cancel()
+        root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
+        notifyDisconnect()
         listenerTask?.cancel()
         listenerTask = nil
         if let listener {
@@ -292,76 +289,64 @@ actor VfsConnection {
         await ConnectionHealth.shared.recordDisconnected(reason: "requested")
     }
 
-    func getClient(for sid: String? = nil) async throws -> VfsClient {
-        guard let targetSid = sid else {
-            throw POSIXError(.ENOTCONN)
-        }
-
-        if let existing = peers[targetSid], let client = existing.client {
+    func getClient() async throws -> VfsClient {
+        if let client = root.client {
             return client
         }
 
-        if let existing = peers[targetSid], let terminalError = existing.terminalError {
+        if let terminalError = root.terminalError {
             log.notice(
-                "Refusing reconnect for terminal sid=\(targetSid, privacy: .public): \(terminalError.localizedDescription, privacy: .public)"
+                "Refusing reconnect for terminal root peer: \(terminalError.localizedDescription, privacy: .public)"
             )
             throw terminalError
         }
 
-        log.notice("No live VFS peer for sid=\(targetSid, privacy: .public)")
+        log.notice("No live root VFS peer")
         throw POSIXError(.ENOTCONN)
     }
 
-    func observeSessionDeath(id: UUID, _ observer: @escaping @Sendable (String) -> Void) {
-        sessionDeathObservers[id] = observer
+    func observeDisconnect(id: UUID, _ observer: @escaping @Sendable () -> Void) {
+        disconnectObservers[id] = observer
     }
 
-    func removeSessionDeathObserver(_ id: UUID) {
-        sessionDeathObservers.removeValue(forKey: id)
+    func removeDisconnectObserver(_ id: UUID) {
+        disconnectObservers.removeValue(forKey: id)
     }
 
-    func liveSessionIDs() -> [String] {
-        peers
-            .filter { _, peer in peer.client != nil }
-            .map { sid, _ in sid }
-            .sorted()
-    }
-
-    private func handleDriverExit(sid: String, reason: String) async {
-        var peer = peers[sid] ?? PeerConnection(client: nil, driverTask: nil, terminalError: nil)
-        peer.client = nil
-        peer.session = nil
-        peer.driverTask = nil
-
+    private func handleDriverExit(reason: String) async {
         if disconnectRequested {
-            log.info("VFS connection closed during normal unload sid=\(sid, privacy: .public)")
+            log.info("VFS root peer connection closed during normal unload")
             NSLog("VixenFS: accepted Vox connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
-            peers.removeValue(forKey: sid)
+            root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
         } else {
-            peer.terminalError = NSError(
+            root = RootConnection(
+                client: nil,
+                session: nil,
+                driverTask: nil,
+                terminalError: NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(POSIXError.ECONNRESET.rawValue),
                 userInfo: [NSLocalizedDescriptionKey: reason]
             )
-            peers[sid] = peer
+            )
             log.error(
-                "Connection to VFS server lost for sid=\(sid, privacy: .public); waiting for FSKit to unload/deactivate"
+                "Connection to root VFS peer lost; waiting for FSKit to unload/deactivate"
             )
             NSLog("VixenFS: accepted Vox connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
 
-        if peers.values.allSatisfy({ $0.client == nil }) {
+        if root.client == nil {
             await ConnectionHealth.shared.recordDisconnected(reason: reason)
         }
 
-        notifySessionDeath(sid: sid)
+        notifyDisconnect()
     }
 
-    private func notifySessionDeath(sid: String) {
-        for observer in sessionDeathObservers.values {
-            observer(sid)
+    private func notifyDisconnect() {
+        for observer in disconnectObservers.values {
+            observer()
         }
     }
 
@@ -392,47 +377,34 @@ actor VfsConnection {
                 resumable: false
             )
             log.notice("Session.acceptFreshLink completed for VFS peer")
-            guard let sid = metadataString(
-                session.peerMetadata,
-                key: VixenFSConstants.sidMetadataKey
-            ), !sid.isEmpty else {
-                log.error("accepted VFS peer without \(VixenFSConstants.sidMetadataKey, privacy: .public)")
-                session.handle.shutdown()
-                return
-            }
 
             let logger = log
             let driverTask = Task { [weak self] in
                 do {
                     try await session.run()
-                    logger.error(
-                        "Accepted Vox driver exited cleanly sid=\(sid, privacy: .public)"
-                    )
-                    await self?.handleDriverExit(sid: sid, reason: "driver_exit_clean")
+                    logger.error("Accepted root Vox driver exited cleanly")
+                    await self?.handleDriverExit(reason: "driver_exit_clean")
                 } catch {
                     logger.error(
-                        "Accepted Vox driver exited with error sid=\(sid, privacy: .public): \(String(describing: error), privacy: .public)"
+                        "Accepted root Vox driver exited with error: \(String(describing: error), privacy: .public)"
                     )
-                    await self?.handleDriverExit(
-                        sid: sid,
-                        reason: "driver_exit_error:\(String(describing: error))"
-                    )
+                    await self?.handleDriverExit(reason: "driver_exit_error:\(String(describing: error))")
                 }
             }
 
-            if let existing = peers[sid] {
-                existing.session?.handle.shutdown()
-                existing.driverTask?.cancel()
+            if let existing = root.session {
+                existing.handle.shutdown()
+                root.driverTask?.cancel()
             }
 
-            peers[sid] = PeerConnection(
+            root = RootConnection(
                 client: VfsClient(connection: session.connection, timeout: 28.0),
                 session: session,
                 driverTask: driverTask,
                 terminalError: nil
             )
             await ConnectionHealth.shared.recordConnected()
-            log.notice("Accepted VFS peer sid=\(sid, privacy: .public)")
+            log.notice("Accepted root VFS peer")
         } catch {
             log.error(
                 "failed to accept VFS peer: \(String(describing: error), privacy: .public)"
@@ -463,16 +435,6 @@ actor VfsConnection {
         logPathState(path: socketPath, label: "socketPath")
         return socketPath
     }
-
-    private func metadataString(_ metadata: [MetadataEntry], key: String) -> String? {
-        for entry in metadata where entry.key == key {
-            if case .string(let value) = entry.value {
-                return value
-            }
-        }
-        return nil
-    }
-
     private struct MountOptions {
         let debug: Bool
         let moireDashboard: String?

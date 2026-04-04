@@ -188,11 +188,6 @@ final class Volume: FSVolume, @unchecked Sendable {
     private let _itemsLock = NSLock()
     private var _items: [UInt64: Item] = [:]
 
-    /// Stable synthetic IDs for routed backend items keyed by SID + backend item ID.
-    private let _routedItemIDLock = NSLock()
-    private var _routedItemIDs: [String: UInt64] = [:]
-    private var _nextRoutedItemID: UInt64 = 0xFFFF_FFFF_FFFC_0000
-
     /// Local synthetic mount root ID.
     private let rootId: UInt64 = 1
     private static let mutableAttributesTTLNs: UInt64 = 2_000_000_000
@@ -280,64 +275,11 @@ final class Volume: FSVolume, @unchecked Sendable {
         )
     }
 
-    private func sidDirectoryAttributes(localItemID: UInt64) -> FSItem.Attributes {
-        FSItem.Attributes.fromVfs(
-            itemId: localItemID,
-            parentId: rootId,
-            itemType: .directory,
-            size: 0,
-            modifiedTime: 0,
-            createdTime: 0,
-            mode: 0o755
-        )
+    func rootAttributesForTesting() -> FSItem.Attributes {
+        rootAttributes()
     }
 
-    private func makeSIDRootItem(sid: String) -> Item {
-        let localID = localItemID(for: sid, backendItemID: rootId)
-        let attrs = sidDirectoryAttributes(localItemID: localID)
-
-        if let existing = getCachedItem(localID) {
-            existing.updateAttributes(attrs)
-            return existing
-        }
-
-        let item = Item(
-            itemId: localID,
-            name: sid,
-            attributes: attrs,
-            sid: sid,
-            backendItemId: rootId
-        )
-        cacheItem(item)
-        return item
-    }
-
-    static func isValidSidSegment(_ sid: String) -> Bool {
-        if sid.count == 32 {
-            return sid.unicodeScalars.allSatisfy {
-                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
-            }
-        }
-        if sid.count == 36 {
-            let chars = Array(sid)
-            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
-            for i in 0..<chars.count {
-                if hyphenPositions.contains(i) {
-                    if chars[i] != "-" {
-                        return false
-                    }
-                    continue
-                }
-                if !chars[i].isHexDigit {
-                    return false
-                }
-            }
-            return true
-        }
-        return false
-    }
-
-    private let sessionDeathObserverID = UUID()
+    private let disconnectObserverID = UUID()
 
     init() {
         let volumeId = FSVolume.Identifier(uuid: UUID())
@@ -345,19 +287,19 @@ final class Volume: FSVolume, @unchecked Sendable {
         log.notice("Volume init")
         super.init(volumeID: volumeId, volumeName: volumeName)
 
-        let observerID = sessionDeathObserverID
+        let observerID = disconnectObserverID
         let owner = self
         Task {
-            await VfsConnection.shared.observeSessionDeath(id: observerID) { sid in
-                owner.purgeItems(forSid: sid)
+            await VfsConnection.shared.observeDisconnect(id: observerID) {
+                owner.purgeRoutedItems()
             }
         }
     }
 
     deinit {
-        let observerID = sessionDeathObserverID
+        let observerID = disconnectObserverID
         Task {
-            await VfsConnection.shared.removeSessionDeathObserver(observerID)
+            await VfsConnection.shared.removeDisconnectObserver(observerID)
         }
     }
 
@@ -403,7 +345,6 @@ final class Volume: FSVolume, @unchecked Sendable {
 
     private func withMappedClientCall<T>(
         operation: StaticString = #function,
-        sid: String? = nil,
         _ body: (VfsClient) async throws -> T
     ) async throws -> T {
         let operationName = String(describing: operation)
@@ -412,7 +353,7 @@ final class Volume: FSVolume, @unchecked Sendable {
         return try await moireRequestContext.$spanID.withValue(spanID) {
             let client: VfsClient
             do {
-                client = try await VfsConnection.shared.getClient(for: sid)
+                client = try await VfsConnection.shared.getClient()
             } catch {
                 let errno = vixenPOSIXCode(for: error)
                 if errno == POSIXError.ETIMEDOUT.rawValue {
@@ -494,11 +435,10 @@ final class Volume: FSVolume, @unchecked Sendable {
     }
 
     private func ensureConnectionAvailable(
-        operation: StaticString = #function,
-        sid: String? = nil
+        operation: StaticString = #function
     ) async throws {
         do {
-            _ = try await VfsConnection.shared.getClient(for: sid)
+            _ = try await VfsConnection.shared.getClient()
         } catch {
             let code = vixenPOSIXCode(for: error)
             log.error(
@@ -508,39 +448,16 @@ final class Volume: FSVolume, @unchecked Sendable {
         }
     }
 
-    private func routedBackendItemID(sid: String, backendItemID: UInt64) -> UInt64 {
-        let key = "\(sid):\(backendItemID)"
-        _routedItemIDLock.lock()
-        defer { _routedItemIDLock.unlock() }
-        if let existing = _routedItemIDs[key] {
-            return existing
-        }
-        _nextRoutedItemID &+= 1
-        let allocated = _nextRoutedItemID
-        _routedItemIDs[key] = allocated
-        return allocated
+    private func localItemID(backendItemID: UInt64) -> UInt64 {
+        backendItemID
     }
 
-    private func localItemID(for sid: String?, backendItemID: UInt64) -> UInt64 {
-        guard let sid else {
-            return backendItemID
-        }
-        return routedBackendItemID(sid: sid, backendItemID: backendItemID)
-    }
-
-    private func purgeItems(forSid sid: String) {
+    private func purgeRoutedItems() {
         _itemsLock.lock()
         _items = _items.filter { _, item in
-            guard let itemSID = item.sid else { return true }
-            return itemSID != sid
+            item.itemId == rootId || isVirtualItem(item.itemId)
         }
         _itemsLock.unlock()
-
-        _routedItemIDLock.lock()
-        _routedItemIDs = _routedItemIDs.filter { key, _ in
-            !key.hasPrefix("\(sid):")
-        }
-        _routedItemIDLock.unlock()
     }
 
     private static func isImmutableFile(_ attrs: FSItem.Attributes) -> Bool {
@@ -665,7 +582,7 @@ extension Volume: FSVolume.Operations {
                 logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
                 return attrs
             }
-            if item.itemId == rootId && item.sid == nil {
+            if item.itemId == rootId {
                 let attrs = rootAttributes()
                 item.updateAttributes(attrs)
                 logOpSuccess(op, details: "itemId=\(item.itemId) source=synthetic-root")
@@ -673,7 +590,7 @@ extension Volume: FSVolume.Operations {
             }
 
             // Avoid serving stale cached attributes when the underlying transport is terminal.
-            try await ensureConnectionAvailable(operation: op, sid: item.sid)
+            try await ensureConnectionAvailable(operation: op)
 
             let nowNs = DispatchTime.now().uptimeNanoseconds
             let snapshot = item.attributesSnapshot()
@@ -689,7 +606,7 @@ extension Volume: FSVolume.Operations {
                 return cachedAttrs
             }
 
-            let result = try await withMappedClientCall(sid: item.sid) {
+            let result = try await withMappedClientCall {
                 try await $0.getAttributes(itemId: item.backendItemId)
             }
             guard result.error == 0 else {
@@ -702,7 +619,7 @@ extension Volume: FSVolume.Operations {
             }
 
             let refreshedAttrs = FSItem.Attributes.fromVfs(
-                itemId: localItemID(for: item.sid, backendItemID: result.attrs.itemId),
+                itemId: localItemID(backendItemID: result.attrs.itemId),
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: result.attrs.itemType,
                 size: result.attrs.size,
@@ -754,7 +671,7 @@ extension Volume: FSVolume.Operations {
         )
 
         let itemID = item.backendItemId
-        let result = try await withMappedClientCall(sid: item.sid) {
+        let result = try await withMappedClientCall {
             try await $0.setAttributes(itemId: itemID, params: params)
         }
 
@@ -765,14 +682,14 @@ extension Volume: FSVolume.Operations {
         newAttributes.consumedAttributes = consumed
 
         // Refresh attributes from server
-        let attrsResult = try await withMappedClientCall(sid: item.sid) {
+        let attrsResult = try await withMappedClientCall {
             try await $0.getAttributes(itemId: itemID)
         }
 
         if attrsResult.error == 0 {
             let cachedAttrs = item.cachedAttributes
             let fsAttrs = FSItem.Attributes.fromVfs(
-                itemId: localItemID(for: item.sid, backendItemID: attrsResult.attrs.itemId),
+                itemId: localItemID(backendItemID: attrsResult.attrs.itemId),
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: attrsResult.attrs.itemType,
                 size: attrsResult.attrs.size,
@@ -794,7 +711,7 @@ extension Volume: FSVolume.Operations {
         let nameStr = name.string ?? ""
         log.debug("lookupItem: name=\(nameStr) in dir=\(dirItem.itemId)")
 
-        // Root routes first segment to either extension-local files or a session SID.
+        // Root routes first segment to either extension-local files or the backend root peer.
         if dirItem.itemId == rootId {
             if nameStr == Volume.vixenfsDirName {
                 let attrs = vixenfsDirAttributes()
@@ -807,14 +724,6 @@ extension Volume: FSVolume.Operations {
                 cacheItem(item)
                 return (item, item.name)
             }
-
-            guard Volume.isValidSidSegment(nameStr) else {
-                throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
-            }
-
-            try await ensureConnectionAvailable(operation: #function, sid: nameStr)
-            let item = makeSIDRootItem(sid: nameStr)
-            return (item, item.name)
         }
 
         // Virtual status.json under .vixenfs
@@ -835,9 +744,8 @@ extension Volume: FSVolume.Operations {
             throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
         }
 
-        let dirSID = dirItem.sid
         let dirBackendID = dirItem.backendItemId
-        let result = try await withMappedClientCall(sid: dirSID) {
+        let result = try await withMappedClientCall {
             try await $0.lookup(parentId: dirBackendID, name: nameStr)
         }
 
@@ -847,7 +755,7 @@ extension Volume: FSVolume.Operations {
         }
 
         let attrs = result.attrs
-        let localItemID = localItemID(for: dirSID, backendItemID: attrs.itemId)
+        let localItemID = localItemID(backendItemID: attrs.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: localItemID,
@@ -869,8 +777,6 @@ extension Volume: FSVolume.Operations {
             itemId: localItemID,
             name: nameStr,
             attributes: fsAttrs,
-            prefix: dirItem.prefix,
-            sid: dirSID,
             backendItemId: attrs.itemId
         )
         cacheItem(item)
@@ -918,9 +824,8 @@ extension Volume: FSVolume.Operations {
             } else {
                 0o644
             }
-        let dirSID = dirItem.sid
         let dirBackendID = dirItem.backendItemId
-        let result = try await withMappedClientCall(sid: dirSID) {
+        let result = try await withMappedClientCall {
             try await $0.create(
                 parentId: dirBackendID,
                 name: nameStr,
@@ -934,11 +839,11 @@ extension Volume: FSVolume.Operations {
         }
 
         // Get attributes for new item
-        let attrsResult = try await withMappedClientCall(sid: dirSID) {
+        let attrsResult = try await withMappedClientCall {
             try await $0.getAttributes(itemId: result.itemId)
         }
 
-        let localItemID = localItemID(for: dirSID, backendItemID: result.itemId)
+        let localItemID = localItemID(backendItemID: result.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: localItemID,
@@ -954,8 +859,6 @@ extension Volume: FSVolume.Operations {
             itemId: localItemID,
             name: nameStr,
             attributes: fsAttrs,
-            prefix: dirItem.prefix,
-            sid: dirSID,
             backendItemId: result.itemId
         )
         cacheItem(item)
@@ -995,7 +898,7 @@ extension Volume: FSVolume.Operations {
         }
 
         let itemID = item.backendItemId
-        let result = try await withMappedClientCall(sid: item.sid) {
+        let result = try await withMappedClientCall {
             try await $0.delete(itemId: itemID)
         }
 
@@ -1033,15 +936,11 @@ extension Volume: FSVolume.Operations {
                 throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
             }
 
-            guard item.sid == destDir.sid else {
-                throw fs_errorForPOSIXError(POSIXError.EXDEV.rawValue)
-            }
-
-            try await ensureConnectionAvailable(operation: op, sid: item.sid)
+            try await ensureConnectionAvailable(operation: op)
 
             let itemID = item.backendItemId
             let destDirID = destDir.backendItemId
-            let result = try await withMappedClientCall(sid: item.sid) {
+            let result = try await withMappedClientCall {
                 try await $0.rename(itemId: itemID, newParentId: destDirID, newName: destName)
             }
 
@@ -1106,19 +1005,41 @@ extension Volume: FSVolume.Operations {
                     }
                 }
 
-                let liveSIDs = await VfsConnection.shared.liveSessionIDs()
+                try await ensureConnectionAvailable(operation: op)
+                let result = try await withMappedClientCall {
+                    try await $0.readDir(itemId: rootId, cookie: 0, verifier: 0)
+                }
+                guard result.error == 0 else {
+                    try failPOSIX(result.error, details: "itemId=\(rootId) cookie=0 verifier=0")
+                }
+
                 let startIndex = cookieValue == 0 ? 0 : Int(cookieValue - 1)
-                if startIndex < liveSIDs.count {
-                    for index in startIndex..<liveSIDs.count {
-                        let sid = liveSIDs[index]
-                        let sidItem = makeSIDRootItem(sid: sid)
-                        let sidAttrs = sidItem.cachedAttributes
+                if startIndex < result.entries.count {
+                    for index in startIndex..<result.entries.count {
+                        let entry = result.entries[index]
+                        let entryItemID = localItemID(backendItemID: entry.itemId)
+                        let entryAttrs = FSItem.Attributes.fromVfs(
+                            itemId: entryItemID,
+                            parentId: rootId,
+                            itemType: entry.itemType,
+                            size: entry.size,
+                            modifiedTime: entry.modifiedTime,
+                            createdTime: entry.createdTime,
+                            mode: entry.mode
+                        )
+                        let entryItem = Item(
+                            itemId: entryItemID,
+                            name: entry.name,
+                            attributes: entryAttrs,
+                            backendItemId: entry.itemId
+                        )
+                        cacheItem(entryItem)
                         let shouldContinue = packer.packEntry(
-                            name: FSFileName(string: sid),
-                            itemType: .directory,
-                            itemID: sidAttrs.fileID,
+                            name: FSFileName(string: entry.name),
+                            itemType: entryAttrs.type,
+                            itemID: entryAttrs.fileID,
                             nextCookie: FSDirectoryCookie(UInt64(index + 2)),
-                            attributes: attributes != nil ? sidAttrs : nil
+                            attributes: attributes != nil ? entryAttrs : nil
                         )
                         if !shouldContinue {
                             break
@@ -1150,12 +1071,11 @@ extension Volume: FSVolume.Operations {
                 return FSDirectoryVerifier(0)
             }
 
-            let dirSID = dirItem.sid
-            try await ensureConnectionAvailable(operation: op, sid: dirSID)
+            try await ensureConnectionAvailable(operation: op)
 
             let dirBackendID = dirItem.backendItemId
             let verifierValue = verifier.rawValue
-            let result = try await withMappedClientCall(sid: dirSID) {
+            let result = try await withMappedClientCall {
                 try await $0.readDir(itemId: dirBackendID, cookie: cookieValue, verifier: verifierValue)
             }
 
@@ -1168,7 +1088,7 @@ extension Volume: FSVolume.Operations {
 
             var nextCookie: UInt64 = cookieValue + 1
             for entry in result.entries {
-                let localItemID = localItemID(for: dirSID, backendItemID: entry.itemId)
+                let localItemID = localItemID(backendItemID: entry.itemId)
 
                 let entryAttrs = FSItem.Attributes.fromVfs(
                     itemId: localItemID,
@@ -1184,8 +1104,6 @@ extension Volume: FSVolume.Operations {
                     itemId: localItemID,
                     name: entry.name,
                     attributes: entryAttrs,
-                    prefix: dirItem.prefix,
-                    sid: dirSID,
                     backendItemId: entry.itemId
                 )
                 cacheItem(entryItem)
@@ -1253,7 +1171,7 @@ extension Volume: FSVolume.ReadWriteOperations {
         do {
             let itemID = item.backendItemId
 
-            let result = try await withMappedClientCall(sid: item.sid) {
+            let result = try await withMappedClientCall {
                 try await $0.read(
                     itemId: itemID,
                     offset: UInt64(offset),
@@ -1320,7 +1238,7 @@ extension Volume: FSVolume.ReadWriteOperations {
 
         let itemID = item.backendItemId
 
-        let result = try await withMappedClientCall(sid: item.sid) {
+        let result = try await withMappedClientCall {
             try await $0.write(itemId: itemID, offset: UInt64(offset), data: Data(bytes))
         }
 

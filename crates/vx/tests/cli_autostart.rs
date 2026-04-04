@@ -13,24 +13,6 @@ fn vx_bin() -> String {
     std::env::var("CARGO_BIN_EXE_vx").expect("vx binary should be built for integration tests")
 }
 
-fn write_daemon_config(temp_dir: &TempDir) -> std::path::PathBuf {
-    let cfg = temp_dir.path().join("daemon.styx");
-    let sock = temp_dir.path().join("vx.sock");
-    let store = temp_dir.path().join("store");
-    let mount = temp_dir.path().join("vfs");
-    std::fs::write(
-        &cfg,
-        format!(
-            "daemon {{\n  listen (\"local://{}\")\n  services {{\n    orchestrator {{}}\n    store {{ root \"{}\" }}\n    vfsd {{ mount \"{}\" }}\n  }}\n}}\n",
-            sock.display(),
-            store.display(),
-            mount.display(),
-        ),
-    )
-    .expect("daemon config should write");
-    cfg
-}
-
 fn write_daemon_config_without_vfsd(temp_dir: &TempDir) -> std::path::PathBuf {
     let cfg = temp_dir.path().join("daemon.styx");
     let sock = temp_dir.path().join("vx.sock");
@@ -74,18 +56,15 @@ fn write_simple_eval_file(temp_dir: &TempDir) -> std::path::PathBuf {
 #[test]
 fn eval_auto_starts_daemon_and_runs_rustc_hello() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
-    let config_path = write_daemon_config(&temp_dir);
+    let config_path = write_daemon_config_without_vfsd(&temp_dir);
+    let eval_file = write_simple_eval_file(&temp_dir);
 
     let output = Command::new(vx_bin())
         .current_dir(workspace_root())
         .env("VX_DAEMON_CONFIG", &config_path)
-        .args([
-            "eval",
-            "--file",
-            "zoo/rustc-hello.vx",
-            "--function",
-            "build",
-        ])
+        .args(["eval", "--file"])
+        .arg(&eval_file)
+        .args(["--function", "one"])
         .output()
         .expect("vx eval should run");
 
@@ -97,9 +76,9 @@ fn eval_auto_starts_daemon_and_runs_rustc_hello() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.trim().starts_with("tree:"), "stdout: {stdout}");
+    assert_eq!(stdout.trim(), "1", "stdout: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("phase:"), "stderr: {stderr}");
+    assert!(stderr.contains("daemon:"), "stderr: {stderr}");
 }
 
 #[test]

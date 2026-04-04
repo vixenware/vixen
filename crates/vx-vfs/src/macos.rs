@@ -4,8 +4,7 @@
 //!
 //! `VixenFS` owns a stable Vox `local://` listener inside the app group container.
 //! `vx-vfs` mounts the extension, resolves the app group path from status.json,
-//! then connects to that listener with session metadata and serves `Vfs` on the
-//! root session connection.
+//! then connects to that listener and serves `Vfs` on one root connection.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
 use camino::Utf8Path;
@@ -14,7 +13,7 @@ use moire::sync::{mpsc, watch};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use vox::{MetadataEntry, NoopClient};
+use vox::NoopClient;
 use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
 use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
@@ -22,8 +21,6 @@ const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const VIXENFS_SOCKET_NAME: &str = "vixenfs.sock";
-const VIXENFS_SID_METADATA_KEY: &str = "vixenfs-sid";
-
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
     T: Vfs + VfsDiskNotify + Clone + Send + Sync + 'static,
@@ -70,16 +67,14 @@ where
             _diagnostics: vec![],
         })?;
 
-    let sid = random_sid_hex();
     let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel("mount_ready", 1);
     let (vfs_dead_tx, vfs_dead_rx) = watch::channel("vfs_dead", false);
 
     tokio::spawn({
         let app_group_root = app_group_root.clone();
-        let sid = sid.clone();
         let vfs = vfs.clone();
         async move {
-            if let Err(error) = run_vox_session(vfs, app_group_root, sid, mount_ready_tx).await {
+            if let Err(error) = run_vox_session(vfs, app_group_root, mount_ready_tx).await {
                 tracing::error!(%error, "macos vfs session failed");
             }
             let _ = vfs_dead_tx.send(true);
@@ -88,11 +83,8 @@ where
 
     match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv()).await {
         Ok(Some(())) => {
-            if let Err(error) = poke_sid_mount(&config.mount_path, &sid).await {
-                tracing::warn!(%sid, %error, "failed to poke sid path after Vox session setup");
-            }
             let mount_path = config.mount_path;
-            let access_path = mount_path.join(&sid);
+            let access_path = mount_path.clone();
             Ok(VfsStart::Mounted {
                 mount_path,
                 access_path,
@@ -118,7 +110,6 @@ where
 async fn run_vox_session<T>(
     vfs: T,
     app_group_root: PathBuf,
-    sid: String,
     mount_ready_tx: mpsc::Sender<()>,
 ) -> Result<(), String>
 where
@@ -129,36 +120,31 @@ where
 
     let client = loop {
         match vox::connect::<NoopClient>(&addr)
-            .metadata(vec![MetadataEntry::str(
-                VIXENFS_SID_METADATA_KEY,
-                sid.as_str(),
-            )])
             .on_connection(VfsDispatcher::new(vfs.clone()))
             .connect_timeout(CONNECT_ATTEMPT_TIMEOUT)
             .establish()
             .await
         {
             Ok(client) => {
-                let metadata = vec![(VIXENFS_SID_METADATA_KEY, sid.as_str())];
-                tracing::info!(%sid, %addr, ?metadata, "Vox session established to VixenFS listener");
+                tracing::info!(%addr, "Vox root VFS session established to VixenFS listener");
                 break client;
             }
             Err(error) if Instant::now() < connect_deadline => {
-                tracing::debug!(%addr, %sid, %error, "waiting for VixenFS listener");
+                tracing::debug!(%addr, %error, "waiting for VixenFS listener");
                 sleep(CONNECT_RETRY_INTERVAL).await;
             }
             Err(error) => {
                 return Err(format!(
-                    "failed to connect to VixenFS listener {addr} for sid {sid}: {error}"
+                    "failed to connect to VixenFS listener {addr}: {error}"
                 ));
             }
         }
     };
 
-    tracing::info!(%sid, %addr, "VFS session established to VixenFS listener");
+    tracing::info!(%addr, "VFS session established to VixenFS listener");
     let _ = mount_ready_tx.try_send(());
     client.caller.closed().await;
-    tracing::warn!(%sid, %addr, "VFS session closed");
+    tracing::warn!(%addr, "VFS session closed");
     Ok(())
 }
 
@@ -172,19 +158,6 @@ fn listener_socket_path(app_group_root: &Path) -> Result<String, String> {
 
 fn listener_addr(app_group_root: &Path) -> Result<String, String> {
     Ok(format!("local://{}", listener_socket_path(app_group_root)?))
-}
-
-fn random_sid_hex() -> String {
-    let mut sid = String::with_capacity(32);
-    for _ in 0..32 {
-        let nibble = fastrand::u8(0..16);
-        let ch = match nibble {
-            0..=9 => (b'0' + nibble) as char,
-            _ => (b'a' + (nibble - 10)) as char,
-        };
-        sid.push(ch);
-    }
-    sid
 }
 
 /// Resolve the App Group container path from the mounted VixenFS status payload.
@@ -228,27 +201,6 @@ async fn read_status_json(mount_path: &Utf8Path) -> Result<String, String> {
 
     String::from_utf8(output.stdout)
         .map_err(|e| format!("{status_path} returned invalid UTF-8: {e}"))
-}
-
-async fn poke_sid_mount(mount_path: &Utf8Path, sid: &str) -> Result<(), String> {
-    let sid_path = format!("{mount_path}/{sid}");
-    let output = Command::new("/bin/ls")
-        .arg("-1")
-        .arg(&sid_path)
-        .output()
-        .await
-        .map_err(|e| format!("failed to list {sid_path}: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "listing {sid_path} failed (status={:?}): {}",
-            output.status.code(),
-            stderr.trim()
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

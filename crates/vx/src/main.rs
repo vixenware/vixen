@@ -341,14 +341,9 @@ async fn mount(args: MountArgs) -> eyre::Result<()> {
     validate_mount_name(&mount_name)?;
 
     let client: VfsdClient = vox::connect(&address).await?;
-    let root = "/mounted";
-    let path = format!("{root}/{mount_name}");
+    let path = format!("/{mount_name}");
 
-    let _ = client.mkdir(root.to_owned()).await;
     let _ = client.rm_rf(path.clone()).await;
-    client.mkdir(path.clone()).await.map_err(|error| {
-        eyre::eyre!("failed to create mount directory `{path}` in hosted vfsd: {error}")
-    })?;
     client.mount(path.clone(), hash).await.map_err(|error| {
         eyre::eyre!(
             "failed to mount tree {} at `{path}` in hosted vfsd: {error}",
@@ -359,7 +354,7 @@ async fn mount(args: MountArgs) -> eyre::Result<()> {
         .access_path()
         .await
         .map_err(|error| eyre::eyre!("failed to query hosted vfs access path: {error}"))?;
-    println!("{access_path}/mounted/{mount_name}");
+    println!("{access_path}/{mount_name}");
     Ok(())
 }
 
