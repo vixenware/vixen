@@ -15,8 +15,10 @@ use eyre::Result;
 use moire::task::FutureExt;
 use std::sync::Arc;
 use vx_services::{
-    CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
+    Blake3Hash, CasNode, ContentHash, CreateResult, DirectoryEntry, DirectoryEntryKind,
+    DirectoryNode, GetAttributesResult, ItemId, LookupResult, NodeHash, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
+    chunking::{put_chunk_if_missing, put_node_if_missing},
 };
 use vx_vfs::{VfsConfig, VfsStart};
 
@@ -73,6 +75,77 @@ impl SharedVfs {
             mode: vx_services::mode::FILE_REGULAR,
         }
     }
+}
+
+async fn store_directory_node(
+    cas: &vx_services::StoreClient,
+    entries: Vec<DirectoryEntry>,
+    total_size: u64,
+) -> Result<Blake3Hash> {
+    let node = CasNode::Directory(DirectoryNode {
+        entries,
+        total_size,
+    });
+    let (bytes, hash) = node.to_bytes_and_hash();
+    put_node_if_missing(cas, hash, bytes)
+        .await
+        .map_err(|e| eyre::eyre!("failed to store directory node: {e}"))?;
+    Ok(hash.0)
+}
+
+async fn store_small_file_tree(
+    cas: &vx_services::StoreClient,
+    rel_path: &str,
+    data: &[u8],
+) -> Result<Blake3Hash> {
+    let content_hash = Blake3Hash::from_bytes(data);
+    put_chunk_if_missing(cas, vx_services::ChunkHash(content_hash), data.to_vec())
+        .await
+        .map_err(|e| eyre::eyre!("failed to store file chunk: {e}"))?;
+
+    let leaf_name = rel_path
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| eyre::eyre!("relative path should contain a file name"))?;
+
+    let mut current_hash = store_directory_node(
+        cas,
+        vec![DirectoryEntry {
+            name: leaf_name.to_string(),
+            kind: DirectoryEntryKind::SmallFile {
+                content_hash: ContentHash(content_hash),
+                size: data.len() as u64,
+                executable: false,
+            },
+        }],
+        data.len() as u64,
+    )
+    .await?;
+
+    for component in rel_path.split('/').rev().skip(1) {
+        current_hash = store_directory_node(
+            cas,
+            vec![DirectoryEntry {
+                name: component.to_string(),
+                kind: DirectoryEntryKind::Dir {
+                    hash: NodeHash(current_hash),
+                },
+            }],
+            data.len() as u64,
+        )
+        .await?;
+    }
+
+    Ok(current_hash)
+}
+
+async fn seed_demo_prefix(cas: Arc<vx_services::StoreClient>, vfs: Arc<CasVfs>) -> Result<()> {
+    let root_hash = store_small_file_tree(&cas, "src/hello.txt", b"hello from vx-vfsd\n").await?;
+    vfs.create_prefix("demo".to_string()).await;
+    vfs.mount_tree_to_prefix("demo", "", NodeHash(root_hash))
+        .await
+        .ok_or_else(|| eyre::eyre!("failed to mount built-in demo tree"))?;
+    Ok(())
 }
 
 impl SharedVfs {
@@ -278,6 +351,7 @@ pub async fn boot_with_store(
         tracing::debug!(%dir, "L2 disk blob cache enabled");
     }
     let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, mount.clone()));
+    seed_demo_prefix(cas.clone(), vfs.clone()).await?;
 
     // 3. Clean up, create mount dir, mount VFS, smoke test.
     let mount_result: Result<Utf8PathBuf> = async {
