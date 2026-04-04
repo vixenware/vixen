@@ -32,6 +32,35 @@ build: generate
       -clonedSourcePackagesDirPath build/SourcePackages \
       build
 
+# Build the Rust XPC PoC runtime and inject it as the VixenFS extension executable.
+inject-rust-vixen-extension:
+    cargo build --release -p xpc-poc
+    repo_root="$(git rev-parse --show-toplevel)" ; \
+    app_bundle_path="$repo_root/apps/mac/xcode/build/DerivedData/Build/Products/Release/Vixen.app" ; \
+    extension_bin="$app_bundle_path/Contents/Extensions/VixenFS.appex/Contents/MacOS/VixenFS" ; \
+    rust_bin="$repo_root/target/release/xpc-poc" ; \
+    extension_entitlements="$repo_root/apps/mac/xcode/VixenFS/VixenFS.entitlements" ; \
+    app_entitlements="$repo_root/apps/mac/xcode/Vixen/Vixen.entitlements" ; \
+    if [[ ! -d "$app_bundle_path" ]]; then \
+      echo "Expected $app_bundle_path before injection. Run just build first." >&2; \
+      exit 1; \
+    fi; \
+    if [[ ! -x "$rust_bin" ]]; then \
+      echo "Expected Rust service binary at $rust_bin" >&2; \
+      exit 1; \
+    fi; \
+    cp "$rust_bin" "$extension_bin"; \
+    chmod +x "$extension_bin"; \
+    signing_identity="${VXFS_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'\"' '/Apple Development|Developer ID Application/ {print $2; exit}')}" ; \
+    if [[ -z "$signing_identity" ]]; then \
+      echo "Expected a signing identity for extension re-sign. Set VXFS_SIGNING_IDENTITY or launch with a signed Vixen.app." >&2; \
+      exit 1; \
+    fi; \
+    codesign --force --options runtime --timestamp --entitlements "$extension_entitlements" --sign "$signing_identity" "$app_bundle_path/Contents/Extensions/VixenFS.appex" ; \
+    codesign --force --options runtime --timestamp --entitlements "$app_entitlements" --sign "$signing_identity" "$app_bundle_path" ; \
+    codesign --verify --deep --strict "$app_bundle_path" ; \
+    echo "Replaced $extension_bin with Rust xpc-poc service binary"
+
 # Install Vixen.app into /Applications and launch once.
 install: build
     rm -rf /Applications/Vixen.app
@@ -39,6 +68,31 @@ install: build
     open /Applications/Vixen.app
     @echo "Installed /Applications/Vixen.app"
     @echo "Follow the instructions in Vixen.app to finish setup."
+
+# Install with the Rust extension binary (same extension identity, same bundle).
+install-rust-fs: build inject-rust-vixen-extension
+    rm -rf /Applications/Vixen.app
+    ditto xcode/build/DerivedData/Build/Products/Release/Vixen.app /Applications/Vixen.app
+    just verify-fs-extension-signing app_path=/Applications/Vixen.app
+    open /Applications/Vixen.app
+    @echo "Installed /Applications/Vixen.app with Rust VixenFS runtime"
+    @echo "Follow the instructions in Vixen.app to finish setup."
+
+verify-fs-extension-signing app_path='/Applications/Vixen.app':
+    app_bundle_path="{{ app_path }}"; \
+    extension_bin="$app_bundle_path/Contents/Extensions/VixenFS.appex"; \
+    if [[ ! -d "$app_bundle_path" ]]; then \
+      echo "Expected $app_bundle_path. Use install/install-rust-fs first." >&2; \
+      exit 1; \
+    fi; \
+    echo "=== app signature ==="; \
+    codesign -d --verbose=4 "$app_bundle_path"; \
+    echo "=== extension signature ==="; \
+    codesign -d --verbose=4 "$extension_bin"; \
+    echo "=== extension entitlements ==="; \
+    codesign -d --entitlements :- "$extension_bin" | plutil -p -; \
+    echo "=== pluginkit FSKit registration ==="; \
+    pluginkit -m -p com.apple.fskit.fsmodule | rg "eu\\.bearcove\\.vixenfs|vixenfs|vixen" || true
 
 # Build, sign, and package a release DMG for review.
 
