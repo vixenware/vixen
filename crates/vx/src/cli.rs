@@ -25,6 +25,9 @@ pub(crate) enum CliCommand {
     /// Lower and evaluate one strict function through the orchestrator
     Eval(EvalArgs),
 
+    /// Mount a store-backed tree into the shared Vixen mount
+    Mount(MountArgs),
+
     /// Start the vx daemon (auto-started by other commands if not running)
     #[facet(args::short = 'd')]
     Daemon(DaemonArgs),
@@ -93,6 +96,20 @@ pub(crate) struct EvalArgs {
     /// Bare values are treated as strings.
     #[facet(args::positional)]
     pub(crate) args: Option<Vec<String>>,
+}
+
+#[derive(Facet, Debug)]
+pub(crate) struct MountArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+
+    /// Tree hash to mount. Accepts `tree:<hash>` or bare hex.
+    #[facet(args::positional)]
+    pub(crate) tree: String,
+
+    /// Override the mounted directory name under the shared VFS root
+    #[facet(args::named)]
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Facet, Debug)]

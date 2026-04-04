@@ -51,6 +51,7 @@ margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
+vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-analysis = { path = "crates/vx-analysis" }
 vx-jit = { path = "crates/vx-jit" }

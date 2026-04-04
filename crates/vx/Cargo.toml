@@ -25,6 +25,7 @@ vx-services.workspace = true
 vxd.workspace = true
 vx-lsp = { path = "../vx-lsp" }
 vx-vfs = { workspace = true }
+vx-vfsd = { workspace = true }
 
 [features]
 default = []

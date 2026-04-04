@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use figue as args;
 use vx_services::{
-    DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, EvalProgressEvent,
-    OrchestratorClient, RuntimeValue, StrictEvalBackend,
+    Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult,
+    EvalProgressEvent, OrchestratorClient, RuntimeValue, StrictEvalBackend,
 };
+use vx_vfsd::protocol::VfsdClient;
 
-use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs};
+use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs, MountArgs};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_WAIT_FOR_SERVICE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,6 +53,7 @@ async fn async_main() -> eyre::Result<()> {
         CliCommand::Health(args) => health(args.target).await,
         CliCommand::Kill(args) => kill(args).await,
         CliCommand::Eval(args) => eval(args).await,
+        CliCommand::Mount(args) => mount(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
             let config =
@@ -331,12 +333,62 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
     }
 }
 
+async fn mount(args: MountArgs) -> eyre::Result<()> {
+    let daemon = ensure_daemon_available(&args.target, false).await?;
+    let address = daemon.address;
+    let hash = parse_tree_hash(&args.tree)?;
+    let mount_name = args.name.unwrap_or_else(|| hash.to_hex());
+    validate_mount_name(&mount_name)?;
+
+    let client: VfsdClient = vox::connect(&address).await?;
+    let root = "/mounted";
+    let path = format!("{root}/{mount_name}");
+
+    let _ = client.mkdir(root.to_owned()).await;
+    let _ = client.rm_rf(path.clone()).await;
+    client.mkdir(path.clone()).await.map_err(|error| {
+        eyre::eyre!("failed to create mount directory `{path}` in hosted vfsd: {error}")
+    })?;
+    client.mount(path.clone(), hash).await.map_err(|error| {
+        eyre::eyre!(
+            "failed to mount tree {} at `{path}` in hosted vfsd: {error}",
+            hash
+        )
+    })?;
+    let access_path = client
+        .access_path()
+        .await
+        .map_err(|error| eyre::eyre!("failed to query hosted vfs access path: {error}"))?;
+    println!("{access_path}/mounted/{mount_name}");
+    Ok(())
+}
+
 fn parse_backend(value: &str) -> eyre::Result<StrictEvalBackend> {
     match value {
         "interpreter" => Ok(StrictEvalBackend::Interpreter),
         "kajit" => Ok(StrictEvalBackend::Kajit),
         other => eyre::bail!("unsupported backend `{other}`; expected `interpreter` or `kajit`"),
     }
+}
+
+fn parse_tree_hash(value: &str) -> eyre::Result<Blake3Hash> {
+    let raw = value.strip_prefix("tree:").unwrap_or(value);
+    Blake3Hash::from_hex(raw).ok_or_else(|| {
+        eyre::eyre!("invalid tree hash `{value}`; expected `tree:<hex>` or bare 64-byte hex")
+    })
+}
+
+fn validate_mount_name(name: &str) -> eyre::Result<()> {
+    if name.is_empty() {
+        eyre::bail!("mount name must not be empty");
+    }
+    if name.contains('/') || name.contains('\\') {
+        eyre::bail!("mount name `{name}` must not contain path separators");
+    }
+    if name == "." || name == ".." {
+        eyre::bail!("mount name `{name}` is not allowed");
+    }
+    Ok(())
 }
 
 fn parse_value(value: &str) -> eyre::Result<RuntimeValue> {
@@ -646,8 +698,8 @@ mod tests {
     use crate::{
         config_home_from_env, current_executable_blake3, daemon_binary_warning,
         daemon_config_override_from_env, daemon_config_path_in, default_eval_args,
-        format_daemon_status, resolve_daemon_target, resolve_store_root, state_home_from_env,
-        store_root_in,
+        format_daemon_status, parse_tree_hash, resolve_daemon_target, resolve_store_root,
+        state_home_from_env, store_root_in, validate_mount_name,
     };
 
     #[test]
@@ -702,6 +754,23 @@ daemon {
                 ),
             })
         );
+    }
+
+    #[test]
+    fn parse_tree_hash_accepts_prefixed_and_bare_hex() {
+        let hex = "8dec911527613a1a8697f1087bea6c0bfdf6980dc74361ab77f3666545952955";
+        let prefixed = parse_tree_hash(&format!("tree:{hex}")).expect("prefixed tree hash");
+        let bare = parse_tree_hash(hex).expect("bare tree hash");
+        assert_eq!(prefixed, bare);
+        assert_eq!(prefixed.to_hex(), hex);
+    }
+
+    #[test]
+    fn validate_mount_name_rejects_pathy_values() {
+        validate_mount_name("ok-name").expect("plain mount names should pass");
+        assert!(validate_mount_name("").is_err());
+        assert!(validate_mount_name("nested/path").is_err());
+        assert!(validate_mount_name("..").is_err());
     }
 
     #[test]
