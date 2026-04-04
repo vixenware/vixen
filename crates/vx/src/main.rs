@@ -5,6 +5,7 @@
 mod cli;
 
 use std::collections::BTreeMap;
+use std::process::Stdio;
 
 use figue as args;
 use vx_services::{
@@ -63,7 +64,8 @@ async fn async_main() -> eyre::Result<()> {
 }
 
 async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
-    let address = resolve_daemon_address(&target)?;
+    let daemon = ensure_daemon_available(&target).await?;
+    let address = daemon.address;
     let client: DaemonClient = vox::connect(&address).await?;
     let status = client.status().await?;
     print!("{}", format_daemon_status(&address, &status));
@@ -80,7 +82,8 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         .collect::<eyre::Result<Vec<_>>>()?;
     let values = default_eval_args(&args.function, values)?;
 
-    let address = resolve_daemon_address(&args.target)?;
+    let daemon = ensure_daemon_available(&args.target).await?;
+    let address = daemon.address;
     let client: OrchestratorClient = vox::connect(&address).await?;
     let result = client
         .eval_function(EvalFunctionRequest {
@@ -206,9 +209,23 @@ fn format_daemon_status(address: &str, status: &vx_services::DaemonStatus) -> St
     out
 }
 
-fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonTarget {
+    address: String,
+    auto_start: Option<DaemonLaunch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonLaunch {
+    config_path: Option<camino::Utf8PathBuf>,
+}
+
+fn resolve_daemon_target(target: &ClientTargetArgs) -> eyre::Result<DaemonTarget> {
     if let Some(address) = &target.daemon {
-        return Ok(address.clone());
+        return Ok(DaemonTarget {
+            address: address.clone(),
+            auto_start: None,
+        });
     }
 
     if let Some(config_path) = discover_daemon_config_path(target.config.as_ref()) {
@@ -216,10 +233,67 @@ fn resolve_daemon_address(target: &ClientTargetArgs) -> eyre::Result<String> {
         let Some(address) = config.listen.into_iter().next() else {
             eyre::bail!("daemon config `{config_path}` did not declare any listen addresses");
         };
-        return Ok(address);
+        return Ok(DaemonTarget {
+            address,
+            auto_start: Some(DaemonLaunch {
+                config_path: Some(config_path),
+            }),
+        });
     }
 
-    Ok(DAEMON_SOCK.to_owned())
+    Ok(DaemonTarget {
+        address: DAEMON_SOCK.to_owned(),
+        auto_start: Some(DaemonLaunch { config_path: None }),
+    })
+}
+
+async fn ensure_daemon_available(target: &ClientTargetArgs) -> eyre::Result<DaemonTarget> {
+    let resolved = resolve_daemon_target(target)?;
+
+    if daemon_status(&resolved.address).await.is_ok() {
+        return Ok(resolved);
+    }
+
+    let Some(launch) = resolved.auto_start.as_ref() else {
+        eyre::bail!("failed to connect to daemon at {}", resolved.address);
+    };
+
+    spawn_daemon(launch)?;
+
+    let mut last_error = None;
+    for _ in 0..150 {
+        match daemon_status(&resolved.address).await {
+            Ok(_) => return Ok(resolved),
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(error),
+        None => eyre::bail!("failed to connect to daemon at {}", resolved.address),
+    }
+}
+
+async fn daemon_status(address: &str) -> eyre::Result<vx_services::DaemonStatus> {
+    let client: DaemonClient = vox::connect(address).await?;
+    Ok(client.status().await?)
+}
+
+fn spawn_daemon(launch: &DaemonLaunch) -> eyre::Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.arg("daemon");
+    if let Some(config_path) = &launch.config_path {
+        command.arg("--config");
+        command.arg(config_path.as_str());
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.spawn()?;
+    Ok(())
 }
 
 fn discover_daemon_config_path(
@@ -336,7 +410,7 @@ mod tests {
     use crate::cli::ClientTargetArgs;
     use crate::{
         config_home_from_env, daemon_config_override_from_env, daemon_config_path_in,
-        default_eval_args, format_daemon_status, resolve_daemon_address, resolve_store_root,
+        default_eval_args, format_daemon_status, resolve_daemon_target, resolve_store_root,
         state_home_from_env, store_root_in,
     };
 
@@ -347,8 +421,12 @@ mod tests {
             config: None,
         };
 
-        let address = resolve_daemon_address(&target).expect("address should resolve");
+        let address = resolve_daemon_target(&target)
+            .expect("target should resolve")
+            .address;
         assert_eq!(address, "tcp://daemon-a:5000");
+        let resolved = resolve_daemon_target(&target).expect("target should resolve");
+        assert_eq!(resolved.auto_start, None);
     }
 
     #[test]
@@ -370,11 +448,24 @@ daemon {
 
         let target = ClientTargetArgs {
             daemon: None,
-            config: Some(camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path")),
+            config: Some(
+                camino::Utf8PathBuf::from_path_buf(config_path.clone()).expect("utf-8 path"),
+            ),
         };
 
-        let address = resolve_daemon_address(&target).expect("address should resolve");
+        let address = resolve_daemon_target(&target)
+            .expect("target should resolve")
+            .address;
         assert_eq!(address, "local:///tmp/custom.vx");
+        let resolved = resolve_daemon_target(&target).expect("target should resolve");
+        assert_eq!(
+            resolved.auto_start,
+            Some(super::DaemonLaunch {
+                config_path: Some(
+                    camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path")
+                ),
+            })
+        );
     }
 
     #[test]
@@ -384,8 +475,15 @@ daemon {
             config: None,
         };
 
-        let address = resolve_daemon_address(&target).expect("address should resolve");
+        let address = resolve_daemon_target(&target)
+            .expect("target should resolve")
+            .address;
         assert_eq!(address, DAEMON_SOCK);
+        let resolved = resolve_daemon_target(&target).expect("target should resolve");
+        assert_eq!(
+            resolved.auto_start,
+            Some(super::DaemonLaunch { config_path: None })
+        );
     }
 
     #[test]
