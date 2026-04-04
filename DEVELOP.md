@@ -114,8 +114,8 @@ can give it submodules as
 1. Install `xcodegen` (`brew install xcodegen`)
 2. Generate project from `/Users/amos/.codex/worktrees/19d8/vixen/apps/mac/xcode` with `xcodegen generate`
 3. Regenerate the VFS Swift client bindings with `cargo xtask vixenfs-codegen`
-4. Build the Vox SHM staticlib used by `VoxRuntime`:
-   `cargo build --release -p vox-shm-ffi`
+4. Build the Vox FFI staticlib used by `VoxRuntime`:
+   `cargo build --release -p vox-ffi`
 5. Validate the Swift package against `VoxRuntime`:
    `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
 6. Build the `Vixen` scheme in Xcode
@@ -130,7 +130,7 @@ If the generated Swift client surface changes:
 1. Regenerate bindings:
    `cargo xtask vixenfs-codegen`
 2. Rebuild the Rust staticlib used by `VoxRuntime`:
-   `cargo build --release -p vox-shm-ffi`
+   `cargo build --release -p vox-ffi`
 3. Rebuild the Swift package:
    `swift build --package-path apps/mac -Xlinker -L../vox/target/release`
 4. Regenerate the Xcode project if package dependencies changed:
