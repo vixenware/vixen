@@ -256,12 +256,13 @@ final class Volume: FSVolume, @unchecked Sendable {
 
     private func statusJsonAttributes() async -> FSItem.Attributes {
         let data = await statusJsonData()
+        let modifiedTime = UInt64(Date().timeIntervalSince1970)
         return FSItem.Attributes.fromVfs(
             itemId: Volume.statusJsonId,
             parentId: Volume.vixenfsDirId,
             itemType: .file,
             size: UInt64(data.count),
-            modifiedTime: 0,
+            modifiedTime: modifiedTime,
             createdTime: 0,
             mode: 0o444
         )
