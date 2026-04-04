@@ -12,6 +12,7 @@ ignored = ["moire"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+async-recursion = "1"
 vox = { workspace = true }
 moire = { workspace = true }
 tokio = { workspace = true }

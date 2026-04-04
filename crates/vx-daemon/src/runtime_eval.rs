@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use async_recursion::async_recursion;
 use thiserror::Error;
 use vx_analysis::{
     AnalysisError, BodyId, ExecSliceError, ExecutableClosure, ExecutableProgram, KernelOp, Operand,
@@ -7,13 +8,19 @@ use vx_analysis::{
     RuntimeField, RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
-use vx_services::RuntimeValue;
+use vx_services::{
+    BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient,
+    cas_tree::{MerkleTreeFile, build_merkle_tree},
+    chunking::{prepare_blob, store_prepared_blob},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EvalValue {
     U64(u64),
     Bool(bool),
     String(String),
+    Blob(Vec<u8>),
+    Tree(NodeHash),
     Pair(Box<EvalValue>, Box<EvalValue>),
     Array(Vec<EvalValue>),
     CallableAddConst(Box<EvalValue>),
@@ -22,6 +29,11 @@ enum EvalValue {
     ProcessStdout(String),
     Failure(String),
     Pending(String),
+}
+
+#[derive(Clone, Default)]
+pub struct RuntimeEvalContext {
+    pub store: Option<StoreClient>,
 }
 
 #[derive(Debug, Error)]
@@ -71,29 +83,34 @@ pub enum RuntimeEvalError {
     },
 }
 
-pub fn evaluate_source_text_function(
+pub async fn evaluate_source_text_function(
+    context: &RuntimeEvalContext,
     source: &str,
     function_name: &str,
     args: &[RuntimeValue],
 ) -> Result<RuntimeValue, RuntimeEvalError> {
-    let bridge = checked_bridge(source)?;
-    let body = bridge
-        .bodies
-        .iter()
-        .find(|body| body.name == function_name)
-        .ok_or_else(|| RuntimeEvalError::MissingFunction(function_name.to_owned()))?;
-    let analysis = build_minimal_analysis(&bridge);
-    analysis.validate().map_err(RuntimeEvalError::Analysis)?;
-    let program = lower_executable_program_for_entry_body(&analysis, &bridge, body.id)
-        .map_err(RuntimeEvalError::ExecSlice)?;
+    let (body_id, program) = {
+        let bridge = checked_bridge(source)?;
+        let body_id = bridge
+            .bodies
+            .iter()
+            .find(|body| body.name == function_name)
+            .ok_or_else(|| RuntimeEvalError::MissingFunction(function_name.to_owned()))?
+            .id;
+        let analysis = build_minimal_analysis(&bridge);
+        analysis.validate().map_err(RuntimeEvalError::Analysis)?;
+        let program = lower_executable_program_for_entry_body(&analysis, &bridge, body_id)
+            .map_err(RuntimeEvalError::ExecSlice)?;
+        (body_id, program)
+    };
 
     let args = args
         .iter()
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
-    let mut evaluator = ProgramEvaluator::new(&program);
-    let value = evaluator.eval_body(function_name, body.id, &args)?;
+    let mut evaluator = ProgramEvaluator::new(context, &program);
+    let value = evaluator.eval_body(function_name, body_id, &args).await?;
     runtime_value_from_eval(function_name, value)
 }
 
@@ -134,6 +151,7 @@ fn runtime_value_from_eval(
         EvalValue::U64(value) => Ok(RuntimeValue::U64(value)),
         EvalValue::Bool(value) => Ok(RuntimeValue::Bool(value)),
         EvalValue::String(value) => Ok(RuntimeValue::String(value)),
+        EvalValue::Tree(value) => Ok(RuntimeValue::Tree(value)),
         EvalValue::Pending(label) => Err(RuntimeEvalError::PendingResult {
             function: function_name.to_owned(),
             label,
@@ -150,19 +168,22 @@ fn runtime_value_from_eval(
 }
 
 struct ProgramEvaluator<'a> {
+    context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
 }
 
 impl<'a> ProgramEvaluator<'a> {
-    fn new(program: &'a ExecutableProgram) -> Self {
+    fn new(context: &'a RuntimeEvalContext, program: &'a ExecutableProgram) -> Self {
         Self {
+            context,
             program,
             memo: HashMap::new(),
         }
     }
 
-    fn eval_body(
+    #[async_recursion]
+    async fn eval_body(
         &mut self,
         function_name: &str,
         body_id: BodyId,
@@ -196,17 +217,20 @@ impl<'a> ProgramEvaluator<'a> {
             .map(|op| (produced_slot(op), op))
             .collect::<HashMap<_, _>>();
 
-        let value = self.read_result(
-            function_name,
-            body.result_source.clone(),
-            &producers,
-            &mut slots,
-        )?;
+        let value = self
+            .read_result(
+                function_name,
+                body.result_source.clone(),
+                &producers,
+                &mut slots,
+            )
+            .await?;
         self.memo.insert(cache_key, value.clone());
         Ok(value)
     }
 
-    fn eval_op(
+    #[async_recursion]
+    async fn eval_op(
         &mut self,
         function_name: &str,
         producers: &HashMap<SlotId, &KernelOp>,
@@ -216,17 +240,34 @@ impl<'a> ProgramEvaluator<'a> {
         match op {
             KernelOp::AssignConstInt { value, .. } => self.int_to_value(function_name, *value),
             KernelOp::AssignConstString { value, .. } => Ok(EvalValue::String(value.clone())),
+            KernelOp::MakeBlob { value, .. } => {
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
+                Ok(EvalValue::Blob(
+                    self.expect_string(function_name, &value)?
+                        .as_bytes()
+                        .to_vec(),
+                ))
+            }
             KernelOp::AssignAlias { value, .. } => {
                 self.resolve_operand(function_name, producers, slots, value)
+                    .await
             }
             KernelOp::AssignLazyPoison { label, .. } => Ok(EvalValue::Pending(label.clone())),
             KernelOp::AssignCallableAddConst { addend, .. } => {
-                let addend = self.resolve_operand(function_name, producers, slots, addend)?;
+                let addend = self
+                    .resolve_operand(function_name, producers, slots, addend)
+                    .await?;
                 Ok(EvalValue::CallableAddConst(Box::new(addend)))
             }
             KernelOp::ApplyCallable { callable, arg, .. } => {
-                let callable = self.resolve_operand(function_name, producers, slots, callable)?;
-                let arg = self.resolve_operand(function_name, producers, slots, arg)?;
+                let callable = self
+                    .resolve_operand(function_name, producers, slots, callable)
+                    .await?;
+                let arg = self
+                    .resolve_operand(function_name, producers, slots, arg)
+                    .await?;
                 match callable {
                     EvalValue::CallableAddConst(addend) => Ok(EvalValue::U64(
                         self.expect_u64(function_name, &arg)?
@@ -240,12 +281,18 @@ impl<'a> ProgramEvaluator<'a> {
                 }
             }
             KernelOp::MakePair { first, second, .. } => {
-                let first = self.resolve_operand(function_name, producers, slots, first)?;
-                let second = self.resolve_operand(function_name, producers, slots, second)?;
+                let first = self
+                    .resolve_operand(function_name, producers, slots, first)
+                    .await?;
+                let second = self
+                    .resolve_operand(function_name, producers, slots, second)
+                    .await?;
                 Ok(EvalValue::Pair(Box::new(first), Box::new(second)))
             }
             KernelOp::ProjectIndex { pair, index, .. } => {
-                let pair = self.resolve_operand(function_name, producers, slots, pair)?;
+                let pair = self
+                    .resolve_operand(function_name, producers, slots, pair)
+                    .await?;
                 match pair {
                     EvalValue::Pair(first, second) => match index {
                         0 => Ok(*first),
@@ -263,29 +310,100 @@ impl<'a> ProgramEvaluator<'a> {
                 }
             }
             KernelOp::Add { lhs, rhs, .. } => {
-                let lhs = self.resolve_operand(function_name, producers, slots, lhs)?;
-                let rhs = self.resolve_operand(function_name, producers, slots, rhs)?;
+                let lhs = self
+                    .resolve_operand(function_name, producers, slots, lhs)
+                    .await?;
+                let rhs = self
+                    .resolve_operand(function_name, producers, slots, rhs)
+                    .await?;
                 Ok(EvalValue::U64(
                     self.expect_u64(function_name, &lhs)?
                         .wrapping_add(self.expect_u64(function_name, &rhs)?),
                 ))
             }
             KernelOp::NotEqual { lhs, rhs, .. } => {
-                let lhs = self.resolve_operand(function_name, producers, slots, lhs)?;
-                let rhs = self.resolve_operand(function_name, producers, slots, rhs)?;
+                let lhs = self
+                    .resolve_operand(function_name, producers, slots, lhs)
+                    .await?;
+                let rhs = self
+                    .resolve_operand(function_name, producers, slots, rhs)
+                    .await?;
                 Ok(EvalValue::Bool(lhs != rhs))
             }
             KernelOp::MakeArray { items, .. } => {
-                let items = items
-                    .iter()
-                    .map(|item| self.resolve_operand(function_name, producers, slots, item))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(EvalValue::Array(items))
+                let mut resolved = Vec::with_capacity(items.len());
+                for item in items {
+                    resolved.push(
+                        self.resolve_operand(function_name, producers, slots, item)
+                            .await?,
+                    );
+                }
+                Ok(EvalValue::Array(resolved))
+            }
+            KernelOp::BuildTree { entries, .. } => {
+                let mut files = Vec::with_capacity(entries.len());
+                for (path, operand) in entries {
+                    let value = self
+                        .resolve_operand(function_name, producers, slots, operand)
+                        .await?;
+                    let blob = match value {
+                        EvalValue::Blob(bytes) => bytes,
+                        other => {
+                            return Err(RuntimeEvalError::TypeMismatch {
+                                function: function_name.to_owned(),
+                                expected: "blob",
+                                found: other.kind_name(),
+                            });
+                        }
+                    };
+                    let store: StoreClient = self.store_client(function_name).await?;
+                    let prepared = prepare_blob(&blob);
+                    let blob_ref = store_prepared_blob(&store, &prepared, &blob)
+                        .await
+                        .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                            function: function_name.to_owned(),
+                            detail: format!(
+                                "failed to store blob for tree entry `{}`: {error}",
+                                path.0
+                            ),
+                        })?;
+                    let kind = match blob_ref {
+                        BlobRef::Small { chunk, size } => DirectoryEntryKind::SmallFile {
+                            content_hash: vx_services::ContentHash(chunk.0),
+                            size,
+                            executable: false,
+                        },
+                        BlobRef::Large {
+                            content_hash,
+                            blob_node,
+                            size,
+                        } => DirectoryEntryKind::LargeFile {
+                            content_hash,
+                            blob_node,
+                            size,
+                            executable: false,
+                        },
+                    };
+                    files.push(MerkleTreeFile {
+                        path: path.0.clone(),
+                        kind,
+                    });
+                }
+                let store: StoreClient = self.store_client(function_name).await?;
+                let (tree, _) = build_merkle_tree(&store, files).await.map_err(|error| {
+                    RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: format!("failed to build tree: {error}"),
+                    }
+                })?;
+                Ok(EvalValue::Tree(tree))
             }
             KernelOp::ConcatStrings { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
-                    let value = self.resolve_operand(function_name, producers, slots, part)?;
+                    let value = self
+                        .resolve_operand(function_name, producers, slots, part)
+                        .await?;
                     match value {
                         EvalValue::String(value) => out.push_str(&value),
                         EvalValue::U64(value) => out.push_str(&value.to_string()),
@@ -302,17 +420,25 @@ impl<'a> ProgramEvaluator<'a> {
                 Ok(EvalValue::String(out))
             }
             KernelOp::StringLen { value, .. } => {
-                let value = self.resolve_operand(function_name, producers, slots, value)?;
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
                 let value = self.expect_string(function_name, &value)?;
                 Ok(EvalValue::U64(value.len() as u64))
             }
             KernelOp::StringSlice {
                 value, start, end, ..
             } => {
-                let value = self.resolve_operand(function_name, producers, slots, value)?;
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
                 let value = self.expect_string(function_name, &value)?;
-                let start = self.resolve_operand(function_name, producers, slots, start)?;
-                let end = self.resolve_operand(function_name, producers, slots, end)?;
+                let start = self
+                    .resolve_operand(function_name, producers, slots, start)
+                    .await?;
+                let end = self
+                    .resolve_operand(function_name, producers, slots, end)
+                    .await?;
                 let start = (self.expect_u64(function_name, &start)? as usize).min(value.len());
                 let end = (self.expect_u64(function_name, &end)? as usize).min(value.len());
                 let start = start.min(end);
@@ -330,23 +456,32 @@ impl<'a> ProgramEvaluator<'a> {
                 else_value,
                 ..
             } => {
-                let condition = self.resolve_operand(function_name, producers, slots, condition)?;
+                let condition = self
+                    .resolve_operand(function_name, producers, slots, condition)
+                    .await?;
                 if self.expect_bool(function_name, &condition)? {
                     self.resolve_operand(function_name, producers, slots, then_value)
+                        .await
                 } else {
                     self.resolve_operand(function_name, producers, slots, else_value)
+                        .await
                 }
             }
             KernelOp::AssignFailure { message, .. } => Ok(EvalValue::Failure(message.clone())),
             KernelOp::CallBody { callee, args, .. } => {
-                let args = args
-                    .iter()
-                    .map(|arg| self.resolve_operand(function_name, producers, slots, arg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.eval_body(function_name, *callee, &args)
+                let mut resolved = Vec::with_capacity(args.len());
+                for arg in args {
+                    resolved.push(
+                        self.resolve_operand(function_name, producers, slots, arg)
+                            .await?,
+                    );
+                }
+                self.eval_body(function_name, *callee, &resolved).await
             }
             KernelOp::ProjectField { value, field, .. } => {
-                let value = self.resolve_operand(function_name, producers, slots, value)?;
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
                 self.eval_project_field(function_name, value, *field)
             }
             KernelOp::CallMember {
@@ -355,12 +490,17 @@ impl<'a> ProgramEvaluator<'a> {
                 args,
                 ..
             } => {
-                let receiver = self.resolve_operand(function_name, producers, slots, receiver)?;
-                let args = args
-                    .iter()
-                    .map(|arg| self.resolve_operand(function_name, producers, slots, arg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.eval_member_call(function_name, receiver, *method, args)
+                let receiver = self
+                    .resolve_operand(function_name, producers, slots, receiver)
+                    .await?;
+                let mut resolved = Vec::with_capacity(args.len());
+                for arg in args {
+                    resolved.push(
+                        self.resolve_operand(function_name, producers, slots, arg)
+                            .await?,
+                    );
+                }
+                self.eval_member_call(function_name, receiver, *method, resolved)
             }
             KernelOp::AwaitRuntime {
                 node,
@@ -369,26 +509,30 @@ impl<'a> ProgramEvaluator<'a> {
                 writable_roots,
                 coarse_mounts,
                 ..
-            } => self.eval_runtime_boundary(
-                function_name,
-                *node,
-                positional_inputs,
-                mounts,
-                writable_roots,
-                coarse_mounts,
-                producers,
-                slots,
-            ),
-            KernelOp::AssignHostLocal { .. }
-            | KernelOp::AssignSandboxTreeRoot { .. }
-            | KernelOp::BuildTree { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
-                function: function_name.to_owned(),
-                detail: format!("op {op:?}"),
-            }),
+            } => {
+                self.eval_runtime_boundary(
+                    function_name,
+                    *node,
+                    positional_inputs,
+                    mounts,
+                    writable_roots,
+                    coarse_mounts,
+                    producers,
+                    slots,
+                )
+                .await
+            }
+            KernelOp::AssignHostLocal { .. } | KernelOp::AssignSandboxTreeRoot { .. } => {
+                Err(RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!("op {op:?}"),
+                })
+            }
         }
     }
 
-    fn read_result(
+    #[async_recursion]
+    async fn read_result(
         &mut self,
         function_name: &str,
         result_source: ResultSource,
@@ -396,7 +540,7 @@ impl<'a> ProgramEvaluator<'a> {
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
         match result_source {
-            ResultSource::Slot(slot) => self.read_slot(function_name, producers, slots, slot),
+            ResultSource::Slot(slot) => self.read_slot(function_name, producers, slots, slot).await,
             ResultSource::PendingRuntimeBoundary => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: "pending runtime boundary result".to_owned(),
@@ -404,7 +548,8 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
-    fn resolve_operand(
+    #[async_recursion]
+    async fn resolve_operand(
         &mut self,
         function_name: &str,
         producers: &HashMap<SlotId, &KernelOp>,
@@ -412,13 +557,14 @@ impl<'a> ProgramEvaluator<'a> {
         operand: &Operand,
     ) -> Result<EvalValue, RuntimeEvalError> {
         match operand {
-            Operand::Slot(slot) => self.read_slot(function_name, producers, slots, *slot),
+            Operand::Slot(slot) => self.read_slot(function_name, producers, slots, *slot).await,
             Operand::Int(value) => self.int_to_value(function_name, *value),
             Operand::String(value) => Ok(EvalValue::String(value.clone())),
         }
     }
 
-    fn read_slot(
+    #[async_recursion]
+    async fn read_slot(
         &mut self,
         function_name: &str,
         producers: &HashMap<SlotId, &KernelOp>,
@@ -435,12 +581,13 @@ impl<'a> ProgramEvaluator<'a> {
                 function: function_name.to_owned(),
                 slot: slot.0,
             })?;
-        let value = self.eval_op(function_name, producers, slots, op)?;
+        let value = self.eval_op(function_name, producers, slots, op).await?;
         slots.insert(slot, value.clone());
         Ok(value)
     }
 
-    fn eval_closure(
+    #[async_recursion]
+    async fn eval_closure(
         &mut self,
         function_name: &str,
         closure: &ExecutableClosure,
@@ -469,6 +616,7 @@ impl<'a> ProgramEvaluator<'a> {
             &producers,
             &mut slots,
         )
+        .await
     }
 
     fn eval_member_call(
@@ -535,7 +683,7 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
-    fn eval_runtime_boundary(
+    async fn eval_runtime_boundary(
         &mut self,
         function_name: &str,
         node: vx_analysis::RuntimeNodeId,
@@ -577,15 +725,15 @@ impl<'a> ProgramEvaluator<'a> {
 
         match (&runtime_node.kind, &runtime_node.payload) {
             (RuntimeBoundaryKind::Exec, RuntimeBoundaryPayload::Exec(_payload)) => {
-                let argv = positional_inputs
-                    .first()
-                    .ok_or_else(|| RuntimeEvalError::UnsupportedBoundary {
+                let input = positional_inputs.first().ok_or_else(|| {
+                    RuntimeEvalError::UnsupportedBoundary {
                         function: function_name.to_owned(),
                         detail: "exec boundary is missing argv input".to_owned(),
-                    })
-                    .and_then(|input| {
-                        self.resolve_exec_argv(function_name, input, producers, slots)
-                    })?;
+                    }
+                })?;
+                let argv = self
+                    .resolve_exec_argv(function_name, input, producers, slots)
+                    .await?;
                 if argv.is_empty() {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
                         function: function_name.to_owned(),
@@ -606,6 +754,7 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: "discover boundary is missing probe closure".to_owned(),
                     })?;
                 self.eval_closure(function_name, closure, &[EvalValue::Host])
+                    .await
             }
             (kind, payload) => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
@@ -614,7 +763,7 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
-    fn resolve_exec_argv(
+    async fn resolve_exec_argv(
         &mut self,
         function_name: &str,
         input: &RuntimeBoundaryInputSpec,
@@ -627,13 +776,17 @@ impl<'a> ProgramEvaluator<'a> {
                 detail: format!("exec argv must be an array input, got {input:?}"),
             });
         };
-        items
-            .iter()
-            .map(|item| self.resolve_runtime_string_input(function_name, item, producers, slots))
-            .collect()
+        let mut argv = Vec::with_capacity(items.len());
+        for item in items {
+            argv.push(
+                self.resolve_runtime_string_input(function_name, item, producers, slots)
+                    .await?,
+            );
+        }
+        Ok(argv)
     }
 
-    fn resolve_runtime_string_input(
+    async fn resolve_runtime_string_input(
         &mut self,
         function_name: &str,
         input: &RuntimeBoundaryInputSpec,
@@ -642,7 +795,9 @@ impl<'a> ProgramEvaluator<'a> {
     ) -> Result<String, RuntimeEvalError> {
         match input {
             RuntimeBoundaryInputSpec::Binding { slot, .. } => {
-                let value = self.read_slot(function_name, producers, slots, *slot)?;
+                let value = self
+                    .read_slot(function_name, producers, slots, *slot)
+                    .await?;
                 Ok(self.expect_string(function_name, &value)?.to_owned())
             }
             RuntimeBoundaryInputSpec::IntLiteral(value) => Ok(value.to_string()),
@@ -653,6 +808,16 @@ impl<'a> ProgramEvaluator<'a> {
                 detail: format!("unsupported runtime string input {other:?}"),
             }),
         }
+    }
+
+    async fn store_client(&self, function_name: &str) -> Result<StoreClient, RuntimeEvalError> {
+        let Some(store) = self.context.store.clone() else {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "tree construction requires a configured store".to_owned(),
+            });
+        };
+        Ok(store)
     }
 
     fn run_local_exec(
@@ -730,6 +895,8 @@ impl EvalValue {
             Self::U64(_) => "u64",
             Self::Bool(_) => "bool",
             Self::String(_) => "string",
+            Self::Blob(_) => "blob",
+            Self::Tree(_) => "tree",
             Self::Pair(_, _) => "pair",
             Self::Array(_) => "array",
             Self::CallableAddConst(_) => "callable",
@@ -748,6 +915,7 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AssignSandboxTreeRoot { dst, .. }
         | KernelOp::AssignConstInt { dst, .. }
         | KernelOp::AssignConstString { dst, .. }
+        | KernelOp::MakeBlob { dst, .. }
         | KernelOp::AssignAlias { dst, .. }
         | KernelOp::AssignLazyPoison { dst, .. }
         | KernelOp::AssignCallableAddConst { dst, .. }
@@ -812,7 +980,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 mod tests {
     use vx_services::RuntimeValue;
 
-    use super::evaluate_source_text_function;
+    use super::{RuntimeEvalContext, evaluate_source_text_function};
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
@@ -857,46 +1025,58 @@ fn probe() #discover -> String (
 )
 "#;
 
-    #[test]
-    fn evaluates_non_strict_top_level_body_call() {
+    #[tokio::test]
+    async fn evaluates_non_strict_top_level_body_call() {
         let value = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
             SOURCE_NON_STRICT_CALL,
             "build",
             &[RuntimeValue::String("serde".to_owned())],
         )
+        .await
         .expect("build should evaluate");
 
         assert_eq!(value, RuntimeValue::String("hello serde".to_owned()));
     }
 
-    #[test]
-    fn evaluates_non_strict_string_len_via_local_call() {
+    #[tokio::test]
+    async fn evaluates_non_strict_string_len_via_local_call() {
         let value = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_len",
             &[RuntimeValue::String("serde".to_owned())],
         )
+        .await
         .expect("build_len should evaluate");
 
         assert_eq!(value, RuntimeValue::U64(5));
     }
 
-    #[test]
-    fn evaluates_non_strict_string_slice_via_local_call() {
+    #[tokio::test]
+    async fn evaluates_non_strict_string_slice_via_local_call() {
         let value = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_slice",
             &[RuntimeValue::String("serde".to_owned())],
         )
+        .await
         .expect("build_slice should evaluate");
 
         assert_eq!(value, RuntimeValue::String("se".to_owned()));
     }
 
-    #[test]
-    fn evaluates_local_discover_host_which() {
-        let value = evaluate_source_text_function(SOURCE_DISCOVER_WHICH, "probe", &[])
-            .expect("probe should evaluate");
+    #[tokio::test]
+    async fn evaluates_local_discover_host_which() {
+        let value = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            SOURCE_DISCOVER_WHICH,
+            "probe",
+            &[],
+        )
+        .await
+        .expect("probe should evaluate");
 
         match value {
             RuntimeValue::String(path) => {
@@ -907,10 +1087,16 @@ fn probe() #discover -> String (
         }
     }
 
-    #[test]
-    fn evaluates_local_exec_stdout_observer() {
-        let value = evaluate_source_text_function(SOURCE_EXEC_STDOUT, "probe", &[])
-            .expect("probe should evaluate");
+    #[tokio::test]
+    async fn evaluates_local_exec_stdout_observer() {
+        let value = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            SOURCE_EXEC_STDOUT,
+            "probe",
+            &[],
+        )
+        .await
+        .expect("probe should evaluate");
 
         assert_eq!(value, RuntimeValue::String("hello".to_owned()));
     }

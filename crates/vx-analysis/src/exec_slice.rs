@@ -124,6 +124,11 @@ pub enum KernelOp {
         source: SourceExpr,
         value: String,
     },
+    MakeBlob {
+        dst: SlotId,
+        source: SourceExpr,
+        value: Operand,
+    },
     AssignAlias {
         dst: SlotId,
         source: SourceExpr,
@@ -1737,6 +1742,27 @@ impl<'a> BodyLowering<'a> {
                 let callee_expr = call
                     .callee()
                     .ok_or_else(|| UnsupportedShape("call has no callee".to_owned()))?;
+
+                if let Expr::NameRef(name_ref) = callee_expr.clone()
+                    && name_ref.token().is_some_and(|token| token.text() == "Blob")
+                {
+                    if call.positional_args().len() != 1 {
+                        return Err(UnsupportedShape(
+                            "Blob constructor expects one argument".to_owned(),
+                        ));
+                    }
+                    let value_expr =
+                        call.positional_args().into_iter().next().ok_or_else(|| {
+                            UnsupportedShape("Blob constructor missing value".to_owned())
+                        })?;
+                    let value_id = self
+                        .expr_id(&value_expr)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    let value = self.lower_expr(value_id)?;
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::MakeBlob { dst, source, value });
+                    return Ok(Operand::Slot(dst));
+                }
 
                 if let Expr::NameRef(name_ref) = callee_expr.clone()
                     && name_ref.token().is_some_and(|token| token.text() == "Tree")

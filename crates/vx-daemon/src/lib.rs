@@ -259,6 +259,11 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         None
     };
 
+    let orchestrator_store = if let Some(cfg) = services.orchestrator.as_ref() {
+        resolve_optional_store_client(cfg.store.as_ref(), store_service.as_ref()).await?
+    } else {
+        None
+    };
     let orchestrator_wiring = services
         .orchestrator
         .as_ref()
@@ -272,7 +277,8 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
             )
         })
         .transpose()?;
-    let orchestrator_service = orchestrator_wiring.map(OrchestratorService::new);
+    let orchestrator_service = orchestrator_wiring
+        .map(|wiring| OrchestratorService::with_store(wiring, orchestrator_store));
     let mut hosted_services = vec!["Daemon".to_owned()];
     if orchestrator_service.is_some() {
         hosted_services.push("Orchestrator".to_owned());
@@ -332,6 +338,21 @@ async fn resolve_required_store_client(
                 )
             }
         }
+    }
+}
+
+async fn resolve_optional_store_client(
+    configured: Option<&ServiceRef>,
+    local_store: Option<&StoreService>,
+) -> Result<Option<vx_services::StoreClient>> {
+    match configured {
+        Some(_) => Ok(Some(
+            resolve_required_store_client(configured, local_store, "orchestrator.store").await?,
+        )),
+        None if local_store.is_some() => Ok(Some(
+            resolve_required_store_client(None, local_store, "orchestrator.store").await?,
+        )),
+        None => Ok(None),
     }
 }
 
@@ -527,10 +548,10 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    use tokio::time::sleep;
+    use tokio::{task::LocalSet, time::sleep};
     use vx_services::{
         DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient, RuntimeValue,
-        StrictEvalBackend,
+        StoreClient, StrictEvalBackend,
     };
 
     use super::{
@@ -578,58 +599,64 @@ mod tests {
 
     #[tokio::test]
     async fn orchestrator_round_trips_over_local_rpc() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let socket_path = temp_dir.path().join("vx-daemon.sock");
-        let listen = format!("local://{}", socket_path.display());
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
 
-        let daemon = tokio::spawn(super::serve(DaemonConfig {
-            listen: vec![listen.clone()],
-            services: HostedServices {
-                orchestrator: Some(OrchestratorConfig::default()),
-                ..HostedServices::default()
-            },
-        }));
+                let daemon = tokio::task::spawn_local(super::serve(DaemonConfig {
+                    listen: vec![listen.clone()],
+                    services: HostedServices {
+                        orchestrator: Some(OrchestratorConfig::default()),
+                        ..HostedServices::default()
+                    },
+                }));
 
-        let client = connect_orchestrator(&listen).await;
-        let result = client
-            .eval_function(EvalFunctionRequest {
-                source_text: r#"
+                let client = connect_orchestrator(&listen).await;
+                let result = client
+                    .eval_function(EvalFunctionRequest {
+                        source_text: r#"
 fn add(lhs: U64, rhs: U64) -> U64 (
   lhs + rhs
 )
 "#
-                .to_owned(),
-                function_name: "add".to_owned(),
-                args: vec![RuntimeValue::U64(30), RuntimeValue::U64(12)],
-                backend: StrictEvalBackend::Kajit,
-                include_strict_fragment_dump: false,
-                include_hir: false,
-                include_ir: false,
+                        .to_owned(),
+                        function_name: "add".to_owned(),
+                        args: vec![RuntimeValue::U64(30), RuntimeValue::U64(12)],
+                        backend: StrictEvalBackend::Kajit,
+                        include_strict_fragment_dump: false,
+                        include_hir: false,
+                        include_ir: false,
+                    })
+                    .await
+                    .expect("rpc call should succeed");
+
+                daemon.abort();
+                let _ = daemon.await;
+
+                match result {
+                    EvalFunctionResult::Ok(success) => {
+                        assert_eq!(success.value, RuntimeValue::U64(42));
+                    }
+                    other => panic!("expected success, got {other:?}"),
+                }
             })
-            .await
-            .expect("rpc call should succeed");
-
-        daemon.abort();
-        let _ = daemon.await;
-
-        match result {
-            EvalFunctionResult::Ok(success) => {
-                assert_eq!(success.value, RuntimeValue::U64(42));
-            }
-            other => panic!("expected success, got {other:?}"),
-        }
+            .await;
     }
 
     #[tokio::test]
     async fn daemon_boots_from_styx_config_and_serves_orchestrator() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let socket_path = temp_dir.path().join("vx-daemon.sock");
-        let listen = format!("local://{}", socket_path.display());
-        let config_path = temp_dir.path().join("daemon.styx");
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
+                let config_path = temp_dir.path().join("daemon.styx");
+                std::fs::write(
+                    &config_path,
+                    format!(
+                        r#"
 daemon {{
   listen ("{listen}")
   services {{
@@ -637,92 +664,158 @@ daemon {{
   }}
 }}
 "#
-            ),
-        )
-        .expect("failed to write config");
+                    ),
+                )
+                .expect("failed to write config");
 
-        let config =
-            load_config_file(&camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"))
+                let config = load_config_file(
+                    &camino::Utf8PathBuf::from_path_buf(config_path).expect("utf-8 path"),
+                )
                 .expect("config should parse");
-        let daemon = tokio::spawn(super::serve(config));
+                let daemon = tokio::task::spawn_local(super::serve(config));
 
-        let client = connect_orchestrator(&listen).await;
-        let result = client
-            .eval_function(EvalFunctionRequest {
-                source_text: r#"
+                let client = connect_orchestrator(&listen).await;
+                let result = client
+                    .eval_function(EvalFunctionRequest {
+                        source_text: r#"
 fn add(lhs: U64, rhs: U64) -> U64 (
   lhs + rhs
 )
 "#
-                .to_owned(),
-                function_name: "add".to_owned(),
-                args: vec![RuntimeValue::U64(7), RuntimeValue::U64(9)],
-                backend: StrictEvalBackend::Kajit,
-                include_strict_fragment_dump: false,
-                include_hir: false,
-                include_ir: false,
+                        .to_owned(),
+                        function_name: "add".to_owned(),
+                        args: vec![RuntimeValue::U64(7), RuntimeValue::U64(9)],
+                        backend: StrictEvalBackend::Kajit,
+                        include_strict_fragment_dump: false,
+                        include_hir: false,
+                        include_ir: false,
+                    })
+                    .await
+                    .expect("rpc call should succeed");
+
+                daemon.abort();
+                let _ = daemon.await;
+
+                match result {
+                    EvalFunctionResult::Ok(success) => {
+                        assert_eq!(success.value, RuntimeValue::U64(16));
+                    }
+                    other => panic!("expected success, got {other:?}"),
+                }
             })
-            .await
-            .expect("rpc call should succeed");
-
-        daemon.abort();
-        let _ = daemon.await;
-
-        match result {
-            EvalFunctionResult::Ok(success) => {
-                assert_eq!(success.value, RuntimeValue::U64(16));
-            }
-            other => panic!("expected success, got {other:?}"),
-        }
+            .await;
     }
 
     #[tokio::test]
     async fn local_all_in_one_daemon_boots_without_loopback_rpc() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let socket_path = temp_dir.path().join("vx-daemon.sock");
-        let listen = format!("local://{}", socket_path.display());
-        let store_root = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("store"))
-            .expect("utf-8 store root");
-        let vfs_mount = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vfs"))
-            .expect("utf-8 vfs mount");
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
+                let store_root = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("store"))
+                    .expect("utf-8 store root");
+                let vfs_mount = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vfs"))
+                    .expect("utf-8 vfs mount");
 
-        let daemon = tokio::spawn(super::serve(DaemonConfig::local_all_in_one(
-            vec![listen.clone()],
-            store_root,
-            vfs_mount,
-        )));
+                let daemon = tokio::task::spawn_local(super::serve(
+                    DaemonConfig::local_all_in_one(vec![listen.clone()], store_root, vfs_mount),
+                ));
 
-        let client = connect_daemon(&listen).await;
-        let status = client.status().await.expect("daemon status should succeed");
+                let client = connect_daemon(&listen).await;
+                let status = client.status().await.expect("daemon status should succeed");
 
-        daemon.abort();
-        let _ = daemon.await;
+                daemon.abort();
+                let _ = daemon.await;
 
-        assert!(
-            status
-                .hosted_services
-                .iter()
-                .any(|service| service == "Store")
-        );
-        assert!(
-            status
-                .hosted_services
-                .iter()
-                .any(|service| service == "Runner")
-        );
-        assert_eq!(
-            status
-                .hosted_services
-                .iter()
-                .any(|service| service == "Vfsd"),
-            cfg!(target_os = "linux") || cfg!(target_os = "windows")
-        );
-        assert!(
-            status
-                .hosted_services
-                .iter()
-                .any(|service| service == "Orchestrator")
-        );
+                assert!(
+                    status
+                        .hosted_services
+                        .iter()
+                        .any(|service| service == "Store")
+                );
+                assert!(
+                    status
+                        .hosted_services
+                        .iter()
+                        .any(|service| service == "Runner")
+                );
+                assert_eq!(
+                    status
+                        .hosted_services
+                        .iter()
+                        .any(|service| service == "Vfsd"),
+                    cfg!(target_os = "linux") || cfg!(target_os = "windows")
+                );
+                assert!(
+                    status
+                        .hosted_services
+                        .iter()
+                        .any(|service| service == "Orchestrator")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn local_all_in_one_orchestrator_can_return_tree_backed_by_store() {
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
+                let store_root = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("store"))
+                    .expect("utf-8 store root");
+                let vfs_mount = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vfs"))
+                    .expect("utf-8 vfs mount");
+
+                let daemon = tokio::task::spawn_local(super::serve(
+                    DaemonConfig::local_all_in_one(vec![listen.clone()], store_root, vfs_mount),
+                ));
+
+                let orchestrator = connect_orchestrator(&listen).await;
+                let result = orchestrator
+                    .eval_function(EvalFunctionRequest {
+                        source_text: r#"
+fn build() -> Tree (
+  Tree %{
+    @src/hello.txt => Blob("hello from tree\n"),
+  }
+)
+"#
+                        .to_owned(),
+                        function_name: "build".to_owned(),
+                        args: vec![],
+                        backend: StrictEvalBackend::Interpreter,
+                        include_strict_fragment_dump: false,
+                        include_hir: false,
+                        include_ir: false,
+                    })
+                    .await
+                    .expect("rpc call should succeed");
+
+                let tree_hash = match result {
+                    EvalFunctionResult::Ok(success) => match success.value {
+                        RuntimeValue::Tree(hash) => hash,
+                        other => panic!("expected tree result, got {other:?}"),
+                    },
+                    other => panic!("expected success, got {other:?}"),
+                };
+
+                let store: StoreClient = vox::connect(&listen)
+                    .await
+                    .expect("store client should connect");
+                let node = store
+                    .get_node(tree_hash)
+                    .await
+                    .expect("store rpc should succeed");
+
+                daemon.abort();
+                let _ = daemon.await;
+
+                assert!(node.is_some(), "tree node should exist in co-hosted store");
+            })
+            .await;
     }
 
     async fn connect_orchestrator(address: &str) -> OrchestratorClient {

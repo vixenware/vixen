@@ -6,11 +6,11 @@ use vx_jit::{
 };
 use vx_services::{
     EvalFunctionRequest, EvalFunctionResult, EvalStrictFunctionFailure, EvalStrictFunctionRequest,
-    EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator, RuntimeValue,
+    EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator, RuntimeValue, StoreClient,
     StrictEvalBackend,
 };
 
-use crate::runtime_eval::evaluate_source_text_function;
+use crate::runtime_eval::{RuntimeEvalContext, evaluate_source_text_function};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrchestratorWiring {
@@ -22,11 +22,19 @@ pub struct OrchestratorWiring {
 #[derive(Clone, Default)]
 pub struct OrchestratorService {
     wiring: OrchestratorWiring,
+    store: Option<StoreClient>,
 }
 
 impl OrchestratorService {
     pub fn new(wiring: OrchestratorWiring) -> Self {
-        Self { wiring }
+        Self {
+            wiring,
+            store: None,
+        }
+    }
+
+    pub fn with_store(wiring: OrchestratorWiring, store: Option<StoreClient>) -> Self {
+        Self { wiring, store }
     }
 
     pub fn wiring(&self) -> &OrchestratorWiring {
@@ -151,10 +159,15 @@ impl OrchestratorService {
             }
             Ok(StrictFragmentClassification::NotStrict { reason }) => {
                 match evaluate_source_text_function(
+                    &RuntimeEvalContext {
+                        store: self.store.clone(),
+                    },
                     &request.source_text,
                     &request.function_name,
                     &request.args,
-                ) {
+                )
+                .await
+                {
                     Ok(value) => EvalFunctionResult::Ok(EvalStrictFunctionSuccess {
                         value,
                         strict_fragment_dump: None,
