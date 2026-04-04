@@ -379,15 +379,15 @@ actor VfsConnection {
 
     private func acceptIncoming(link: NIOFrameLink) async {
         do {
-            log.notice("beginning Session.acceptorOn for raw VFS peer")
-            let session = try await Session.acceptorOn(
+            log.notice("beginning Session.acceptFreshLink for raw VFS peer")
+            let session = try await Session.acceptFreshLink(
                 link,
-                transport: .bare,
+                conduit: .bare,
                 dispatcher: NoopDispatcher(),
                 acceptConnections: false,
                 resumable: false
             )
-            log.notice("Session.acceptorOn completed for VFS peer")
+            log.notice("Session.acceptFreshLink completed for VFS peer")
             guard let sid = metadataString(
                 session.peerMetadata,
                 key: VixenFSConstants.sidMetadataKey
