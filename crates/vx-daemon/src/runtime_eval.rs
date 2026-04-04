@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -14,9 +15,13 @@ use vx_analysis::{
     RuntimeField, RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
+use vx_jit::{
+    StrictFragmentFunction, StrictFragmentValue, compile_strict_fragment,
+    execute_compiled_copying_strict_fragment_strings, interpret, lower_source_text_strict_fragment,
+};
 use vx_services::EvalProgressEvent;
 use vx_services::{
-    BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient,
+    BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
     cas_tree::{MerkleTreeFile, build_merkle_tree},
     chunking::{prepare_blob, store_prepared_blob},
 };
@@ -106,8 +111,15 @@ pub async fn evaluate_source_text_function(
     source: &str,
     function_name: &str,
     args: &[RuntimeValue],
+    backend: StrictEvalBackend,
     progress: Option<Tx<EvalProgressEvent>>,
 ) -> Result<RuntimeValue, RuntimeEvalError> {
+    if let Some(value) =
+        try_execute_strict_fragment_fast_path(source, function_name, args, backend)?
+    {
+        return Ok(value);
+    }
+
     let (body_id, program) = {
         let bridge = checked_bridge(source)?;
         let body_id = bridge
@@ -129,9 +141,89 @@ pub async fn evaluate_source_text_function(
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
     let mut evaluator = ProgramEvaluator::new(context, &program, progress);
-    let value = evaluator.eval_body(function_name, body_id, &args).await?;
-    let value = evaluator.finalize_value(function_name, value).await?;
-    runtime_value_from_eval(function_name, value)
+    let result = async {
+        let value = evaluator.eval_body(function_name, body_id, &args).await?;
+        let value = evaluator.finalize_value(function_name, value).await?;
+        runtime_value_from_eval(function_name, value)
+    }
+    .await;
+    evaluator.cleanup_exec_prefixes().await;
+    result
+}
+
+fn try_execute_strict_fragment_fast_path(
+    source: &str,
+    function_name: &str,
+    args: &[RuntimeValue],
+    backend: StrictEvalBackend,
+) -> Result<Option<RuntimeValue>, RuntimeEvalError> {
+    let strict_fragment = match lower_source_text_strict_fragment(source, function_name) {
+        Ok(strict_fragment) => strict_fragment,
+        Err(error) if error.describes_non_strict_shape() => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+
+    let args = match args
+        .iter()
+        .cloned()
+        .map(strict_fragment_value_from_runtime)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(args) => args,
+        Err(_) => return Ok(None),
+    };
+
+    let executor: &dyn StrictFragmentExecutor = match backend {
+        StrictEvalBackend::Interpreter => &StrictFragmentInterpreterExecutor,
+        StrictEvalBackend::Kajit => &StrictFragmentKajitExecutor,
+    };
+    let value = executor.execute(&strict_fragment, &args)?;
+    runtime_value_from_strict_fragment(value).map(Some)
+}
+
+trait StrictFragmentExecutor {
+    fn execute(
+        &self,
+        function: &StrictFragmentFunction,
+        args: &[StrictFragmentValue],
+    ) -> Result<StrictFragmentValue, RuntimeEvalError>;
+}
+
+struct StrictFragmentInterpreterExecutor;
+
+impl StrictFragmentExecutor for StrictFragmentInterpreterExecutor {
+    fn execute(
+        &self,
+        function: &StrictFragmentFunction,
+        args: &[StrictFragmentValue],
+    ) -> Result<StrictFragmentValue, RuntimeEvalError> {
+        interpret(function, args).map_err(|error| RuntimeEvalError::UnsupportedOperation {
+            function: function.name.clone(),
+            detail: format!("strict-fragment interpreter failed: {error}"),
+        })
+    }
+}
+
+struct StrictFragmentKajitExecutor;
+
+impl StrictFragmentExecutor for StrictFragmentKajitExecutor {
+    fn execute(
+        &self,
+        function: &StrictFragmentFunction,
+        args: &[StrictFragmentValue],
+    ) -> Result<StrictFragmentValue, RuntimeEvalError> {
+        let compiled = compile_strict_fragment(function).map_err(|error| {
+            RuntimeEvalError::UnsupportedOperation {
+                function: function.name.clone(),
+                detail: format!("Kajit compile failed: {error}"),
+            }
+        })?;
+        unsafe { execute_compiled_copying_strict_fragment_strings(function, &compiled, args) }
+            .map_err(|error| RuntimeEvalError::UnsupportedOperation {
+                function: function.name.clone(),
+                detail: format!("Kajit execution failed: {error}"),
+            })
+    }
 }
 
 fn checked_bridge(source: &str) -> Result<SingleSourceBridge, RuntimeEvalError> {
@@ -193,6 +285,50 @@ fn runtime_value_from_eval(
     }
 }
 
+fn strict_fragment_value_from_runtime(
+    value: RuntimeValue,
+) -> Result<StrictFragmentValue, RuntimeEvalError> {
+    Ok(match value {
+        RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
+        RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
+        RuntimeValue::String(value) => StrictFragmentValue::String(value),
+        RuntimeValue::Path(_) => {
+            return Err(RuntimeEvalError::UnsupportedResultKind {
+                function: "strict-fragment-arg".to_owned(),
+                kind: "path",
+            });
+        }
+        RuntimeValue::StringArray(_) => {
+            return Err(RuntimeEvalError::UnsupportedResultKind {
+                function: "strict-fragment-arg".to_owned(),
+                kind: "string-array",
+            });
+        }
+        RuntimeValue::StringMap(_) => {
+            return Err(RuntimeEvalError::UnsupportedResultKind {
+                function: "strict-fragment-arg".to_owned(),
+                kind: "string-map",
+            });
+        }
+        RuntimeValue::Tree(_) => {
+            return Err(RuntimeEvalError::UnsupportedResultKind {
+                function: "strict-fragment-arg".to_owned(),
+                kind: "tree",
+            });
+        }
+    })
+}
+
+fn runtime_value_from_strict_fragment(
+    value: StrictFragmentValue,
+) -> Result<RuntimeValue, RuntimeEvalError> {
+    Ok(match value {
+        StrictFragmentValue::U64(value) => RuntimeValue::U64(value),
+        StrictFragmentValue::Bool(value) => RuntimeValue::Bool(value),
+        StrictFragmentValue::String(value) => RuntimeValue::String(value),
+    })
+}
+
 struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
@@ -201,6 +337,8 @@ struct ProgramEvaluator<'a> {
     runtime_exec_prefixes: HashMap<vx_analysis::RuntimeNodeId, String>,
     next_exec_prefix: u64,
 }
+
+static NEXT_EXEC_PREFIX_ID: AtomicU64 = AtomicU64::new(0);
 
 impl<'a> ProgramEvaluator<'a> {
     fn new(
@@ -214,7 +352,16 @@ impl<'a> ProgramEvaluator<'a> {
             progress,
             memo: HashMap::new(),
             runtime_exec_prefixes: HashMap::new(),
-            next_exec_prefix: 0,
+            next_exec_prefix: NEXT_EXEC_PREFIX_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    async fn cleanup_exec_prefixes(&self) {
+        let Some(vfsd) = self.context.vfsd.as_ref() else {
+            return;
+        };
+        for prefix in self.runtime_exec_prefixes.values() {
+            let _ = vfsd.rm_rf(format!("/{prefix}")).await;
         }
     }
 
@@ -1348,7 +1495,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use vx_services::RuntimeValue;
+    use vx_services::{RuntimeValue, StrictEvalBackend};
 
     use super::{RuntimeEvalContext, evaluate_source_text_function};
 
@@ -1402,6 +1549,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_CALL,
             "build",
             &[RuntimeValue::String("serde".to_owned())],
+            StrictEvalBackend::Interpreter,
             None,
         )
         .await
@@ -1417,6 +1565,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_len",
             &[RuntimeValue::String("serde".to_owned())],
+            StrictEvalBackend::Interpreter,
             None,
         )
         .await
@@ -1432,6 +1581,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_slice",
             &[RuntimeValue::String("serde".to_owned())],
+            StrictEvalBackend::Interpreter,
             None,
         )
         .await
@@ -1447,6 +1597,7 @@ fn probe() #discover -> String (
             SOURCE_DISCOVER_WHICH,
             "probe",
             &[],
+            StrictEvalBackend::Interpreter,
             None,
         )
         .await
@@ -1468,6 +1619,7 @@ fn probe() #discover -> String (
             SOURCE_EXEC_STDOUT,
             "probe",
             &[],
+            StrictEvalBackend::Interpreter,
             None,
         )
         .await

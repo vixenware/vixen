@@ -177,6 +177,10 @@ actor ReadTelemetry {
 
 /// FSKit Volume implementation that delegates to the VFS client.
 final class Volume: FSVolume, @unchecked Sendable {
+    private struct RoutedItemKey: Hashable {
+        let connectionGeneration: UInt64
+        let backendItemId: UInt64
+    }
 
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "Volume")
     private let readTelemetry = ReadTelemetry()
@@ -187,6 +191,8 @@ final class Volume: FSVolume, @unchecked Sendable {
     /// We use NSLock because Item doesn't conform to Sendable (ObjC base class).
     private let _itemsLock = NSLock()
     private var _items: [UInt64: Item] = [:]
+    private var _routedItemIDs: [RoutedItemKey: UInt64] = [:]
+    private var _nextRoutedItemID: UInt64 = 2
 
     /// Local synthetic mount root ID.
     private let rootId: UInt64 = 1
@@ -448,8 +454,28 @@ final class Volume: FSVolume, @unchecked Sendable {
         }
     }
 
-    private func localItemID(backendItemID: UInt64) -> UInt64 {
-        backendItemID
+    private func routedItemID(for key: RoutedItemKey) -> UInt64 {
+        _itemsLock.lock()
+        defer { _itemsLock.unlock() }
+
+        if let existing = _routedItemIDs[key] {
+            return existing
+        }
+
+        let itemId = _nextRoutedItemID
+        _nextRoutedItemID &+= 1
+        _routedItemIDs[key] = itemId
+        return itemId
+    }
+
+    private func localItemID(backendItemID: UInt64) async -> UInt64 {
+        let connectionGeneration = await VfsConnection.shared.currentConnectionGeneration()
+        return routedItemID(
+            for: RoutedItemKey(
+                connectionGeneration: connectionGeneration,
+                backendItemId: backendItemID
+            )
+        )
     }
 
     private func purgeRoutedItems() {
@@ -457,6 +483,7 @@ final class Volume: FSVolume, @unchecked Sendable {
         _items = _items.filter { _, item in
             item.itemId == rootId || isVirtualItem(item.itemId)
         }
+        _routedItemIDs.removeAll()
         _itemsLock.unlock()
     }
 
@@ -618,8 +645,9 @@ extension Volume: FSVolume.Operations {
                 return cachedAttrs
             }
 
+            let refreshedItemID = await localItemID(backendItemID: result.attrs.itemId)
             let refreshedAttrs = FSItem.Attributes.fromVfs(
-                itemId: localItemID(backendItemID: result.attrs.itemId),
+                itemId: refreshedItemID,
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: result.attrs.itemType,
                 size: result.attrs.size,
@@ -688,8 +716,9 @@ extension Volume: FSVolume.Operations {
 
         if attrsResult.error == 0 {
             let cachedAttrs = item.cachedAttributes
+            let refreshedItemID = await localItemID(backendItemID: attrsResult.attrs.itemId)
             let fsAttrs = FSItem.Attributes.fromVfs(
-                itemId: localItemID(backendItemID: attrsResult.attrs.itemId),
+                itemId: refreshedItemID,
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: attrsResult.attrs.itemType,
                 size: attrsResult.attrs.size,
@@ -755,7 +784,7 @@ extension Volume: FSVolume.Operations {
         }
 
         let attrs = result.attrs
-        let localItemID = localItemID(backendItemID: attrs.itemId)
+        let localItemID = await localItemID(backendItemID: attrs.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: localItemID,
@@ -843,7 +872,7 @@ extension Volume: FSVolume.Operations {
             try await $0.getAttributes(itemId: result.itemId)
         }
 
-        let localItemID = localItemID(backendItemID: result.itemId)
+        let localItemID = await localItemID(backendItemID: result.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: localItemID,
@@ -1017,7 +1046,7 @@ extension Volume: FSVolume.Operations {
                 if startIndex < result.entries.count {
                     for index in startIndex..<result.entries.count {
                         let entry = result.entries[index]
-                        let entryItemID = localItemID(backendItemID: entry.itemId)
+                        let entryItemID = await localItemID(backendItemID: entry.itemId)
                         let entryAttrs = FSItem.Attributes.fromVfs(
                             itemId: entryItemID,
                             parentId: rootId,
@@ -1088,7 +1117,7 @@ extension Volume: FSVolume.Operations {
 
             var nextCookie: UInt64 = cookieValue + 1
             for entry in result.entries {
-                let localItemID = localItemID(backendItemID: entry.itemId)
+                let localItemID = await localItemID(backendItemID: entry.itemId)
 
                 let entryAttrs = FSItem.Attributes.fromVfs(
                     itemId: localItemID,

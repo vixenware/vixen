@@ -178,47 +178,30 @@ impl OrchestratorService {
             format!("classifying `{}`", request.function_name),
         )
         .await;
-        match classify_source_text_function(&request.source_text, &request.function_name) {
-            Ok(StrictFragmentClassification::StrictFragment) => {
-                emit_phase(
-                    progress.as_ref(),
-                    format!("evaluating strict fragment `{}`", request.function_name),
-                )
-                .await;
-                self.eval_strict_function_impl(request).await
-            }
-            Ok(StrictFragmentClassification::NotStrict { .. }) => {
-                emit_phase(
-                    progress.as_ref(),
-                    format!("evaluating `{}`", request.function_name),
-                )
-                .await;
-                match evaluate_source_text_function(
-                    &RuntimeEvalContext {
-                        store: self.store.clone(),
-                        vfsd: self.vfsd.clone(),
-                    },
-                    &request.source_text,
-                    &request.function_name,
-                    &request.args,
-                    progress,
-                )
-                .await
-                {
-                    Ok(value) => EvalFunctionResult::Ok(EvalStrictFunctionSuccess {
-                        value,
-                        strict_fragment_dump: None,
-                        hir: None,
-                        ir: None,
-                    }),
-                    Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
-                        message: error.to_string(),
-                        strict_fragment_dump: None,
-                        hir: None,
-                        ir: None,
-                    }),
-                }
-            }
+        emit_phase(
+            progress.as_ref(),
+            format!("evaluating `{}`", request.function_name),
+        )
+        .await;
+        match evaluate_source_text_function(
+            &RuntimeEvalContext {
+                store: self.store.clone(),
+                vfsd: self.vfsd.clone(),
+            },
+            &request.source_text,
+            &request.function_name,
+            &request.args,
+            request.backend,
+            progress,
+        )
+        .await
+        {
+            Ok(value) => EvalFunctionResult::Ok(EvalStrictFunctionSuccess {
+                value,
+                strict_fragment_dump: None,
+                hir: None,
+                ir: None,
+            }),
             Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
                 message: error.to_string(),
                 strict_fragment_dump: None,
@@ -557,6 +540,29 @@ fn probe() #discover -> String (
                 function_name: "build_slice".to_owned(),
                 args: vec![RuntimeValue::String("serde".to_owned())],
                 backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_hir: false,
+                include_ir: false,
+            })
+            .await;
+
+        match result {
+            EvalFunctionResult::Ok(success) => {
+                assert_eq!(success.value, RuntimeValue::String("se".to_owned()));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn evals_non_strict_function_with_kajit_backend_selected() {
+        let service = OrchestratorService::new(OrchestratorWiring::default());
+        let result = service
+            .eval_function(EvalFunctionRequest {
+                source_text: SOURCE_NON_STRICT_STRING_HELPERS.to_owned(),
+                function_name: "build_slice".to_owned(),
+                args: vec![RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Kajit,
                 include_strict_fragment_dump: false,
                 include_hir: false,
                 include_ir: false,

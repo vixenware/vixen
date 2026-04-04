@@ -73,26 +73,20 @@ install: build
 install-rust-fs: build inject-rust-vixen-extension
     rm -rf /Applications/Vixen.app
     ditto xcode/build/DerivedData/Build/Products/Release/Vixen.app /Applications/Vixen.app
-    just verify-fs-extension-signing app_path=/Applications/Vixen.app
+    repo_root="$(git rev-parse --show-toplevel)" ; \
+    "$repo_root/apps/mac/scripts/verify-fs-extension-signing.sh" /Applications/Vixen.app
     open /Applications/Vixen.app
     @echo "Installed /Applications/Vixen.app with Rust VixenFS runtime"
     @echo "Follow the instructions in Vixen.app to finish setup."
 
 verify-fs-extension-signing app_path='/Applications/Vixen.app':
-    app_bundle_path="{{ app_path }}"; \
-    extension_bin="$app_bundle_path/Contents/Extensions/VixenFS.appex"; \
-    if [[ ! -d "$app_bundle_path" ]]; then \
-      echo "Expected $app_bundle_path. Use install/install-rust-fs first." >&2; \
-      exit 1; \
-    fi; \
-    echo "=== app signature ==="; \
-    codesign -d --verbose=4 "$app_bundle_path"; \
-    echo "=== extension signature ==="; \
-    codesign -d --verbose=4 "$extension_bin"; \
-    echo "=== extension entitlements ==="; \
-    codesign -d --entitlements :- "$extension_bin" | plutil -p -; \
-    echo "=== pluginkit FSKit registration ==="; \
-    pluginkit -m -p com.apple.fskit.fsmodule | rg "eu\\.bearcove\\.vixenfs|vixenfs|vixen" || true
+    repo_root="$(git rev-parse --show-toplevel)" ; \
+    "$repo_root/apps/mac/scripts/verify-fs-extension-signing.sh" {{ app_path }}
+
+reload-fs-extension-registration app_path='/Applications/Vixen.app':
+    repo_root="$(git rev-parse --show-toplevel)" ; \
+    "$repo_root/apps/mac/scripts/reload-vixen-fs-extension.sh" {{ app_path }} ; \
+    "$repo_root/apps/mac/scripts/verify-fs-extension-signing.sh" {{ app_path }}
 
 # Build, sign, and package a release DMG for review.
 

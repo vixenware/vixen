@@ -1,0 +1,543 @@
+use std::ffi::{CStr, CString};
+use std::fs::{OpenOptions, create_dir_all};
+use std::io::Write;
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use block::{Block, ConcreteBlock};
+use xpc_connection_sys::{
+    _xpc_error_connection_interrupted, _xpc_error_connection_invalid,
+    _xpc_error_termination_imminent, _xpc_type_connection, _xpc_type_dictionary, _xpc_type_error,
+    XPC_CONNECTION_MACH_SERVICE_LISTENER, dispatch_main, dispatch_queue_create,
+    xpc_connection_activate, xpc_connection_create, xpc_connection_create_from_endpoint,
+    xpc_connection_create_mach_service, xpc_connection_get_name,
+    xpc_connection_send_message_with_reply_sync, xpc_connection_set_event_handler,
+    xpc_connection_t, xpc_copy_description, xpc_dictionary_create_empty,
+    xpc_dictionary_create_reply, xpc_dictionary_get_string, xpc_dictionary_set_string,
+    xpc_endpoint_create, xpc_get_type, xpc_object_t, xpc_release, xpc_retain,
+};
+
+pub const PING_KEY: &str = "ping";
+pub const HOUR_KEY: &str = "hour";
+pub const PING_VALUE: &str = "what-time-is-it";
+pub const REQUEST_KEY: &str = "request";
+pub const REQUEST_READ_FILE: &str = "read-file";
+pub const REQUEST_FILE_KEY: &str = "file";
+pub const RESPONSE_KEY: &str = "contents";
+pub const STATUS_KEY: &str = "status";
+pub const STATUS_OK: &str = "ok";
+pub const STATUS_ERR: &str = "err";
+pub const ERROR_KEY: &str = "error";
+const APP_GROUP_ID: &str = "B2N6FSRTPV.vixenfs";
+const LOG_FILE_NAME: &str = "vixenfs-extension.log";
+static LOG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn timestamp_string() -> String {
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => since,
+        Err(err) => {
+            return format!("(time error: {err})");
+        }
+    };
+    format!("{}.{}", now.as_secs(), now.subsec_millis())
+}
+
+fn log_file_path() -> PathBuf {
+    if let Ok(path) = std::env::var("VIXEN_FS_LOG_PATH") {
+        return PathBuf::from(path);
+    }
+    if let Ok(path) = std::env::var("VIXEN_XPC_LOG_FILE") {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    PathBuf::from(home)
+        .join("Library")
+        .join("Group Containers")
+        .join(APP_GROUP_ID)
+        .join("Logs")
+        .join(LOG_FILE_NAME)
+}
+
+fn append_group_log(level: &str, message: &str) {
+    let line = format!("[{}] [{level}] {message}\n", timestamp_string());
+
+    if let Some(lock) = LOG_MUTEX.get() {
+        if lock.lock().is_ok() {
+            let _ = writeln!(std::io::stderr(), "{}", line.trim_end());
+        }
+    }
+
+    let path = log_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+pub fn log_event(level: &str, message: impl AsRef<str>) {
+    append_group_log(level, message.as_ref());
+}
+
+pub fn init_logging() {
+    let _ = LOG_MUTEX.set(Mutex::new(()));
+    log_event("info", "xpc-poc logging initialized");
+}
+
+fn cstring(value: &str) -> CString {
+    CString::new(value).expect("CString without interior NULs")
+}
+
+fn new_queue(label: &str) -> *mut xpc_connection_sys::dispatch_queue_s {
+    let label = cstring(label);
+    unsafe { dispatch_queue_create(label.as_ptr(), ptr::null_mut()) }
+}
+
+fn xpc_type_name(object: xpc_object_t) -> &'static str {
+    let ty = unsafe { xpc_get_type(object) };
+    if ty == unsafe { &_xpc_type_connection } {
+        "connection"
+    } else if ty == unsafe { &_xpc_type_dictionary } {
+        "dictionary"
+    } else if ty == unsafe { &_xpc_type_error } {
+        "error"
+    } else {
+        "other"
+    }
+}
+
+fn xpc_description(object: xpc_object_t) -> String {
+    let desc = unsafe { xpc_copy_description(object) };
+    if desc.is_null() {
+        return "<null>".to_owned();
+    }
+    let string = unsafe { CStr::from_ptr(desc) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { libc::free(desc.cast()) };
+    string
+}
+
+fn connection_name(connection: xpc_connection_t) -> Option<String> {
+    let name = unsafe { xpc_connection_get_name(connection) };
+    if name.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+fn current_hour_string() -> String {
+    let mut now = 0;
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe {
+        libc::time(&mut now);
+        libc::localtime_r(&now, &mut tm);
+    }
+    format!("{:02}", tm.tm_hour)
+}
+
+fn dictionary_get_string(message: xpc_object_t, key: &str) -> Option<String> {
+    let key = cstring(key);
+    let value = unsafe { xpc_dictionary_get_string(message, key.as_ptr()) };
+    if value.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+unsafe fn retain_connection(connection: xpc_connection_t) -> xpc_connection_t {
+    unsafe { xpc_retain(connection.cast()) };
+    connection
+}
+
+fn install_peer_handler(connection: xpc_connection_t, tx: std::sync::mpsc::Sender<String>) {
+    log_event(
+        "debug",
+        format!(
+            "installing peer handler for connection raw ptr={:?}",
+            connection as *const ()
+        ),
+    );
+    unsafe {
+        let retained = retain_connection(connection);
+        let peer_name = connection_name(retained).unwrap_or_else(|| "<anonymous-peer>".to_owned());
+        let block = ConcreteBlock::new(move |event: xpc_object_t| {
+            let ty = xpc_get_type(event);
+            if ty == &_xpc_type_dictionary {
+                let _ = tx.send(format!(
+                    "peer name={peer_name} event={} desc={}",
+                    xpc_type_name(event),
+                    xpc_description(event)
+                ));
+                log_event(
+                    "debug",
+                    format!(
+                        "peer event type=dict peer={peer_name} desc={}",
+                        xpc_description(event)
+                    ),
+                );
+                let request = dictionary_get_string(event, REQUEST_KEY);
+                if dictionary_get_string(event, PING_KEY).as_deref() == Some(PING_VALUE)
+                    && request.is_none()
+                {
+                    log_event(
+                        "info",
+                        format!("handling ping request for peer={peer_name}"),
+                    );
+                    let reply = xpc_dictionary_create_reply(event);
+                    if reply.is_null() {
+                        log_event(
+                            "error",
+                            format!("failed to create ping reply peer={peer_name}"),
+                        );
+                        return;
+                    }
+                    let hour_key = cstring(HOUR_KEY);
+                    let hour_value = cstring(&current_hour_string());
+                    xpc_dictionary_set_string(reply, hour_key.as_ptr(), hour_value.as_ptr());
+                    log_event(
+                        "debug",
+                        format!("responding to ping hour={}", current_hour_string()),
+                    );
+                    xpc_connection_sys::xpc_connection_send_message(retained, reply);
+                    xpc_release(reply);
+                    return;
+                }
+
+                if request.as_deref() == Some(REQUEST_READ_FILE)
+                    && dictionary_get_string(event, REQUEST_FILE_KEY).as_deref()
+                        == Some("/hour.txt")
+                {
+                    let file = "/hour.txt";
+                    let reply = xpc_dictionary_create_reply(event);
+                    if reply.is_null() {
+                        log_event(
+                            "error",
+                            format!(
+                                "failed to create file reply for peer={peer_name} request_file={}",
+                                file
+                            ),
+                        );
+                        return;
+                    }
+                    let status_key = cstring(STATUS_KEY);
+                    let status_ok = cstring(STATUS_OK);
+                    let response_key = cstring(RESPONSE_KEY);
+                    let response_value = cstring(&format!("{}\n", current_hour_string()));
+
+                    xpc_dictionary_set_string(reply, status_key.as_ptr(), status_ok.as_ptr());
+                    xpc_dictionary_set_string(
+                        reply,
+                        response_key.as_ptr(),
+                        response_value.as_ptr(),
+                    );
+                    xpc_connection_sys::xpc_connection_send_message(retained, reply);
+                    xpc_release(reply);
+                    log_event(
+                        "info",
+                        format!("served read-file request for {file} peer={peer_name}"),
+                    );
+                    return;
+                }
+
+                let reply = if request.is_some() {
+                    log_event(
+                        "warn",
+                        format!("unsupported request from peer={peer_name} request={request:?}"),
+                    );
+                    let reply = xpc_dictionary_create_reply(event);
+                    if reply.is_null() {
+                        return;
+                    }
+                    let status_key = cstring(STATUS_KEY);
+                    let status_err = cstring(STATUS_ERR);
+                    let error_key = cstring(ERROR_KEY);
+                    let error_message = cstring("unsupported request");
+
+                    xpc_dictionary_set_string(reply, status_key.as_ptr(), status_err.as_ptr());
+                    xpc_dictionary_set_string(reply, error_key.as_ptr(), error_message.as_ptr());
+                    reply
+                } else {
+                    xpc_dictionary_create_reply(event)
+                };
+                if reply.is_null() {
+                    return;
+                }
+                if request.is_none() {
+                    log_event("warn", format!("invalid payload from peer={peer_name}"));
+                    let status_key = cstring(STATUS_KEY);
+                    let status_err = cstring(STATUS_ERR);
+                    let error_key = cstring(ERROR_KEY);
+                    let error_message = cstring("invalid payload");
+
+                    xpc_dictionary_set_string(reply, status_key.as_ptr(), status_err.as_ptr());
+                    xpc_dictionary_set_string(reply, error_key.as_ptr(), error_message.as_ptr());
+                }
+                xpc_connection_sys::xpc_connection_send_message(retained, reply);
+                xpc_release(reply);
+            } else if ty == &_xpc_type_error {
+                let interrupted: xpc_object_t = ptr::addr_of!(_xpc_error_connection_interrupted)
+                    .cast_mut()
+                    .cast();
+                let invalid: xpc_object_t = ptr::addr_of!(_xpc_error_connection_invalid)
+                    .cast_mut()
+                    .cast();
+                let imminent: xpc_object_t = ptr::addr_of!(_xpc_error_termination_imminent)
+                    .cast_mut()
+                    .cast();
+                let _ = tx.send(format!(
+                    "peer name={peer_name} error desc={}",
+                    xpc_description(event)
+                ));
+                log_event(
+                    "warn",
+                    format!(
+                        "peer error peer={peer_name} event={}",
+                        xpc_description(event)
+                    ),
+                );
+                if event == interrupted {
+                    return;
+                }
+                if event == invalid {
+                    return;
+                }
+                if event == imminent {
+                    return;
+                }
+            }
+        })
+        .copy();
+        xpc_connection_set_event_handler(
+            retained,
+            (&*block as *const Block<_, _>).cast_mut().cast(),
+        );
+        xpc_connection_activate(retained);
+    }
+}
+
+fn install_listener_handler(listener: xpc_connection_t, tx: std::sync::mpsc::Sender<String>) {
+    log_event(
+        "info",
+        format!("starting listener handler listener={listener:?}"),
+    );
+    unsafe {
+        let block = ConcreteBlock::new(move |event: xpc_object_t| {
+            let ty = xpc_get_type(event);
+            if ty == &_xpc_type_connection {
+                let peer = event.cast();
+                let peer_name =
+                    connection_name(peer).unwrap_or_else(|| "<anonymous-peer>".to_owned());
+                let _ = tx.send(format!("accepted connection peer={peer_name}"));
+                log_event("info", format!("accepted peer={peer_name}"));
+                install_peer_handler(peer, tx.clone());
+            } else {
+                log_event(
+                    "debug",
+                    format!(
+                        "listener event type={} desc={}",
+                        xpc_type_name(event),
+                        xpc_description(event)
+                    ),
+                );
+                let _ = tx.send(format!(
+                    "listener event type={} desc={}",
+                    xpc_type_name(event),
+                    xpc_description(event)
+                ));
+            }
+        })
+        .copy();
+        xpc_connection_set_event_handler(
+            listener,
+            (&*block as *const Block<_, _>).cast_mut().cast(),
+        );
+        xpc_connection_activate(listener);
+    }
+}
+
+pub fn start_anonymous_hour_service() -> (xpc_connection_t, Receiver<String>) {
+    log_event("info", "creating anonymous xpc listener");
+    let listener_queue = new_queue("eu.bearcove.vixen.xpc-poc.listener");
+    let listener = unsafe { xpc_connection_create(ptr::null(), listener_queue) };
+    let (tx, rx) = channel();
+    install_listener_handler(listener, tx);
+
+    (listener, rx)
+}
+
+pub fn start_mach_hour_service(service_name: &str) -> (xpc_connection_t, Receiver<String>) {
+    log_event(
+        "info",
+        format!("creating mach listener service_name={service_name}"),
+    );
+    let listener_queue = new_queue("eu.bearcove.vixen.xpc-poc.mach-listener");
+    let service_name = cstring(service_name);
+    let listener = unsafe {
+        xpc_connection_create_mach_service(
+            service_name.as_ptr(),
+            listener_queue,
+            u64::from(XPC_CONNECTION_MACH_SERVICE_LISTENER),
+        )
+    };
+    let (tx, rx) = channel();
+    install_listener_handler(listener, tx);
+    (listener, rx)
+}
+
+pub fn request_hour(listener: xpc_connection_t) -> String {
+    log_event("info", "request_hour start");
+    let endpoint = unsafe { xpc_endpoint_create(listener) };
+    assert!(
+        !endpoint.is_null(),
+        "expected endpoint from anonymous listener"
+    );
+
+    let client = unsafe { xpc_connection_create_from_endpoint(endpoint) };
+    assert!(!client.is_null(), "expected client from endpoint");
+
+    unsafe {
+        let block = ConcreteBlock::new(|_event: xpc_object_t| {}).copy();
+        xpc_connection_set_event_handler(client, (&*block as *const Block<_, _>).cast_mut().cast());
+        xpc_connection_activate(client);
+    }
+
+    let request = unsafe { xpc_dictionary_create_empty() };
+    let ping_key = cstring(PING_KEY);
+    let ping_value = cstring(PING_VALUE);
+    unsafe {
+        xpc_dictionary_set_string(request, ping_key.as_ptr(), ping_value.as_ptr());
+    }
+
+    let reply = unsafe { xpc_connection_send_message_with_reply_sync(client, request) };
+    assert!(!reply.is_null(), "expected synchronous reply");
+    let ty = unsafe { xpc_get_type(reply) };
+    assert_eq!(
+        ty,
+        unsafe { &_xpc_type_dictionary },
+        "expected dictionary reply"
+    );
+
+    let hour_key = cstring(HOUR_KEY);
+    let hour = unsafe { xpc_dictionary_get_string(reply, hour_key.as_ptr()) };
+    assert!(!hour.is_null(), "expected hour field in reply");
+    let hour = unsafe { CStr::from_ptr(hour) }
+        .to_string_lossy()
+        .into_owned();
+    log_event("debug", format!("request_hour response={hour}"));
+
+    unsafe {
+        xpc_release(reply);
+        xpc_release(request);
+        xpc_release(client.cast());
+        xpc_release(endpoint.cast());
+    }
+
+    hour
+}
+
+pub fn request_read_file(listener: xpc_connection_t, file: &str) -> String {
+    log_event("info", format!("request_read_file start file={file}"));
+    let endpoint = unsafe { xpc_endpoint_create(listener) };
+    assert!(
+        !endpoint.is_null(),
+        "expected endpoint from anonymous listener"
+    );
+
+    let client = unsafe { xpc_connection_create_from_endpoint(endpoint) };
+    assert!(!client.is_null(), "expected client from endpoint");
+
+    unsafe {
+        let block = ConcreteBlock::new(|_event: xpc_object_t| {}).copy();
+        xpc_connection_set_event_handler(client, (&*block as *const Block<_, _>).cast_mut().cast());
+        xpc_connection_activate(client);
+    }
+
+    let request = unsafe { xpc_dictionary_create_empty() };
+    let request_key = cstring(REQUEST_KEY);
+    let operation = cstring(REQUEST_READ_FILE);
+    let file_key = cstring(REQUEST_FILE_KEY);
+    let file = cstring(file);
+    unsafe {
+        xpc_dictionary_set_string(request, request_key.as_ptr(), operation.as_ptr());
+        xpc_dictionary_set_string(request, file_key.as_ptr(), file.as_ptr());
+    }
+
+    let reply = unsafe { xpc_connection_send_message_with_reply_sync(client, request) };
+    assert!(!reply.is_null(), "expected synchronous reply");
+    let ty = unsafe { xpc_get_type(reply) };
+    assert_eq!(
+        ty,
+        unsafe { &_xpc_type_dictionary },
+        "expected dictionary reply"
+    );
+
+    let status = dictionary_get_string(reply, STATUS_KEY).unwrap_or_else(|| STATUS_ERR.to_owned());
+    if status != STATUS_OK {
+        let error =
+            dictionary_get_string(reply, ERROR_KEY).unwrap_or_else(|| "unknown error".to_owned());
+        log_event(
+            "error",
+            format!("request_read_file failed status={status} error={error}"),
+        );
+        panic!("request failed: {error}");
+    }
+
+    let contents_key = cstring(RESPONSE_KEY);
+    let contents = unsafe { xpc_dictionary_get_string(reply, contents_key.as_ptr()) };
+    assert!(!contents.is_null(), "expected file contents in reply");
+    let contents = unsafe { CStr::from_ptr(contents) }
+        .to_string_lossy()
+        .into_owned();
+    log_event(
+        "debug",
+        format!("request_read_file response={} bytes", contents.len()),
+    );
+
+    unsafe {
+        xpc_release(reply);
+        xpc_release(request);
+        xpc_release(client.cast());
+        xpc_release(endpoint.cast());
+    }
+
+    contents
+}
+
+pub fn run_dispatch_main() -> ! {
+    log_event("info", "entering dispatch_main");
+    unsafe { dispatch_main() };
+    loop {
+        log_event("debug", "dispatch thread parked");
+        std::thread::park();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{request_hour, start_anonymous_hour_service};
+
+    #[test]
+    fn anonymous_listener_round_trips_hour_reply() {
+        let (listener, rx) = start_anonymous_hour_service();
+        let hour = request_hour(listener);
+        let accept = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+
+        assert_eq!(accept, "accepted connection peer=<anonymous-peer>");
+        assert_eq!(hour.len(), 2);
+        assert!(hour.chars().all(|ch| ch.is_ascii_digit()));
+    }
+}

@@ -231,15 +231,23 @@ actor VfsConnection {
         var session: Session?
         var driverTask: Task<Void, Never>?
         var terminalError: NSError?
+        var generation: UInt64
     }
 
-    private var root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
+    private var root = RootConnection(
+        client: nil,
+        session: nil,
+        driverTask: nil,
+        terminalError: nil,
+        generation: 0
+    )
     private var disconnectRequested = false
     private var debugEnabled = false
     private var listener: UnixListener?
     private var listenerTask: Task<Void, Never>?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
     private var disconnectObservers: [UUID: @Sendable () -> Void] = [:]
+    private var connectionGeneration: UInt64 = 0
 
     func connect(url: URL) async throws {
         await LifecycleTrace.shared.mark(
@@ -278,7 +286,13 @@ actor VfsConnection {
 
         root.session?.handle.shutdown()
         root.driverTask?.cancel()
-        root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
+        root = RootConnection(
+            client: nil,
+            session: nil,
+            driverTask: nil,
+            terminalError: nil,
+            generation: root.generation
+        )
         notifyDisconnect()
         listenerTask?.cancel()
         listenerTask = nil
@@ -305,6 +319,10 @@ actor VfsConnection {
         throw POSIXError(.ENOTCONN)
     }
 
+    func currentConnectionGeneration() -> UInt64 {
+        root.generation
+    }
+
     func observeDisconnect(id: UUID, _ observer: @escaping @Sendable () -> Void) {
         disconnectObservers[id] = observer
     }
@@ -313,12 +331,25 @@ actor VfsConnection {
         disconnectObservers.removeValue(forKey: id)
     }
 
-    private func handleDriverExit(reason: String) async {
+    private func handleDriverExit(generation: UInt64, reason: String) async {
+        if root.generation != generation {
+            log.notice(
+                "Ignoring stale root VFS peer exit generation=\(generation) current=\(self.root.generation)"
+            )
+            return
+        }
+
         if disconnectRequested {
             log.info("VFS root peer connection closed during normal unload")
             NSLog("VixenFS: accepted Vox connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
-            root = RootConnection(client: nil, session: nil, driverTask: nil, terminalError: nil)
+            root = RootConnection(
+                client: nil,
+                session: nil,
+                driverTask: nil,
+                terminalError: nil,
+                generation: generation
+            )
         } else {
             root = RootConnection(
                 client: nil,
@@ -328,7 +359,8 @@ actor VfsConnection {
                 domain: NSPOSIXErrorDomain,
                 code: Int(POSIXError.ECONNRESET.rawValue),
                 userInfo: [NSLocalizedDescriptionKey: reason]
-            )
+            ),
+                generation: generation
             )
             log.error(
                 "Connection to root VFS peer lost; waiting for FSKit to unload/deactivate"
@@ -378,17 +410,22 @@ actor VfsConnection {
             )
             log.notice("Session.acceptFreshLink completed for VFS peer")
 
+            connectionGeneration &+= 1
+            let generation = connectionGeneration
             let logger = log
             let driverTask = Task { [weak self] in
                 do {
                     try await session.run()
                     logger.error("Accepted root Vox driver exited cleanly")
-                    await self?.handleDriverExit(reason: "driver_exit_clean")
+                    await self?.handleDriverExit(generation: generation, reason: "driver_exit_clean")
                 } catch {
                     logger.error(
                         "Accepted root Vox driver exited with error: \(String(describing: error), privacy: .public)"
                     )
-                    await self?.handleDriverExit(reason: "driver_exit_error:\(String(describing: error))")
+                    await self?.handleDriverExit(
+                        generation: generation,
+                        reason: "driver_exit_error:\(String(describing: error))"
+                    )
                 }
             }
 
@@ -401,10 +438,11 @@ actor VfsConnection {
                 client: VfsClient(connection: session.connection, timeout: 28.0),
                 session: session,
                 driverTask: driverTask,
-                terminalError: nil
+                terminalError: nil,
+                generation: generation
             )
             await ConnectionHealth.shared.recordConnected()
-            log.notice("Accepted root VFS peer")
+            log.notice("Accepted root VFS peer generation=\(generation)")
         } catch {
             log.error(
                 "failed to accept VFS peer: \(String(describing: error), privacy: .public)"
