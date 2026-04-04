@@ -53,6 +53,7 @@ impl Vfs for DummyVfs {
         _parent_id: ItemId,
         _name: String,
         _item_type: ItemType,
+        _mode: u32,
     ) -> CreateResult {
         CreateResult {
             item_id: 0,

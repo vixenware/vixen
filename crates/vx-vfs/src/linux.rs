@@ -188,13 +188,13 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _req: Request,
         parent: Inode,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
     ) -> fuse3::Result<ReplyEntry> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
         let result = self
             .vfs
-            .create(parent, name_str.to_owned(), ItemType::Directory)
+            .create(parent, name_str.to_owned(), ItemType::Directory, mode)
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
@@ -216,13 +216,13 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _req: Request,
         parent: Inode,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _flags: u32,
     ) -> fuse3::Result<ReplyCreated> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
         let result = self
             .vfs
-            .create(parent, name_str.to_owned(), ItemType::File)
+            .create(parent, name_str.to_owned(), ItemType::File, mode)
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));

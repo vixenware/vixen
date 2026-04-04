@@ -910,10 +910,23 @@ extension Volume: FSVolume.Operations {
         }
 
         let vfsType: ItemType = (type == .directory) ? .directory : .file
+        let requestedMode: UInt32 =
+            if newAttributes.isValid(.mode) {
+                UInt32(newAttributes.mode)
+            } else if vfsType == .directory {
+                0o755
+            } else {
+                0o644
+            }
         let dirSID = dirItem.sid
         let dirBackendID = dirItem.backendItemId
         let result = try await withMappedClientCall(sid: dirSID) {
-            try await $0.create(parentId: dirBackendID, name: nameStr, itemType: vfsType)
+            try await $0.create(
+                parentId: dirBackendID,
+                name: nameStr,
+                itemType: vfsType,
+                mode: requestedMode
+            )
         }
 
         if result.error != 0 {

@@ -229,9 +229,10 @@ impl SharedVfs {
         parent_id: ItemId,
         name: String,
         item_type: vx_services::ItemType,
+        mode: u32,
     ) -> CreateResult {
-        tracing::trace!(parent_id, %name, ?item_type, "create");
-        CasVfs::create(self.inner.as_ref(), parent_id, name, item_type).await
+        tracing::trace!(parent_id, %name, ?item_type, mode, "create");
+        CasVfs::create(self.inner.as_ref(), parent_id, name, item_type, mode).await
     }
 
     async fn delete(&self, item_id: ItemId) -> VfsResult {
@@ -276,8 +277,9 @@ impl Vfs for SharedVfs {
         parent_id: ItemId,
         name: String,
         item_type: vx_services::ItemType,
+        mode: u32,
     ) -> CreateResult {
-        SharedVfs::create(self, parent_id, name, item_type).await
+        SharedVfs::create(self, parent_id, name, item_type, mode).await
     }
     async fn delete(&self, item_id: ItemId) -> VfsResult {
         SharedVfs::delete(self, item_id).await

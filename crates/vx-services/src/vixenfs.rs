@@ -140,8 +140,14 @@ pub trait Vfs {
     /// Write file contents.
     async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult;
 
-    /// Create a new file or directory.
-    async fn create(&self, parent_id: ItemId, name: String, item_type: ItemType) -> CreateResult;
+    /// Create a new file or directory with its initial mode.
+    async fn create(
+        &self,
+        parent_id: ItemId,
+        name: String,
+        item_type: ItemType,
+        mode: u32,
+    ) -> CreateResult;
 
     /// Delete an item.
     async fn delete(&self, item_id: ItemId) -> VfsResult;

@@ -1697,16 +1697,12 @@ impl CasVfs {
         parent_id: ItemId,
         name: String,
         item_type: ItemType,
+        mode: u32,
     ) -> CreateResult {
         tracing::trace!(parent_id, name = %name, ?item_type, "create");
 
         // Single write lock for check+create (no TOCTOU)
         let new_id = self.alloc_id();
-        let item_mode = match item_type {
-            ItemType::Directory => mode::DIRECTORY,
-            ItemType::File => mode::FILE_REGULAR,
-            ItemType::Symlink => mode::FILE_REGULAR,
-        };
 
         let mut state = self.state.lock();
 
@@ -1741,7 +1737,7 @@ impl CasVfs {
             parent_id,
             name,
             item_type,
-            mode: item_mode,
+            mode,
             cas_hash: None,
             blob_node: None,
             size: 0,

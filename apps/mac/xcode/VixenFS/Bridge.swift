@@ -389,7 +389,6 @@ actor VfsConnection {
                 conduit: .bare,
                 expecting: VfsClient.self,
                 dispatcher: NoopDispatcher(),
-                acceptConnections: false,
                 resumable: false
             )
             log.notice("Session.acceptFreshLink completed for VFS peer")

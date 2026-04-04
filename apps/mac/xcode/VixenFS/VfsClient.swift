@@ -2,6 +2,7 @@
 // DO NOT EDIT - regenerate with `cargo xtask codegen --swift`
 
 import Foundation
+@preconcurrency import NIOCore
 import VoxRuntime
 
 // MARK: - Vfs Method IDs
@@ -149,6 +150,79 @@ public struct SetAttributesParams: Codable, Sendable {
     }
 }
 
+// MARK: - Vfs Encoders
+
+internal func encodeItemType(_ value: ItemType, into buffer: inout ByteBuffer) {
+    switch value {
+    case .file:
+        encodeVarint(UInt64(0), into: &buffer)
+    case .directory:
+        encodeVarint(UInt64(1), into: &buffer)
+    case .symlink:
+        encodeVarint(UInt64(2), into: &buffer)
+    }
+}
+
+internal func encodeItemAttributes(_ value: ItemAttributes, into buffer: inout ByteBuffer) {
+    encodeVarint(value.itemId, into: &buffer)
+    encodeItemType(value.itemType, into: &buffer)
+    encodeVarint(value.size, into: &buffer)
+    encodeVarint(value.modifiedTime, into: &buffer)
+    encodeVarint(value.createdTime, into: &buffer)
+    encodeU32(value.mode, into: &buffer)
+}
+
+internal func encodeLookupResult(_ value: LookupResult, into buffer: inout ByteBuffer) {
+    encodeItemAttributes(value.attrs, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeGetAttributesResult(_ value: GetAttributesResult, into buffer: inout ByteBuffer) {
+    encodeItemAttributes(value.attrs, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeDirEntry(_ value: DirEntry, into buffer: inout ByteBuffer) {
+    encodeString(value.name, into: &buffer)
+    encodeVarint(value.itemId, into: &buffer)
+    encodeItemType(value.itemType, into: &buffer)
+    encodeVarint(value.size, into: &buffer)
+    encodeVarint(value.modifiedTime, into: &buffer)
+    encodeVarint(value.createdTime, into: &buffer)
+    encodeU32(value.mode, into: &buffer)
+}
+
+internal func encodeReadDirResult(_ value: ReadDirResult, into buffer: inout ByteBuffer) {
+    encodeVec(value.entries, into: &buffer, encoder: { val, buf in encodeDirEntry(val, into: &buf) })
+    encodeVarint(value.nextCookie, into: &buffer)
+    encodeVarint(value.verifier, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeReadResult(_ value: ReadResult, into buffer: inout ByteBuffer) {
+    encodeByteSeq(value.data, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeWriteResult(_ value: WriteResult, into buffer: inout ByteBuffer) {
+    encodeVarint(value.bytesWritten, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeCreateResult(_ value: CreateResult, into buffer: inout ByteBuffer) {
+    encodeVarint(value.itemId, into: &buffer)
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeVfsResult(_ value: VfsResult, into buffer: inout ByteBuffer) {
+    encodeI32(value.error, into: &buffer)
+}
+
+internal func encodeSetAttributesParams(_ value: SetAttributesParams, into buffer: inout ByteBuffer) {
+    encodeOption(value.mode, into: &buffer, encoder: { val, buf in encodeU32(val, into: &buf) })
+    encodeOption(value.modifiedTime, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeOption(value.size, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+}
 // MARK: - Vfs Client
 
 ///  The VFS service trait - defines the RPC interface between client and server.
@@ -165,8 +239,8 @@ public protocol VfsCaller {
     func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult
     ///  Write file contents.
     func write(itemId: UInt64, offset: UInt64, data: Data) async throws -> WriteResult
-    ///  Create a new file or directory.
-    func create(parentId: UInt64, name: String, itemType: ItemType) async throws -> CreateResult
+    ///  Create a new file or directory with its initial mode.
+    func create(parentId: UInt64, name: String, itemType: ItemType, mode: UInt32) async throws -> CreateResult
     ///  Delete an item.
     func delete(itemId: UInt64) async throws -> VfsResult
     ///  Rename/move an item.
@@ -187,18 +261,18 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func lookup(parentId: UInt64, name: String) async throws -> LookupResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(parentId)
-        payloadBytes += encodeString(name)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(parentId, into: &buffer)
+        encodeString(name, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xab2b853c144d133b]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0xab2b853c144d133b, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-            let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_itemId = try decodeVarint(from: &cursor)
+            let ___result_attrs_itemType_disc = try decodeVarint(from: &cursor)
             let __result_attrs_itemType: ItemType
             switch ___result_attrs_itemType_disc {
             case 0:
@@ -210,16 +284,16 @@ public final class VfsClient: VfsCaller, Sendable {
             default:
                 throw VoxError.decodeError("unknown enum variant")
             }
-            let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
+            let __result_attrs_size = try decodeVarint(from: &cursor)
+            let __result_attrs_modifiedTime = try decodeVarint(from: &cursor)
+            let __result_attrs_createdTime = try decodeVarint(from: &cursor)
+            let __result_attrs_mode = try decodeU32(from: &cursor)
             let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = LookupResult(attrs: _result_attrs, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -240,17 +314,17 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func getAttributes(itemId: UInt64) async throws -> GetAttributesResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xd97f57caa097adf9]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0xd97f57caa097adf9, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-            let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_itemId = try decodeVarint(from: &cursor)
+            let ___result_attrs_itemType_disc = try decodeVarint(from: &cursor)
             let __result_attrs_itemType: ItemType
             switch ___result_attrs_itemType_disc {
             case 0:
@@ -262,16 +336,16 @@ public final class VfsClient: VfsCaller, Sendable {
             default:
                 throw VoxError.decodeError("unknown enum variant")
             }
-            let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
-            let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
+            let __result_attrs_size = try decodeVarint(from: &cursor)
+            let __result_attrs_modifiedTime = try decodeVarint(from: &cursor)
+            let __result_attrs_createdTime = try decodeVarint(from: &cursor)
+            let __result_attrs_mode = try decodeU32(from: &cursor)
             let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = GetAttributesResult(attrs: _result_attrs, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -292,22 +366,22 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(cookie)
-        payloadBytes += encodeVarint(verifier)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        encodeVarint(cookie, into: &buffer)
+        encodeVarint(verifier, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xf2ba29feced65eb7]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0xf2ba29feced65eb7, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_entries = try decodeVec(from: response, offset: &cursor, decoder: { data, off in
-                let _name = try decodeString(from: data, offset: &off)
-                let _itemId = try decodeVarint(from: data, offset: &off)
-                let _itemType = try ({ data, off in
-                let disc = try decodeVarint(from: data, offset: &off)
+            let _result_entries = try decodeVec(from: &cursor, decoder: { buf in
+                let _name = try ({ buf in try decodeString(from: &buf) })(&buf)
+                let _itemId = try ({ buf in try decodeVarint(from: &buf) })(&buf)
+                let _itemType = try ({ buf in
+                let disc = try decodeVarint(from: &buf)
                 let result: ItemType
                 switch disc {
                 case 0:
@@ -320,20 +394,20 @@ public final class VfsClient: VfsCaller, Sendable {
                     throw VoxError.decodeError("unknown enum variant")
                 }
                 return result
-            })(data, &off)
-                let _size = try decodeVarint(from: data, offset: &off)
-                let _modifiedTime = try decodeVarint(from: data, offset: &off)
-                let _createdTime = try decodeVarint(from: data, offset: &off)
-                let _mode = try decodeU32(from: data, offset: &off)
+            })(&buf)
+                let _size = try ({ buf in try decodeVarint(from: &buf) })(&buf)
+                let _modifiedTime = try ({ buf in try decodeVarint(from: &buf) })(&buf)
+                let _createdTime = try ({ buf in try decodeVarint(from: &buf) })(&buf)
+                let _mode = try ({ buf in try decodeU32(from: &buf) })(&buf)
                 return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
             })
-            let _result_nextCookie = try decodeVarint(from: response, offset: &cursor)
-            let _result_verifier = try decodeVarint(from: response, offset: &cursor)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_nextCookie = try decodeVarint(from: &cursor)
+            let _result_verifier = try decodeVarint(from: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = ReadDirResult(entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -354,23 +428,24 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(offset)
-        payloadBytes += encodeVarint(len)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        encodeVarint(offset, into: &buffer)
+        encodeVarint(len, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x719a43e94d147918]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0x719a43e94d147918, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_data = try decodeBytes(from: response, offset: &cursor)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            var __result_data_buf = try decodeBytes(from: &cursor)
+            let _result_data = Data(__result_data_buf.readBytes(length: __result_data_buf.readableBytes) ?? [])
+            let _result_error = try decodeI32(from: &cursor)
             let result = ReadResult(data: _result_data, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -391,23 +466,23 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func write(itemId: UInt64, offset: UInt64, data: Data) async throws -> WriteResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(offset)
-        payloadBytes += encodeBytes(Array(data))
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        encodeVarint(offset, into: &buffer)
+        encodeByteSeq(data, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xc330417994d57b8a]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0xc330417994d57b8a, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_bytesWritten = try decodeVarint(from: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = WriteResult(bytesWritten: _result_bytesWritten, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -427,33 +502,25 @@ public final class VfsClient: VfsCaller, Sendable {
         }
     }
 
-    public func create(parentId: UInt64, name: String, itemType: ItemType) async throws -> CreateResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(parentId)
-        payloadBytes += encodeString(name)
-        payloadBytes += { v in
-    switch v {
-    case .file:
-        return encodeVarint(UInt64(0))
-    case .directory:
-        return encodeVarint(UInt64(1))
-    case .symlink:
-        return encodeVarint(UInt64(2))
-    }
-}(itemType)
-        let payload = Data(payloadBytes)
+    public func create(parentId: UInt64, name: String, itemType: ItemType, mode: UInt32) async throws -> CreateResult {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(parentId, into: &buffer)
+        encodeString(name, into: &buffer)
+        encodeItemType(itemType, into: &buffer)
+        encodeU32(mode, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x9b060d7cd7c1a62e]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0x9b060d7cd7c1a62e, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_itemId = try decodeVarint(from: response, offset: &cursor)
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_itemId = try decodeVarint(from: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = CreateResult(itemId: _result_itemId, error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -474,20 +541,20 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func delete(itemId: UInt64) async throws -> VfsResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x2a1f41955c3e63a8]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0x2a1f41955c3e63a8, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = VfsResult(error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -508,22 +575,22 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws -> VfsResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(newParentId)
-        payloadBytes += encodeString(newName)
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        encodeVarint(newParentId, into: &buffer)
+        encodeString(newName, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x5aca8524d890971d]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0x5aca8524d890971d, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = VfsResult(error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -544,21 +611,21 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeOption(params.mode, encoder: { encodeU32($0) }) + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) }) + encodeOption(params.size, encoder: { encodeVarint($0) })
-        let payload = Data(payloadBytes)
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(itemId, into: &buffer)
+        encodeSetAttributesParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x2086815889a62b33]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0x2086815889a62b33, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: &cursor)
             let result = VfsResult(error: _result_error)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -579,17 +646,17 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func ping() async throws -> String {
-        let payload = Data()
+        let payload: [UInt8] = []
         let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xda4fc1cc055a4fcb]!, schemaRegistry: vfs_schema_registry)
         let response = try await connection.call(methodId: 0xda4fc1cc055a4fcb, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        var cursor = 0
-        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        var cursor = { var buf = ByteBufferAllocator().buffer(capacity: response.count); buf.writeBytes(response); return buf }()
+        let _cursor_resultDisc = try decodeVarint(from: &cursor)
         switch _cursor_resultDisc {
         case 0:
-            let result = try decodeString(from: response, offset: &cursor)
+            let result = try decodeString(from: &cursor)
             return result
         case 1:
-            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            let _cursor_errorCode = try decodeU8(from: &cursor)
             switch _cursor_errorCode {
             case 0:
                 throw VoxError.decodeError("unexpected user error for infallible method")
@@ -618,7 +685,7 @@ public let vfs_schemas: [String: MethodBindingSchema] = [
     "readDir": MethodBindingSchema(args: [.u64, .u64, .u64]),
     "read": MethodBindingSchema(args: [.u64, .u64, .u64]),
     "write": MethodBindingSchema(args: [.u64, .u64, .bytes]),
-    "create": MethodBindingSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])])]),
+    "create": MethodBindingSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])]), .u32]),
     "delete": MethodBindingSchema(args: [.u64]),
     "rename": MethodBindingSchema(args: [.u64, .u64, .string]),
     "setAttributes": MethodBindingSchema(args: [.u64, .struct(fields: [("mode", .option(inner: .u32)), ("modified_time", .option(inner: .u64)), ("size", .option(inner: .u64))])]),
@@ -640,6 +707,7 @@ nonisolated(unsafe) public let vfs_schema_registry: [UInt64: Schema] = [
     0x6847ab90feda71c1: Schema(id: 0x6847ab90feda71c1, typeParams: ["T0"], kind: .tuple(elements: [.var(name: "T0")])),
     0x6a734a2e970719e0: Schema(id: 0x6a734a2e970719e0, typeParams: [], kind: .struct(name: "GetAttributesResult", fields: [FieldSchema(name: "attrs", typeRef: .concrete(0xae6ac02e727cc211), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
     0x6d7dce914ee150e8: Schema(id: 0x6d7dce914ee150e8, typeParams: [], kind: .primitive(.string)),
+    0x915c6fb5b64f270b: Schema(id: 0x915c6fb5b64f270b, typeParams: ["T0", "T1", "T2", "T3"], kind: .tuple(elements: [.var(name: "T0"), .var(name: "T1"), .var(name: "T2"), .var(name: "T3")])),
     0xaa510ab07d34f141: Schema(id: 0xaa510ab07d34f141, typeParams: ["T0", "T1", "T2"], kind: .tuple(elements: [.var(name: "T0"), .var(name: "T1"), .var(name: "T2")])),
     0xae6ac02e727cc211: Schema(id: 0xae6ac02e727cc211, typeParams: [], kind: .struct(name: "ItemAttributes", fields: [FieldSchema(name: "item_id", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "item_type", typeRef: .concrete(0xd1e63100371f0715), required: true), FieldSchema(name: "size", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "modified_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "created_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "mode", typeRef: .concrete(0x281c5be4f2ee63b4), required: true)])),
     0xb5d116be89549d7a: Schema(id: 0xb5d116be89549d7a, typeParams: [], kind: .struct(name: "LookupResult", fields: [FieldSchema(name: "attrs", typeRef: .concrete(0xae6ac02e727cc211), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
@@ -688,8 +756,8 @@ nonisolated(unsafe) public let vfs_method_schemas: [UInt64: MethodSchemaInfo] = 
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xcef75facafe734d2), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0x9b060d7cd7c1a62e: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xd1e63100371f0715, 0xaa510ab07d34f141],
-        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0x6d7dce914ee150e8), .concrete(0xd1e63100371f0715)]),
+        argsSchemaIds: [0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xd1e63100371f0715, 0x281c5be4f2ee63b4, 0x915c6fb5b64f270b],
+        argsRoot: .generic(0x915c6fb5b64f270b, args: [.concrete(0xd9356298b81639ac), .concrete(0x6d7dce914ee150e8), .concrete(0xd1e63100371f0715), .concrete(0x281c5be4f2ee63b4)]),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x361f4536eee9f991, 0x2ef062292a4e82d5],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x2ef062292a4e82d5), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
@@ -724,18 +792,18 @@ public struct VfsSerializers: BindingSerializers {
 
     public func txSerializer(for schema: BindingSchema) -> @Sendable (Any) -> [UInt8] {
         switch schema {
-        case .bool: return { encodeBool($0 as! Bool) }
-        case .u8: return { encodeU8($0 as! UInt8) }
-        case .i8: return { encodeI8($0 as! Int8) }
-        case .u16: return { encodeU16($0 as! UInt16) }
-        case .i16: return { encodeI16($0 as! Int16) }
-        case .u32: return { encodeU32($0 as! UInt32) }
-        case .i32: return { encodeI32($0 as! Int32) }
-        case .u64: return { encodeVarint($0 as! UInt64) }
-        case .i64: return { encodeI64($0 as! Int64) }
-        case .f32: return { encodeF32($0 as! Float) }
-        case .f64: return { encodeF64($0 as! Double) }
-        case .string: return { encodeString($0 as! String) }
+        case .bool: return { var b = ByteBufferAllocator().buffer(capacity: 1); encodeBool($0 as! Bool, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .u8: return { var b = ByteBufferAllocator().buffer(capacity: 1); encodeU8($0 as! UInt8, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .i8: return { var b = ByteBufferAllocator().buffer(capacity: 1); encodeI8($0 as! Int8, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .u16: return { var b = ByteBufferAllocator().buffer(capacity: 2); encodeU16($0 as! UInt16, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .i16: return { var b = ByteBufferAllocator().buffer(capacity: 2); encodeI16($0 as! Int16, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .u32: return { var b = ByteBufferAllocator().buffer(capacity: 4); encodeU32($0 as! UInt32, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .i32: return { var b = ByteBufferAllocator().buffer(capacity: 4); encodeI32($0 as! Int32, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .u64: return { var b = ByteBufferAllocator().buffer(capacity: 9); encodeVarint($0 as! UInt64, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .i64: return { var b = ByteBufferAllocator().buffer(capacity: 9); encodeI64($0 as! Int64, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .f32: return { var b = ByteBufferAllocator().buffer(capacity: 4); encodeF32($0 as! Float, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .f64: return { var b = ByteBufferAllocator().buffer(capacity: 8); encodeF64($0 as! Double, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
+        case .string: return { var b = ByteBufferAllocator().buffer(capacity: 64); encodeString($0 as! String, into: &b); return b.readBytes(length: b.readableBytes) ?? [] }
         case .bytes: return { [UInt8]($0 as! Data) }
         case .tx(_, _), .rx(_, _): fatalError("Channel schemas are not serialized directly")
         default: fatalError("Unsupported schema for Tx serialization: \(schema)")
@@ -744,18 +812,18 @@ public struct VfsSerializers: BindingSerializers {
 
     public func rxDeserializer(for schema: BindingSchema) -> @Sendable ([UInt8]) throws -> Any {
         switch schema {
-        case .bool: return { var o = 0; return try decodeBool(from: Data($0), offset: &o) }
-        case .u8: return { var o = 0; return try decodeU8(from: Data($0), offset: &o) }
-        case .i8: return { var o = 0; return try decodeI8(from: Data($0), offset: &o) }
-        case .u16: return { var o = 0; return try decodeU16(from: Data($0), offset: &o) }
-        case .i16: return { var o = 0; return try decodeI16(from: Data($0), offset: &o) }
-        case .u32: return { var o = 0; return try decodeU32(from: Data($0), offset: &o) }
-        case .i32: return { var o = 0; return try decodeI32(from: Data($0), offset: &o) }
-        case .u64: return { var o = 0; return try decodeVarint(from: Data($0), offset: &o) }
-        case .i64: return { var o = 0; return try decodeI64(from: Data($0), offset: &o) }
-        case .f32: return { var o = 0; return try decodeF32(from: Data($0), offset: &o) }
-        case .f64: return { var o = 0; return try decodeF64(from: Data($0), offset: &o) }
-        case .string: return { var o = 0; return try decodeString(from: Data($0), offset: &o) }
+        case .bool: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeBool(from: &b) }
+        case .u8: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeU8(from: &b) }
+        case .i8: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeI8(from: &b) }
+        case .u16: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeU16(from: &b) }
+        case .i16: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeI16(from: &b) }
+        case .u32: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeU32(from: &b) }
+        case .i32: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeI32(from: &b) }
+        case .u64: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeVarint(from: &b) }
+        case .i64: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeI64(from: &b) }
+        case .f32: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeF32(from: &b) }
+        case .f64: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeF64(from: &b) }
+        case .string: return { var b = ByteBufferAllocator().buffer(bytes: $0); return try decodeString(from: &b) }
         case .bytes: return { Data($0) }
         case .tx(_, _), .rx(_, _): fatalError("Channel schemas are not deserialized directly")
         default: fatalError("Unsupported schema for Rx deserialization: \(schema)")

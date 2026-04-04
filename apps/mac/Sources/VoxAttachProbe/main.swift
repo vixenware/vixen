@@ -56,9 +56,8 @@ struct VoxAttachProbe {
                     session = try await Session.acceptFreshLink(
                         link,
                         conduit: .bare,
-                        expecting: NoopRootClient.self,
+                        expecting: NoopClient.self,
                         dispatcher: NoopDispatcher(),
-                        acceptConnections: false,
                         resumable: false
                     )
                 case "vfs":
@@ -67,7 +66,6 @@ struct VoxAttachProbe {
                         conduit: .bare,
                         expecting: ExpectedVfsClient.self,
                         dispatcher: NoopDispatcher(),
-                        acceptConnections: false,
                         resumable: false
                     )
                 default:
