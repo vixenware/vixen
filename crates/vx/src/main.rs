@@ -98,7 +98,7 @@ async fn shutdown_daemon(address: &str) -> eyre::Result<()> {
     client.shutdown().await?;
 
     for _ in 0..100 {
-        if daemon_status(address).await.is_err() {
+        if daemon_connect(address).await.is_err() {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -370,24 +370,20 @@ async fn ensure_daemon_available(
 ) -> eyre::Result<ActiveDaemon> {
     let resolved = resolve_daemon_target(target)?;
 
-    if let Ok(status) = daemon_status(&resolved.address).await {
-        if fresh_daemon {
-            let Some(_) = resolved.auto_start.as_ref() else {
-                eyre::bail!(
-                    "--fresh-daemon requires an auto-startable daemon target, not an explicit --daemon address"
-                );
-            };
+    if fresh_daemon {
+        let Some(_) = resolved.auto_start.as_ref() else {
+            eyre::bail!(
+                "--fresh-daemon requires an auto-startable daemon target, not an explicit --daemon address"
+            );
+        };
+        if daemon_connect(&resolved.address).await.is_ok() {
             shutdown_daemon(&resolved.address).await?;
-        } else {
-            return Ok(ActiveDaemon {
-                address: resolved.address,
-                status,
-            });
         }
-    } else if fresh_daemon && resolved.auto_start.is_none() {
-        eyre::bail!(
-            "--fresh-daemon requires an auto-startable daemon target, not an explicit --daemon address"
-        );
+    } else if let Ok(status) = daemon_status(&resolved.address).await {
+        return Ok(ActiveDaemon {
+            address: resolved.address,
+            status,
+        });
     }
 
     let Some(launch) = resolved.auto_start.as_ref() else {
@@ -406,8 +402,12 @@ async fn ensure_daemon_available(
     })
 }
 
+async fn daemon_connect(address: &str) -> eyre::Result<DaemonClient> {
+    Ok(vox::connect(address).await?)
+}
+
 async fn daemon_status(address: &str) -> eyre::Result<vx_services::DaemonStatus> {
-    let client: DaemonClient = vox::connect(address).await?;
+    let client = daemon_connect(address).await?;
     Ok(client.status().await?)
 }
 

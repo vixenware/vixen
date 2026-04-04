@@ -40,6 +40,21 @@ fn cleanup_daemon(config_path: &std::path::Path) {
         .status();
 }
 
+fn start_daemon(config_path: &std::path::Path) -> std::process::Child {
+    Command::new(vx_bin())
+        .current_dir(workspace_root())
+        .args(["daemon", "--config"])
+        .arg(config_path)
+        .spawn()
+        .expect("vx daemon should spawn")
+}
+
+fn write_simple_eval_file(temp_dir: &TempDir) -> std::path::PathBuf {
+    let file = temp_dir.path().join("simple.vx");
+    std::fs::write(&file, "fn one() -> U64 ( 1 )\n").expect("simple eval file should write");
+    file
+}
+
 #[test]
 fn eval_auto_starts_daemon_and_runs_rustc_hello() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
@@ -67,4 +82,34 @@ fn eval_auto_starts_daemon_and_runs_rustc_hello() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.trim().starts_with("tree:"), "stdout: {stdout}");
+}
+
+#[test]
+fn eval_fresh_daemon_replaces_running_daemon_and_runs_rustc_hello() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let config_path = write_daemon_config(&temp_dir);
+    let eval_file = write_simple_eval_file(&temp_dir);
+    let mut daemon = start_daemon(&config_path);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = Command::new(vx_bin())
+        .current_dir(workspace_root())
+        .env("VX_DAEMON_CONFIG", &config_path)
+        .args(["eval", "--fresh-daemon", "--file"])
+        .arg(&eval_file)
+        .args(["--function", "one"])
+        .output()
+        .expect("vx eval should run");
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    cleanup_daemon(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "1", "stdout: {stdout}");
 }
