@@ -3942,7 +3942,6 @@ dependencies = [
  "facet",
  "facet-error",
  "facet-json",
- "fastrand",
  "fuse3",
  "futures-util",
  "libc",
