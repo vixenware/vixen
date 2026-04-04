@@ -11,7 +11,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("local://{socket_path}");
 
     let client = vox::connect::<NoopClient>(&addr)
-        .metadata(vec![MetadataEntry::str("probe", "rust")])
+        .metadata(vec![
+            MetadataEntry::str("vox-service", "Noop"),
+            MetadataEntry::str("probe", "rust"),
+        ])
         .connect_timeout(Duration::from_secs(5))
         .establish()
         .await?;
