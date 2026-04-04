@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .library(name: "VixenApp", targets: ["VixenApp"]),
         .library(name: "VixenFS", targets: ["VixenFS"]),
+        .executable(name: "VoxAttachProbe", targets: ["VoxAttachProbe"]),
     ],
     dependencies: [
         .package(path: "../../../vox/swift/vox-runtime"),
@@ -34,6 +35,13 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("FSKit")
             ]
+        ),
+        .executableTarget(
+            name: "VoxAttachProbe",
+            dependencies: [
+                .product(name: "VoxRuntime", package: "vox-runtime")
+            ],
+            path: "Sources/VoxAttachProbe"
         ),
         .testTarget(
             name: "VixenFSTests",
