@@ -1,3 +1,4 @@
+use vox::Tx;
 use vx_jit::{
     StrictFragmentClassification, StrictFragmentValue, classify_source_text_function,
     compile_strict_fragment, execute_compiled_copying_strict_fragment_strings,
@@ -5,9 +6,9 @@ use vx_jit::{
     lower_source_text_strict_fragment,
 };
 use vx_services::{
-    EvalFunctionRequest, EvalFunctionResult, EvalStrictFunctionFailure, EvalStrictFunctionRequest,
-    EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator, RuntimeValue, StoreClient,
-    StrictEvalBackend,
+    EvalFunctionRequest, EvalFunctionResult, EvalProgressEvent, EvalStrictFunctionFailure,
+    EvalStrictFunctionRequest, EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator,
+    RuntimeValue, StoreClient, StrictEvalBackend,
 };
 use vx_vfsd::VfsdService;
 
@@ -164,11 +165,34 @@ impl OrchestratorService {
     }
 
     async fn eval_function_impl(&self, request: EvalFunctionRequest) -> EvalFunctionResult {
+        self.eval_function_with_progress_impl(request, None).await
+    }
+
+    async fn eval_function_with_progress_impl(
+        &self,
+        request: EvalFunctionRequest,
+        progress: Option<Tx<EvalProgressEvent>>,
+    ) -> EvalFunctionResult {
+        emit_phase(
+            progress.as_ref(),
+            format!("classifying `{}`", request.function_name),
+        )
+        .await;
         match classify_source_text_function(&request.source_text, &request.function_name) {
             Ok(StrictFragmentClassification::StrictFragment) => {
+                emit_phase(
+                    progress.as_ref(),
+                    format!("evaluating strict fragment `{}`", request.function_name),
+                )
+                .await;
                 self.eval_strict_function_impl(request).await
             }
             Ok(StrictFragmentClassification::NotStrict { .. }) => {
+                emit_phase(
+                    progress.as_ref(),
+                    format!("evaluating `{}`", request.function_name),
+                )
+                .await;
                 match evaluate_source_text_function(
                     &RuntimeEvalContext {
                         store: self.store.clone(),
@@ -177,6 +201,7 @@ impl OrchestratorService {
                     &request.source_text,
                     &request.function_name,
                     &request.args,
+                    progress,
                 )
                 .await
                 {
@@ -209,11 +234,30 @@ impl Orchestrator for OrchestratorService {
         self.eval_function_impl(request).await
     }
 
+    async fn eval_function_with_progress(
+        &self,
+        request: EvalFunctionRequest,
+        progress: Tx<EvalProgressEvent>,
+    ) -> EvalFunctionResult {
+        let result = self
+            .eval_function_with_progress_impl(request, Some(progress))
+            .await;
+        // The handler owns the sender for the lifetime of the request. Dropping it
+        // closes the progress stream after the terminal result has been sent.
+        result
+    }
+
     async fn eval_strict_function(
         &self,
         request: EvalStrictFunctionRequest,
     ) -> EvalStrictFunctionResult {
         self.eval_strict_function_impl(request).await
+    }
+}
+
+async fn emit_phase(progress: Option<&Tx<EvalProgressEvent>>, message: String) {
+    if let Some(progress) = progress {
+        let _ = progress.send(format!("phase: {message}\n")).await;
     }
 }
 

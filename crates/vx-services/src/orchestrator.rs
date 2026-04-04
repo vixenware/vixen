@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use crate::NodeHash;
 use facet::Facet;
+use vox::Tx;
 
 /// Orchestrator protocol version.
 pub const ORCHESTRATOR_PROTOCOL_VERSION: u32 = 1;
@@ -68,10 +69,17 @@ pub type EvalFunctionRequest = EvalStrictFunctionRequest;
 pub type EvalFunctionSuccess = EvalStrictFunctionSuccess;
 pub type EvalFunctionFailure = EvalStrictFunctionFailure;
 pub type EvalFunctionResult = EvalStrictFunctionResult;
+pub type EvalProgressEvent = String;
 
 #[vox::service]
 pub trait Orchestrator {
     async fn eval_function(&self, request: EvalFunctionRequest) -> EvalFunctionResult;
+
+    async fn eval_function_with_progress(
+        &self,
+        request: EvalFunctionRequest,
+        progress: Tx<EvalProgressEvent>,
+    ) -> EvalFunctionResult;
 
     async fn eval_strict_function(
         &self,

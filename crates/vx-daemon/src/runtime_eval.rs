@@ -1,14 +1,20 @@
 use std::collections::{BTreeMap, HashMap};
+use std::process::Stdio;
+
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 use async_recursion::async_recursion;
 use thiserror::Error;
+use vox::Tx;
 use vx_analysis::{
     AnalysisError, BodyId, ExecSliceError, ExecutableClosure, ExecutableProgram, KernelOp, Operand,
     ResultSource, RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload,
     RuntimeField, RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
+use vx_services::EvalProgressEvent;
 use vx_services::{
     BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient,
     cas_tree::{MerkleTreeFile, build_merkle_tree},
@@ -100,6 +106,7 @@ pub async fn evaluate_source_text_function(
     source: &str,
     function_name: &str,
     args: &[RuntimeValue],
+    progress: Option<Tx<EvalProgressEvent>>,
 ) -> Result<RuntimeValue, RuntimeEvalError> {
     let (body_id, program) = {
         let bridge = checked_bridge(source)?;
@@ -121,7 +128,7 @@ pub async fn evaluate_source_text_function(
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
-    let mut evaluator = ProgramEvaluator::new(context, &program);
+    let mut evaluator = ProgramEvaluator::new(context, &program, progress);
     let value = evaluator.eval_body(function_name, body_id, &args).await?;
     let value = evaluator.finalize_value(function_name, value).await?;
     runtime_value_from_eval(function_name, value)
@@ -189,16 +196,22 @@ fn runtime_value_from_eval(
 struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
+    progress: Option<Tx<EvalProgressEvent>>,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
     runtime_exec_prefixes: HashMap<vx_analysis::RuntimeNodeId, String>,
     next_exec_prefix: u64,
 }
 
 impl<'a> ProgramEvaluator<'a> {
-    fn new(context: &'a RuntimeEvalContext, program: &'a ExecutableProgram) -> Self {
+    fn new(
+        context: &'a RuntimeEvalContext,
+        program: &'a ExecutableProgram,
+        progress: Option<Tx<EvalProgressEvent>>,
+    ) -> Self {
         Self {
             context,
             program,
+            progress,
             memo: HashMap::new(),
             runtime_exec_prefixes: HashMap::new(),
             next_exec_prefix: 0,
@@ -974,8 +987,12 @@ impl<'a> ProgramEvaluator<'a> {
 
         let prefix = format!("eval-{:016x}", self.next_exec_prefix);
         self.next_exec_prefix += 1;
+        self.emit_phase(format!("preparing exec sandbox `{prefix}`"))
+            .await;
 
         for writable_root in writable_roots {
+            self.emit_phase(format!("creating writable root `{}`", writable_root.0))
+                .await;
             vfsd.mkdir(format!("/{prefix}/{}", writable_root.0))
                 .await
                 .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
@@ -991,6 +1008,12 @@ impl<'a> ProgramEvaluator<'a> {
             let tree = self
                 .resolve_runtime_tree_input(function_name, input, producers, slots)
                 .await?;
+            self.emit_phase(format!(
+                "mounting tree {} at `{}`",
+                tree.to_hex(),
+                mount_path.0
+            ))
+            .await;
             vfsd.mount(format!("/{prefix}/{}", mount_path.0), tree.0)
                 .await
                 .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
@@ -1043,19 +1066,114 @@ impl<'a> ProgramEvaluator<'a> {
         function_name: &str,
         argv: &[String],
     ) -> Result<EvalValue, RuntimeEvalError> {
-        let output = Command::new(&argv[0])
+        self.emit_phase(format!("spawning `{}`", argv.join(" ")))
+            .await;
+        let mut child = Command::new(&argv[0])
             .args(&argv[1..])
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!("local exec failed: {error}"),
             })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "local exec stdout was not piped".to_owned(),
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "local exec stderr was not piped".to_owned(),
+            })?;
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel();
+        let stdout_task = tokio::spawn(read_exec_stream(
+            stdout,
+            ExecStream::Stdout,
+            chunk_tx.clone(),
+        ));
+        let stderr_task = tokio::spawn(read_exec_stream(stderr, ExecStream::Stderr, chunk_tx));
+        let mut wait = Box::pin(child.wait());
+        let mut status = None;
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+
+        loop {
+            tokio::select! {
+                result = &mut wait, if status.is_none() => {
+                    let exit = result.map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: format!("local exec wait failed: {error}"),
+                    })?;
+                    status = Some(exit);
+                }
+                maybe_chunk = chunk_rx.recv() => {
+                    let Some((stream, chunk)) = maybe_chunk else {
+                        if status.is_some() {
+                            break;
+                        }
+                        continue;
+                    };
+                    match stream {
+                        ExecStream::Stdout => {
+                            stdout_buf.extend_from_slice(&chunk);
+                            self.emit_stdout(String::from_utf8_lossy(&chunk).into_owned()).await;
+                        }
+                        ExecStream::Stderr => {
+                            stderr_buf.extend_from_slice(&chunk);
+                            self.emit_stderr(String::from_utf8_lossy(&chunk).into_owned()).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        stdout_task
+            .await
+            .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("stdout reader task failed: {error}"),
+            })?;
+        stderr_task
+            .await
+            .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("stderr reader task failed: {error}"),
+            })?;
+        let status = status.expect("process status should be observed before readers close");
+        self.emit_phase(format!(
+            "process exited with code {}",
+            status.code().unwrap_or(1)
+        ))
+        .await;
         Ok(EvalValue::Process {
-            exit_code: output.status.code().unwrap_or(1) as u64,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: status.code().unwrap_or(1) as u64,
+            stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
         })
+    }
+
+    async fn emit_phase(&self, message: String) {
+        if let Some(progress) = self.progress.as_ref() {
+            let _ = progress.send(format!("phase: {message}\n")).await;
+        }
+    }
+
+    async fn emit_stdout(&self, chunk: String) {
+        if let Some(progress) = self.progress.as_ref() {
+            let _ = progress.send(chunk).await;
+        }
+    }
+
+    async fn emit_stderr(&self, chunk: String) {
+        if let Some(progress) = self.progress.as_ref() {
+            let _ = progress.send(chunk).await;
+        }
     }
 
     fn int_to_value(&self, function_name: &str, value: i64) -> Result<EvalValue, RuntimeEvalError> {
@@ -1105,6 +1223,33 @@ impl<'a> ProgramEvaluator<'a> {
                 expected: "string",
                 found: other.kind_name(),
             }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExecStream {
+    Stdout,
+    Stderr,
+}
+
+async fn read_exec_stream<R>(
+    mut reader: R,
+    stream: ExecStream,
+    chunk_tx: mpsc::UnboundedSender<(ExecStream, Vec<u8>)>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = vec![0_u8; 8 * 1024];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(len) => {
+                if chunk_tx.send((stream, buffer[..len].to_vec())).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -1257,6 +1402,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_CALL,
             "build",
             &[RuntimeValue::String("serde".to_owned())],
+            None,
         )
         .await
         .expect("build should evaluate");
@@ -1271,6 +1417,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_len",
             &[RuntimeValue::String("serde".to_owned())],
+            None,
         )
         .await
         .expect("build_len should evaluate");
@@ -1285,6 +1432,7 @@ fn probe() #discover -> String (
             SOURCE_NON_STRICT_STRING_HELPERS,
             "build_slice",
             &[RuntimeValue::String("serde".to_owned())],
+            None,
         )
         .await
         .expect("build_slice should evaluate");
@@ -1299,6 +1447,7 @@ fn probe() #discover -> String (
             SOURCE_DISCOVER_WHICH,
             "probe",
             &[],
+            None,
         )
         .await
         .expect("probe should evaluate");
@@ -1319,6 +1468,7 @@ fn probe() #discover -> String (
             SOURCE_EXEC_STDOUT,
             "probe",
             &[],
+            None,
         )
         .await
         .expect("probe should evaluate");

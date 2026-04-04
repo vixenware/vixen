@@ -31,6 +31,22 @@ fn write_daemon_config(temp_dir: &TempDir) -> std::path::PathBuf {
     cfg
 }
 
+fn write_daemon_config_without_vfsd(temp_dir: &TempDir) -> std::path::PathBuf {
+    let cfg = temp_dir.path().join("daemon.styx");
+    let sock = temp_dir.path().join("vx.sock");
+    let store = temp_dir.path().join("store");
+    std::fs::write(
+        &cfg,
+        format!(
+            "daemon {{\n  listen (\"local://{}\")\n  services {{\n    orchestrator {{}}\n    store {{ root \"{}\" }}\n  }}\n}}\n",
+            sock.display(),
+            store.display(),
+        ),
+    )
+    .expect("daemon config should write");
+    cfg
+}
+
 fn cleanup_daemon(config_path: &std::path::Path) {
     let _ = Command::new("pkill")
         .args([
@@ -82,12 +98,14 @@ fn eval_auto_starts_daemon_and_runs_rustc_hello() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.trim().starts_with("tree:"), "stdout: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("phase:"), "stderr: {stderr}");
 }
 
 #[test]
 fn eval_fresh_daemon_replaces_running_daemon_and_runs_rustc_hello() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
-    let config_path = write_daemon_config(&temp_dir);
+    let config_path = write_daemon_config_without_vfsd(&temp_dir);
     let eval_file = write_simple_eval_file(&temp_dir);
     let mut daemon = start_daemon(&config_path);
     std::thread::sleep(std::time::Duration::from_millis(300));

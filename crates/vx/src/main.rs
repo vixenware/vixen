@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use figue as args;
 use vx_services::{
-    DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient,
-    RuntimeValue, StrictEvalBackend,
+    DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, EvalProgressEvent,
+    OrchestratorClient, RuntimeValue, StrictEvalBackend,
 };
 
 use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
-const DAEMON_WAIT_FOR_SERVICE_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_WAIT_FOR_SERVICE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() {
     init_cli_stderr();
@@ -273,8 +273,14 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
     emit_eval_daemon_note(&daemon.address, &daemon.status)?;
     let address = daemon.address;
     let client: OrchestratorClient = vox::connect(&address).await?;
+    let (progress_tx, mut progress_rx) = vox::channel::<EvalProgressEvent>();
+    let progress_task = tokio::spawn(async move {
+        while let Ok(Some(event)) = progress_rx.recv().await {
+            eprint!("{}", event.get());
+        }
+    });
     let result = client
-        .eval_function(EvalFunctionRequest {
+        .eval_function_with_progress(EvalFunctionRequest {
             source_text,
             function_name: args.function,
             args: values,
@@ -282,8 +288,18 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
             include_strict_fragment_dump: args.strict_fragment_dump,
             include_hir: args.hir,
             include_ir: args.ir,
-        })
-        .await?;
+        }, progress_tx)
+        .await
+        .map_err(|error| {
+            if matches!(error, vox::VoxError::UnknownMethod) {
+                eyre::eyre!(
+                    "daemon does not support progress-aware eval; run `vx kill` or retry with `--fresh-daemon`"
+                )
+            } else {
+                error.into()
+            }
+        })?;
+    progress_task.await?;
 
     match result {
         EvalFunctionResult::Ok(success) => {
