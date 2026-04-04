@@ -391,27 +391,11 @@ async fn ensure_daemon_available(
     };
 
     spawn_daemon(launch)?;
-
-    let mut last_error = None;
-    for _ in 0..150 {
-        match daemon_status(&resolved.address).await {
-            Ok(status) => {
-                return Ok(ActiveDaemon {
-                    address: resolved.address,
-                    status,
-                });
-            }
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-    }
-
-    match last_error {
-        Some(error) => Err(error),
-        None => eyre::bail!("failed to connect to daemon at {}", resolved.address),
-    }
+    let status = daemon_status(&resolved.address).await?;
+    Ok(ActiveDaemon {
+        address: resolved.address,
+        status,
+    })
 }
 
 async fn daemon_status(address: &str) -> eyre::Result<vx_services::DaemonStatus> {
