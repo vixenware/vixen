@@ -48,6 +48,7 @@ struct VoxAttachProbe {
                 let session = try await Session.acceptFreshLink(
                     link,
                     conduit: .bare,
+                    expecting: NoopRootClient.self,
                     dispatcher: NoopDispatcher(),
                     acceptConnections: false,
                     resumable: false

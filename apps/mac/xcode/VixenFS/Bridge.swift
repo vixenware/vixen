@@ -127,6 +127,10 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
     }
 }
 
+extension VfsClient: ExpectedRootClient {
+    public static let voxServiceName = "Vfs"
+}
+
 struct ConnectionHealthSnapshot: Codable {
     let connected: Bool
     let everConnected: Bool
@@ -383,6 +387,7 @@ actor VfsConnection {
             let session = try await Session.acceptFreshLink(
                 link,
                 conduit: .bare,
+                expecting: VfsClient.self,
                 dispatcher: NoopDispatcher(),
                 acceptConnections: false,
                 resumable: false
