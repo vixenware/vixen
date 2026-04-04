@@ -7,6 +7,7 @@ mod cli;
 use std::collections::BTreeMap;
 use std::fs;
 use std::process::Stdio;
+use std::time::Duration;
 
 use figue as args;
 use vx_services::{
@@ -15,6 +16,9 @@ use vx_services::{
 };
 
 use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs};
+
+const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const DAEMON_WAIT_FOR_SERVICE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() {
     init_cli_stderr();
@@ -391,7 +395,11 @@ async fn ensure_daemon_available(
     };
 
     spawn_daemon(launch)?;
-    let status = daemon_status(&resolved.address).await?;
+    let client: DaemonClient = vox::connect(&resolved.address)
+        .connect_timeout(DAEMON_CONNECT_TIMEOUT)
+        .wait_for_service(DAEMON_WAIT_FOR_SERVICE_TIMEOUT)
+        .await?;
+    let status = client.status().await?;
     Ok(ActiveDaemon {
         address: resolved.address,
         status,
