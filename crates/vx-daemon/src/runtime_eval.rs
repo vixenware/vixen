@@ -119,6 +119,10 @@ fn eval_value_from_runtime(value: RuntimeValue) -> EvalValue {
         RuntimeValue::U64(value) => EvalValue::U64(value),
         RuntimeValue::Bool(value) => EvalValue::Bool(value),
         RuntimeValue::String(value) => EvalValue::String(value),
+        RuntimeValue::Tree(hash) => EvalValue::Failure(format!(
+            "tree runtime arguments are not yet supported: {}",
+            hash.to_hex()
+        )),
     }
 }
 

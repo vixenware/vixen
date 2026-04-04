@@ -216,6 +216,9 @@ fn strict_fragment_value_from_runtime(value: RuntimeValue) -> Result<StrictFragm
         RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
         RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
         RuntimeValue::String(value) => StrictFragmentValue::String(value),
+        RuntimeValue::Tree(_) => {
+            return Err("strict fragments do not accept Tree arguments yet".to_owned());
+        }
     })
 }
 

@@ -151,6 +151,7 @@ fn format_value(value: &RuntimeValue) -> String {
         RuntimeValue::U64(value) => value.to_string(),
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::String(value) => value.clone(),
+        RuntimeValue::Tree(hash) => format!("tree:{}", hash.to_hex()),
     }
 }
 

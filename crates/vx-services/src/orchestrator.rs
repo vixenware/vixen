@@ -3,6 +3,7 @@
 //! This is the top-level evaluation/scheduling service surface. It is distinct
 //! from the tiny `Daemon` host-introspection service.
 
+use crate::NodeHash;
 use facet::Facet;
 
 /// Orchestrator protocol version.
@@ -21,6 +22,7 @@ pub enum RuntimeValue {
     U64(u64),
     Bool(bool),
     String(String),
+    Tree(NodeHash),
 }
 
 #[derive(Debug, Clone, Facet)]
