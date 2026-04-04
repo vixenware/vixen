@@ -3711,6 +3711,7 @@ dependencies = [
 name = "vx"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "camino",
  "eyre",
  "facet",
@@ -3744,6 +3745,7 @@ dependencies = [
  "arborium-theme",
  "ariadne",
  "async-recursion",
+ "blake3",
  "camino",
  "concolor",
  "eyre",

@@ -5,6 +5,7 @@
 mod cli;
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::process::Stdio;
 
 use figue as args;
@@ -13,7 +14,7 @@ use vx_services::{
     RuntimeValue, StrictEvalBackend,
 };
 
-use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs};
+use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs};
 
 fn main() {
     init_cli_stderr();
@@ -45,6 +46,7 @@ async fn async_main() -> eyre::Result<()> {
 
     match cli.command {
         CliCommand::Health(args) => health(args.target).await,
+        CliCommand::Kill(args) => kill(args).await,
         CliCommand::Eval(args) => eval(args).await,
         CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
@@ -64,11 +66,102 @@ async fn async_main() -> eyre::Result<()> {
 }
 
 async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
-    let daemon = ensure_daemon_available(&target).await?;
-    let address = daemon.address;
-    let client: DaemonClient = vox::connect(&address).await?;
-    let status = client.status().await?;
-    print!("{}", format_daemon_status(&address, &status));
+    let daemon = ensure_daemon_available(&target, false).await?;
+    print!("{}", format_daemon_status(&daemon.address, &daemon.status));
+    if let Some(warning) = daemon_binary_warning(&daemon.address, &daemon.status)? {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
+async fn kill(args: KillArgs) -> eyre::Result<()> {
+    let resolved = resolve_daemon_target(&args.target)?;
+    match daemon_status(&resolved.address).await {
+        Ok(_) => {
+            shutdown_daemon(&resolved.address).await?;
+            eprintln!("killed daemon at {}", resolved.address);
+            Ok(())
+        }
+        Err(_) => {
+            eprintln!("no daemon running at {}", resolved.address);
+            Ok(())
+        }
+    }
+}
+
+async fn shutdown_daemon(address: &str) -> eyre::Result<()> {
+    let client: DaemonClient = vox::connect(address).await?;
+    client.shutdown().await?;
+
+    for _ in 0..100 {
+        if daemon_status(address).await.is_err() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    eyre::bail!("daemon at {address} did not exit after shutdown request")
+}
+
+fn current_executable_blake3() -> eyre::Result<Option<String>> {
+    let current_exe = std::env::current_exe()?;
+    let bytes = match fs::read(current_exe) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(blake3::hash(&bytes).to_hex().to_string()))
+}
+
+fn daemon_binary_warning(
+    address: &str,
+    status: &vx_services::DaemonStatus,
+) -> eyre::Result<Option<String>> {
+    if !address.starts_with("local://") {
+        return Ok(None);
+    }
+
+    let Some(daemon_hash) = status.executable_blake3.as_deref() else {
+        return Ok(None);
+    };
+    let Some(current_hash) = current_executable_blake3()? else {
+        return Ok(None);
+    };
+
+    if daemon_hash == current_hash {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "connected daemon binary differs from this vx client (daemon pid {} path {:?}); run `vx kill` or `vx eval --fresh-daemon`",
+        status.pid, status.executable_path
+    )))
+}
+
+fn format_duration_ms(uptime_ms: u64) -> String {
+    let total_seconds = uptime_ms / 1_000;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn emit_eval_daemon_note(address: &str, status: &vx_services::DaemonStatus) -> eyre::Result<()> {
+    eprintln!(
+        "daemon: {} (pid {}, uptime {})",
+        address,
+        status.pid,
+        format_duration_ms(status.uptime_ms)
+    );
+    if let Some(warning) = daemon_binary_warning(address, status)? {
+        eprintln!("warning: {warning}");
+    }
     Ok(())
 }
 
@@ -82,7 +175,8 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         .collect::<eyre::Result<Vec<_>>>()?;
     let values = default_eval_args(&args.function, values)?;
 
-    let daemon = ensure_daemon_available(&args.target).await?;
+    let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
+    emit_eval_daemon_note(&daemon.address, &daemon.status)?;
     let address = daemon.address;
     let client: OrchestratorClient = vox::connect(&address).await?;
     let result = client
@@ -189,7 +283,12 @@ fn format_value(value: &RuntimeValue) -> String {
 fn format_daemon_status(address: &str, status: &vx_services::DaemonStatus) -> String {
     let mut out = String::new();
     out.push_str(&format!("daemon: {address}\n"));
+    out.push_str(&format!("pid: {}\n", status.pid));
     out.push_str(&format!("uptime_ms: {}\n", status.uptime_ms));
+    out.push_str(&format!(
+        "uptime: {}\n",
+        format_duration_ms(status.uptime_ms)
+    ));
     if status.listen.is_empty() {
         out.push_str("listen: []\n");
     } else {
@@ -206,6 +305,14 @@ fn format_daemon_status(address: &str, status: &vx_services::DaemonStatus) -> St
             out.push_str(&format!("  - {service}\n"));
         }
     }
+    match &status.executable_path {
+        Some(path) => out.push_str(&format!("executable_path: {path}\n")),
+        None => out.push_str("executable_path: <unknown>\n"),
+    }
+    match &status.executable_blake3 {
+        Some(hash) => out.push_str(&format!("executable_blake3: {hash}\n")),
+        None => out.push_str("executable_blake3: <unknown>\n"),
+    }
     out
 }
 
@@ -213,6 +320,12 @@ fn format_daemon_status(address: &str, status: &vx_services::DaemonStatus) -> St
 struct DaemonTarget {
     address: String,
     auto_start: Option<DaemonLaunch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveDaemon {
+    address: String,
+    status: vx_services::DaemonStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,11 +360,30 @@ fn resolve_daemon_target(target: &ClientTargetArgs) -> eyre::Result<DaemonTarget
     })
 }
 
-async fn ensure_daemon_available(target: &ClientTargetArgs) -> eyre::Result<DaemonTarget> {
+async fn ensure_daemon_available(
+    target: &ClientTargetArgs,
+    fresh_daemon: bool,
+) -> eyre::Result<ActiveDaemon> {
     let resolved = resolve_daemon_target(target)?;
 
-    if daemon_status(&resolved.address).await.is_ok() {
-        return Ok(resolved);
+    if let Ok(status) = daemon_status(&resolved.address).await {
+        if fresh_daemon {
+            let Some(_) = resolved.auto_start.as_ref() else {
+                eyre::bail!(
+                    "--fresh-daemon requires an auto-startable daemon target, not an explicit --daemon address"
+                );
+            };
+            shutdown_daemon(&resolved.address).await?;
+        } else {
+            return Ok(ActiveDaemon {
+                address: resolved.address,
+                status,
+            });
+        }
+    } else if fresh_daemon && resolved.auto_start.is_none() {
+        eyre::bail!(
+            "--fresh-daemon requires an auto-startable daemon target, not an explicit --daemon address"
+        );
     }
 
     let Some(launch) = resolved.auto_start.as_ref() else {
@@ -263,7 +395,12 @@ async fn ensure_daemon_available(target: &ClientTargetArgs) -> eyre::Result<Daem
     let mut last_error = None;
     for _ in 0..150 {
         match daemon_status(&resolved.address).await {
-            Ok(_) => return Ok(resolved),
+            Ok(status) => {
+                return Ok(ActiveDaemon {
+                    address: resolved.address,
+                    status,
+                });
+            }
             Err(error) => {
                 last_error = Some(error);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -407,11 +544,12 @@ mod tests {
     use tempfile::TempDir;
     use vx_services::{DAEMON_SOCK, DaemonStatus, RuntimeValue};
 
-    use crate::cli::ClientTargetArgs;
+    use crate::cli::{ClientTargetArgs, EvalArgs};
     use crate::{
-        config_home_from_env, daemon_config_override_from_env, daemon_config_path_in,
-        default_eval_args, format_daemon_status, resolve_daemon_target, resolve_store_root,
-        state_home_from_env, store_root_in,
+        config_home_from_env, current_executable_blake3, daemon_binary_warning,
+        daemon_config_override_from_env, daemon_config_path_in, default_eval_args,
+        format_daemon_status, resolve_daemon_target, resolve_store_root, state_home_from_env,
+        store_root_in,
     };
 
     #[test]
@@ -554,16 +692,60 @@ daemon {
         let rendered = format_daemon_status(
             "local:///tmp/vixen.vox",
             &DaemonStatus {
+                pid: 42,
                 uptime_ms: 42,
                 listen: vec!["local:///tmp/vixen.vox".to_owned()],
                 hosted_services: vec!["Daemon".to_owned(), "Orchestrator".to_owned()],
+                executable_path: Some("/Users/amos/.cargo/bin/vx".to_owned()),
+                executable_blake3: Some("abc123".to_owned()),
             },
         );
 
         assert!(rendered.contains("daemon: local:///tmp/vixen.vox"));
+        assert!(rendered.contains("pid: 42"));
         assert!(rendered.contains("uptime_ms: 42"));
+        assert!(rendered.contains("uptime: 0s"));
         assert!(rendered.contains("listen:\n  - local:///tmp/vixen.vox"));
         assert!(rendered.contains("hosted_services:\n  - Daemon\n  - Orchestrator"));
+        assert!(rendered.contains("executable_path: /Users/amos/.cargo/bin/vx"));
+        assert!(rendered.contains("executable_blake3: abc123"));
+    }
+
+    #[test]
+    fn warns_when_local_daemon_binary_differs() {
+        let status = DaemonStatus {
+            pid: 7,
+            uptime_ms: 1_000,
+            listen: vec!["local:///tmp/vixen.vox".to_owned()],
+            hosted_services: vec!["Daemon".to_owned()],
+            executable_path: Some("/tmp/old-vx".to_owned()),
+            executable_blake3: Some("definitely-not-current".to_owned()),
+        };
+
+        let warning = daemon_binary_warning("local:///tmp/vixen.vox", &status)
+            .expect("warning should resolve");
+        assert!(warning.is_some());
+        assert!(
+            warning
+                .expect("warning should be present")
+                .contains("vx eval --fresh-daemon")
+        );
+    }
+
+    #[test]
+    fn does_not_warn_when_local_daemon_binary_matches() {
+        let status = DaemonStatus {
+            pid: 7,
+            uptime_ms: 1_000,
+            listen: vec!["local:///tmp/vixen.vox".to_owned()],
+            hosted_services: vec!["Daemon".to_owned()],
+            executable_path: Some("/tmp/current-vx".to_owned()),
+            executable_blake3: current_executable_blake3().expect("hash should resolve"),
+        };
+
+        let warning = daemon_binary_warning("local:///tmp/vixen.vox", &status)
+            .expect("warning should resolve");
+        assert!(warning.is_none());
     }
 
     #[test]
@@ -582,5 +764,25 @@ daemon {
     fn non_build_defaults_do_not_inject_arguments() {
         let args = default_eval_args("greet", Vec::new()).expect("defaults should resolve");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn eval_args_can_request_fresh_daemon() {
+        let args = EvalArgs {
+            target: ClientTargetArgs {
+                daemon: None,
+                config: None,
+            },
+            fresh_daemon: true,
+            file: camino::Utf8PathBuf::from("zoo/rustc-hello.vx"),
+            function: "build".to_owned(),
+            backend: "interpreter".to_owned(),
+            strict_fragment_dump: false,
+            hir: false,
+            ir: false,
+            args: None,
+        };
+
+        assert!(args.fresh_daemon);
     }
 }

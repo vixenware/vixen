@@ -20,6 +20,7 @@ camino = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 vox = { workspace = true }
+blake3 = { workspace = true }
 vx-services.workspace = true
 vxd.workspace = true
 vx-lsp = { path = "../vx-lsp" }

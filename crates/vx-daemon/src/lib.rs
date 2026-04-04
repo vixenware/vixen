@@ -6,6 +6,7 @@
 use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
+use tokio::sync::watch;
 use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_runner::RunnerService;
 use vx_services::{
@@ -289,7 +290,8 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     if vfsd_service.is_some() {
         hosted_services.push("Vfsd".to_owned());
     }
-    let service = DaemonService::new(listen_addrs, hosted_services);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let service = DaemonService::new(listen_addrs, hosted_services, shutdown_tx);
 
     let acceptor = DaemonAcceptor {
         service,
@@ -306,11 +308,30 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         listeners.spawn(async move { vox::serve(l, acceptor).await });
     }
 
-    while let Some(result) = listeners.join_next().await {
-        result??;
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    listeners.abort_all();
+                    while let Some(result) = listeners.join_next().await {
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err(error.into()),
+                            Err(join_error) if join_error.is_cancelled() => {}
+                            Err(join_error) => return Err(join_error.into()),
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            maybe_result = listeners.join_next() => {
+                match maybe_result {
+                    Some(result) => result??,
+                    None => return Ok(()),
+                }
+            }
+        }
     }
-
-    Ok(())
 }
 
 async fn resolve_required_store_client(
@@ -699,6 +720,35 @@ fn add(lhs: U64, rhs: U64) -> U64 (
                     }
                     other => panic!("expected success, got {other:?}"),
                 }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_rpc_stops_server() {
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
+
+                let daemon = tokio::task::spawn_local(super::serve(DaemonConfig {
+                    listen: vec![listen.clone()],
+                    services: HostedServices {
+                        orchestrator: Some(OrchestratorConfig::default()),
+                        ..HostedServices::default()
+                    },
+                }));
+
+                let client = connect_daemon(&listen).await;
+                client
+                    .shutdown()
+                    .await
+                    .expect("daemon shutdown should succeed");
+                daemon
+                    .await
+                    .expect("daemon task should join")
+                    .expect("daemon should exit cleanly");
             })
             .await;
     }

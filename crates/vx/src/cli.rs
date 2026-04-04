@@ -19,6 +19,9 @@ pub(crate) enum CliCommand {
     /// Quick health check
     Health(HealthArgs),
 
+    /// Stop a running vx daemon
+    Kill(KillArgs),
+
     /// Lower and evaluate one strict function through the orchestrator
     Eval(EvalArgs),
 
@@ -48,9 +51,19 @@ pub(crate) struct HealthArgs {
 }
 
 #[derive(Facet, Debug)]
+pub(crate) struct KillArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+}
+
+#[derive(Facet, Debug)]
 pub(crate) struct EvalArgs {
     #[facet(flatten)]
     pub(crate) target: ClientTargetArgs,
+
+    /// Stop and restart the local auto-started daemon before evaluation
+    #[facet(args::named)]
+    pub(crate) fresh_daemon: bool,
 
     /// Source file containing the function to evaluate
     #[facet(args::named)]
