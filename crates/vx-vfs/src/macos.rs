@@ -20,6 +20,7 @@ use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const VIXENFS_SOCKET_NAME: &str = "vixenfs.sock";
 const VIXENFS_SID_METADATA_KEY: &str = "vixenfs-sid";
 
@@ -133,7 +134,7 @@ where
                 MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
             ])
             .on_connection(VfsDispatcher::new(vfs.clone()))
-            .connect_timeout(CONNECT_RETRY_INTERVAL)
+            .connect_timeout(CONNECT_ATTEMPT_TIMEOUT)
             .establish()
             .await
         {
