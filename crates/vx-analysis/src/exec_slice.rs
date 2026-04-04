@@ -56,6 +56,8 @@ pub enum RuntimeBoundaryPayload {
 pub struct ExecBoundaryPayload {
     pub positional_arg_count: usize,
     pub has_where_clause: bool,
+    pub has_mounts: bool,
+    pub has_writable: bool,
     pub has_coarse_mounts: bool,
 }
 
@@ -230,6 +232,8 @@ pub enum KernelOp {
         source: SourceExpr,
         node: RuntimeNodeId,
         positional_inputs: Vec<RuntimeBoundaryInputSpec>,
+        mounts: Vec<(TreeFilePath, RuntimeBoundaryInputSpec)>,
+        writable_roots: Vec<TreeFilePath>,
         coarse_mounts: Vec<RuntimeBoundaryInputSpec>,
     },
 }
@@ -245,6 +249,7 @@ pub enum RuntimeBoundaryInputSpec {
     },
     IntLiteral(i64),
     StringLiteral(String),
+    PathLiteral(TreeFilePath),
     Closure {
         source: SourceExpr,
         closure: ExecutableClosure,
@@ -539,6 +544,22 @@ fn runtime_boundary_payload(
                 .map(|call| call.positional_args().len())
                 .unwrap_or(0),
             has_where_clause: matches!(expr_nodes.get(&expr_id), Some(Expr::Where(_))),
+            has_mounts: expr_nodes
+                .get(&expr_id)
+                .and_then(|expr| match expr {
+                    Expr::Where(where_expr) => where_expr.keywords(),
+                    _ => None,
+                })
+                .and_then(|keywords| extract_where_field_expr(&keywords, "mounts").ok())
+                .is_some(),
+            has_writable: expr_nodes
+                .get(&expr_id)
+                .and_then(|expr| match expr {
+                    Expr::Where(where_expr) => where_expr.keywords(),
+                    _ => None,
+                })
+                .and_then(|keywords| extract_where_field_expr(&keywords, "writable").ok())
+                .is_some(),
             has_coarse_mounts: expr_nodes
                 .get(&expr_id)
                 .and_then(|expr| match expr {
@@ -1219,6 +1240,16 @@ impl<'a> BodyLowering<'a> {
                             .into_iter()
                             .map(|arg| self.runtime_input_spec_for_expr(&arg))
                             .collect::<Result<Vec<_>, _>>()?;
+                        let mounts = match extract_where_field_expr(&keywords, "mounts") {
+                            Ok(expr) => self.runtime_mount_specs_for_expr(&expr)?,
+                            Err(ExecSliceError::UnsupportedShape(_)) => vec![],
+                            Err(err) => return Err(err),
+                        };
+                        let writable_roots = match extract_where_field_expr(&keywords, "writable") {
+                            Ok(expr) => self.runtime_path_list_for_expr(&expr)?,
+                            Err(ExecSliceError::UnsupportedShape(_)) => vec![],
+                            Err(err) => return Err(err),
+                        };
                         let coarse_mounts =
                             match extract_where_field_expr(&keywords, "coarse_mounts") {
                                 Ok(expr) => match self.runtime_input_spec_for_expr(&expr)? {
@@ -1239,6 +1270,8 @@ impl<'a> BodyLowering<'a> {
                             source: self.source_for(callee_id),
                             node,
                             positional_inputs,
+                            mounts,
+                            writable_roots,
                             coarse_mounts,
                         });
                         self.awaited_runtime_nodes.insert(node);
@@ -1304,6 +1337,8 @@ impl<'a> BodyLowering<'a> {
                         source: self.source_for(expr_id),
                         node,
                         positional_inputs,
+                        mounts: vec![],
+                        writable_roots: vec![],
                         coarse_mounts: vec![],
                     });
                     self.awaited_runtime_nodes.insert(node);
@@ -1690,6 +1725,8 @@ impl<'a> BodyLowering<'a> {
                         source: self.source_for(expr_id),
                         node,
                         positional_inputs,
+                        mounts: vec![],
+                        writable_roots: vec![],
                         coarse_mounts: vec![],
                     });
                     self.awaited_runtime_nodes.insert(node);
@@ -1874,6 +1911,10 @@ impl<'a> BodyLowering<'a> {
             };
         }
 
+        if let Some(path) = parse_tree_path_key(expr) {
+            return Ok(RuntimeBoundaryInputSpec::PathLiteral(path));
+        }
+
         if let Expr::Closure(_) = expr {
             let expr_id = self.expr_id(expr).ok_or(ExecSliceError::MissingExpr(
                 self.source_for(self.entry_expr),
@@ -1913,6 +1954,60 @@ impl<'a> BodyLowering<'a> {
         Ok(RuntimeBoundaryInputSpec::OpaqueExpr {
             source: self.source_for(expr_id),
         })
+    }
+
+    fn runtime_mount_specs_for_expr(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Vec<(TreeFilePath, RuntimeBoundaryInputSpec)>, ExecSliceError> {
+        let Expr::Map(map) = expr else {
+            return Err(UnsupportedShape(
+                "exec mounts must be a map literal in executable slice".to_owned(),
+            ));
+        };
+        let mut mounts = Vec::new();
+        for entry in map.entries() {
+            if entry.spread().is_some() {
+                return Err(UnsupportedShape(
+                    "exec mounts spread entries are unsupported in executable slice".to_owned(),
+                ));
+            }
+            let key = entry
+                .key()
+                .ok_or_else(|| UnsupportedShape("exec mount key missing".to_owned()))?;
+            let path = parse_tree_path_key(&key).ok_or_else(|| {
+                UnsupportedShape("exec mount key must be a simple path literal".to_owned())
+            })?;
+            let value = entry
+                .value()
+                .ok_or_else(|| UnsupportedShape("exec mount value missing".to_owned()))?;
+            mounts.push((path, self.runtime_input_spec_for_expr(&value)?));
+        }
+        Ok(mounts)
+    }
+
+    fn runtime_path_list_for_expr(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Vec<TreeFilePath>, ExecSliceError> {
+        let Expr::Array(array) = expr else {
+            return Err(UnsupportedShape(
+                "exec path list must be an array literal in executable slice".to_owned(),
+            ));
+        };
+        let mut paths = Vec::new();
+        for item in array.items() {
+            let vx_parser::ArrayItem::Expr(expr) = item else {
+                return Err(UnsupportedShape(
+                    "exec path lists do not support spread items".to_owned(),
+                ));
+            };
+            let path = parse_tree_path_key(&expr).ok_or_else(|| {
+                UnsupportedShape("exec path list items must be path literals".to_owned())
+            })?;
+            paths.push(path);
+        }
+        Ok(paths)
     }
 
     fn lower_tree_entries(
@@ -2000,6 +2095,92 @@ fn extract_observer_closure(keywords: &Expr) -> Result<vx_parser::ClosureExpr, E
         ));
     };
     Ok(closure)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{SingleSourceBridge, build_minimal_analysis};
+
+    use super::{
+        KernelOp, RuntimeBoundaryInputSpec, TreeFilePath, lower_executable_program_for_entry_body,
+    };
+
+    #[test]
+    fn exec_await_runtime_keeps_mounts_writable_and_path_literals() {
+        let src = r#"
+fn build(src: Tree) #discover -> String (
+  let sh = "sh";
+  exec [sh, "-c", @src/main.rs, @out/hello] where {
+    mounts: %{ @src => src },
+    writable: [@out],
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
+        let bridge = SingleSourceBridge::from_source_text(src);
+        assert!(bridge.parse_errors.is_empty(), "{:?}", bridge.parse_errors);
+        assert!(
+            bridge.resolve_errors.is_empty(),
+            "{:?}",
+            bridge.resolve_errors
+        );
+        assert!(bridge.type_errors.is_empty(), "{:?}", bridge.type_errors);
+        assert!(bridge.cap_errors.is_empty(), "{:?}", bridge.cap_errors);
+
+        let body = bridge
+            .bodies
+            .iter()
+            .find(|body| body.name == "build")
+            .expect("build body should exist");
+        let analysis = build_minimal_analysis(&bridge);
+        let program = lower_executable_program_for_entry_body(&analysis, &bridge, body.id)
+            .expect("lowering should succeed");
+        let lowered = program
+            .bodies
+            .get(&body.id)
+            .expect("lowered body should exist");
+
+        let await_runtime = lowered
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                KernelOp::AwaitRuntime {
+                    positional_inputs,
+                    mounts,
+                    writable_roots,
+                    ..
+                } => Some((positional_inputs, mounts, writable_roots)),
+                _ => None,
+            })
+            .expect("exec should lower to AwaitRuntime");
+
+        let argv = match await_runtime.0.as_slice() {
+            [RuntimeBoundaryInputSpec::Array(items)] => items,
+            other => panic!("unexpected positional inputs: {other:?}"),
+        };
+        assert!(
+            matches!(
+                argv.get(2),
+                Some(RuntimeBoundaryInputSpec::PathLiteral(TreeFilePath(path))) if path == "src/main.rs"
+            ),
+            "unexpected third argv input: {:?}",
+            argv.get(2)
+        );
+        assert!(
+            matches!(
+                argv.get(3),
+                Some(RuntimeBoundaryInputSpec::PathLiteral(TreeFilePath(path))) if path == "out/hello"
+            ),
+            "unexpected fourth argv input: {:?}",
+            argv.get(3)
+        );
+        assert!(matches!(
+            await_runtime.1.as_slice(),
+            [(TreeFilePath(path), RuntimeBoundaryInputSpec::Binding { .. })] if path == "src"
+        ));
+        assert_eq!(await_runtime.2, &[TreeFilePath("out".to_owned())]);
+    }
 }
 
 fn normalize_string_literal_token(token_text: &str) -> String {

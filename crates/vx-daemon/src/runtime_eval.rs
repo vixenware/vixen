@@ -365,12 +365,16 @@ impl<'a> ProgramEvaluator<'a> {
             KernelOp::AwaitRuntime {
                 node,
                 positional_inputs,
+                mounts,
+                writable_roots,
                 coarse_mounts,
                 ..
             } => self.eval_runtime_boundary(
                 function_name,
                 *node,
                 positional_inputs,
+                mounts,
+                writable_roots,
                 coarse_mounts,
                 producers,
                 slots,
@@ -536,10 +540,27 @@ impl<'a> ProgramEvaluator<'a> {
         function_name: &str,
         node: vx_analysis::RuntimeNodeId,
         positional_inputs: &[RuntimeBoundaryInputSpec],
+        mounts: &[(vx_analysis::TreeFilePath, RuntimeBoundaryInputSpec)],
+        writable_roots: &[vx_analysis::TreeFilePath],
         coarse_mounts: &[RuntimeBoundaryInputSpec],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
+        if !mounts.is_empty() {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "exec mounts are not yet supported in local runtime eval".to_owned(),
+            });
+        }
+
+        if !writable_roots.is_empty() {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "exec writable roots are not yet supported in local runtime eval"
+                    .to_owned(),
+            });
+        }
+
         if !coarse_mounts.is_empty() {
             return Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
@@ -626,6 +647,7 @@ impl<'a> ProgramEvaluator<'a> {
             }
             RuntimeBoundaryInputSpec::IntLiteral(value) => Ok(value.to_string()),
             RuntimeBoundaryInputSpec::StringLiteral(value) => Ok(value.clone()),
+            RuntimeBoundaryInputSpec::PathLiteral(path) => Ok(path.0.clone()),
             other => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!("unsupported runtime string input {other:?}"),
