@@ -277,8 +277,9 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
             )
         })
         .transpose()?;
-    let orchestrator_service = orchestrator_wiring
-        .map(|wiring| OrchestratorService::with_store(wiring, orchestrator_store));
+    let orchestrator_service = orchestrator_wiring.map(|wiring| {
+        OrchestratorService::with_runtime(wiring, orchestrator_store, vfsd_service.clone())
+    });
     let mut hosted_services = vec!["Daemon".to_owned()];
     if orchestrator_service.is_some() {
         hosted_services.push("Orchestrator".to_owned());
@@ -550,14 +551,14 @@ mod tests {
     use tempfile::TempDir;
     use tokio::{task::LocalSet, time::sleep};
     use vx_services::{
-        DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient, RuntimeValue,
-        StoreClient, StrictEvalBackend,
+        CasNode, DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient,
+        RuntimeValue, StoreClient, StrictEvalBackend,
     };
 
     use super::{
         DaemonConfig, HostedServices, OrchestratorConfig, OrchestratorWiring, ServiceRef,
-        ServiceRefFile, load_config_file, resolve_optional_dependency, resolve_orchestrator_wiring,
-        resolve_required_dependency,
+        ServiceRefFile, StoreConfig, VfsdConfig, load_config_file, resolve_optional_dependency,
+        resolve_orchestrator_wiring, resolve_required_dependency,
     };
 
     #[test]
@@ -814,6 +815,111 @@ fn build() -> Tree (
                 let _ = daemon.await;
 
                 assert!(node.is_some(), "tree node should exist in co-hosted store");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn orchestrator_can_exec_rustc_through_hosted_vfsd() {
+        LocalSet::new()
+            .run_until(async {
+                let temp_dir = TempDir::new().expect("failed to create temp dir");
+                let socket_path = temp_dir.path().join("vx-daemon.sock");
+                let listen = format!("local://{}", socket_path.display());
+                let store_root = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("store"))
+                    .expect("utf-8 store root");
+                let vfs_mount = camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("vfs"))
+                    .expect("utf-8 vfs mount");
+
+                let daemon = tokio::task::spawn_local(super::serve(DaemonConfig {
+                    listen: vec![listen.clone()],
+                    services: HostedServices {
+                        orchestrator: Some(OrchestratorConfig::default()),
+                        store: Some(StoreConfig {
+                            root: store_root,
+                            upstream: None,
+                        }),
+                        vfsd: Some(VfsdConfig {
+                            mount: vfs_mount,
+                            store: None,
+                        }),
+                        ..HostedServices::default()
+                    },
+                }));
+
+                sleep(Duration::from_millis(200)).await;
+                assert!(
+                    !daemon.is_finished(),
+                    "daemon exited before listener came up: {:?}",
+                    daemon.await
+                );
+
+                let orchestrator = connect_orchestrator(&listen).await;
+                let result = orchestrator
+                    .eval_function(EvalFunctionRequest {
+                        source_text: r#"
+fn build() #discover -> Tree (
+  let rustc = discover(executor_class("default"), (host) => host.which("rustc"));
+  let source = Tree %{
+    @main.rs => Blob("fn main() { println!(\"hello from vx eval\"); }\n"),
+  };
+
+  exec [rustc, @src/main.rs, "-o", @out/hello] where {
+    mounts: %{ @src => source },
+    writable: [@out],
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `rustc failed: ${proc.stderr.collect()}`
+      ) else (
+        vfs
+      )
+    ),
+  }
+)
+"#
+                        .to_owned(),
+                        function_name: "build".to_owned(),
+                        args: vec![],
+                        backend: StrictEvalBackend::Interpreter,
+                        include_strict_fragment_dump: false,
+                        include_hir: false,
+                        include_ir: false,
+                    })
+                    .await
+                    .expect("rpc call should succeed");
+
+                let tree_hash = match result {
+                    EvalFunctionResult::Ok(success) => match success.value {
+                        RuntimeValue::Tree(hash) => hash,
+                        other => panic!("expected tree result, got {other:?}"),
+                    },
+                    other => panic!("expected success, got {other:?}"),
+                };
+
+                let store: StoreClient = vox::connect(&listen)
+                    .await
+                    .expect("store client should connect");
+                let node_bytes = store
+                    .get_node(tree_hash)
+                    .await
+                    .expect("store rpc should succeed")
+                    .expect("tree node should exist");
+                let root = CasNode::from_bytes(&node_bytes).expect("tree node should decode");
+
+                daemon.abort();
+                let _ = daemon.await;
+
+                let CasNode::Directory(root) = root else {
+                    panic!("expected directory node at tree root");
+                };
+                assert!(
+                    root.entries.iter().any(|entry| entry.name == "out"),
+                    "expected flushed output directory in root entries: {:?}",
+                    root.entries
+                        .iter()
+                        .map(|entry| entry.name.as_str())
+                        .collect::<Vec<_>>()
+                );
             })
             .await;
     }

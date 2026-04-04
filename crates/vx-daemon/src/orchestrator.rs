@@ -9,6 +9,7 @@ use vx_services::{
     EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator, RuntimeValue, StoreClient,
     StrictEvalBackend,
 };
+use vx_vfsd::VfsdService;
 
 use crate::runtime_eval::{RuntimeEvalContext, evaluate_source_text_function};
 
@@ -23,6 +24,7 @@ pub struct OrchestratorWiring {
 pub struct OrchestratorService {
     wiring: OrchestratorWiring,
     store: Option<StoreClient>,
+    vfsd: Option<VfsdService>,
 }
 
 impl OrchestratorService {
@@ -30,11 +32,20 @@ impl OrchestratorService {
         Self {
             wiring,
             store: None,
+            vfsd: None,
         }
     }
 
-    pub fn with_store(wiring: OrchestratorWiring, store: Option<StoreClient>) -> Self {
-        Self { wiring, store }
+    pub fn with_runtime(
+        wiring: OrchestratorWiring,
+        store: Option<StoreClient>,
+        vfsd: Option<VfsdService>,
+    ) -> Self {
+        Self {
+            wiring,
+            store,
+            vfsd,
+        }
     }
 
     pub fn wiring(&self) -> &OrchestratorWiring {
@@ -161,6 +172,7 @@ impl OrchestratorService {
                 match evaluate_source_text_function(
                     &RuntimeEvalContext {
                         store: self.store.clone(),
+                        vfsd: self.vfsd.clone(),
                     },
                     &request.source_text,
                     &request.function_name,

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use tokio::process::Command;
 
 use async_recursion::async_recursion;
 use thiserror::Error;
@@ -13,6 +14,7 @@ use vx_services::{
     cas_tree::{MerkleTreeFile, build_merkle_tree},
     chunking::{prepare_blob, store_prepared_blob},
 };
+use vx_vfsd::{VfsdService, protocol::Vfsd};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EvalValue {
@@ -21,12 +23,18 @@ enum EvalValue {
     String(String),
     Blob(Vec<u8>),
     Tree(NodeHash),
+    SandboxTreeRoot(String),
     Pair(Box<EvalValue>, Box<EvalValue>),
     Array(Vec<EvalValue>),
     CallableAddConst(Box<EvalValue>),
     Host,
-    Process { exit_code: u64, stdout: String },
+    Process {
+        exit_code: u64,
+        stdout: String,
+        stderr: String,
+    },
     ProcessStdout(String),
+    ProcessStderr(String),
     Failure(String),
     Pending(String),
 }
@@ -34,6 +42,7 @@ enum EvalValue {
 #[derive(Clone, Default)]
 pub struct RuntimeEvalContext {
     pub store: Option<StoreClient>,
+    pub vfsd: Option<VfsdService>,
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +120,7 @@ pub async fn evaluate_source_text_function(
         .collect::<Vec<_>>();
     let mut evaluator = ProgramEvaluator::new(context, &program);
     let value = evaluator.eval_body(function_name, body_id, &args).await?;
+    let value = evaluator.finalize_value(function_name, value).await?;
     runtime_value_from_eval(function_name, value)
 }
 
@@ -171,6 +181,8 @@ struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
+    runtime_exec_prefixes: HashMap<vx_analysis::RuntimeNodeId, String>,
+    next_exec_prefix: u64,
 }
 
 impl<'a> ProgramEvaluator<'a> {
@@ -179,6 +191,8 @@ impl<'a> ProgramEvaluator<'a> {
             context,
             program,
             memo: HashMap::new(),
+            runtime_exec_prefixes: HashMap::new(),
+            next_exec_prefix: 0,
         }
     }
 
@@ -467,7 +481,14 @@ impl<'a> ProgramEvaluator<'a> {
                         .await
                 }
             }
-            KernelOp::AssignFailure { message, .. } => Ok(EvalValue::Failure(message.clone())),
+            KernelOp::AssignFailure { message, .. } => {
+                let value = self
+                    .resolve_operand(function_name, producers, slots, message)
+                    .await?;
+                Ok(EvalValue::Failure(
+                    self.expect_string(function_name, &value)?.to_owned(),
+                ))
+            }
             KernelOp::CallBody { callee, args, .. } => {
                 let mut resolved = Vec::with_capacity(args.len());
                 for arg in args {
@@ -522,12 +543,22 @@ impl<'a> ProgramEvaluator<'a> {
                 )
                 .await
             }
-            KernelOp::AssignHostLocal { .. } | KernelOp::AssignSandboxTreeRoot { .. } => {
-                Err(RuntimeEvalError::UnsupportedBoundary {
-                    function: function_name.to_owned(),
-                    detail: format!("op {op:?}"),
-                })
+            KernelOp::AssignSandboxTreeRoot { node, .. } => {
+                let Some(prefix) = self.runtime_exec_prefixes.get(node).cloned() else {
+                    return Err(RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: format!(
+                            "sandbox tree root requested before exec node {} completed",
+                            node.0
+                        ),
+                    });
+                };
+                Ok(EvalValue::SandboxTreeRoot(prefix))
             }
+            KernelOp::AssignHostLocal { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("op {op:?}"),
+            }),
         }
     }
 
@@ -636,6 +667,15 @@ impl<'a> ProgramEvaluator<'a> {
                 };
                 Ok(EvalValue::String(stdout))
             }
+            (EvalValue::ProcessStderr(stderr), RuntimeMemberOp::Collect) => {
+                let [] = args.as_slice() else {
+                    return Err(RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: "stderr.collect expects no arguments".to_owned(),
+                    });
+                };
+                Ok(EvalValue::String(stderr))
+            }
             (EvalValue::Host, RuntimeMemberOp::Which) => {
                 let [name] = args.as_slice() else {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
@@ -673,6 +713,9 @@ impl<'a> ProgramEvaluator<'a> {
             (EvalValue::Process { stdout, .. }, RuntimeField::Stdout) => {
                 Ok(EvalValue::ProcessStdout(stdout))
             }
+            (EvalValue::Process { stderr, .. }, RuntimeField::Stderr) => {
+                Ok(EvalValue::ProcessStderr(stderr))
+            }
             (value, field) => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!(
@@ -694,21 +737,6 @@ impl<'a> ProgramEvaluator<'a> {
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<EvalValue, RuntimeEvalError> {
-        if !mounts.is_empty() {
-            return Err(RuntimeEvalError::UnsupportedBoundary {
-                function: function_name.to_owned(),
-                detail: "exec mounts are not yet supported in local runtime eval".to_owned(),
-            });
-        }
-
-        if !writable_roots.is_empty() {
-            return Err(RuntimeEvalError::UnsupportedBoundary {
-                function: function_name.to_owned(),
-                detail: "exec writable roots are not yet supported in local runtime eval"
-                    .to_owned(),
-            });
-        }
-
         if !coarse_mounts.is_empty() {
             return Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
@@ -731,16 +759,37 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: "exec boundary is missing argv input".to_owned(),
                     }
                 })?;
-                let argv = self
-                    .resolve_exec_argv(function_name, input, producers, slots)
-                    .await?;
+                let argv = if mounts.is_empty() && writable_roots.is_empty() {
+                    self.resolve_exec_argv(function_name, input, producers, slots)
+                        .await?
+                } else {
+                    let (access_path, prefix) = self
+                        .prepare_local_exec_vfs(
+                            function_name,
+                            node,
+                            mounts,
+                            writable_roots,
+                            producers,
+                            slots,
+                        )
+                        .await?;
+                    self.resolve_exec_argv_for_prefix(
+                        function_name,
+                        input,
+                        producers,
+                        slots,
+                        &access_path,
+                        &prefix,
+                    )
+                    .await?
+                };
                 if argv.is_empty() {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
                         function: function_name.to_owned(),
                         detail: "exec argv must not be empty".to_owned(),
                     });
                 }
-                self.run_local_exec(function_name, &argv)
+                self.run_local_exec(function_name, &argv).await
             }
             (RuntimeBoundaryKind::Discover, RuntimeBoundaryPayload::Discover(_payload)) => {
                 let closure = positional_inputs
@@ -786,6 +835,38 @@ impl<'a> ProgramEvaluator<'a> {
         Ok(argv)
     }
 
+    async fn resolve_exec_argv_for_prefix(
+        &mut self,
+        function_name: &str,
+        input: &RuntimeBoundaryInputSpec,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+        access_path: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>, RuntimeEvalError> {
+        let RuntimeBoundaryInputSpec::Array(items) = input else {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("exec argv must be an array input, got {input:?}"),
+            });
+        };
+        let mut argv = Vec::with_capacity(items.len());
+        for item in items {
+            argv.push(
+                self.resolve_exec_string_input_for_prefix(
+                    function_name,
+                    item,
+                    producers,
+                    slots,
+                    access_path,
+                    prefix,
+                )
+                .await?,
+            );
+        }
+        Ok(argv)
+    }
+
     async fn resolve_runtime_string_input(
         &mut self,
         function_name: &str,
@@ -810,6 +891,26 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
+    async fn resolve_exec_string_input_for_prefix(
+        &mut self,
+        function_name: &str,
+        input: &RuntimeBoundaryInputSpec,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+        access_path: &str,
+        prefix: &str,
+    ) -> Result<String, RuntimeEvalError> {
+        match input {
+            RuntimeBoundaryInputSpec::PathLiteral(path) => {
+                Ok(format!("{access_path}/{prefix}/{}", path.0))
+            }
+            other => {
+                self.resolve_runtime_string_input(function_name, other, producers, slots)
+                    .await
+            }
+        }
+    }
+
     async fn store_client(&self, function_name: &str) -> Result<StoreClient, RuntimeEvalError> {
         let Some(store) = self.context.store.clone() else {
             return Err(RuntimeEvalError::UnsupportedBoundary {
@@ -820,14 +921,123 @@ impl<'a> ProgramEvaluator<'a> {
         Ok(store)
     }
 
-    fn run_local_exec(
+    async fn finalize_value(
+        &self,
+        function_name: &str,
+        value: EvalValue,
+    ) -> Result<EvalValue, RuntimeEvalError> {
+        match value {
+            EvalValue::SandboxTreeRoot(prefix) => {
+                let Some(vfsd) = self.context.vfsd.as_ref() else {
+                    return Err(RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: "sandbox tree result requires a hosted vfsd".to_owned(),
+                    });
+                };
+                let hash = vfsd.flush(format!("/{prefix}")).await.map_err(|error| {
+                    RuntimeEvalError::UnsupportedBoundary {
+                        function: function_name.to_owned(),
+                        detail: format!("failed to flush sandbox tree `{prefix}`: {error}"),
+                    }
+                })?;
+                let _ = vfsd.rm_rf(format!("/{prefix}")).await;
+                Ok(EvalValue::Tree(NodeHash(hash)))
+            }
+            other => Ok(other),
+        }
+    }
+
+    async fn prepare_local_exec_vfs(
+        &mut self,
+        function_name: &str,
+        node: vx_analysis::RuntimeNodeId,
+        mounts: &[(vx_analysis::TreeFilePath, RuntimeBoundaryInputSpec)],
+        writable_roots: &[vx_analysis::TreeFilePath],
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+    ) -> Result<(String, String), RuntimeEvalError> {
+        let Some(vfsd) = self.context.vfsd.as_ref() else {
+            return Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: "exec mounts/writable roots require a hosted vfsd".to_owned(),
+            });
+        };
+
+        let prefix = format!("eval-{:016x}", self.next_exec_prefix);
+        self.next_exec_prefix += 1;
+
+        for writable_root in writable_roots {
+            vfsd.mkdir(format!("/{prefix}/{}", writable_root.0))
+                .await
+                .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!(
+                        "failed to create writable root `{}`: {error}",
+                        writable_root.0
+                    ),
+                })?;
+        }
+
+        for (mount_path, input) in mounts {
+            let tree = self
+                .resolve_runtime_tree_input(function_name, input, producers, slots)
+                .await?;
+            vfsd.mount(format!("/{prefix}/{}", mount_path.0), tree.0)
+                .await
+                .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!("failed to mount `{}`: {error}", mount_path.0),
+                })?;
+        }
+
+        self.runtime_exec_prefixes.insert(node, prefix.clone());
+        let access_path =
+            vfsd.access_path()
+                .await
+                .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!("failed to query vfs access path: {error}"),
+                })?;
+        Ok((access_path, prefix))
+    }
+
+    async fn resolve_runtime_tree_input(
+        &mut self,
+        function_name: &str,
+        input: &RuntimeBoundaryInputSpec,
+        producers: &HashMap<SlotId, &KernelOp>,
+        slots: &mut BTreeMap<SlotId, EvalValue>,
+    ) -> Result<NodeHash, RuntimeEvalError> {
+        match input {
+            RuntimeBoundaryInputSpec::Binding { slot, .. } => {
+                let value = self
+                    .read_slot(function_name, producers, slots, *slot)
+                    .await?;
+                match value {
+                    EvalValue::Tree(hash) => Ok(hash),
+                    other => Err(RuntimeEvalError::TypeMismatch {
+                        function: function_name.to_owned(),
+                        expected: "tree",
+                        found: other.kind_name(),
+                    }),
+                }
+            }
+            other => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!("unsupported runtime tree input {other:?}"),
+            }),
+        }
+    }
+
+    async fn run_local_exec(
         &mut self,
         function_name: &str,
         argv: &[String],
     ) -> Result<EvalValue, RuntimeEvalError> {
-        let output = std::process::Command::new(&argv[0])
+        let output = Command::new(&argv[0])
             .args(&argv[1..])
             .output()
+            .await
             .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!("local exec failed: {error}"),
@@ -835,6 +1045,7 @@ impl<'a> ProgramEvaluator<'a> {
         Ok(EvalValue::Process {
             exit_code: output.status.code().unwrap_or(1) as u64,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
 
@@ -897,12 +1108,14 @@ impl EvalValue {
             Self::String(_) => "string",
             Self::Blob(_) => "blob",
             Self::Tree(_) => "tree",
+            Self::SandboxTreeRoot(_) => "sandbox-tree-root",
             Self::Pair(_, _) => "pair",
             Self::Array(_) => "array",
             Self::CallableAddConst(_) => "callable",
             Self::Host => "host",
             Self::Process { .. } => "process",
             Self::ProcessStdout(_) => "process-stdout",
+            Self::ProcessStderr(_) => "process-stderr",
             Self::Failure(_) => "failure",
             Self::Pending(_) => "pending",
         }

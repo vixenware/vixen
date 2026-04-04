@@ -89,6 +89,7 @@ pub enum Operand {
 pub enum RuntimeField {
     ExitCode,
     Stdout,
+    Stderr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +225,7 @@ pub enum KernelOp {
     AssignFailure {
         dst: SlotId,
         source: SourceExpr,
-        message: String,
+        message: Operand,
     },
     CallBody {
         dst: SlotId,
@@ -1647,15 +1648,14 @@ impl<'a> BodyLowering<'a> {
                 Ok(Operand::Slot(dst))
             }
             Expr::Fail(fail_expr) => {
-                let message = fail_expr
-                    .message()
-                    .and_then(|message| match message {
-                        Expr::InterpolatedString(_) | Expr::Literal(_) => {
-                            Some(message.syntax().text().to_string())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "fail".to_owned());
+                let message = if let Some(message) = fail_expr.message() {
+                    let message_id = self
+                        .expr_id(&message)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    self.lower_expr(message_id)?
+                } else {
+                    Operand::String("fail".to_owned())
+                };
                 let dst = self.alloc_temp();
                 self.ops.push(KernelOp::AssignFailure {
                     dst,
@@ -2078,6 +2078,7 @@ fn runtime_field_from_name(name: &str) -> Result<RuntimeField, ExecSliceError> {
     match name {
         "exit_code" => Ok(RuntimeField::ExitCode),
         "stdout" => Ok(RuntimeField::Stdout),
+        "stderr" => Ok(RuntimeField::Stderr),
         _ => Err(UnsupportedShape(format!(
             "unsupported runtime field `{name}` in executable slice"
         ))),
@@ -2128,7 +2129,8 @@ mod tests {
     use crate::{SingleSourceBridge, build_minimal_analysis};
 
     use super::{
-        KernelOp, RuntimeBoundaryInputSpec, TreeFilePath, lower_executable_program_for_entry_body,
+        KernelOp, Operand, RuntimeBoundaryInputSpec, TreeFilePath,
+        lower_executable_program_for_entry_body,
     };
 
     #[test]
@@ -2207,12 +2209,115 @@ fn build(src: Tree) #discover -> String (
         ));
         assert_eq!(await_runtime.2, &[TreeFilePath("out".to_owned())]);
     }
+
+    #[test]
+    fn string_literals_are_unescaped_in_exec_slice() {
+        let src = r#"
+fn build() -> Tree (
+  Tree %{
+    @main.rs => Blob("fn main() { println!(\"hello from vx eval\"); }\n"),
+  }
+)
+"#;
+
+        let bridge = SingleSourceBridge::from_source_text(src);
+        assert!(bridge.parse_errors.is_empty(), "{:?}", bridge.parse_errors);
+        assert!(
+            bridge.resolve_errors.is_empty(),
+            "{:?}",
+            bridge.resolve_errors
+        );
+        assert!(bridge.type_errors.is_empty(), "{:?}", bridge.type_errors);
+        assert!(bridge.cap_errors.is_empty(), "{:?}", bridge.cap_errors);
+
+        let body = bridge
+            .bodies
+            .iter()
+            .find(|body| body.name == "build")
+            .expect("build body should exist");
+        let analysis = build_minimal_analysis(&bridge);
+        let program = lower_executable_program_for_entry_body(&analysis, &bridge, body.id)
+            .expect("lowering should succeed");
+        let lowered = program
+            .bodies
+            .get(&body.id)
+            .expect("lowered body should exist");
+
+        let blob_source = lowered
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                KernelOp::MakeBlob {
+                    value: Operand::String(value),
+                    ..
+                } if value.contains("hello from vx eval") => Some(value.clone()),
+                _ => None,
+            })
+            .expect("blob source string should lower to a MakeBlob string operand");
+
+        assert_eq!(
+            blob_source,
+            "fn main() { println!(\"hello from vx eval\"); }\n"
+        );
+    }
 }
 
 fn normalize_string_literal_token(token_text: &str) -> String {
-    token_text
+    let inner = token_text
         .strip_prefix('"')
         .and_then(|stripped| stripped.strip_suffix('"'))
-        .unwrap_or(token_text)
-        .to_owned()
+        .unwrap_or(token_text);
+
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('u') => {
+                let Some('{') = chars.next() else {
+                    out.push('\\');
+                    out.push('u');
+                    continue;
+                };
+                let mut hex = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(c) => hex.push(c),
+                        None => {
+                            out.push_str("\\u{");
+                            out.push_str(&hex);
+                            return out;
+                        }
+                    }
+                }
+                if let Ok(codepoint) = u32::from_str_radix(&hex, 16)
+                    && let Some(decoded) = char::from_u32(codepoint)
+                {
+                    out.push(decoded);
+                } else {
+                    out.push_str("\\u{");
+                    out.push_str(&hex);
+                    out.push('}');
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+
+    out
 }
