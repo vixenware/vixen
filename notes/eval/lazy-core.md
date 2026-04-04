@@ -19,7 +19,7 @@ Concrete IR sketch:
 
 Its job is simple:
 
-- make the kernel/node split explicit before HIR emission
+- make the strict-fragment/runtime-node split explicit before HIR emission
 
 Without this layer, the compiler either stays too source-shaped and vague, or it
 falls straight into eager HIR and loses the lazy semantics.
@@ -40,7 +40,7 @@ to make these things explicit:
 - which values are lazy refs
 - where lazy identity is allocated
 - where observations are propagated
-- where compiled kernels begin and end
+- where compiled strict fragments begin and end
 
 ## Design constraints
 
@@ -138,7 +138,7 @@ observation" explicit before Kajit lowering.
 
 ## Core program structure
 
-The lazy core should be organized around generated entry kernels plus a small
+The lazy core should be organized around generated strict-fragment entrypoints plus a small
 set of helper bodies.
 
 Recommended shape:
@@ -436,7 +436,7 @@ The lazy core still leaves some implementation questions open:
 - how much observation specialization is encoded in the core vs deferred to
   helper generation
 - whether product shells are always allocated or can sometimes be stack-shaped
-  inside one kernel before escaping
+  inside one strict fragment before escaping
 
 Those are legitimate open questions.
 

@@ -26,7 +26,7 @@ If slice 0 cannot be made precise, the later slices will be hand-waving.
 
 Slice 0 should prove one thing:
 
-> lazy, typed Vixen semantics can reduce mostly through compiled native kernels
+> lazy, typed Vixen semantics can reduce mostly through compiled native strict fragments
 > without collapsing into a universal runtime `Value` interpreter.
 
 More concretely, slice 0 should establish:
@@ -277,15 +277,15 @@ So node entry can be modeled as:
 
 No scheduler, no async protocol, no owner/worker round-trip.
 
-## Kernel extraction rule
+## Strict-fragment extraction rule
 
-Slice 0 needs one concrete rule for when the compiler keeps code inside a kernel
+Slice 0 needs one concrete rule for when the compiler keeps code inside a strict fragment
 vs allocating a thunk/product object.
 
 Recommended planning rule:
 
 - if a cone is local, non-escaping, and demanded in one known observation
-  context, compile it straight-line inside the current kernel
+  context, compile it straight-line inside the current strict fragment
 - allocate a thunk when a computation is shared, captured, returned as a lazy
   subresult, or otherwise needs independent identity
 - allocate a product object when a tuple/struct escapes as a lazy structured
@@ -398,7 +398,7 @@ Planning is complete when these artifacts exist:
 2. A tiny observation-lattice note for the included types.
 3. A tiny ABI/object-layout note for `Ref<T>`, closures, products, and thunks.
 4. A tiny reference runner or oracle model for the four canonical programs.
-5. A lowering sketch from typed Vixen subset into Kajit-facing IR/kernels.
+5. A lowering sketch from typed Vixen subset into Kajit-facing IR/strict fragments.
 
 If any of those are missing, slice 0 is still underplanned.
 

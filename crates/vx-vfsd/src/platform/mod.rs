@@ -6,11 +6,9 @@ use crate::Result;
 cfg_if::cfg_if! {
     if #[cfg(target_os = "linux")] {
         mod linux;
-        mod unix;
         use linux as os;
     } else if #[cfg(target_os = "macos")] {
         mod macos;
-        mod unix;
         use macos as os;
     } else {
         mod windows;
@@ -21,17 +19,6 @@ cfg_if::cfg_if! {
 /// Pre-mount: clean up stuck mounts from previous crashes.
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     os::cleanup_stuck_mount(mount_path).await
-}
-
-/// Sentinel mode: watch parent process, unmount when it dies.
-pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
-    cfg_if::cfg_if! {
-        if #[cfg(unix)] {
-            unix::run_sentinel(mount_path).await
-        } else {
-            os::run_sentinel(mount_path).await
-        }
-    }
 }
 
 /// Whether we should create the mount directory (false for system-managed paths).

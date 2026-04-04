@@ -7,11 +7,6 @@ pub async fn cleanup_stuck_mount(_mount_path: &Utf8PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Unmount — on macOS, vx-fskit::teardown() handles this.
-pub fn unmount(_mount_path: &Utf8PathBuf) {
-    // Noop — vx-reaper calls vx_fskit::teardown() on macOS.
-}
-
 /// Diagnostics now come from vx-fskit's structured log entries.
 pub async fn collect_vfs_diagnostics(_mount_path: &Utf8PathBuf) -> String {
     String::new()

@@ -48,9 +48,9 @@ That also matches Kajit HIR better.
 
 The core IR should have four top-level entity kinds.
 
-### 1. Kernel
+### 1. Strict fragment
 
-A kernel is a compiled entry body.
+A strict fragment is a compiled entry body.
 
 Examples:
 
@@ -74,7 +74,7 @@ They are compiler identities used by alloc/load/store/project operations.
 
 The IR needs symbolic references to:
 
-- kernel ids
+- strict-fragment ids
 - layouts
 - string-like trap labels
 
@@ -92,11 +92,11 @@ Examples:
 - `ProductHandle<PairU64U64>`
 - `ThunkHandle<U64>`
 
-## Kernel signature
+## Strict-fragment signature
 
-Every kernel should have:
+Every strict fragment should have:
 
-- a name / kernel id
+- a name / strict-fragment id
 - parameter list
 - local declarations
 - blocks
@@ -104,7 +104,7 @@ Every kernel should have:
 Recommended signature shape:
 
 ```text
-kernel enter_plus_one(
+strict_fragment enter_plus_one(
   ctx: RuntimeCtx,
   self: ThunkHandle<U64>,
   arg0: Ref<U64>,
@@ -114,11 +114,11 @@ kernel enter_plus_one(
 
 Returning `Never` here means:
 
-- entry kernels update `self` and tail into a return/update path
+- entry strict fragments update `self` and tail into a return/update path
 - they do not return a source-level value directly
 
 That matches the thunk-update execution model better than pretending entry
-kernels are ordinary pure functions.
+strict fragments are ordinary pure functions.
 
 For direct strict helpers, ordinary typed returns are fine.
 
@@ -225,7 +225,7 @@ return_ref(r)
 done
 ```
 
-For thunk entry kernels, `done` after cache/update is probably enough.
+For thunk entry strict fragments, `done` after cache/update is probably enough.
 
 ## Typed helper ops instead of mega-ops
 
@@ -320,7 +320,7 @@ fn main() -> U64 {
 Suggested lazy-core shape:
 
 ```text
-kernel enter_main(ctx, self, obs):
+strict_fragment enter_main(ctx, self, obs):
 entry:
   forty_one = const_u64(41)
   one = const_u64(1)
@@ -333,7 +333,7 @@ entry:
   cache_ready_u64(self, out)
   done
 
-kernel thunk_bomb(ctx, self, obs):
+strict_fragment thunk_bomb(ctx, self, obs):
 entry:
   trap "bomb"
 ```
@@ -361,7 +361,7 @@ fn main(n: U64) -> U64 {
 Suggested lazy-core shape:
 
 ```text
-kernel enter_plus_one(ctx, self, n_ref, obs):
+strict_fragment enter_plus_one(ctx, self, n_ref, obs):
 entry:
   state = thunk_state(self)
   if state_is_ready(state) goto reuse else eval
@@ -379,7 +379,7 @@ eval:
   cache_ready_u64(self, out)
   done
 
-kernel enter_main(ctx, self, n_ref, obs):
+strict_fragment enter_main(ctx, self, n_ref, obs):
 entry:
   x = alloc_thunk enter_plus_one { n_ref: n_ref }
   lhs = enter_u64(x, NeedValue)
@@ -411,7 +411,7 @@ fn main(n: U64) -> U64 {
 Suggested lazy-core shape:
 
 ```text
-kernel enter_add_n(ctx, self, env, x_ref, obs):
+strict_fragment enter_add_n(ctx, self, env, x_ref, obs):
 entry:
   n_ref = env_get_capture_0(env)
   x = enter_u64(x_ref, NeedValue)
@@ -420,7 +420,7 @@ entry:
   cache_ready_u64(self, out)
   done
 
-kernel enter_apply(ctx, self, f_ref, x_ref, obs):
+strict_fragment enter_apply(ctx, self, f_ref, x_ref, obs):
 entry:
   callable = need_callable(f_ref)
   result = alloc_thunk call_result { callable: callable, arg0: x_ref, obs: NeedValue }
@@ -428,7 +428,7 @@ entry:
   cache_ready_u64(self, out)
   done
 
-kernel call_result(ctx, self, callable, arg0, obs):
+strict_fragment call_result(ctx, self, callable, arg0, obs):
 entry:
   call_callable_u64_to_u64(callable, self, arg0, obs)
   done
@@ -474,7 +474,7 @@ The compiler step into the lazy core should follow these rules:
 2. Every strict local cone becomes straight-line strict statements.
 3. Every projection becomes `project_*` plus an explicit `enter_*` only where
    demanded.
-4. Every function/closure body becomes an `enter_*` kernel signature.
+4. Every function/closure body becomes an `enter_*` strict-fragment signature.
 5. Every call keeps arguments as refs.
 
 This means the lazy core is where planning decisions become executable shape.
@@ -483,7 +483,7 @@ This means the lazy core is where planning decisions become executable shape.
 
 The next lowering step should be mostly mechanical:
 
-- kernel params -> HIR params
+- strict-fragment params -> HIR params
 - locals -> HIR locals
 - strict ops -> HIR arithmetic / control
 - alloc/update/project/enter -> HIR calls to typed helper callables

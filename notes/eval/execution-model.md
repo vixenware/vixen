@@ -106,13 +106,13 @@ the runtime for every force".
 The central bet of `eval3` is:
 
 - authored Vixen stays lazy
-- the compiler statically extracts strict kernels from that lazy source
+- the compiler statically extracts strict fragments from that lazy source
 - the runtime only owns the parts that are genuinely global, shared, or
   effectful
 
 So the execution model is a mix of:
 
-- native kernels
+- native strict fragments
 - explicit runtime nodes
 
 The important boundary is:
@@ -191,7 +191,7 @@ If the model only talks clearly about the first one, it is incomplete.
 
 The compiler should statically rewrite lazy source into a mix of:
 
-- strict kernels for the demanded local cone
+- strict fragments for the demanded local cone
 - runtime nodes for the parts that must remain latent, shared, or effectful
 
 This implies a few core analyses:
@@ -211,28 +211,28 @@ In plain English:
   boundary, or is demanded in a way that cannot be cheaply specialized, it
   becomes a real runtime node
 
-### Kernels are not just selector kernels
+### Strict fragments are not just selector fragments
 
 The first draft over-centered tuple projection.
 
-Real Vixen kernels will often be:
+Real Vixen strict fragments will often be:
 
-- arithmetic kernels
-- control-flow kernels
-- builder kernels for arrays, maps, and trees
-- higher-order combinator kernels like `map`/`fold`/`merge`
+- arithmetic fragments
+- control-flow fragments
+- builder fragments for arrays, maps, and trees
+- higher-order combinator fragments like `map`/`fold`/`merge`
 - closure bodies
 - observer callbacks
-- projection/selector kernels
+- projection/selector fragments
 
 That matters because real zoo programs are often more builder-shaped than
 selector-shaped.
 
-## Node / kernel split
+## Node / strict-fragment split
 
 This split is the center of `eval3`.
 
-A kernel is:
+A strict fragment is:
 
 - local
 - compiled by Kajit to native code
@@ -258,7 +258,7 @@ Expected node boundaries include:
 - host boundaries whose effects or identities must be runtime-tracked
 - unknown or highly dynamic observation shape
 
-Everything else should prefer kernels.
+Everything else should prefer strict fragments.
 
 ## Runtime responsibilities
 
@@ -289,8 +289,8 @@ The runtime must not own:
 - package policy
 - C toolchain flag selection
 - ordinary control flow
-- local collection construction when it stays inside one kernel
-- local closure invocation when it stays inside one kernel
+- local collection construction when it stays inside one strict fragment
+- local closure invocation when it stays inside one strict fragment
 
 ## Kajit responsibilities
 
@@ -306,9 +306,9 @@ For `eval3`, Kajit should ultimately compile:
 
 - function bodies
 - closure bodies
-- builder/combinator kernels
+- builder/combinator fragments
 - observation-specialized entrypoints
-- continuation/resume kernels
+- continuation/resume fragments
 - local enter/update logic for non-shared nodes
 - observer code that runs at host boundaries
 
@@ -372,7 +372,7 @@ So `eval3` needs an explicit story for:
   host/resource objects
 - how compiled closures cross into host callbacks
 - which host operations become runtime nodes
-- which host-adjacent builder logic can still remain inside native kernels
+- which host-adjacent builder logic can still remain inside native strict fragments
 
 If this is not explicit, the first real build workloads will force the runtime
 back toward an erased interpreter boundary.
@@ -403,7 +403,7 @@ But the model should not be "every tiny step is globally coordinated".
 
 The intended shape is:
 
-- workers own local kernels and local node segments
+- workers own local strict fragments and local node segments
 - local demand propagation stays local
 - only real shared boundaries publish into runtime coordination
 - keyed/shared nodes, search frontier changes, pending boundaries, and final
@@ -422,7 +422,7 @@ The first draft only had a toy slice. That is not enough.
 
 Purpose:
 
-- prove that lazy Vixen semantics can reduce mostly through native kernels
+- prove that lazy Vixen semantics can reduce mostly through native strict fragments
 
 Scope:
 
@@ -450,7 +450,7 @@ Scope should include:
 - observer closures
 - local helper functions with `where`
 - partial application
-- array/map/tree builder kernels
+- array/map/tree builder fragments
 
 This is the first slice that looks like ordinary Vixen build programs.
 
@@ -483,7 +483,7 @@ Important open questions include:
 - how are continuations represented for suspension/resume?
 - how much specialization is generated ahead of time vs on demand?
 - how does keyed memoization record partial observations of structured outputs?
-- how do builder/combinator kernels preserve laziness without exploding node
+- how do builder/combinator fragments preserve laziness without exploding node
   count?
 
 These are execution-shaping questions, not polish details.
@@ -501,7 +501,7 @@ The first `eval3` work should not try to:
 The first job is to prove the machine:
 
 - lazy semantics stay intact
-- compiled kernels do most local work
+- compiled strict fragments do most local work
 - host/runtime boundaries are explicit and typed
 - shared solver semantics still fit the same architecture
 

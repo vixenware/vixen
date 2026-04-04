@@ -55,17 +55,17 @@ That implies:
 Eval3 must preserve enough identity to explain what happened and why.
 
 That implies:
-- stable typed ids for bodies, expressions, kernels, runtime nodes, layouts, and slots
+- stable typed ids for bodies, expressions, strict fragments, runtime nodes, layouts, and slots
 - source provenance and causal provenance both matter
 - demand paths, carried obligations, and boundary facts must be attributable
 - semantic identity must not depend on raw names or incidental source text
 
-### 5. Kernelized execution, not eval2 granularity
+### 5. Strict-fragment execution, not eval2 granularity
 
 Eval2 proved that per-expression suspension is too expensive.
 
 Eval3 should instead:
-- execute straight-line local work inside kernels
+- execute straight-line strict fragments as compiled/interpreted regions
 - keep boundaries explicit
 - keep enough structure for explanation and later lowering
 - avoid both extremes:
@@ -79,9 +79,12 @@ Eval3 does not need Kajit now, but it must not block Kajit later.
 That implies:
 - explicit static executable plans
 - typed ops and typed slots
-- suspension/resumption outside kernels
+- suspension/resumption outside strict fragments
 - no semantic dependence on interpreter-only shortcuts
 - avoid turning everything into a giant dynamic object bag
+
+Kajit eligibility should be decided for strict fragments within one runtime path,
+not by routing whole programs into a separate evaluator.
 
 ### 7. Honest shipped closures
 
@@ -100,7 +103,7 @@ These layers need to stay distinct.
 The intended split is:
 - language core: syntax and general evaluation semantics
 - stdlib/build runtime surface: `discover`, `exec`, `Tree`, `Blob`, `Path`, `Host`, `Process`
-- eval3 analysis: static structure, kernels, boundaries, lowering
+- eval3 analysis: static structure, strict fragments, boundaries, lowering
 - eval3 runtime: frames, cells, suspension, resumption, execution
 - platform seam: sandboxing, process launch, host interaction
 
@@ -213,6 +216,8 @@ When reviewing eval3 work, ask:
 - does it keep the runtime lowerable later?
 - does it preserve the lang/stdlib/runtime/platform split?
 - does it move us toward eval1-class usefulness, or just make a fixture pass?
+- does it keep strict fragments as an execution strategy inside one runtime,
+  rather than reintroducing a separate evaluator path?
 
 ## Near-term trajectory
 

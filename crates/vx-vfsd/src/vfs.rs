@@ -1907,10 +1907,6 @@ impl CasVfs {
 
         VfsResult { error: errno::OK }
     }
-
-    pub(crate) async fn ping(&self) -> String {
-        "pong from vx-runner CAS VFS".to_string()
-    }
 }
 
 impl VfsDiskNotify for CasVfs {

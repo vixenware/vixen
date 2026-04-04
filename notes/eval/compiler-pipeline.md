@@ -10,7 +10,7 @@ This note is the lowering-plan companion to
 
 Its purpose is:
 
-- explain how slice-0 Vixen should lower into Kajit-facing compiled kernels
+- explain how slice-0 Vixen should lower into Kajit-facing compiled strict fragments
 
 This is where "typed lazy refs" becomes an actual compiler pipeline instead of a
 semantic wish.
@@ -72,7 +72,7 @@ The important addition relative to a direct eager lowering is:
 
 - demand planning and node extraction happen before Kajit HIR emission
 
-Kajit should compile the resulting kernels.
+Kajit should compile the resulting strict fragments.
 It should not be asked to infer laziness from already-eager lowered code.
 
 ## Slice-0 lazy core
@@ -81,7 +81,7 @@ Before lowering to Kajit HIR, slice 0 should pass through a tiny internal core
 language whose terms already make laziness explicit.
 
 This core does not need to be a public user-facing IR.
-It exists to make the kernel/node split concrete.
+It exists to make the strict-fragment/runtime-node split concrete.
 
 ### Core values
 
@@ -106,7 +106,7 @@ The core only needs a small vocabulary:
 - update thunk result
 - branch on strict bool
 - direct arithmetic on strict scalars
-- direct call to compiled entry kernel
+- direct call to a compiled strict-fragment entrypoint
 
 This core is already enough to express the slice-0 canonical programs.
 
@@ -132,7 +132,7 @@ The lowering must first determine:
 
 So the pipeline needs a planning step that decides:
 
-- which cones stay straight-line inside one kernel
+- which cones stay straight-line inside one strict fragment
 - which subexpressions become independently enterable lazy nodes
 
 Only then should Kajit HIR be emitted.
@@ -143,7 +143,7 @@ Demand planning for slice 0 should produce four things:
 
 1. An observation on each expression use site.
 2. A set of expressions extracted as nodes.
-3. A set of kernel entrypoints to generate.
+3. A set of strict-fragment entrypoints to generate.
 4. Concrete environment/frame layouts for closures and thunks.
 
 This is the planning result that drives the rest of lowering.
@@ -160,7 +160,7 @@ Extract a runtime node when an expression:
 - is returned as a field of a lazy product
 - otherwise needs stable lazy identity
 
-Keep an expression inside the current kernel when it is:
+Keep an expression inside the current strict fragment when it is:
 
 - local
 - demanded under one known observation
@@ -177,7 +177,7 @@ It is just enough to separate:
 
 Slice 0 lowering should generate a small number of compiled artifact kinds.
 
-### 1. Function-item entry kernels
+### 1. Function-item entry strict fragments
 
 For top-level/non-capturing functions.
 
@@ -187,7 +187,7 @@ Conceptually:
 enter_fn_f(ctx, self_thunk, arg0: Ref<A0>, ..., obs: Obs<R>)
 ```
 
-### 2. Closure entry kernels
+### 2. Closure entry strict fragments
 
 For capturing functions.
 
@@ -199,7 +199,7 @@ enter_closure_f(ctx, self_thunk, env: EnvObj*, arg0: Ref<A0>, ..., obs: Obs<R>)
 
 The code body may be shared with the non-capturing form when possible.
 
-### 3. Thunk entry kernels
+### 3. Thunk entry strict fragments
 
 For extracted lazy computations.
 
@@ -228,7 +228,7 @@ These shims are acceptable only if they are:
 
 - thin tag/shape dispatch
 - not generic evaluation loops
-- immediately tailing into compiled entry kernels or returning ready values
+- immediately tailing into compiled entry strict fragments or returning ready values
 
 They are dispatch glue, not the evaluator.
 
@@ -325,7 +325,7 @@ by:
 
 - first planning uses of `x`
 - then either:
-  - inline `e1` into the local kernel if it stays local and singly demanded
+  - inline `e1` into the local strict fragment if it stays local and singly demanded
   - or extract one thunk for `x` if it needs identity/sharing
 
 `let` is where most local-sharing decisions happen.
@@ -373,7 +373,7 @@ Lower a closure literal by:
 - allocating an env object if captures exist
 - producing a typed callable value `{ code_id, env }`
 
-The closure body itself becomes a compiled entry kernel.
+The closure body itself becomes a compiled entry strict fragment.
 
 ### Call
 
@@ -511,5 +511,5 @@ problem:
 
 - plan demand first
 - extract lazy identity explicitly
-- compile kernels through Kajit
+- compile strict fragments through Kajit
 - keep runtime work narrow and explicit

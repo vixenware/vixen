@@ -13,12 +13,12 @@ into toy-lowering work.
 
 - start from real Vixen frontend output
 - decide what stays lazy runtime state
-- decide what can be compiled as a straight-line kernel
-- only then lower the chosen kernels toward Kajit
+- decide what can be compiled as a straight-line strict fragment
+- only then lower the chosen strict fragments toward Kajit
 
 The key decision for every authored expression is:
 
-- does this become part of a compiled kernel, or
+- does this become part of a compiled strict fragment, or
 - does this become a runtime node with lazy identity?
 
 That decision depends on:
@@ -87,7 +87,7 @@ It should answer, for a fixed frontend-derived program slice:
 - what is shared
 - what escapes
 - what becomes a runtime node
-- what kernel entrypoints must exist
+- what strict-fragment entrypoints must exist
 - what closure/env/frame layouts are needed
 
 ### Lazy core
@@ -142,7 +142,7 @@ The new implementation should start from:
 
 - real frontend input
 - explicit analysis output
-- a fresh kernel/runtime split
+- a fresh strict-fragment/runtime split
 
 ## Four canonical examples
 
@@ -212,8 +212,8 @@ It should include at least:
 
 - demanded observation per use site
 - extracted node set
-- compiled kernel set
-- kernel parameters / result observation
+- compiled strict-fragment set
+- strict-fragment parameters / result observation
 - closure environment layouts
 - thunk/frame layouts
 - runtime-boundary markers
@@ -233,7 +233,7 @@ At that point, lowering should be mostly mechanical.
 
 The first end-to-end implementation target should prove one thing:
 
-- analysis can carve a real authored body into local kernels plus explicit
+- analysis can carve a real authored body into local strict fragments plus explicit
   runtime-managed boundaries
 
 That slice should stay small.
@@ -249,14 +249,14 @@ It does need:
 
 - real frontend input
 - real analysis output
-- real kernel execution without tiny-step runtime round-trips
+- real strict-fragment execution without tiny-step runtime round-trips
 - real explicit boundaries for the things that must stay in the runtime
 
-### Kernel/backend rule
+### Strict-fragment/backend rule
 
 For the first executable slice, the backend does not need to be final.
 
-A compact straight-line bytecode is acceptable as the first kernel format if it
+A compact straight-line bytecode is acceptable as the first strict-fragment format if it
 proves the correct split:
 
 - local regions run in one shot
@@ -284,7 +284,7 @@ branching, and command assembly before reaching a boundary.
 1. Frontend bridge for the required subset
 2. Analysis result structs in Rust
 3. Structural tests for the analysis result on the canonical examples
-4. A tiny kernel IR or bytecode for straight-line local regions
+4. A tiny strict-fragment IR or bytecode for straight-line local regions
 5. A runtime path for explicit boundary nodes
 6. End-to-end tests that check both result and semantic trace
 
@@ -298,14 +298,14 @@ For the first slice, the runtime should still own:
 - `exec`
 - `discover`
 
-Everything else should be aggressively pushed into kernels whenever analysis can
+Everything else should be aggressively pushed into strict fragments whenever analysis can
 prove it is local and non-escaping.
 
 ## Next required slice: shared search
 
 The first slice is deliberately small, but it must not paint us into a corner.
 
-The next required workload after "local kernels plus build boundaries" is
+The next required workload after "local strict fragments plus build boundaries" is
 Cargo-style search:
 
 - keyed shared nodes
@@ -321,7 +321,7 @@ as a separate future project.
 
 The core split should remain unchanged:
 
-- local straight-line regions become kernels
+- local straight-line regions become strict fragments
 - shared/effectful/global things remain runtime nodes
 
 Cargo-style search does not replace that model. It extends it.
@@ -362,7 +362,7 @@ In practice that means:
   keyed nodes, even if slice 1 never constructs one yet
 - runtime-boundary markers must be able to represent "shared keyed node", not
   just `exec`/`discover`
-- kernel extraction must not assume every non-`exec` node is purely local
+- strict-fragment extraction must not assume every non-`exec` node is purely local
 - closure/env/frame layout decisions must remain compatible with future keyed
   node bodies
 
@@ -374,7 +374,7 @@ Cargo-lite search fixture that proves:
 1. repeated package requests meet at one keyed node
 2. colliding requests join instead of duplicating work
 3. conflicts are structured values, not ad hoc errors
-4. local candidate filtering / activation logic can still run inside kernels
+4. local candidate filtering / activation logic can still run inside strict fragments
 5. the final answer remains deterministic
 
 ## Short-term code policy
@@ -402,10 +402,10 @@ These are the next tasks that should survive agent/context churn.
    - how Programs A-D exercise it
 4. Add one build-shaped example to the executable target:
    - command/path assembly before `exec`
-   - explicit statement of what stays kernel-local vs what becomes a boundary
-5. Implement a tiny kernel backend:
+   - explicit statement of what stays strict-fragment-local vs what becomes a boundary
+5. Implement a tiny strict-fragment backend:
    - bytecode is acceptable first
-   - no tiny-step runtime round-trips inside one kernel
+   - no tiny-step runtime round-trips inside one strict fragment
 6. Add the next executable target for shared search:
    - one keyed-node Cargo-lite fixture
    - joined requests
@@ -418,6 +418,6 @@ These are the next tasks that should survive agent/context churn.
 
 When evaluating a proposed `eval3` task, ask:
 
-"Does this make the frontend-to-analysis-to-kernel boundary clearer?"
+"Does this make the frontend-to-analysis-to-strict-fragment boundary clearer?"
 
 If no, it is probably not the next task.

@@ -93,19 +93,6 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     }
 }
 
-/// Unmount a FUSE filesystem using fusermount3.
-pub fn unmount(mount_path: &Utf8PathBuf) {
-    let status = std::process::Command::new("fusermount3")
-        .arg("-uz")
-        .arg(mount_path.as_str())
-        .status();
-    match status {
-        Ok(s) if s.success() => tracing::info!("unmounted successfully"),
-        Ok(s) => tracing::error!("unmount failed with status: {}", s),
-        Err(e) => tracing::error!("failed to run fusermount3: {}", e),
-    }
-}
-
 /// Whether we should create the mount directory.
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true

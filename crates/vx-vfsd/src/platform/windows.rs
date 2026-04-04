@@ -7,12 +7,6 @@ pub async fn cleanup_stuck_mount(_mount_path: &Utf8PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Sentinel mode is not supported on Windows.
-pub async fn run_sentinel(_mount_path: &Utf8PathBuf) -> Result<()> {
-    tracing::error!("sentinel mode is not supported on Windows");
-    Ok(())
-}
-
 /// Always create the mount directory on Windows.
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true

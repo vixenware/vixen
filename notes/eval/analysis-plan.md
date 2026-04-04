@@ -10,7 +10,7 @@ It should first produce an analysis result that explains:
 - what is demanded
 - what is local strict work
 - what needs lazy identity
-- what becomes a compiled kernel
+- what becomes a compiled strict fragment
 
 ## Input
 
@@ -40,7 +40,7 @@ For each analyzed body, it should answer:
 
 ### Local strict cones
 
-- which expression regions can stay inside one compiled kernel
+- which expression regions can stay inside one compiled strict fragment
 - which scalar/control-flow fragments are safe to evaluate straight-line under a
   known observation
 
@@ -58,12 +58,12 @@ Every extracted node should carry a reason such as:
 - crosses a host/runtime boundary
 - later: crosses a solver/shared-node boundary
 
-### Kernel entrypoints
+### Strict-fragment entrypoints
 
-- which compiled entry kernels must exist
+- which compiled entry strict fragments must exist
 - their parameters
 - their result observation
-- what local region of code each kernel owns
+- what local region of code each strict fragment owns
 
 ### Layouts
 
@@ -76,8 +76,8 @@ Every extracted node should carry a reason such as:
 The analysis result must make these facts explicit.
 
 1. Every extracted node has a reason.
-2. Every kernel has a well-defined demanded result observation.
-3. Sibling lazy work is not accidentally pulled into a kernel without demand.
+2. Every strict fragment has a well-defined demanded result observation.
+3. Sibling lazy work is not accidentally pulled into a strict fragment without demand.
 4. Shared work is not duplicated silently.
 5. Closure capture is derived from real bindings, not guessed later in lowering.
 6. The lazy core should not need to rediscover any of the above.
@@ -152,7 +152,7 @@ The analysis must conclude:
 - `x` is shared
 - `x` therefore needs lazy identity
 - the call result should be extracted once and reused
-- `plus_one`'s local arithmetic can still become compiled kernel work
+- `plus_one`'s local arithmetic can still become compiled strict-fragment work
 
 ### Program D
 
@@ -193,12 +193,12 @@ Cargo-style resolution adds one more kind of extracted node pressure:
 
 - repeated requests should meet at keyed shared nodes
 - joined demand must be represented explicitly
-- local candidate filtering can still remain kernel-local
+- local candidate filtering can still remain strict-fragment-local
 - conflict production must remain structured
 
 So the long-term model is still the same:
 
-- kernels own local straight-line work
+- strict fragments own local straight-line work
 - runtime nodes own shared identity, boundaries, and later keyed search state
 
 The first slice only proves the local/boundary split.

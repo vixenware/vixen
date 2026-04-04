@@ -161,7 +161,7 @@ The oracle needs only a tiny node set:
 
 Each thunk node should record at least:
 
-- source/kernel identity
+- source/strict-fragment identity
 - current state
 - strongest satisfied observation so far
 - cached result

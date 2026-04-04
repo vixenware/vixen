@@ -92,7 +92,7 @@ For slice 0, the bridge output should provide:
 It should not yet decide:
 
 - what becomes a runtime node
-- what becomes a compiled kernel
+- what becomes a compiled strict fragment
 - exact lazy-core operations
 - Kajit lowering details
 
@@ -130,7 +130,7 @@ That pass should compute:
 - demanded observations
 - strict local cones
 - extracted nodes
-- kernel entrypoints
+- strict-fragment entrypoints
 - closure environment layouts
 - frame/thunk layouts
 
