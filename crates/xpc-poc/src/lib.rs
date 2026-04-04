@@ -88,13 +88,47 @@ pub fn init_logging() {
     log_event("info", "xpc-poc logging initialized");
 }
 
+pub fn log_process_context(args: &[String]) {
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|err| format!("<current_exe error: {err}>"));
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|err| format!("<current_dir error: {err}>"));
+    let pid = std::process::id();
+    let ppid = unsafe { libc::getppid() };
+    let service_env = std::env::var("VIXEN_XPC_MACH_SERVICE").ok();
+    let xpc_service_name = std::env::var("XPC_SERVICE_NAME").ok();
+    let xpc_service_bundle = std::env::var("XPC_SERVICE_BUNDLE_IDENTIFIER").ok();
+    let launchd_job_label = std::env::var("LAUNCH_JOB_LABEL").ok();
+
+    log_event(
+        "info",
+        format!("process context pid={pid} ppid={ppid} exe={exe} cwd={cwd} args={args:?}"),
+    );
+    log_event(
+        "info",
+        format!(
+            "process env VIXEN_XPC_MACH_SERVICE={service_env:?} XPC_SERVICE_NAME={xpc_service_name:?} XPC_SERVICE_BUNDLE_IDENTIFIER={xpc_service_bundle:?} LAUNCH_JOB_LABEL={launchd_job_label:?}"
+        ),
+    );
+}
+
 fn cstring(value: &str) -> CString {
     CString::new(value).expect("CString without interior NULs")
 }
 
 fn new_queue(label: &str) -> *mut xpc_connection_sys::dispatch_queue_s {
     let label = cstring(label);
-    unsafe { dispatch_queue_create(label.as_ptr(), ptr::null_mut()) }
+    let queue = unsafe { dispatch_queue_create(label.as_ptr(), ptr::null_mut()) };
+    log_event(
+        "debug",
+        format!(
+            "created dispatch queue label={value:?} ptr={queue:?}",
+            value = label
+        ),
+    );
+    queue
 }
 
 fn xpc_type_name(object: xpc_object_t) -> &'static str {
@@ -174,6 +208,10 @@ fn install_peer_handler(connection: xpc_connection_t, tx: std::sync::mpsc::Sende
     unsafe {
         let retained = retain_connection(connection);
         let peer_name = connection_name(retained).unwrap_or_else(|| "<anonymous-peer>".to_owned());
+        log_event(
+            "debug",
+            format!("activated peer connection peer={peer_name}"),
+        );
         let block = ConcreteBlock::new(move |event: xpc_object_t| {
             let ty = xpc_get_type(event);
             if ty == &_xpc_type_dictionary {
@@ -366,6 +404,7 @@ fn install_listener_handler(listener: xpc_connection_t, tx: std::sync::mpsc::Sen
             (&*block as *const Block<_, _>).cast_mut().cast(),
         );
         xpc_connection_activate(listener);
+        log_event("info", format!("activated listener listener={listener:?}"));
     }
 }
 
@@ -373,6 +412,10 @@ pub fn start_anonymous_hour_service() -> (xpc_connection_t, Receiver<String>) {
     log_event("info", "creating anonymous xpc listener");
     let listener_queue = new_queue("eu.bearcove.vixen.xpc-poc.listener");
     let listener = unsafe { xpc_connection_create(ptr::null(), listener_queue) };
+    log_event(
+        "info",
+        format!("anonymous listener created queue={listener_queue:?} listener={listener:?}"),
+    );
     let (tx, rx) = channel();
     install_listener_handler(listener, tx);
 
@@ -393,6 +436,13 @@ pub fn start_mach_hour_service(service_name: &str) -> (xpc_connection_t, Receive
             u64::from(XPC_CONNECTION_MACH_SERVICE_LISTENER),
         )
     };
+    log_event(
+        "info",
+        format!(
+            "mach listener created queue={listener_queue:?} listener={listener:?} service_name={}",
+            service_name.to_string_lossy()
+        ),
+    );
     let (tx, rx) = channel();
     install_listener_handler(listener, tx);
     (listener, rx)

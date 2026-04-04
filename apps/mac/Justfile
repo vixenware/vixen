@@ -41,6 +41,10 @@ inject-rust-vixen-extension:
     rust_bin="$repo_root/target/release/xpc-poc" ; \
     extension_entitlements="$repo_root/apps/mac/xcode/VixenFS/VixenFS.entitlements" ; \
     app_entitlements="$repo_root/apps/mac/xcode/Vixen/Vixen.entitlements" ; \
+    extension_debug_entitlements="$(mktemp /tmp/vixenfs-extension-entitlements.XXXXXX.plist)" ; \
+    app_debug_entitlements="$(mktemp /tmp/vixen-app-entitlements.XXXXXX.plist)" ; \
+    cleanup() { rm -f "$extension_debug_entitlements" "$app_debug_entitlements"; } ; \
+    trap cleanup EXIT ; \
     if [[ ! -d "$app_bundle_path" ]]; then \
       echo "Expected $app_bundle_path before injection. Run just build first." >&2; \
       exit 1; \
@@ -56,8 +60,12 @@ inject-rust-vixen-extension:
       echo "Expected a signing identity for extension re-sign. Set VXFS_SIGNING_IDENTITY or launch with a signed Vixen.app." >&2; \
       exit 1; \
     fi; \
-    codesign --force --options runtime --timestamp --entitlements "$extension_entitlements" --sign "$signing_identity" "$app_bundle_path/Contents/Extensions/VixenFS.appex" ; \
-    codesign --force --options runtime --timestamp --entitlements "$app_entitlements" --sign "$signing_identity" "$app_bundle_path" ; \
+    cp "$extension_entitlements" "$extension_debug_entitlements" ; \
+    cp "$app_entitlements" "$app_debug_entitlements" ; \
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$extension_debug_entitlements" ; \
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$app_debug_entitlements" ; \
+    codesign --force --options runtime --timestamp --entitlements "$extension_debug_entitlements" --sign "$signing_identity" "$app_bundle_path/Contents/Extensions/VixenFS.appex" ; \
+    codesign --force --options runtime --timestamp --entitlements "$app_debug_entitlements" --sign "$signing_identity" "$app_bundle_path" ; \
     codesign --verify --deep --strict "$app_bundle_path" ; \
     echo "Replaced $extension_bin with Rust xpc-poc service binary"
 
