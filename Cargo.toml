@@ -77,7 +77,6 @@ figue = { version = "2.0.1" }
 vox = { version = "0.3.1", features = ["transport-tcp", "transport-local"] }
 
 vox-codegen = { version = "0.3.1" }
-vox-stream = { path = "../vox/rust/vox-stream" }
 
 # process management
 

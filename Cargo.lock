@@ -3934,7 +3934,6 @@ dependencies = [
  "tokio",
  "tracing",
  "vox",
- "vox-stream",
  "vx-fskit",
  "vx-services",
  "vx-vfs-types",

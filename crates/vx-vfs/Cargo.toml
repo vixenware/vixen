@@ -24,7 +24,6 @@ vox = { workspace = true }
 libc = { workspace = true }
 fastrand = { workspace = true }
 facet-json = { workspace = true }
-vox-stream = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
