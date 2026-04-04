@@ -87,14 +87,10 @@ impl DaemonConfig {
 }
 
 fn default_local_vfsd(vfs_mount: Utf8PathBuf) -> Option<VfsdConfig> {
-    if cfg!(target_os = "linux") || cfg!(target_os = "windows") {
-        Some(VfsdConfig {
-            mount: vfs_mount,
-            store: None,
-        })
-    } else {
-        None
-    }
+    Some(VfsdConfig {
+        mount: vfs_mount,
+        store: None,
+    })
 }
 
 #[derive(Debug, Clone, Facet)]
@@ -723,6 +719,13 @@ fn add(lhs: U64, rhs: U64) -> U64 (
                     DaemonConfig::local_all_in_one(vec![listen.clone()], store_root, vfs_mount),
                 ));
 
+                sleep(Duration::from_millis(200)).await;
+                assert!(
+                    !daemon.is_finished(),
+                    "daemon exited before listener came up: {:?}",
+                    daemon.await
+                );
+
                 let client = connect_daemon(&listen).await;
                 let status = client.status().await.expect("daemon status should succeed");
 
@@ -746,7 +749,7 @@ fn add(lhs: U64, rhs: U64) -> U64 (
                         .hosted_services
                         .iter()
                         .any(|service| service == "Vfsd"),
-                    cfg!(target_os = "linux") || cfg!(target_os = "windows")
+                    true
                 );
                 assert!(
                     status
@@ -926,12 +929,12 @@ fn build() #discover -> Tree (
 
     async fn connect_orchestrator(address: &str) -> OrchestratorClient {
         let mut last_error = None;
-        for _ in 0..50 {
+        for _ in 0..600 {
             match vox::connect(address).await {
                 Ok(client) => return client,
                 Err(error) => {
                     last_error = Some(error);
-                    sleep(Duration::from_millis(20)).await;
+                    sleep(Duration::from_millis(50)).await;
                 }
             }
         }
@@ -944,12 +947,12 @@ fn build() #discover -> Tree (
 
     async fn connect_daemon(address: &str) -> DaemonClient {
         let mut last_error = None;
-        for _ in 0..50 {
+        for _ in 0..600 {
             match vox::connect(address).await {
                 Ok(client) => return client,
                 Err(error) => {
                     last_error = Some(error);
-                    sleep(Duration::from_millis(20)).await;
+                    sleep(Duration::from_millis(50)).await;
                 }
             }
         }

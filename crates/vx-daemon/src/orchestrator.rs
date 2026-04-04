@@ -168,7 +168,7 @@ impl OrchestratorService {
             Ok(StrictFragmentClassification::StrictFragment) => {
                 self.eval_strict_function_impl(request).await
             }
-            Ok(StrictFragmentClassification::NotStrict { reason }) => {
+            Ok(StrictFragmentClassification::NotStrict { .. }) => {
                 match evaluate_source_text_function(
                     &RuntimeEvalContext {
                         store: self.store.clone(),
@@ -187,10 +187,7 @@ impl OrchestratorService {
                         ir: None,
                     }),
                     Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
-                        message: format!(
-                            "non-strict evaluation not fully implemented for `{}`: {error} (classification: {reason})",
-                            request.function_name
-                        ),
+                        message: error.to_string(),
                         strict_fragment_dump: None,
                         hir: None,
                         ir: None,
@@ -279,6 +276,8 @@ fn execute_with_kajit(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use vx_services::{
         EvalFunctionRequest, EvalFunctionResult, EvalStrictFunctionRequest,
         EvalStrictFunctionResult, Orchestrator, RuntimeValue, StrictEvalBackend,
@@ -535,7 +534,11 @@ fn probe() #discover -> String (
             .eval_function(EvalFunctionRequest {
                 source_text: CC_VERSION_SOURCE.to_owned(),
                 function_name: "build".to_owned(),
-                args: vec![RuntimeValue::String("hello".to_owned())],
+                args: vec![
+                    RuntimeValue::Path("/tmp/workspace".to_owned()),
+                    RuntimeValue::StringArray(Vec::new()),
+                    RuntimeValue::StringMap(BTreeMap::new()),
+                ],
                 backend: StrictEvalBackend::Interpreter,
                 include_strict_fragment_dump: false,
                 include_hir: false,
@@ -546,9 +549,10 @@ fn probe() #discover -> String (
         match result {
             EvalFunctionResult::Err(failure) => {
                 assert!(
-                    failure
-                        .message
-                        .contains("non-strict evaluation not fully implemented"),
+                    failure.message.contains("failed to lower executable slice")
+                        || failure
+                            .message
+                            .contains("coarse_mounts are not yet supported"),
                     "unexpected error message: {}",
                     failure.message
                 );
