@@ -129,20 +129,17 @@ where
 
     let client = loop {
         match vox::connect::<NoopClient>(&addr)
-            .metadata(vec![
-                MetadataEntry::str("vox-service", "Vfs"),
-                MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
-            ])
+            .metadata(vec![MetadataEntry::str(
+                VIXENFS_SID_METADATA_KEY,
+                sid.as_str(),
+            )])
             .on_connection(VfsDispatcher::new(vfs.clone()))
             .connect_timeout(CONNECT_ATTEMPT_TIMEOUT)
             .establish()
             .await
         {
             Ok(client) => {
-                let metadata = vec![
-                    ("vox-service", "Vfs"),
-                    (VIXENFS_SID_METADATA_KEY, sid.as_str()),
-                ];
+                let metadata = vec![(VIXENFS_SID_METADATA_KEY, sid.as_str())];
                 tracing::info!(%sid, %addr, ?metadata, "Vox session established to VixenFS listener");
                 break client;
             }
