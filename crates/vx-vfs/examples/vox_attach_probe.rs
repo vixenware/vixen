@@ -1,20 +1,131 @@
 use std::time::Duration;
 
 use vox::{MetadataEntry, NoopClient};
+use vx_services::{
+    CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
+    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsDispatcher, VfsResult,
+    WriteResult,
+};
+
+#[derive(Clone)]
+struct DummyVfs;
+
+impl Vfs for DummyVfs {
+    async fn lookup(&self, _parent_id: ItemId, _name: String) -> LookupResult {
+        LookupResult {
+            attrs: missing_file_attrs(),
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn get_attributes(&self, _item_id: ItemId) -> GetAttributesResult {
+        GetAttributesResult {
+            attrs: missing_file_attrs(),
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn read_dir(&self, _item_id: ItemId, _cookie: u64, _verifier: u64) -> ReadDirResult {
+        ReadDirResult {
+            entries: Vec::<DirEntry>::new(),
+            next_cookie: 0,
+            verifier: 0,
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn read(&self, _item_id: ItemId, _offset: u64, _len: u64) -> ReadResult {
+        ReadResult {
+            data: Vec::new(),
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn write(&self, _item_id: ItemId, _offset: u64, _data: Vec<u8>) -> WriteResult {
+        WriteResult {
+            bytes_written: 0,
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn create(
+        &self,
+        _parent_id: ItemId,
+        _name: String,
+        _item_type: ItemType,
+    ) -> CreateResult {
+        CreateResult {
+            item_id: 0,
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn delete(&self, _item_id: ItemId) -> VfsResult {
+        VfsResult {
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn rename(
+        &self,
+        _item_id: ItemId,
+        _new_parent_id: ItemId,
+        _new_name: String,
+    ) -> VfsResult {
+        VfsResult {
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn set_attributes(&self, _item_id: ItemId, _params: SetAttributesParams) -> VfsResult {
+        VfsResult {
+            error: vx_services::errno::ENOENT,
+        }
+    }
+
+    async fn ping(&self) -> String {
+        "pong".to_string()
+    }
+}
+
+impl VfsDiskNotify for DummyVfs {}
+
+fn missing_file_attrs() -> ItemAttributes {
+    ItemAttributes {
+        item_id: 0,
+        item_type: ItemType::File,
+        size: 0,
+        modified_time: 0,
+        created_time: 0,
+        mode: 0,
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
+    let mode = args.next().ok_or(
+        "usage: cargo run -p vx-vfs --example vox_attach_probe -- <noop|vfs> /tmp/vox-attach-probe.sock",
+    )?;
     let socket_path = args.next().ok_or(
-        "usage: cargo run -p vx-vfs --example vox_attach_probe -- /tmp/vox-attach-probe.sock",
+        "usage: cargo run -p vx-vfs --example vox_attach_probe -- <noop|vfs> /tmp/vox-attach-probe.sock",
     )?;
     let addr = format!("local://{socket_path}");
 
-    let client = vox::connect::<NoopClient>(&addr)
+    let builder = vox::connect::<NoopClient>(&addr)
         .metadata(vec![MetadataEntry::str("probe", "rust")])
-        .connect_timeout(Duration::from_secs(5))
-        .establish()
-        .await?;
+        .connect_timeout(Duration::from_secs(5));
+
+    let client = match mode.as_str() {
+        "noop" => builder.establish().await?,
+        "vfs" => {
+            builder
+                .on_connection(VfsDispatcher::new(DummyVfs))
+                .establish()
+                .await?
+        }
+        _ => return Err(format!("unknown mode: {mode}").into()),
+    };
 
     println!("connected {addr}");
     client.caller.closed().await;

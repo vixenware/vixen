@@ -24,17 +24,22 @@ struct NoopDispatcher: ServiceDispatcher {
     }
 }
 
+enum ExpectedVfsClient: ExpectedRootClient {
+    static let voxServiceName = "Vfs"
+}
+
 @main
 struct VoxAttachProbe {
     static func main() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard args.count == 1 else {
-            fputs("usage: VoxAttachProbe /tmp/vox-attach-probe.sock\n", stderr)
+        guard args.count == 2 else {
+            fputs("usage: VoxAttachProbe <noop|vfs> /tmp/vox-attach-probe.sock\n", stderr)
             Foundation.exit(64)
         }
 
-        let socketPath = args[0]
-        print("listening \(socketPath)")
+        let mode = args[0]
+        let socketPath = args[1]
+        print("listening \(mode) \(socketPath)")
         let listener = try await UnixListener.bind(unixPath: socketPath)
         defer {
             Task {
@@ -45,14 +50,30 @@ struct VoxAttachProbe {
         for await link in listener.acceptConnections() {
             print("accepted raw link")
             do {
-                let session = try await Session.acceptFreshLink(
-                    link,
-                    conduit: .bare,
-                    expecting: NoopRootClient.self,
-                    dispatcher: NoopDispatcher(),
-                    acceptConnections: false,
-                    resumable: false
-                )
+                let session: Session
+                switch mode {
+                case "noop":
+                    session = try await Session.acceptFreshLink(
+                        link,
+                        conduit: .bare,
+                        expecting: NoopRootClient.self,
+                        dispatcher: NoopDispatcher(),
+                        acceptConnections: false,
+                        resumable: false
+                    )
+                case "vfs":
+                    session = try await Session.acceptFreshLink(
+                        link,
+                        conduit: .bare,
+                        expecting: ExpectedVfsClient.self,
+                        dispatcher: NoopDispatcher(),
+                        acceptConnections: false,
+                        resumable: false
+                    )
+                default:
+                    fputs("unknown mode: \(mode)\n", stderr)
+                    Foundation.exit(64)
+                }
                 print("accepted session")
                 for entry in session.peerMetadata {
                     print("metadata \(entry.key)=\(entry.value)")
