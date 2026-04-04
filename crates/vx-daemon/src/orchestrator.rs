@@ -241,6 +241,17 @@ fn strict_fragment_value_from_runtime(value: RuntimeValue) -> Result<StrictFragm
         RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
         RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
         RuntimeValue::String(value) => StrictFragmentValue::String(value),
+        RuntimeValue::Path(_) => {
+            return Err("strict fragments do not accept Path arguments yet".to_owned());
+        }
+        RuntimeValue::StringArray(_) => {
+            return Err("strict fragments do not accept Array[String] arguments yet".to_owned());
+        }
+        RuntimeValue::StringMap(_) => {
+            return Err(
+                "strict fragments do not accept Map[String, String] arguments yet".to_owned(),
+            );
+        }
         RuntimeValue::Tree(_) => {
             return Err("strict fragments do not accept Tree arguments yet".to_owned());
         }

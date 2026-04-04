@@ -4,6 +4,8 @@
 
 mod cli;
 
+use std::collections::BTreeMap;
+
 use figue as args;
 use vx_services::{
     DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, OrchestratorClient,
@@ -71,11 +73,12 @@ async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
 async fn eval(args: EvalArgs) -> eyre::Result<()> {
     let source_text = std::fs::read_to_string(args.file.as_std_path())?;
     let backend = parse_backend(&args.backend)?;
-    let values = args
-        .args
+    let raw_args = args.args.unwrap_or_default();
+    let values = raw_args
         .iter()
         .map(|arg| parse_value(arg))
         .collect::<eyre::Result<Vec<_>>>()?;
+    let values = default_eval_args(&args.function, values)?;
 
     let address = resolve_daemon_address(&args.target)?;
     let client: OrchestratorClient = vox::connect(&address).await?;
@@ -143,7 +146,29 @@ fn parse_value(value: &str) -> eyre::Result<RuntimeValue> {
     if let Some(rest) = value.strip_prefix("string:") {
         return Ok(RuntimeValue::String(rest.to_owned()));
     }
+    if let Some(rest) = value.strip_prefix("path:") {
+        return Ok(RuntimeValue::Path(rest.to_owned()));
+    }
     Ok(RuntimeValue::String(value.to_owned()))
+}
+
+fn default_eval_args(
+    function_name: &str,
+    args: Vec<RuntimeValue>,
+) -> eyre::Result<Vec<RuntimeValue>> {
+    if !args.is_empty() || function_name != "build" {
+        return Ok(args);
+    }
+
+    let workspace = std::env::current_dir()?;
+    let workspace = camino::Utf8PathBuf::from_path_buf(workspace)
+        .map_err(|path| eyre::eyre!("workspace path is not valid UTF-8: {}", path.display()))?;
+
+    Ok(vec![
+        RuntimeValue::Path(workspace.to_string()),
+        RuntimeValue::StringArray(Vec::new()),
+        RuntimeValue::StringMap(BTreeMap::new()),
+    ])
 }
 
 fn format_value(value: &RuntimeValue) -> String {
@@ -151,6 +176,9 @@ fn format_value(value: &RuntimeValue) -> String {
         RuntimeValue::U64(value) => value.to_string(),
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::String(value) => value.clone(),
+        RuntimeValue::Path(value) => value.clone(),
+        RuntimeValue::StringArray(values) => format!("{values:?}"),
+        RuntimeValue::StringMap(values) => format!("{values:?}"),
         RuntimeValue::Tree(hash) => format!("tree:{}", hash.to_hex()),
     }
 }
@@ -303,13 +331,13 @@ mod tests {
     use std::ffi::OsStr;
 
     use tempfile::TempDir;
-    use vx_services::{DAEMON_SOCK, DaemonStatus};
+    use vx_services::{DAEMON_SOCK, DaemonStatus, RuntimeValue};
 
     use crate::cli::ClientTargetArgs;
     use crate::{
         config_home_from_env, daemon_config_override_from_env, daemon_config_path_in,
-        format_daemon_status, resolve_daemon_address, resolve_store_root, state_home_from_env,
-        store_root_in,
+        default_eval_args, format_daemon_status, resolve_daemon_address, resolve_store_root,
+        state_home_from_env, store_root_in,
     };
 
     #[test]
@@ -438,5 +466,23 @@ daemon {
         assert!(rendered.contains("uptime_ms: 42"));
         assert!(rendered.contains("listen:\n  - local:///tmp/vixen.vox"));
         assert!(rendered.contains("hosted_services:\n  - Daemon\n  - Orchestrator"));
+    }
+
+    #[test]
+    fn build_defaults_supply_standard_entry_arguments() {
+        let args = default_eval_args("build", Vec::new()).expect("build defaults should resolve");
+        assert_eq!(args.len(), 3);
+        assert!(matches!(args[0], RuntimeValue::Path(_)));
+        assert_eq!(args[1], RuntimeValue::StringArray(Vec::new()));
+        assert_eq!(
+            args[2],
+            RuntimeValue::StringMap(std::collections::BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn non_build_defaults_do_not_inject_arguments() {
+        let args = default_eval_args("greet", Vec::new()).expect("defaults should resolve");
+        assert!(args.is_empty());
     }
 }

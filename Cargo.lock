@@ -3577,6 +3577,7 @@ dependencies = [
  "facet",
  "facet-pretty",
  "facet-reflect",
+ "moire 1.0.0 (git+https://github.com/bearcove/moire?rev=13eac79)",
  "tokio",
  "tracing",
  "vox-core",

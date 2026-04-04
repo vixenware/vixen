@@ -3,6 +3,8 @@
 //! This is the top-level evaluation/scheduling service surface. It is distinct
 //! from the tiny `Daemon` host-introspection service.
 
+use std::collections::BTreeMap;
+
 use crate::NodeHash;
 use facet::Facet;
 
@@ -22,6 +24,9 @@ pub enum RuntimeValue {
     U64(u64),
     Bool(bool),
     String(String),
+    Path(String),
+    StringArray(Vec<String>),
+    StringMap(BTreeMap<String, String>),
     Tree(NodeHash),
 }
 

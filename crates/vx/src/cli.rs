@@ -79,7 +79,7 @@ pub(crate) struct EvalArgs {
     /// Function arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
     /// Bare values are treated as strings.
     #[facet(args::positional)]
-    pub(crate) args: Vec<String>,
+    pub(crate) args: Option<Vec<String>>,
 }
 
 #[derive(Facet, Debug)]
