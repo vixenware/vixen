@@ -80,7 +80,7 @@ async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
 
 async fn kill(args: KillArgs) -> eyre::Result<()> {
     let resolved = resolve_daemon_target(&args.target)?;
-    match daemon_status(&resolved.address).await {
+    match daemon_connect(&resolved.address).await {
         Ok(_) => {
             shutdown_daemon(&resolved.address).await?;
             eprintln!("killed daemon at {}", resolved.address);
@@ -95,7 +95,13 @@ async fn kill(args: KillArgs) -> eyre::Result<()> {
 
 async fn shutdown_daemon(address: &str) -> eyre::Result<()> {
     let client: DaemonClient = vox::connect(address).await?;
-    client.shutdown().await?;
+    match client.shutdown().await {
+        Ok(()) => {}
+        Err(vox::VoxError::UnknownMethod) if address.starts_with("local://") => {
+            force_shutdown_local_daemon(address)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
 
     for _ in 0..100 {
         if daemon_connect(address).await.is_err() {
@@ -105,6 +111,90 @@ async fn shutdown_daemon(address: &str) -> eyre::Result<()> {
     }
 
     eyre::bail!("daemon at {address} did not exit after shutdown request")
+}
+
+fn force_shutdown_local_daemon(address: &str) -> eyre::Result<()> {
+    #[cfg(unix)]
+    {
+        let Some(socket_path) = address.strip_prefix("local://") else {
+            eyre::bail!("cannot force-shutdown non-local daemon at {address}");
+        };
+
+        let socket_pids = pids_with_open_path(socket_path)?;
+        let daemon_pids = daemon_process_pids()?;
+        let self_pid = std::process::id();
+
+        let target_pids: Vec<u32> = socket_pids
+            .into_iter()
+            .filter(|pid| *pid != self_pid && daemon_pids.contains(pid))
+            .collect();
+
+        if target_pids.is_empty() {
+            eyre::bail!(
+                "daemon at {address} does not support shutdown(), and no local `vx daemon` process owning `{socket_path}` was found"
+            );
+        }
+
+        for pid in target_pids {
+            let status = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status()?;
+            if !status.success() {
+                eyre::bail!("failed to terminate daemon process {pid} for {address}");
+            }
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        eyre::bail!(
+            "daemon at {address} does not support shutdown(), and force-shutdown is only implemented for local daemons on unix"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn pids_with_open_path(path: &str) -> eyre::Result<Vec<u32>> {
+    let output = std::process::Command::new("lsof")
+        .args(["-n", "-P", "-Fpn", "--", path])
+        .output()?;
+    if !output.status.success() {
+        eyre::bail!("failed to inspect local daemon socket `{path}` with lsof");
+    }
+
+    let mut current_pid = None;
+    let mut found = Vec::new();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            current_pid = rest.parse::<u32>().ok();
+        } else if let Some(found_path) = line.strip_prefix('n')
+            && found_path == path
+            && let Some(pid) = current_pid
+            && !found.contains(&pid)
+        {
+            found.push(pid);
+        }
+    }
+
+    Ok(found)
+}
+
+#[cfg(unix)]
+fn daemon_process_pids() -> eyre::Result<Vec<u32>> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", "vx daemon"])
+        .output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
 }
 
 fn current_executable_blake3() -> eyre::Result<Option<String>> {
