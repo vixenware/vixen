@@ -14,8 +14,7 @@ use moire::sync::{mpsc, watch};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use vox::{MetadataEntry, NoopClient, TransportMode, initiator_on};
-use vox_stream::LocalLink;
+use vox::{MetadataEntry, NoopClient};
 use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
 use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
@@ -128,38 +127,29 @@ where
     let connect_deadline = Instant::now() + MOUNT_TIMEOUT;
 
     let client = loop {
-        match LocalLink::connect(&addr).await {
-            Ok(link) => {
-                eprintln!("vx-vfs: raw local connect succeeded sid={sid} addr={addr}");
-                tracing::info!(%sid, %addr, "connected raw local link to VixenFS listener");
+        match vox::connect::<NoopClient>(&addr)
+            .metadata(vec![
+                MetadataEntry::str("vox-service", "Vfs"),
+                MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
+            ])
+            .on_connection(VfsDispatcher::new(vfs.clone()))
+            .connect_timeout(CONNECT_RETRY_INTERVAL)
+            .establish()
+            .await
+        {
+            Ok(client) => {
                 let metadata = vec![
-                    MetadataEntry::str("vox-service", "Vfs"),
-                    MetadataEntry::str(VIXENFS_SID_METADATA_KEY, sid.as_str()),
+                    ("vox-service", "Vfs"),
+                    (VIXENFS_SID_METADATA_KEY, sid.as_str()),
                 ];
-                eprintln!("vx-vfs: beginning vox establish sid={sid} addr={addr}");
-                tracing::info!(%sid, %addr, "starting Vox session establish to VixenFS");
-                let client = initiator_on(link, TransportMode::Bare)
-                    .metadata(metadata)
-                    .on_connection(VfsDispatcher::new(vfs.clone()))
-                    .establish::<NoopClient>()
-                    .await
-                    .map_err(|error| {
-                        eprintln!(
-                            "vx-vfs: vox establish failed sid={sid} addr={addr} error={error}"
-                        );
-                        format!("failed to establish VFS session on {addr}: {error}")
-                    })?;
-                eprintln!("vx-vfs: vox establish completed sid={sid} addr={addr}");
-                tracing::info!(%sid, %addr, "Vox session establish completed");
+                tracing::info!(%sid, %addr, ?metadata, "Vox session established to VixenFS listener");
                 break client;
             }
             Err(error) if Instant::now() < connect_deadline => {
-                eprintln!("vx-vfs: waiting for listener sid={sid} addr={addr} error={error}");
                 tracing::debug!(%addr, %sid, %error, "waiting for VixenFS listener");
                 sleep(CONNECT_RETRY_INTERVAL).await;
             }
             Err(error) => {
-                eprintln!("vx-vfs: local connect failed sid={sid} addr={addr} error={error}");
                 return Err(format!(
                     "failed to connect to VixenFS listener {addr} for sid {sid}: {error}"
                 ));
@@ -174,12 +164,16 @@ where
     Ok(())
 }
 
-fn listener_addr(app_group_root: &Path) -> Result<String, String> {
+fn listener_socket_path(app_group_root: &Path) -> Result<String, String> {
     let socket_path = app_group_root.join(VIXENFS_SOCKET_NAME);
-    let socket_path = socket_path
+    socket_path
         .to_str()
-        .ok_or_else(|| format!("non-utf8 app group socket path: {}", socket_path.display()))?;
-    Ok(format!("local://{socket_path}"))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("non-utf8 app group socket path: {}", socket_path.display()))
+}
+
+fn listener_addr(app_group_root: &Path) -> Result<String, String> {
+    Ok(format!("local://{}", listener_socket_path(app_group_root)?))
 }
 
 fn random_sid_hex() -> String {
@@ -261,11 +255,18 @@ async fn poke_sid_mount(mount_path: &Utf8Path, sid: &str) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{listener_addr, parse_app_group_path_from_status_json};
+    use super::{listener_addr, listener_socket_path, parse_app_group_path_from_status_json};
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn listener_addr_uses_stable_socket_name() {
+    fn listener_socket_path_uses_stable_socket_name() {
+        let path = PathBuf::from("/tmp/group");
+        let socket_path = listener_socket_path(&path).expect("listener socket path");
+        assert_eq!(socket_path, "/tmp/group/vixenfs.sock");
+    }
+
+    #[test]
+    fn listener_addr_uses_local_scheme() {
         let path = PathBuf::from("/tmp/group");
         let addr = listener_addr(&path).expect("listener addr");
         assert_eq!(addr, "local:///tmp/group/vixenfs.sock");
