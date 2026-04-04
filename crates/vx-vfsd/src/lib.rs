@@ -102,7 +102,33 @@ impl SharedVfs {
 
     async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
         tracing::trace!(item_id, cookie, verifier, "read_dir");
-        CasVfs::read_dir(self.inner.as_ref(), item_id, cookie, verifier).await
+        let mut result = CasVfs::read_dir(self.inner.as_ref(), item_id, cookie, verifier).await;
+
+        if item_id != ROOT_ITEM_ID || result.error != vx_services::errno::OK {
+            return result;
+        }
+
+        let canary = vx_services::DirEntry {
+            name: self.canary.name.clone(),
+            item_id: self.canary.item_id,
+            item_type: vx_services::ItemType::File,
+            size: self.canary.content.len() as u64,
+            modified_time: 0,
+            created_time: 0,
+            mode: vx_services::mode::FILE_REGULAR,
+        };
+
+        if cookie == 0 {
+            result.entries.insert(0, canary);
+            if result.next_cookie != 0 {
+                result.next_cookie += 1;
+            }
+        } else if cookie == 1 {
+            result.entries = vec![canary];
+            result.next_cookie = 0;
+        }
+
+        result
     }
 
     async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
