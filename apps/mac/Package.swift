@@ -9,11 +9,9 @@ let package = Package(
     products: [
         .library(name: "VixenApp", targets: ["VixenApp"]),
         .library(name: "VixenFS", targets: ["VixenFS"]),
-        .executable(name: "VoxAttachProbe", targets: ["VoxAttachProbe"]),
     ],
     dependencies: [
-        .package(path: "../../../vox/swift/vox-runtime"),
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1")
     ],
     targets: [
         .target(
@@ -28,25 +26,10 @@ let package = Package(
         ),
         .target(
             name: "VixenFS",
-            dependencies: [
-                .product(name: "VoxRuntime", package: "vox-runtime")
-            ],
             path: "xcode/VixenFS",
             linkerSettings: [
                 .linkedFramework("FSKit")
             ]
-        ),
-        .executableTarget(
-            name: "VoxAttachProbe",
-            dependencies: [
-                .product(name: "VoxRuntime", package: "vox-runtime")
-            ],
-            path: "Sources/VoxAttachProbe"
-        ),
-        .testTarget(
-            name: "VixenFSTests",
-            dependencies: ["VixenFS"],
-            path: "tests/VixenFSTests"
         ),
     ]
 )

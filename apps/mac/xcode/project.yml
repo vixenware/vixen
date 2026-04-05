@@ -14,8 +14,6 @@ settings:
     CODE_SIGN_STYLE: Automatic
 
 packages:
-  vox-runtime:
-    path: ../../../../vox/swift/vox-runtime
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
@@ -104,6 +102,3 @@ targets:
         OTHER_LDFLAGS:
           - $(inherited)
           - -lvx_fskit
-    dependencies:
-      - package: vox-runtime
-        product: VoxRuntime
