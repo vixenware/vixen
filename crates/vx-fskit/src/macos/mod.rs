@@ -1,3 +1,4 @@
+mod extension_runtime;
 mod probe;
 mod process;
 mod setup_impl;

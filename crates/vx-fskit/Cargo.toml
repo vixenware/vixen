@@ -10,15 +10,34 @@ repository.workspace = true
 [package.metadata."docs.rs"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tokio = { workspace = true }
 moire = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = "0.2.3"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 camino = { workspace = true }
 jiff = { workspace = true }
 facet = { workspace = true }
 facet-json = { workspace = true }
 libc = { workspace = true }
+block2 = { version = "0.6.2", features = ["alloc"] }
+objc2 = { version = "0.6.4", features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSDictionary",
+    "NSArray",
+    "NSData",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSUUID",
+] }
+objc2-fs-kit = "0.3.2"
+vox = { workspace = true }
+vx-services = { workspace = true }
 
 [lints]
 workspace = true

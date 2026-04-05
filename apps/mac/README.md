@@ -83,23 +83,17 @@ There are three moving parts in local development:
 
 ### Pick the right install path for the experiment
 
-There are two different extension launch shapes in this repo.
+There is one supported extension launch shape in this repo.
 
 - Hybrid Swift entrypoint plus Rust FSKit objects:
   - use `just -f apps/mac/Justfile install`
   - the extension entrypoint stays [VixenFS.swift](xcode/VixenFS/VixenFS.swift)
   - Swift calls into [RustFSKitBootstrap.swift](xcode/VixenFS/RustFSKitBootstrap.swift)
+  - the Rust runtime is linked from the `vx-fskit` crate
   - this is the path to use when debugging the real FSKit host with Rust-backed `FSUnaryFileSystem` / `FSVolume` / `FSItem` objects
-- Standalone injected Rust executable:
-  - use `just -f apps/mac/Justfile install-rust-fs`
-  - this replaces `VixenFS.appex/Contents/MacOS/VixenFS` with `target/release/xpc-poc`
-  - this is only for bootstrap / raw-XPC experiments
 
-Do not mix them up.
-
-If you are trying to debug the hybrid Swift-plus-Rust extension and you run `install-rust-fs`,
-you have changed the experiment. The failure will move earlier into bootstrap because the live
-extension executable is no longer the Swift FSKit host.
+The old standalone executable-swap experiment has been retired. `install-rust-fs` and
+`inject-rust-vixen-extension` now print guidance and exit instead of mutating the bundle.
 
 ### What actually registers the extension
 

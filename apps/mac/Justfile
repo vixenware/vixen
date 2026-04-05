@@ -32,42 +32,15 @@ build: generate
       -clonedSourcePackagesDirPath build/SourcePackages \
       build
 
-# Build the Rust XPC PoC runtime and inject it as the VixenFS extension executable.
+# Retired standalone bootstrap experiment.
 inject-rust-vixen-extension:
-    cargo build --release -p xpc-poc
-    repo_root="$(git rev-parse --show-toplevel)" ; \
-    app_bundle_path="$repo_root/apps/mac/xcode/build/DerivedData/Build/Products/Release/Vixen.app" ; \
-    extension_bin="$app_bundle_path/Contents/Extensions/VixenFS.appex/Contents/MacOS/VixenFS" ; \
-    rust_bin="$repo_root/target/release/xpc-poc" ; \
-    extension_entitlements="$repo_root/apps/mac/xcode/VixenFS/VixenFS.entitlements" ; \
-    app_entitlements="$repo_root/apps/mac/xcode/Vixen/Vixen.entitlements" ; \
-    extension_debug_entitlements="$(mktemp /tmp/vixenfs-extension-entitlements.XXXXXX.plist)" ; \
-    app_debug_entitlements="$(mktemp /tmp/vixen-app-entitlements.XXXXXX.plist)" ; \
-    cleanup() { rm -f "$extension_debug_entitlements" "$app_debug_entitlements"; } ; \
-    trap cleanup EXIT ; \
-    if [[ ! -d "$app_bundle_path" ]]; then \
-      echo "Expected $app_bundle_path before injection. Run just build first." >&2; \
-      exit 1; \
-    fi; \
-    if [[ ! -x "$rust_bin" ]]; then \
-      echo "Expected Rust service binary at $rust_bin" >&2; \
-      exit 1; \
-    fi; \
-    cp "$rust_bin" "$extension_bin"; \
-    chmod +x "$extension_bin"; \
-    signing_identity="${VXFS_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'\"' '/Apple Development|Developer ID Application/ {print $2; exit}')}" ; \
-    if [[ -z "$signing_identity" ]]; then \
-      echo "Expected a signing identity for extension re-sign. Set VXFS_SIGNING_IDENTITY or launch with a signed Vixen.app." >&2; \
-      exit 1; \
-    fi; \
-    cp "$extension_entitlements" "$extension_debug_entitlements" ; \
-    cp "$app_entitlements" "$app_debug_entitlements" ; \
-    /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$extension_debug_entitlements" ; \
-    /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" "$app_debug_entitlements" ; \
-    codesign --force --options runtime --timestamp --entitlements "$extension_debug_entitlements" --sign "$signing_identity" "$app_bundle_path/Contents/Extensions/VixenFS.appex" ; \
-    codesign --force --options runtime --timestamp --entitlements "$app_debug_entitlements" --sign "$signing_identity" "$app_bundle_path" ; \
-    codesign --verify --deep --strict "$app_bundle_path" ; \
-    echo "Replaced $extension_bin with Rust xpc-poc service binary"
+    @echo "inject-rust-vixen-extension is retired."
+    @echo
+    @echo "Use the supported hybrid path instead:"
+    @echo "  just -f apps/mac/Justfile install"
+    @echo
+    @echo "That keeps the Swift FSKit entrypoint and links the Rust runtime from vx-fskit."
+    @exit 1
 
 # Install Vixen.app into /Applications and launch once.
 install: build
@@ -84,10 +57,6 @@ install-rust-fs:
     @echo "Use one of these instead:"
     @echo "  just -f apps/mac/Justfile install"
     @echo "    Hybrid path: Swift FSKit entrypoint, Rust FSKit objects."
-    @echo
-    @echo "  just -f apps/mac/Justfile build"
-    @echo "  just -f apps/mac/Justfile inject-rust-vixen-extension"
-    @echo "    Standalone bootstrap experiment: replaces VixenFS executable with xpc-poc."
     @echo
     @echo "See apps/mac/README.md for the registration/reset checklist."
     @exit 1
