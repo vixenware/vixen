@@ -4748,6 +4748,9 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-fs-kit",
+ "tokio",
+ "vox",
+ "vx-services",
  "xpc-connection-sys",
 ]
 

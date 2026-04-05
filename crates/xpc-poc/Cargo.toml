@@ -27,6 +27,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSUUID",
 ] }
 objc2-fs-kit = "0.3.2"
+tokio.workspace = true
+vox.workspace = true
+vx-services.workspace = true
 xpc-connection-sys = "0.1.1"
 
 [lints]

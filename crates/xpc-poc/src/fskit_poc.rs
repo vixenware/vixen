@@ -1,6 +1,10 @@
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::path::PathBuf;
 use std::ptr;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -15,22 +19,61 @@ use objc2_fs_kit::{
     FSVolume, FSVolumeIdentifier, FSVolumeOperations, FSVolumePathConfOperations,
     FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities,
 };
+use tokio::runtime::{Builder, Runtime};
+use vox::{acceptor_fn, acceptor_on};
+use vx_services::{
+    CreateResult, DirEntry, GetAttributesResult, ItemAttributes as VfsItemAttributes,
+    ItemType as VfsItemType, LookupResult, ReadDirResult, ReadResult, SetAttributesParams,
+    VfsClient, VfsResult, WriteResult,
+};
 
-use crate::log_event;
+use crate::{log_event, real_home_dir};
 
-const ROOT_ITEM_ID: u64 = FSItemID::RootDirectory.0;
-const HOUR_ITEM_ID: u64 = ROOT_ITEM_ID + 1;
-const VOLUME_NAME: &str = "Rust FSKit PoC";
-const HOUR_FILE_NAME: &str = "hour.txt";
-const HOUR_FILE_BYTES: &[u8] = b"hour\n";
+const ROOT_LOCAL_ID: u64 = FSItemID::RootDirectory.0;
+const ROOT_BACKEND_ID: u64 = 1;
+const VIXENFS_DIR_ID: u64 = 0xFFFF_FFFF_FFFE_0001;
+const STATUS_JSON_ID: u64 = 0xFFFF_FFFF_FFFE_0002;
+const ROUTED_ITEM_ID_START: u64 = 2;
 const DIRECTORY_VERIFIER: FSDirectoryVerifier = 1;
+const VOLUME_NAME: &str = "Vixen";
+const APP_GROUP_ID: &str = "B2N6FSRTPV.vixenfs";
+const SOCKET_NAME: &str = "vixenfs.sock";
+const VIXENFS_DIR_NAME: &str = ".vixenfs";
+const STATUS_JSON_NAME: &str = "status.json";
+
+static TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VirtualKind {
+    Root,
+    MetaDir,
+    StatusJson,
+    None,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct RoutedItemKey {
+    connection_generation: u64,
+    backend_item_id: u64,
+}
+
+struct CachedAttrs {
+    parent_local_id: u64,
+    item_type: FSItemType,
+    size: u64,
+    modified_time: u64,
+    created_time: u64,
+    mode: u32,
+}
 
 struct ItemIvars {
-    item_id: u64,
-    parent_id: u64,
-    item_type: FSItemType,
+    local_item_id: u64,
+    backend_item_id: u64,
+    connection_generation: u64,
     name: Retained<FSFileName>,
-    contents: Vec<u8>,
+    virtual_kind: VirtualKind,
+    attrs: Mutex<CachedAttrs>,
 }
 
 define_class!(
@@ -43,58 +86,186 @@ define_class!(
 
 impl RustItem {
     fn new(
-        item_id: u64,
-        parent_id: u64,
-        item_type: FSItemType,
+        local_item_id: u64,
+        backend_item_id: u64,
+        connection_generation: u64,
+        parent_local_id: u64,
         name: &str,
-        contents: &[u8],
+        item_type: FSItemType,
+        size: u64,
+        modified_time: u64,
+        created_time: u64,
+        mode: u32,
+        virtual_kind: VirtualKind,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(ItemIvars {
-            item_id,
-            parent_id,
-            item_type,
+            local_item_id,
+            backend_item_id,
+            connection_generation,
             name: fs_filename(name),
-            contents: contents.to_vec(),
+            virtual_kind,
+            attrs: Mutex::new(CachedAttrs {
+                parent_local_id,
+                item_type,
+                size,
+                modified_time,
+                created_time,
+                mode,
+            }),
         });
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn root(connection_generation: u64) -> Retained<Self> {
+        Self::new(
+            ROOT_LOCAL_ID,
+            ROOT_BACKEND_ID,
+            connection_generation,
+            ROOT_LOCAL_ID,
+            "/",
+            FSItemType::Directory,
+            0,
+            0,
+            0,
+            0o755,
+            VirtualKind::Root,
+        )
+    }
+
+    fn meta_dir() -> Retained<Self> {
+        Self::new(
+            VIXENFS_DIR_ID,
+            VIXENFS_DIR_ID,
+            0,
+            ROOT_LOCAL_ID,
+            VIXENFS_DIR_NAME,
+            FSItemType::Directory,
+            0,
+            0,
+            0,
+            0o755,
+            VirtualKind::MetaDir,
+        )
+    }
+
+    fn status_json(len: usize) -> Retained<Self> {
+        let now = unix_time();
+        Self::new(
+            STATUS_JSON_ID,
+            STATUS_JSON_ID,
+            0,
+            VIXENFS_DIR_ID,
+            STATUS_JSON_NAME,
+            FSItemType::File,
+            len as u64,
+            now,
+            0,
+            0o444,
+            VirtualKind::StatusJson,
+        )
+    }
+
+    fn from_backend(
+        local_item_id: u64,
+        parent_local_id: u64,
+        connection_generation: u64,
+        name: &str,
+        attrs: &VfsItemAttributes,
+    ) -> Retained<Self> {
+        Self::new(
+            local_item_id,
+            attrs.item_id,
+            connection_generation,
+            parent_local_id,
+            name,
+            fs_item_type(attrs.item_type),
+            attrs.size,
+            attrs.modified_time,
+            attrs.created_time,
+            attrs.mode,
+            VirtualKind::None,
+        )
+    }
+
+    fn item_id(&self) -> u64 {
+        self.ivars().local_item_id
+    }
+
+    fn backend_item_id(&self) -> u64 {
+        self.ivars().backend_item_id
+    }
+
+    fn generation(&self) -> u64 {
+        self.ivars().connection_generation
+    }
+
+    fn virtual_kind(&self) -> VirtualKind {
+        self.ivars().virtual_kind
+    }
+
+    fn parent_local_id(&self) -> u64 {
+        self.ivars()
+            .attrs
+            .lock()
+            .expect("item attrs mutex poisoned")
+            .parent_local_id
     }
 
     fn fs_name(&self) -> Retained<FSFileName> {
         self.ivars().name.clone()
     }
 
-    fn item_id(&self) -> u64 {
-        self.ivars().item_id
-    }
-
-    fn contents(&self) -> &[u8] {
-        &self.ivars().contents
-    }
-
     fn attributes(&self) -> Retained<FSItemAttributes> {
-        let attrs = unsafe { FSItemAttributes::new() };
-        unsafe {
-            attrs.setType(self.ivars().item_type);
-            attrs.setMode(match self.ivars().item_type {
-                FSItemType::Directory => 0o755,
-                _ => 0o644,
-            });
-            attrs.setFileID(FSItemID(self.ivars().item_id));
-            attrs.setParentID(FSItemID(self.ivars().parent_id));
-            attrs.setLinkCount(1);
-            attrs.setSize(self.ivars().contents.len() as u64);
-            attrs.setAllocSize(self.ivars().contents.len() as u64);
-            attrs.setUid(0);
-            attrs.setGid(0);
-        }
-        attrs
+        let attrs = self
+            .ivars()
+            .attrs
+            .lock()
+            .expect("item attrs mutex poisoned");
+        fs_item_attributes(
+            self.item_id(),
+            attrs.parent_local_id,
+            attrs.item_type,
+            attrs.size,
+            attrs.modified_time,
+            attrs.created_time,
+            attrs.mode,
+        )
     }
+
+    fn update_from_backend(&self, parent_local_id: u64, attrs: &VfsItemAttributes) {
+        let mut cached = self
+            .ivars()
+            .attrs
+            .lock()
+            .expect("item attrs mutex poisoned");
+        cached.parent_local_id = parent_local_id;
+        cached.item_type = fs_item_type(attrs.item_type);
+        cached.size = attrs.size;
+        cached.modified_time = attrs.modified_time;
+        cached.created_time = attrs.created_time;
+        cached.mode = attrs.mode;
+    }
+
+    fn update_status_len(&self, len: usize) {
+        let mut cached = self
+            .ivars()
+            .attrs
+            .lock()
+            .expect("item attrs mutex poisoned");
+        cached.size = len as u64;
+        cached.modified_time = unix_time();
+    }
+}
+
+struct RoutedItems {
+    by_key: HashMap<RoutedItemKey, u64>,
+    next_local_id: u64,
 }
 
 struct VolumeIvars {
     file_system: Retained<FSUnaryFileSystem>,
-    root: Retained<RustItem>,
-    hour_file: Retained<RustItem>,
+    items: Mutex<HashMap<u64, Retained<RustItem>>>,
+    routed: Mutex<RoutedItems>,
 }
 
 define_class!(
@@ -117,7 +288,7 @@ define_class!(
 
         #[unsafe(method(restrictsOwnershipChanges))]
         fn restrictsOwnershipChanges(&self) -> bool {
-            false
+            true
         }
 
         #[unsafe(method(truncatesLongNames))]
@@ -137,12 +308,17 @@ define_class!(
             let stats = unsafe {
                 FSStatFSResult::initWithFileSystemTypeName(
                     FSStatFSResult::alloc(),
-                    &NSString::from_str("vixen-poc"),
+                    &NSString::from_str("vixenfs"),
                 )
             };
             unsafe {
                 stats.setBlockSize(4096);
-                stats.setIoSize(4096);
+                stats.setIoSize(262_144);
+                stats.setTotalBlocks(1_000_000);
+                stats.setFreeBlocks(500_000);
+                stats.setAvailableBlocks(500_000);
+                stats.setTotalFiles(100_000);
+                stats.setFreeFiles(50_000);
             }
             Retained::into_raw(stats)
         }
@@ -156,7 +332,7 @@ define_class!(
             log_event("info", "fskit-poc activateWithOptions");
             let active = unsafe { FSContainerStatus::active() };
             unsafe { FSFileSystemBase::setContainerStatus(&*self.ivars().file_system, &active) };
-            let root: Retained<FSItem> = self.ivars().root.clone().into_super();
+            let root = self.root_item();
             reply.call((Retained::into_raw(root), ptr::null_mut()));
         }
 
@@ -195,18 +371,78 @@ define_class!(
             item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
-            if let Some(item) = as_rust_item(item) {
-                let attrs = item.attributes();
-                log_event(
-                    "info",
-                    format!("fskit-poc getAttributes item={}", item.item_id()),
-                );
-                reply.call((Retained::into_raw(attrs), ptr::null_mut()));
-            } else {
+            let Some(item) = as_rust_item(item) else {
                 reply.call((
                     ptr::null_mut(),
                     Retained::into_raw(posix_error(libc::ENOENT)),
                 ));
+                return;
+            };
+
+            match self.attributes_for_item(item) {
+                Ok(attrs) => reply.call((Retained::into_raw(attrs), ptr::null_mut())),
+                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
+            }
+        }
+
+        #[unsafe(method(setAttributes:onItem:replyHandler:))]
+        fn setAttributes_onItem_replyHandler(
+            &self,
+            new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
+            item: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
+        ) {
+            let Some(item) = as_rust_item(item) else {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::ENOENT)),
+                ));
+                return;
+            };
+
+            if item.virtual_kind() != VirtualKind::None || item.item_id() == ROOT_LOCAL_ID {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::EACCES)),
+                ));
+                return;
+            }
+
+            let params = SetAttributesParams {
+                mode: unsafe {
+                    new_attributes
+                        .isValid(objc2_fs_kit::FSItemAttribute::Mode)
+                        .then(|| new_attributes.mode() as u32)
+                },
+                modified_time: None,
+                size: unsafe {
+                    new_attributes
+                        .isValid(objc2_fs_kit::FSItemAttribute::Size)
+                        .then(|| new_attributes.size() as u64)
+                },
+            };
+
+            let result = block_on_vfs({
+                let backend_item_id = item.backend_item_id();
+                async move {
+                    let (client, _) = root_peer_state().connected_client()?;
+                    let result = client
+                        .set_attributes(backend_item_id, params)
+                        .await
+                        .map_err(|error| vox_rpc_errno("set_attributes", error))?;
+                    Ok::<_, i32>(result)
+                }
+            });
+
+            match result {
+                Ok(VfsResult { error: 0 }) => match self.refresh_backend_item(item) {
+                    Ok(attrs) => reply.call((Retained::into_raw(attrs), ptr::null_mut())),
+                    Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
+                },
+                Ok(VfsResult { error }) => {
+                    reply.call((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                }
+                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
             }
         }
 
@@ -226,49 +462,228 @@ define_class!(
                 return;
             };
 
-            let requested = fs_filename_bytes(name);
-            let root = self.ivars().root.item_id();
-            if directory.item_id() == root && requested == b"." {
-                let item: Retained<FSItem> = self.ivars().root.clone().into_super();
-                let fs_name = fs_filename(".");
-                log_event("info", "fskit-poc lookupItemNamed .");
-                reply.call((
+            match self.lookup_item(directory, name) {
+                Ok((item, item_name)) => reply.call((
                     Retained::into_raw(item),
-                    Retained::into_raw(fs_name),
+                    Retained::into_raw(item_name),
                     ptr::null_mut(),
-                ));
-            } else if directory.item_id() == root && requested == b".." {
-                let item: Retained<FSItem> = self.ivars().root.clone().into_super();
-                let fs_name = fs_filename("..");
-                log_event("info", "fskit-poc lookupItemNamed ..");
-                reply.call((
-                    Retained::into_raw(item),
-                    Retained::into_raw(fs_name),
-                    ptr::null_mut(),
-                ));
-            } else if directory.item_id() == root && requested == HOUR_FILE_NAME.as_bytes() {
-                log_event("info", "fskit-poc lookupItemNamed hour.txt");
-                let item: Retained<FSItem> = self.ivars().hour_file.clone().into_super();
-                let fs_name = self.ivars().hour_file.fs_name();
-                reply.call((
-                    Retained::into_raw(item),
-                    Retained::into_raw(fs_name),
-                    ptr::null_mut(),
-                ));
-            } else {
-                let requested_name = String::from_utf8_lossy(&requested).into_owned();
-                log_event(
-                    "info",
-                    format!(
-                        "fskit-poc lookupItemNamed miss dir={} name={requested_name:?}",
-                        directory.item_id()
-                    ),
-                );
+                )),
+                Err(error) => {
+                    reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
+                }
+            }
+        }
+
+        #[unsafe(method(createItemNamed:type:inDirectory:attributes:replyHandler:))]
+        fn createItemNamed_type_inDirectory_attributes_replyHandler(
+            &self,
+            name: &FSFileName,
+            item_type: FSItemType,
+            directory: &FSItem,
+            new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
+            reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
+        ) {
+            let Some(directory) = as_rust_item(directory) else {
                 reply.call((
                     ptr::null_mut(),
                     ptr::null_mut(),
                     Retained::into_raw(posix_error(libc::ENOENT)),
                 ));
+                return;
+            };
+
+            if directory.virtual_kind() != VirtualKind::None || directory.item_id() == ROOT_LOCAL_ID
+            {
+                reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::EACCES)),
+                ));
+                return;
+            }
+
+            let requested_name = fs_filename_string(name);
+            let mode = if unsafe { new_attributes.isValid(objc2_fs_kit::FSItemAttribute::Mode) } {
+                unsafe { new_attributes.mode() as u32 }
+            } else if item_type == FSItemType::Directory {
+                0o755
+            } else {
+                0o644
+            };
+
+            let create_type = if item_type == FSItemType::Directory {
+                VfsItemType::Directory
+            } else {
+                VfsItemType::File
+            };
+
+            let result = block_on_vfs({
+                let parent_backend_id = directory.backend_item_id();
+                let requested_name = requested_name.clone();
+                async move {
+                    let (client, _) = root_peer_state().connected_client()?;
+                    let result = client
+                        .create(parent_backend_id, requested_name, create_type, mode)
+                        .await
+                        .map_err(|error| vox_rpc_errno("create", error))?;
+                    Ok::<_, i32>(result)
+                }
+            });
+
+            match result {
+                Ok(CreateResult { item_id, error: 0 }) => {
+                    let attrs_result = block_on_vfs(async move {
+                        let (client, generation) = root_peer_state().connected_client()?;
+                        let attrs = client
+                            .get_attributes(item_id)
+                            .await
+                            .map_err(|error| vox_rpc_errno("get_attributes", error))?;
+                        Ok::<_, i32>((attrs, generation))
+                    });
+                    match attrs_result {
+                        Ok((GetAttributesResult { attrs, error: 0 }, generation)) => {
+                            let local_item_id = self.local_item_id(generation, attrs.item_id);
+                            let item = self.cached_backend_item(
+                                local_item_id,
+                                directory.item_id(),
+                                generation,
+                                &requested_name,
+                                &attrs,
+                            );
+                            reply.call((
+                                Retained::into_raw(item.clone().into_super()),
+                                Retained::into_raw(item.fs_name()),
+                                ptr::null_mut(),
+                            ));
+                        }
+                        Ok((GetAttributesResult { error, .. }, _)) => {
+                            reply.call((
+                                ptr::null_mut(),
+                                ptr::null_mut(),
+                                Retained::into_raw(posix_error(error)),
+                            ));
+                        }
+                        Err(error) => {
+                            reply.call((
+                                ptr::null_mut(),
+                                ptr::null_mut(),
+                                Retained::into_raw(error),
+                            ));
+                        }
+                    }
+                }
+                Ok(CreateResult { error, .. }) => reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(error)),
+                )),
+                Err(error) => {
+                    reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
+                }
+            }
+        }
+
+        #[unsafe(method(removeItem:named:fromDirectory:replyHandler:))]
+        fn removeItem_named_fromDirectory_replyHandler(
+            &self,
+            item: &FSItem,
+            _name: &FSFileName,
+            _directory: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let Some(item) = as_rust_item(item) else {
+                reply.call((Retained::into_raw(posix_error(libc::ENOENT)),));
+                return;
+            };
+
+            if item.virtual_kind() != VirtualKind::None || item.item_id() == ROOT_LOCAL_ID {
+                reply.call((Retained::into_raw(posix_error(libc::EACCES)),));
+                return;
+            }
+
+            let result = block_on_vfs({
+                let backend_item_id = item.backend_item_id();
+                async move {
+                    let (client, _) = root_peer_state().connected_client()?;
+                    let result = client
+                        .delete(backend_item_id)
+                        .await
+                        .map_err(|error| vox_rpc_errno("delete", error))?;
+                    Ok::<_, i32>(result)
+                }
+            });
+
+            match result {
+                Ok(VfsResult { error: 0 }) => {
+                    self.remove_cached_item(item.item_id());
+                    reply.call((ptr::null_mut(),));
+                }
+                Ok(VfsResult { error }) => reply.call((Retained::into_raw(posix_error(error)),)),
+                Err(error) => reply.call((Retained::into_raw(error),)),
+            }
+        }
+
+        #[unsafe(method(renameItem:inDirectory:named:toNewName:inDirectory:overItem:replyHandler:))]
+        fn renameItem_inDirectory_named_toNewName_inDirectory_overItem_replyHandler(
+            &self,
+            item: &FSItem,
+            _source_directory: &FSItem,
+            _source_name: &FSFileName,
+            destination_name: &FSFileName,
+            destination_directory: &FSItem,
+            _over_item: *mut FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
+        ) {
+            let Some(item) = as_rust_item(item) else {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::ENOENT)),
+                ));
+                return;
+            };
+            let Some(destination_directory) = as_rust_item(destination_directory) else {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::ENOENT)),
+                ));
+                return;
+            };
+
+            if item.virtual_kind() != VirtualKind::None
+                || destination_directory.virtual_kind() != VirtualKind::None
+                || item.item_id() == ROOT_LOCAL_ID
+                || destination_directory.item_id() == ROOT_LOCAL_ID
+            {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::EACCES)),
+                ));
+                return;
+            }
+
+            let new_name = fs_filename_string(destination_name);
+            let result = block_on_vfs({
+                let backend_item_id = item.backend_item_id();
+                let new_parent_id = destination_directory.backend_item_id();
+                let new_name = new_name.clone();
+                async move {
+                    let (client, _) = root_peer_state().connected_client()?;
+                    let result = client
+                        .rename(backend_item_id, new_parent_id, new_name)
+                        .await
+                        .map_err(|error| vox_rpc_errno("rename", error))?;
+                    Ok::<_, i32>(result)
+                }
+            });
+
+            match result {
+                Ok(VfsResult { error: 0 }) => {
+                    reply.call((Retained::into_raw(fs_filename(&new_name)), ptr::null_mut()))
+                }
+                Ok(VfsResult { error }) => {
+                    reply.call((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                }
+                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
             }
         }
 
@@ -277,7 +692,7 @@ define_class!(
             &self,
             directory: &FSItem,
             cookie: FSDirectoryCookie,
-            _verifier: FSDirectoryVerifier,
+            verifier: FSDirectoryVerifier,
             attributes: Option<&FSItemGetAttributesRequest>,
             packer: &FSDirectoryEntryPacker,
             reply: &block2::DynBlock<dyn Fn(FSDirectoryVerifier, *mut NSError)>,
@@ -286,74 +701,11 @@ define_class!(
                 reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
                 return;
             };
-            if directory.item_id() != self.ivars().root.item_id() {
-                reply.call((0, Retained::into_raw(posix_error(libc::ENOTDIR))));
-                return;
+
+            match self.enumerate_directory(directory, cookie, verifier, attributes, packer) {
+                Ok(next_verifier) => reply.call((next_verifier, ptr::null_mut())),
+                Err(error) => reply.call((0, Retained::into_raw(error))),
             }
-
-            let include_dots = attributes.is_none();
-            let mut entries = Vec::with_capacity(if include_dots { 3 } else { 1 });
-            if include_dots {
-                entries.push((
-                    fs_filename("."),
-                    FSItemType::Directory,
-                    FSItemID(ROOT_ITEM_ID),
-                    Some(self.ivars().root.attributes()),
-                ));
-                entries.push((
-                    fs_filename(".."),
-                    FSItemType::Directory,
-                    FSItemID(ROOT_ITEM_ID),
-                    Some(self.ivars().root.attributes()),
-                ));
-            }
-            entries.push((
-                self.ivars().hour_file.fs_name(),
-                FSItemType::File,
-                FSItemID(HOUR_ITEM_ID),
-                Some(self.ivars().hour_file.attributes()),
-            ));
-
-            let start = if cookie == unsafe { FSDirectoryCookieInitial } {
-                0
-            } else {
-                cookie.saturating_sub(1) as usize
-            };
-            if start > entries.len() {
-                reply.call((0, Retained::into_raw(posix_error(libc::EINVAL))));
-                return;
-            }
-
-            log_event(
-                "info",
-                format!(
-                    "fskit-poc enumerateDirectory cookie={cookie} include_dots={include_dots} start={start}"
-                ),
-            );
-
-            for (index, (name, item_type, item_id, entry_attributes)) in
-                entries.iter().enumerate().skip(start)
-            {
-                let next_cookie = if index + 1 < entries.len() {
-                    (index + 2) as FSDirectoryCookie
-                } else {
-                    0
-                };
-                let packed = unsafe {
-                    packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
-                        name,
-                        *item_type,
-                        *item_id,
-                        next_cookie,
-                        entry_attributes.as_deref(),
-                    )
-                };
-                if !packed {
-                    break;
-                }
-            }
-
-            reply.call((DIRECTORY_VERIFIER, ptr::null_mut()));
         }
 
         #[unsafe(method(reclaimItem:replyHandler:))]
@@ -362,10 +714,13 @@ define_class!(
             item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            let item_id = as_rust_item(item)
-                .map(RustItem::item_id)
-                .unwrap_or_default();
-            log_event("info", format!("fskit-poc reclaimItem item={item_id}"));
+            if let Some(item) = as_rust_item(item) {
+                log_event(
+                    "info",
+                    format!("fskit-poc reclaimItem item={}", item.item_id()),
+                );
+                self.remove_cached_item(item.item_id());
+            }
             reply.call((ptr::null_mut(),));
         }
     }
@@ -385,81 +740,521 @@ define_class!(
                 return;
             };
 
-            let offset = offset.max(0) as usize;
-            let available = item.contents();
-            if offset >= available.len() {
-                reply.call((0, ptr::null_mut()));
-                return;
+            match self.read_item(item, offset, length, buffer) {
+                Ok(actual) => reply.call((actual, ptr::null_mut())),
+                Err(error) => reply.call((0, Retained::into_raw(error))),
             }
-
-            let readable = available.len() - offset;
-            let buffer_len = unsafe { buffer.length() };
-            let actual = readable.min(length).min(buffer_len);
-            let src = &available[offset..offset + actual];
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    src.as_ptr(),
-                    buffer.mutableBytes().as_ptr().cast::<u8>(),
-                    actual,
-                );
-            }
-            log_event(
-                "info",
-                format!(
-                    "fskit-poc read item={} offset={offset} actual={actual}",
-                    item.item_id()
-                ),
-            );
-            reply.call((actual, ptr::null_mut()));
         }
 
         #[unsafe(method(writeContents:toFile:atOffset:replyHandler:))]
         fn writeContents_toFile_atOffset_replyHandler(
             &self,
-            _contents: &NSData,
-            _item: &FSItem,
-            _offset: libc::off_t,
+            contents: &NSData,
+            item: &FSItem,
+            offset: libc::off_t,
             reply: &block2::DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
-            log_event("info", "fskit-poc writeContents unsupported");
-            reply.call((0, Retained::into_raw(posix_error(libc::EROFS))));
+            let Some(item) = as_rust_item(item) else {
+                reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
+                return;
+            };
+
+            if item.virtual_kind() != VirtualKind::None {
+                reply.call((0, Retained::into_raw(posix_error(libc::EACCES))));
+                return;
+            }
+
+            let bytes = contents.to_vec();
+            let result = block_on_vfs({
+                let backend_item_id = item.backend_item_id();
+                let offset = offset.max(0) as u64;
+                async move {
+                    let (client, _) = root_peer_state().connected_client()?;
+                    let result = client
+                        .write(backend_item_id, offset, bytes)
+                        .await
+                        .map_err(|error| vox_rpc_errno("write", error))?;
+                    Ok::<_, i32>(result)
+                }
+            });
+
+            match result {
+                Ok(WriteResult {
+                    bytes_written,
+                    error: 0,
+                }) => {
+                    reply.call((bytes_written as usize, ptr::null_mut()));
+                }
+                Ok(WriteResult { error, .. }) => {
+                    reply.call((0, Retained::into_raw(posix_error(error))));
+                }
+                Err(error) => reply.call((0, Retained::into_raw(error))),
+            }
         }
     }
 );
 
 impl RustVolume {
     fn new(file_system: &FSUnaryFileSystem) -> Retained<Self> {
-        let root = RustItem::new(
-            ROOT_ITEM_ID,
-            FSItemID::ParentOfRoot.0,
-            FSItemType::Directory,
-            "/",
-            &[],
-        );
-        let hour_file = RustItem::new(
-            HOUR_ITEM_ID,
-            ROOT_ITEM_ID,
-            FSItemType::File,
-            HOUR_FILE_NAME,
-            HOUR_FILE_BYTES,
-        );
         let uuid = NSUUID::new();
         let volume_id =
             unsafe { FSVolumeIdentifier::initWithUUID(FSVolumeIdentifier::alloc(), &uuid) };
         let volume_name = fs_filename(VOLUME_NAME);
+        let generation = root_peer_state().generation();
+        let root = RustItem::root(generation);
+        let meta_dir = RustItem::meta_dir();
+        let status = RustItem::status_json(root_peer_state().status_json_bytes().len());
+        let mut items = HashMap::new();
+        items.insert(root.item_id(), root);
+        items.insert(meta_dir.item_id(), meta_dir);
+        items.insert(status.item_id(), status);
+
         let this = Self::alloc().set_ivars(VolumeIvars {
             file_system: unsafe {
                 Retained::retain(file_system as *const FSUnaryFileSystem as *mut FSUnaryFileSystem)
                     .unwrap()
             },
-            root,
-            hour_file,
+            items: Mutex::new(items),
+            routed: Mutex::new(RoutedItems {
+                by_key: HashMap::new(),
+                next_local_id: ROUTED_ITEM_ID_START,
+            }),
         });
         unsafe { msg_send![super(this), initWithVolumeID: &*volume_id, volumeName: &*volume_name] }
     }
 
-    pub fn root_item(&self) -> Retained<FSItem> {
-        self.ivars().root.clone().into_super()
+    fn root_item(&self) -> Retained<FSItem> {
+        self.get_cached_item(ROOT_LOCAL_ID)
+            .expect("root item should exist")
+            .into_super()
+    }
+
+    fn get_cached_item(&self, item_id: u64) -> Option<Retained<RustItem>> {
+        self.ivars()
+            .items
+            .lock()
+            .expect("items mutex poisoned")
+            .get(&item_id)
+            .cloned()
+    }
+
+    fn cache_item(&self, item: Retained<RustItem>) -> Retained<RustItem> {
+        self.ivars()
+            .items
+            .lock()
+            .expect("items mutex poisoned")
+            .insert(item.item_id(), item.clone());
+        item
+    }
+
+    fn remove_cached_item(&self, item_id: u64) {
+        if item_id == ROOT_LOCAL_ID || item_id == VIXENFS_DIR_ID || item_id == STATUS_JSON_ID {
+            return;
+        }
+        self.ivars()
+            .items
+            .lock()
+            .expect("items mutex poisoned")
+            .remove(&item_id);
+    }
+
+    fn local_item_id(&self, generation: u64, backend_item_id: u64) -> u64 {
+        if backend_item_id == ROOT_BACKEND_ID {
+            return ROOT_LOCAL_ID;
+        }
+
+        let mut routed = self
+            .ivars()
+            .routed
+            .lock()
+            .expect("routed items mutex poisoned");
+        let key = RoutedItemKey {
+            connection_generation: generation,
+            backend_item_id,
+        };
+        if let Some(existing) = routed.by_key.get(&key) {
+            return *existing;
+        }
+        let local_item_id = routed.next_local_id;
+        routed.next_local_id += 1;
+        routed.by_key.insert(key, local_item_id);
+        local_item_id
+    }
+
+    fn cached_backend_item(
+        &self,
+        local_item_id: u64,
+        parent_local_id: u64,
+        generation: u64,
+        name: &str,
+        attrs: &VfsItemAttributes,
+    ) -> Retained<RustItem> {
+        if let Some(item) = self.get_cached_item(local_item_id) {
+            item.update_from_backend(parent_local_id, attrs);
+            return item;
+        }
+        self.cache_item(RustItem::from_backend(
+            local_item_id,
+            parent_local_id,
+            generation,
+            name,
+            attrs,
+        ))
+    }
+
+    fn attributes_for_item(
+        &self,
+        item: &RustItem,
+    ) -> Result<Retained<FSItemAttributes>, Retained<NSError>> {
+        match item.virtual_kind() {
+            VirtualKind::Root => Ok(item.attributes()),
+            VirtualKind::MetaDir => Ok(item.attributes()),
+            VirtualKind::StatusJson => {
+                let bytes = root_peer_state().status_json_bytes();
+                if let Some(status_item) = self.get_cached_item(STATUS_JSON_ID) {
+                    status_item.update_status_len(bytes.len());
+                    Ok(status_item.attributes())
+                } else {
+                    let status_item = self.cache_item(RustItem::status_json(bytes.len()));
+                    Ok(status_item.attributes())
+                }
+            }
+            VirtualKind::None => self.refresh_backend_item(item),
+        }
+    }
+
+    fn refresh_backend_item(
+        &self,
+        item: &RustItem,
+    ) -> Result<Retained<FSItemAttributes>, Retained<NSError>> {
+        let backend_item_id = item.backend_item_id();
+        let parent_local_id = item.parent_local_id();
+        let generation = item.generation();
+        let result = block_on_vfs(async move {
+            let (client, current_generation) = root_peer_state().connected_client()?;
+            if generation != 0 && generation != current_generation {
+                return Err(libc::ESTALE);
+            }
+            let result = client
+                .get_attributes(backend_item_id)
+                .await
+                .map_err(|error| vox_rpc_errno("get_attributes", error))?;
+            Ok::<_, i32>((result, current_generation))
+        })?;
+
+        let (result, current_generation) = result;
+        if result.error != 0 {
+            return Err(posix_error(result.error));
+        }
+
+        item.update_from_backend(parent_local_id, &result.attrs);
+        if generation != 0 && current_generation != generation {
+            return Err(posix_error(libc::ESTALE));
+        }
+        Ok(item.attributes())
+    }
+
+    fn lookup_item(
+        &self,
+        directory: &RustItem,
+        name: &FSFileName,
+    ) -> Result<(Retained<FSItem>, Retained<FSFileName>), Retained<NSError>> {
+        let requested_name = fs_filename_string(name);
+
+        if requested_name == "." {
+            let item: Retained<FSItem> = self
+                .get_cached_item(directory.item_id())
+                .expect("directory should be cached")
+                .into_super();
+            return Ok((item, fs_filename(".")));
+        }
+
+        if requested_name == ".." {
+            let parent_id = directory.parent_local_id();
+            if let Some(parent) = self.get_cached_item(parent_id) {
+                return Ok((parent.clone().into_super(), parent.fs_name()));
+            }
+        }
+
+        if directory.item_id() == ROOT_LOCAL_ID && requested_name == VIXENFS_DIR_NAME {
+            let item = self
+                .get_cached_item(VIXENFS_DIR_ID)
+                .expect(".vixenfs dir should be cached");
+            return Ok((item.clone().into_super(), item.fs_name()));
+        }
+
+        if directory.item_id() == VIXENFS_DIR_ID && requested_name == STATUS_JSON_NAME {
+            let bytes = root_peer_state().status_json_bytes();
+            let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
+                item.update_status_len(bytes.len());
+                item
+            } else {
+                self.cache_item(RustItem::status_json(bytes.len()))
+            };
+            return Ok((item.clone().into_super(), item.fs_name()));
+        }
+
+        if directory.item_id() == VIXENFS_DIR_ID {
+            return Err(posix_error(libc::ENOENT));
+        }
+
+        let parent_backend_id = directory.backend_item_id();
+        let parent_local_id = directory.item_id();
+        let requested_name_for_rpc = requested_name.clone();
+        let result = block_on_vfs(async move {
+            let (client, generation) = root_peer_state().connected_client()?;
+            let lookup = client
+                .lookup(parent_backend_id, requested_name_for_rpc)
+                .await
+                .map_err(|error| vox_rpc_errno("lookup", error))?;
+            Ok::<_, i32>((lookup, generation))
+        })?;
+
+        let (LookupResult { attrs, error }, generation) = result;
+        if error != 0 {
+            return Err(posix_error(error));
+        }
+
+        let local_item_id = self.local_item_id(generation, attrs.item_id);
+        let item = self.cached_backend_item(
+            local_item_id,
+            parent_local_id,
+            generation,
+            &requested_name,
+            &attrs,
+        );
+        Ok((item.clone().into_super(), item.fs_name()))
+    }
+
+    fn enumerate_directory(
+        &self,
+        directory: &RustItem,
+        cookie: FSDirectoryCookie,
+        verifier: FSDirectoryVerifier,
+        attributes: Option<&FSItemGetAttributesRequest>,
+        packer: &FSDirectoryEntryPacker,
+    ) -> Result<FSDirectoryVerifier, Retained<NSError>> {
+        if directory.item_id() == VIXENFS_DIR_ID {
+            let bytes = root_peer_state().status_json_bytes();
+            let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
+                item.update_status_len(bytes.len());
+                item
+            } else {
+                self.cache_item(RustItem::status_json(bytes.len()))
+            };
+            if cookie == unsafe { FSDirectoryCookieInitial } {
+                let attrs = item.attributes();
+                let _ = unsafe {
+                    packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
+                        &item.fs_name(),
+                        FSItemType::File,
+                        FSItemID(STATUS_JSON_ID),
+                        0,
+                        if attributes.is_some() {
+                            Some(attrs.as_ref())
+                        } else {
+                            None
+                        },
+                    )
+                };
+            }
+            return Ok(0);
+        }
+
+        if directory.item_id() == ROOT_LOCAL_ID {
+            let start = if cookie == unsafe { FSDirectoryCookieInitial } {
+                0
+            } else {
+                cookie.saturating_sub(1) as usize
+            };
+
+            let mut root_entries = Vec::<(Retained<RustItem>, u64)>::new();
+            let meta_dir = self
+                .get_cached_item(VIXENFS_DIR_ID)
+                .expect(".vixenfs dir should be cached");
+            root_entries.push((meta_dir, 1));
+
+            let result = block_on_vfs(async move {
+                let (client, generation) = root_peer_state().connected_client()?;
+                let listing = client
+                    .read_dir(ROOT_BACKEND_ID, 0, 0)
+                    .await
+                    .map_err(|error| vox_rpc_errno("read_dir", error))?;
+                Ok::<_, i32>((listing, generation))
+            });
+
+            if let Ok((
+                ReadDirResult {
+                    entries, error: 0, ..
+                },
+                generation,
+            )) = result
+            {
+                for entry in entries {
+                    let local_item_id = self.local_item_id(generation, entry.item_id);
+                    let item = self.cached_backend_item(
+                        local_item_id,
+                        ROOT_LOCAL_ID,
+                        generation,
+                        &entry.name,
+                        &entry_attributes(&entry),
+                    );
+                    let next_cookie = root_entries.len() as u64 + 1;
+                    root_entries.push((item, next_cookie));
+                }
+            } else if let Ok((ReadDirResult { error, .. }, _)) = result {
+                return Err(posix_error(error));
+            } else if let Err(error) = result {
+                return Err(error);
+            }
+
+            for (index, (item, next_cookie)) in root_entries.iter().enumerate().skip(start) {
+                let attrs = item.attributes();
+                let next_cookie = if index + 1 < root_entries.len() {
+                    *next_cookie
+                } else {
+                    0
+                };
+                let packed = unsafe {
+                    packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
+                        &item.fs_name(),
+                        attrs.r#type(),
+                        FSItemID(item.item_id()),
+                        next_cookie,
+                        if attributes.is_some() {
+                            Some(attrs.as_ref())
+                        } else {
+                            None
+                        },
+                    )
+                };
+                if !packed {
+                    break;
+                }
+            }
+
+            return Ok(0);
+        }
+
+        let directory_backend_id = directory.backend_item_id();
+        let directory_generation = directory.generation();
+        let parent_local_id = directory.item_id();
+        let result = block_on_vfs(async move {
+            let (client, current_generation) = root_peer_state().connected_client()?;
+            if directory_generation != 0 && directory_generation != current_generation {
+                return Err(libc::ESTALE);
+            }
+            let listing = client
+                .read_dir(directory_backend_id, cookie, verifier)
+                .await
+                .map_err(|error| vox_rpc_errno("read_dir", error))?;
+            Ok::<_, i32>((listing, current_generation))
+        })?;
+
+        let (
+            ReadDirResult {
+                entries,
+                next_cookie,
+                verifier,
+                error,
+            },
+            generation,
+        ) = result;
+        if error != 0 {
+            return Err(posix_error(error));
+        }
+
+        for entry in entries {
+            let local_item_id = self.local_item_id(generation, entry.item_id);
+            let item = self.cached_backend_item(
+                local_item_id,
+                parent_local_id,
+                generation,
+                &entry.name,
+                &entry_attributes(&entry),
+            );
+            let attrs = item.attributes();
+            let packed = unsafe {
+                packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
+                    &item.fs_name(),
+                    attrs.r#type(),
+                    FSItemID(item.item_id()),
+                    next_cookie,
+                    if attributes.is_some() {
+                        Some(attrs.as_ref())
+                    } else {
+                        None
+                    },
+                )
+            };
+            if !packed {
+                break;
+            }
+        }
+
+        Ok(verifier)
+    }
+
+    fn read_item(
+        &self,
+        item: &RustItem,
+        offset: libc::off_t,
+        length: usize,
+        buffer: &FSMutableFileDataBuffer,
+    ) -> Result<usize, Retained<NSError>> {
+        if item.virtual_kind() == VirtualKind::StatusJson {
+            let data = root_peer_state().status_json_bytes();
+            let start = offset.max(0) as usize;
+            let start = start.min(data.len());
+            let end = (start + length).min(data.len());
+            let slice = &data[start..end];
+            let actual = slice.len().min(unsafe { buffer.length() });
+            if actual > 0 {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        slice.as_ptr(),
+                        buffer.mutableBytes().as_ptr().cast::<u8>(),
+                        actual,
+                    );
+                }
+            }
+            return Ok(actual);
+        }
+
+        let backend_item_id = item.backend_item_id();
+        let offset = offset.max(0) as u64;
+        let result = block_on_vfs(async move {
+            let (client, _) = root_peer_state().connected_client()?;
+            let result = client
+                .read(backend_item_id, offset, length as u64)
+                .await
+                .map_err(|error| vox_rpc_errno("read", error))?;
+            Ok::<_, i32>(result)
+        })?;
+
+        match result {
+            ReadResult { data, error: 0 } => {
+                let actual = data.len().min(unsafe { buffer.length() });
+                if actual > 0 {
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            buffer.mutableBytes().as_ptr().cast::<u8>(),
+                            actual,
+                        );
+                    }
+                }
+                log_event(
+                    "info",
+                    format!(
+                        "fskit-poc read item={} offset={offset} actual={actual}",
+                        item.item_id()
+                    ),
+                );
+                Ok(actual)
+            }
+            ReadResult { error, .. } => Err(posix_error(error)),
+        }
     }
 }
 
@@ -477,6 +1272,7 @@ define_class!(
             _resource: &FSResource,
             reply: &block2::DynBlock<dyn Fn(*mut FSProbeResult, *mut NSError)>,
         ) {
+            root_peer_state();
             log_event("info", "fskit-poc probeResource");
             let result = unsafe { FSProbeResult::usableButLimitedProbeResult() };
             reply.call((Retained::into_raw(result), ptr::null_mut()));
@@ -489,6 +1285,7 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &block2::DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
         ) {
+            root_peer_state();
             log_event("info", "fskit-poc loadResource");
             let file_system = self.as_super();
             let ready = unsafe { FSContainerStatus::ready() };
@@ -514,6 +1311,7 @@ define_class!(
 
         #[unsafe(method(didFinishLoading))]
         fn didFinishLoading(&self) {
+            root_peer_state();
             log_event("info", "fskit-poc didFinishLoading");
         }
     }
@@ -525,28 +1323,217 @@ impl RustUnaryFileSystem {
     }
 }
 
+#[derive(Clone)]
+struct RootPeerState {
+    app_group_root: PathBuf,
+    socket_path: PathBuf,
+    inner: Arc<Mutex<RootPeerSnapshot>>,
+}
+
+struct RootPeerSnapshot {
+    client: Option<VfsClient>,
+    connected: bool,
+    ever_connected: bool,
+    generation: u64,
+    disconnect_reason: Option<String>,
+}
+
+impl RootPeerState {
+    fn new() -> Self {
+        let app_group_root = real_home_dir()
+            .join("Library")
+            .join("Group Containers")
+            .join(APP_GROUP_ID);
+        let socket_path = app_group_root.join(SOCKET_NAME);
+        let _ = std::fs::create_dir_all(&app_group_root);
+        let state = Self {
+            app_group_root,
+            socket_path,
+            inner: Arc::new(Mutex::new(RootPeerSnapshot {
+                client: None,
+                connected: false,
+                ever_connected: false,
+                generation: 0,
+                disconnect_reason: Some("not connected".to_owned()),
+            })),
+        };
+        state.start_listener();
+        state
+    }
+
+    fn start_listener(&self) {
+        let state = self.clone();
+        runtime().spawn(async move {
+            state.run_listener().await;
+        });
+    }
+
+    async fn run_listener(self) {
+        let socket_path = self.socket_path_string();
+        let _ = std::fs::create_dir_all(&self.app_group_root);
+        let _ = vox::transport::local::remove_endpoint(&socket_path);
+        log_event(
+            "info",
+            format!("starting VFS root listener addr=local://{socket_path}"),
+        );
+        let listener = match vox::transport::local::LocalLinkAcceptor::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                self.record_disconnect(format!("listener_bind_error:{error}"));
+                log_event(
+                    "error",
+                    format!("failed to bind VFS root listener: {error}"),
+                );
+                return;
+            }
+        };
+
+        loop {
+            match listener.accept().await {
+                Ok(link) => {
+                    let state = self.clone();
+                    tokio::spawn(async move {
+                        state.accept_link(link).await;
+                    });
+                }
+                Err(error) => {
+                    self.record_disconnect(format!("listener_accept_error:{error}"));
+                    log_event("error", format!("VFS root listener accept failed: {error}"));
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn accept_link(self, link: vox::transport::local::LocalLink) {
+        let acceptor = acceptor_fn(
+            |request: &vox::ConnectionRequest,
+             connection: vox::PendingConnection|
+             -> Result<(), vox::Metadata<'static>> {
+                log_event(
+                    "info",
+                    format!("root listener request.service={}", request.service()),
+                );
+                connection.handle_with(());
+                Ok(())
+            },
+        );
+
+        match acceptor_on(link)
+            .on_connection(acceptor)
+            .establish::<VfsClient>()
+            .await
+        {
+            Ok(client) => {
+                let generation = self.record_connected(client.clone());
+                log_event(
+                    "info",
+                    format!("accepted VFS root peer generation={generation}"),
+                );
+                client.caller.closed().await;
+                self.record_closed(generation, "caller closed");
+            }
+            Err(error) => {
+                self.record_disconnect(format!("accept_error:{error}"));
+                log_event("error", format!("failed to accept VFS root peer: {error}"));
+            }
+        }
+    }
+
+    fn record_connected(&self, client: VfsClient) -> u64 {
+        let mut snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        snapshot.generation += 1;
+        snapshot.client = Some(client);
+        snapshot.connected = true;
+        snapshot.ever_connected = true;
+        snapshot.disconnect_reason = None;
+        snapshot.generation
+    }
+
+    fn record_closed(&self, generation: u64, reason: &str) {
+        let mut snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        if snapshot.generation != generation {
+            return;
+        }
+        snapshot.client = None;
+        snapshot.connected = false;
+        snapshot.disconnect_reason = Some(reason.to_owned());
+    }
+
+    fn record_disconnect(&self, reason: String) {
+        let mut snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        snapshot.client = None;
+        snapshot.connected = false;
+        snapshot.disconnect_reason = Some(reason);
+    }
+
+    fn connected_client(&self) -> Result<(VfsClient, u64), i32> {
+        let snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        match snapshot.client.clone() {
+            Some(client) => Ok((client, snapshot.generation)),
+            None => Err(libc::ENOTCONN),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned")
+            .generation
+    }
+
+    fn socket_path_string(&self) -> String {
+        self.socket_path.display().to_string()
+    }
+
+    fn status_json_bytes(&self) -> Vec<u8> {
+        let snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        let app_group_path = json_string(self.app_group_root.display().to_string());
+        let disconnect_reason = snapshot
+            .disconnect_reason
+            .as_deref()
+            .map(json_string)
+            .unwrap_or_else(|| "null".to_owned());
+        format!(
+            concat!(
+                "{{\n",
+                "  \"connected\": {},\n",
+                "  \"ever_connected\": {},\n",
+                "  \"app_group_path\": {},\n",
+                "  \"connected_at\": null,\n",
+                "  \"disconnected_at\": null,\n",
+                "  \"uptime_seconds\": null,\n",
+                "  \"disconnect_reason\": {}\n",
+                "}}\n"
+            ),
+            snapshot.connected, snapshot.ever_connected, app_group_path, disconnect_reason
+        )
+        .into_bytes()
+    }
+}
+
 pub fn create_file_system() -> Retained<FSUnaryFileSystem> {
+    root_peer_state();
     RustUnaryFileSystem::new().into_super()
 }
 
-fn fs_filename(name: &str) -> Retained<FSFileName> {
-    unsafe { FSFileName::initWithString(FSFileName::alloc(), &NSString::from_str(name)) }
-}
-
-fn fs_filename_bytes(name: &FSFileName) -> Vec<u8> {
-    unsafe { name.data() }.to_vec()
-}
-
-fn posix_error(code: i32) -> Retained<NSError> {
-    NSError::new(code as isize, unsafe { NSPOSIXErrorDomain })
-}
-
-fn as_rust_item(item: &FSItem) -> Option<&RustItem> {
-    let object: &AnyObject = item.as_ref();
-    object.downcast_ref::<RustItem>()
-}
-
 pub fn run_fskit_smoke() {
+    root_peer_state();
     log_event("info", "fskit-poc smoke begin");
 
     let fs = RustUnaryFileSystem::new();
@@ -554,23 +1541,7 @@ pub fn run_fskit_smoke() {
 
     let volume = RustVolume::new(fs.as_super());
     let root = volume.root_item();
-    let hour = volume.ivars().hour_file.clone();
-    let attrs = hour.attributes();
-
-    log_event(
-        "info",
-        format!(
-            "fskit-poc smoke volume={} root={} hour={} size={}",
-            VOLUME_NAME,
-            as_rust_item(&root)
-                .map(RustItem::item_id)
-                .unwrap_or_default(),
-            hour.item_id(),
-            unsafe { attrs.size() }
-        ),
-    );
-
-    let lookup_name = fs_filename(HOUR_FILE_NAME);
+    let lookup_name = fs_filename(VIXENFS_DIR_NAME);
     let looked_up_item = std::rc::Rc::new(std::cell::RefCell::new(None::<Retained<FSItem>>));
     let looked_up_name = std::rc::Rc::new(std::cell::RefCell::new(None::<Retained<FSFileName>>));
     let lookup_error = std::rc::Rc::new(std::cell::RefCell::new(None::<Retained<NSError>>));
@@ -601,24 +1572,133 @@ pub fn run_fskit_smoke() {
         );
     }
 
-    let looked_up_item_ref = looked_up_item.borrow();
-    let found = looked_up_item_ref
-        .as_ref()
-        .and_then(|item| as_rust_item(item))
-        .map(RustItem::item_id)
-        .unwrap_or_default();
     let found_name = looked_up_name
         .borrow()
         .as_ref()
-        .map(|name| String::from_utf8_lossy(&fs_filename_bytes(name)).into_owned())
+        .map(|name| fs_filename_string(name))
         .unwrap_or_default();
     let failed = lookup_error.borrow().is_some();
-
     log_event(
         "info",
         format!(
-            "fskit-poc smoke lookup failed={failed} found_item={} found_name={found_name}",
-            found
+            "fskit-poc smoke lookup failed={failed} found_name={found_name} status_len={}",
+            root_peer_state().status_json_bytes().len()
         ),
     );
+}
+
+fn root_peer_state() -> &'static RootPeerState {
+    ROOT_PEER_STATE.get_or_init(RootPeerState::new)
+}
+
+fn runtime() -> &'static Runtime {
+    TOKIO_RUNTIME.get_or_init(|| {
+        Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("xpc-poc-vox")
+            .build()
+            .expect("failed to create xpc-poc tokio runtime")
+    })
+}
+
+fn block_on_vfs<F, T>(future: F) -> Result<T, Retained<NSError>>
+where
+    F: std::future::Future<Output = Result<T, i32>>,
+{
+    runtime()
+        .handle()
+        .block_on(async move { future.await.map_err(posix_error) })
+}
+
+fn fs_filename(name: &str) -> Retained<FSFileName> {
+    unsafe { FSFileName::initWithString(FSFileName::alloc(), &NSString::from_str(name)) }
+}
+
+fn fs_filename_string(name: &FSFileName) -> String {
+    if let Some(string) = unsafe { name.string() } {
+        return string.to_string();
+    }
+    let data = unsafe { name.data() };
+    String::from_utf8_lossy(&data.to_vec()).into_owned()
+}
+
+fn posix_error(code: i32) -> Retained<NSError> {
+    NSError::new(code as isize, unsafe { NSPOSIXErrorDomain })
+}
+
+fn as_rust_item(item: &FSItem) -> Option<&RustItem> {
+    let object: &AnyObject = item.as_ref();
+    object.downcast_ref::<RustItem>()
+}
+
+fn fs_item_type(item_type: VfsItemType) -> FSItemType {
+    match item_type {
+        VfsItemType::File => FSItemType::File,
+        VfsItemType::Directory => FSItemType::Directory,
+        VfsItemType::Symlink => FSItemType::Symlink,
+    }
+}
+
+fn fs_item_attributes(
+    item_id: u64,
+    parent_id: u64,
+    item_type: FSItemType,
+    size: u64,
+    _modified_time: u64,
+    _created_time: u64,
+    mode: u32,
+) -> Retained<FSItemAttributes> {
+    let attrs = unsafe { FSItemAttributes::new() };
+    unsafe {
+        attrs.setType(item_type);
+        attrs.setMode(mode);
+        attrs.setFileID(FSItemID(item_id));
+        attrs.setParentID(FSItemID(parent_id));
+        attrs.setLinkCount(1);
+        attrs.setSize(size);
+        attrs.setAllocSize(size);
+        attrs.setUid(libc::getuid());
+        attrs.setGid(libc::getgid());
+    }
+    attrs
+}
+
+fn vox_rpc_errno(context: &str, error: impl Display) -> i32 {
+    log_event("error", format!("vox rpc {context} failed: {error}"));
+    libc::EIO
+}
+
+fn entry_attributes(entry: &DirEntry) -> VfsItemAttributes {
+    VfsItemAttributes {
+        item_id: entry.item_id,
+        item_type: entry.item_type,
+        size: entry.size,
+        modified_time: entry.modified_time,
+        created_time: entry.created_time,
+        mode: entry.mode,
+    }
+}
+
+fn json_string(value: impl AsRef<str>) -> String {
+    let mut out = String::from("\"");
+    for ch in value.as_ref().chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn unix_time() -> u64 {
+    let mut now = 0;
+    unsafe {
+        libc::time(&mut now);
+    }
+    now as u64
 }
