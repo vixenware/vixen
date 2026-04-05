@@ -28,6 +28,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-fs-kit = "0.3.2"
 tokio.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2.3"
+tracing-subscriber.workspace = true
 vox.workspace = true
 vx-services.workspace = true
 xpc-connection-sys = "0.1.1"

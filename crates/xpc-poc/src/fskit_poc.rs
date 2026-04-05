@@ -20,7 +20,7 @@ use objc2_fs_kit::{
     FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities,
 };
 use tokio::runtime::{Builder, Runtime};
-use vox::{acceptor_fn, acceptor_on};
+use vox::{ConnectionAcceptor, ConnectionRequest, Metadata, PendingConnection, acceptor_on};
 use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes as VfsItemAttributes,
     ItemType as VfsItemType, LookupResult, ReadDirResult, ReadResult, SetAttributesParams,
@@ -1389,6 +1389,7 @@ impl RootPeerState {
         };
 
         loop {
+            log_event("debug", "waiting for VFS root peer");
             match listener.accept().await {
                 Ok(link) => {
                     let state = self.clone();
@@ -1406,32 +1407,16 @@ impl RootPeerState {
     }
 
     async fn accept_link(self, link: vox::transport::local::LocalLink) {
-        let acceptor = acceptor_fn(
-            |request: &vox::ConnectionRequest,
-             connection: vox::PendingConnection|
-             -> Result<(), vox::Metadata<'static>> {
-                log_event(
-                    "info",
-                    format!("root listener request.service={}", request.service()),
-                );
-                connection.handle_with(());
-                Ok(())
-            },
-        );
-
         match acceptor_on(link)
-            .on_connection(acceptor)
-            .establish::<VfsClient>()
+            .on_connection(RootPeerAcceptor {
+                state: self.clone(),
+            })
+            .establish::<vox::NoopClient>()
             .await
         {
             Ok(client) => {
-                let generation = self.record_connected(client.clone());
-                log_event(
-                    "info",
-                    format!("accepted VFS root peer generation={generation}"),
-                );
+                log_event("info", "VFS root peer session established");
                 client.caller.closed().await;
-                self.record_closed(generation, "caller closed");
             }
             Err(error) => {
                 self.record_disconnect(format!("accept_error:{error}"));
@@ -1524,6 +1509,36 @@ impl RootPeerState {
             snapshot.connected, snapshot.ever_connected, app_group_path, disconnect_reason
         )
         .into_bytes()
+    }
+}
+
+#[derive(Clone)]
+struct RootPeerAcceptor {
+    state: RootPeerState,
+}
+
+impl ConnectionAcceptor for RootPeerAcceptor {
+    fn accept(
+        &self,
+        request: &ConnectionRequest,
+        connection: PendingConnection,
+    ) -> Result<(), Metadata<'static>> {
+        log_event(
+            "info",
+            format!("root listener request.service={}", request.service()),
+        );
+        let client: VfsClient = connection.handle_with_client(());
+        let generation = self.state.record_connected(client.clone());
+        log_event(
+            "info",
+            format!("accepted VFS root peer generation={generation}"),
+        );
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            client.caller.closed().await;
+            state.record_closed(generation, "caller closed");
+        });
+        Ok(())
     }
 }
 
