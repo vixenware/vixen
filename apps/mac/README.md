@@ -73,6 +73,78 @@ The release flow:
    - `open /Applications/Vixen.app`
 3. In macOS settings, enable `Vixen` under File System Extensions.
 
+## Extension registration model
+
+There are three moving parts in local development:
+
+- the app bundle path that contains `VixenFS.appex`
+- PlugInKit's current registration for `eu.bearcove.vixenfs`
+- the `fskit_agent` / `extensionkitservice` processes that try to launch the registered extension
+
+### What actually registers the extension
+
+- `Vixen.app` calls `pluginkit -a <appex-path>` on launch from [VixenApp.swift](xcode/Vixen/VixenApp.swift).
+- Our explicit reload helper in [reload-vixen-fs-extension.sh](scripts/reload-vixen-fs-extension.sh) does:
+  - `pluginkit -r <appex-path>`
+  - `pluginkit -a <appex-path>`
+  - `lsregister -f -R -trusted <app-bundle>`
+- `xcodebuild` itself also re-registers the built app with LaunchServices at the end of a build:
+  - `RegisterWithLaunchServices ... lsregister -f -R -trusted .../Vixen.app`
+
+That last point matters: a GUI/Xcode build under the global DerivedData folder can silently replace the active registration, even if you expected `/Applications/Vixen.app` or the repo-local `apps/mac/xcode/build/DerivedData/...` copy to be the one in use.
+
+### Which copy wins
+
+Ask PlugInKit, not your memory:
+
+- `pluginkit -mAvvv -i eu.bearcove.vixenfs`
+
+That prints the currently registered path and UUID for the active FSKit extension. During debugging, this is the source of truth.
+
+Typical paths we have seen:
+
+- repo-local build: `apps/mac/xcode/build/DerivedData/Build/Products/<Config>/Vixen.app/...`
+- global Xcode DerivedData: `~/Library/Developer/Xcode/DerivedData/.../Vixen.app/...`
+- installed app: `/Applications/Vixen.app/...`
+
+If the path is not the one you think you are testing, you are debugging the wrong binary.
+
+### Failure mode: stale extension UUIDs
+
+The easiest way to get confused is:
+
+1. build one copy of the app
+2. let PlugInKit register UUID `A`
+3. build or register another copy with the same bundle id
+4. PlugInKit now knows UUID `B`
+5. `fskit_agent` or `extensionkitservice` still tries to launch stale UUID `A`
+
+When that happens, launch fails before the extension process becomes useful. The logs look like:
+
+- `Failed to initialize _EXExtensionIdentity`
+- `Failed to find extension: <old-uuid>`
+- `Exception caught during decoding of received selector prepareWithLaunchConfiguration:reply:`
+- mount fails with `com.apple.extensionKit.errorDomain error 2`
+
+This is not an in-extension bug. It means the host side is still holding an older identity than the one PlugInKit currently advertises.
+
+### Practical reset procedure
+
+If registration gets poisoned, first decide which app copy should win, then reset to that copy only.
+
+For an installed app:
+
+- `just apps/mac/reload-fs-extension-registration /Applications/Vixen.app`
+
+For a specific build product:
+
+- `pluginkit -r <old-appex-path>`
+- `pluginkit -a <new-appex-path>`
+- `lsregister -f -R -trusted <new-app-bundle>`
+- `pluginkit -mAvvv -i eu.bearcove.vixenfs`
+
+Do not trust a successful build alone. Always verify the active registration path afterward.
+
 ## Runtime expectations from `vx-vfs`
 
 `vx-vfs` expects:
