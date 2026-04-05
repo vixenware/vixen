@@ -499,4 +499,37 @@ unsafe impl FSVolumeOperations for RustVolume {
             Err(error) => reply.call((0, Retained::into_raw(error))),
         }
     }
+
+    unsafe fn activateWithOptions_replyHandler(
+        &self,
+        _options: &FSTaskOptions,
+        reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut NSError)>,
+    ) {
+        log_event("info", "vixen-fskit activateWithOptions");
+        match self.get_cached_item(ROOT_LOCAL_ID) {
+            Some(root) => {
+                let root_fs_item: Retained<FSItem> = unsafe { Retained::cast_unchecked(root) };
+                reply.call((Retained::into_raw(root_fs_item), ptr::null_mut()));
+            }
+            None => {
+                log_event(
+                    "error",
+                    "vixen-fskit activateWithOptions: root item not found",
+                );
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::into_raw(posix_error(libc::ENOENT)),
+                ));
+            }
+        }
+    }
+
+    unsafe fn deactivateWithOptions_replyHandler(
+        &self,
+        _options: FSDeactivateOptions,
+        reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+    ) {
+        log_event("info", "vixen-fskit deactivateWithOptions");
+        reply.call((ptr::null_mut(),));
+    }
 }

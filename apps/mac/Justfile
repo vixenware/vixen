@@ -13,19 +13,11 @@ generate:
     plutil -lint xcode/Vixen/Vixen.entitlements
 
 # Build Vixen.app in Release configuration.
-build: generate
+build $profile:
     cd xcode && xcodebuild \
       -project Vixen.xcodeproj \
       -scheme Vixen \
-      -configuration Release \
-      -sdk macosx \
-      -derivedDataPath build/DerivedData \
-      -clonedSourcePackagesDirPath build/SourcePackages \
-      -resolvePackageDependencies
-    cd xcode && xcodebuild \
-      -project Vixen.xcodeproj \
-      -scheme Vixen \
-      -configuration Release \
+      -configuration $profile \
       -sdk macosx \
       CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
       -derivedDataPath build/DerivedData \
@@ -33,13 +25,12 @@ build: generate
       build
 
 # Install Vixen.app into /Applications and launch once.
-install: build
+install $profile:
+    just build $profile
     rm -rf /Applications/Vixen.app
-    ditto xcode/build/DerivedData/Build/Products/Release/Vixen.app /Applications/Vixen.app
-    scripts/unregister-all.js
-    open /Applications/Vixen.app
-    @echo "Installed /Applications/Vixen.app"
-    @echo "Follow the instructions in Vixen.app to finish setup."
+    ditto xcode/build/DerivedData/Build/Products/$profile/Vixen.app /Applications/Vixen.app
+    scripts/fix-registration.js
+    # open /Applications/Vixen.app/
 
 # Build, sign, and package a release DMG for review.
 

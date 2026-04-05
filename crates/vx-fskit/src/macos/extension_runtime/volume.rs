@@ -9,11 +9,11 @@ use objc2::runtime::Bool;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSData, NSError, NSObjectProtocol, NSString, NSUUID};
 use objc2_fs_kit::{
-    FSAccessMask, FSContainerStatus, FSDirectoryCookie, FSDirectoryCookieInitial,
-    FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName, FSFileSystemBase, FSItem,
-    FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest, FSItemID, FSItemType,
-    FSMutableFileDataBuffer, FSSetXattrPolicy, FSStatFSResult, FSSyncFlags, FSTaskOptions,
-    FSUnaryFileSystem, FSVolume, FSVolumeAccessCheckOperations, FSVolumeIdentifier,
+    FSAccessMask, FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie,
+    FSDirectoryCookieInitial, FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName,
+    FSFileSystemBase, FSItem, FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest,
+    FSItemID, FSItemType, FSMutableFileDataBuffer, FSSetXattrPolicy, FSStatFSResult, FSSyncFlags,
+    FSTaskOptions, FSUnaryFileSystem, FSVolume, FSVolumeAccessCheckOperations, FSVolumeIdentifier,
     FSVolumeOpenCloseOperations, FSVolumeOpenModes, FSVolumeOperations, FSVolumePathConfOperations,
     FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities, FSVolumeXattrOperations,
 };

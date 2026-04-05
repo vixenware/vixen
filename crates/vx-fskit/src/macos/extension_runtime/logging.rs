@@ -19,7 +19,7 @@ pub(super) fn init_logging() {
         let filter = EnvFilter::new("trace");
         let (log_dir, file_name) = log_destination();
         let _ = create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::hourly(log_dir, file_name);
+        let file_appender = tracing_appender::rolling::weekly(log_dir, file_name);
         let (writer, guard) = tracing_appender::non_blocking(file_appender);
         let _ = TRACING_GUARD.set(guard);
         let fmt_layer = tracing_subscriber::fmt::layer()

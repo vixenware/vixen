@@ -42,12 +42,17 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &block2::DynBlock<dyn Fn(*mut FSVolume, *mut objc2_foundation::NSError)>,
         ) {
+            tracing::info!("in loadResource");
             root_peer_state();
-            log_event("info", "vixen-fskit loadResource");
+            tracing::info!("calling as_super()");
             let file_system = self.as_super();
+            tracing::info!("calling ready()");
             let ready = unsafe { FSContainerStatus::ready() };
+            tracing::info!("calling setContainerStatus()");
             unsafe { FSFileSystemBase::setContainerStatus(file_system, &ready) };
+            tracing::info!("Making new RustVolume");
             let volume: Retained<FSVolume> = RustVolume::new(file_system).into_super();
+            tracing::info!("reply.call()");
             reply.call((Retained::into_raw(volume), ptr::null_mut()));
         }
 

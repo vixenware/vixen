@@ -59,7 +59,9 @@ struct VixenApp: App {
                 NSLog("Current VixenFS registrations: %@", snapshot.paths.joined(separator: ", "))
             }
             if !snapshot.uuids.isEmpty {
-                NSLog("Current VixenFS registration UUIDs: %@", snapshot.uuids.joined(separator: ", "))
+                NSLog(
+                    "Current VixenFS registration UUIDs: %@", snapshot.uuids.joined(separator: ", ")
+                )
             }
             for stalePath in snapshot.paths where stalePath != desiredPath {
                 NSLog("Unregistering stale VixenFS registration: %@", stalePath)
@@ -120,7 +122,9 @@ struct VixenApp: App {
             try process.run()
             process.waitUntilExit()
         } catch {
-            NSLog("Failed to run %@ %@: %@", path, arguments.joined(separator: " "), error.localizedDescription)
+            NSLog(
+                "Failed to run %@ %@: %@", path, arguments.joined(separator: " "),
+                error.localizedDescription)
             return nil
         }
 
@@ -175,7 +179,8 @@ private struct RegistrationSnapshot {
     private static func extractUUIDs(from rawOutput: String) -> [String] {
         let nsRange = NSRange(rawOutput.startIndex..<rawOutput.endIndex, in: rawOutput)
         let regex = try? NSRegularExpression(
-            pattern: #"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"#
+            pattern:
+                #"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"#
         )
         let matches = regex?.matches(in: rawOutput, range: nsRange) ?? []
         var seen = Set<String>()

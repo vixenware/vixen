@@ -2,7 +2,9 @@ use super::*;
 
 impl RustVolume {
     pub(crate) fn new(file_system: &FSUnaryFileSystem) -> Retained<Self> {
+        tracing::info!("Making new volume");
         let uuid = NSUUID::new();
+        tracing::info!("Initializing with UUID");
         let volume_id =
             unsafe { FSVolumeIdentifier::initWithUUID(FSVolumeIdentifier::alloc(), &uuid) };
         let volume_name = fs_filename(VOLUME_NAME);
@@ -10,11 +12,13 @@ impl RustVolume {
         let root = RustItem::root(generation);
         let meta_dir = RustItem::meta_dir();
         let status = RustItem::status_json(root_peer_state().status_json_bytes().len());
+        tracing::info!("Inserting root/meta_dir/status IDs");
         let mut items = HashMap::new();
         items.insert(root.item_id(), root);
         items.insert(meta_dir.item_id(), meta_dir);
         items.insert(status.item_id(), status);
 
+        tracing::info!("Allocating this/settin ivars");
         let this = Self::alloc().set_ivars(VolumeIvars {
             file_system: unsafe {
                 Retained::retain(file_system as *const FSUnaryFileSystem as *mut FSUnaryFileSystem)
@@ -26,7 +30,12 @@ impl RustVolume {
                 next_local_id: ROUTED_ITEM_ID_START,
             }),
         });
-        unsafe { msg_send![super(this), initWithVolumeID: &*volume_id, volumeName: &*volume_name] }
+        tracing::info!("Calling initWithVolumeID");
+        let res = unsafe {
+            msg_send![super(this), initWithVolumeID: &*volume_id, volumeName: &*volume_name]
+        };
+        tracing::info!("Calling initWithVolumeID... success!");
+        res
     }
 
     pub(crate) fn get_cached_item(&self, item_id: u64) -> Option<Retained<RustItem>> {
