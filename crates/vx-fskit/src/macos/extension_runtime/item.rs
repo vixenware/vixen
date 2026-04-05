@@ -22,7 +22,8 @@ pub(super) enum VirtualKind {
     None,
 }
 
-struct CachedAttrs {
+struct CachedState {
+    name: Retained<FSFileName>,
     parent_local_id: u64,
     item_type: FSItemType,
     size: u64,
@@ -35,9 +36,8 @@ pub(super) struct ItemIvars {
     local_item_id: u64,
     backend_item_id: u64,
     connection_generation: u64,
-    name: Retained<FSFileName>,
     virtual_kind: VirtualKind,
-    attrs: Mutex<CachedAttrs>,
+    state: Mutex<CachedState>,
 }
 
 define_class!(
@@ -66,9 +66,9 @@ impl RustItem {
             local_item_id,
             backend_item_id,
             connection_generation,
-            name: fs_filename(name),
             virtual_kind,
-            attrs: Mutex::new(CachedAttrs {
+            state: Mutex::new(CachedState {
+                name: fs_filename(name),
                 parent_local_id,
                 item_type,
                 size,
@@ -169,78 +169,99 @@ impl RustItem {
 
     pub(super) fn parent_local_id(&self) -> u64 {
         self.ivars()
-            .attrs
+            .state
             .lock()
-            .expect("item attrs mutex poisoned")
+            .expect("item state mutex poisoned")
             .parent_local_id
     }
 
     pub(super) fn fs_name(&self) -> Retained<FSFileName> {
-        self.ivars().name.clone()
+        self.ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned")
+            .name
+            .clone()
     }
 
     pub(super) fn attributes_for_request(
         &self,
         request: Option<&FSItemGetAttributesRequest>,
     ) -> Retained<FSItemAttributes> {
-        let attrs = self
+        let state = self
             .ivars()
-            .attrs
+            .state
             .lock()
-            .expect("item attrs mutex poisoned");
+            .expect("item state mutex poisoned");
         fs_item_attributes(
             request,
             self.item_id(),
-            attrs.parent_local_id,
-            attrs.item_type,
-            attrs.size,
-            attrs.modified_time,
-            attrs.created_time,
-            attrs.mode,
+            state.parent_local_id,
+            state.item_type,
+            state.size,
+            state.modified_time,
+            state.created_time,
+            state.mode,
         )
     }
 
-    pub(super) fn update_from_backend(&self, parent_local_id: u64, attrs: &VfsItemAttributes) {
-        let mut cached = self
+    pub(super) fn update_from_backend(
+        &self,
+        parent_local_id: u64,
+        name: &str,
+        attrs: &VfsItemAttributes,
+    ) {
+        let mut state = self
             .ivars()
-            .attrs
+            .state
             .lock()
-            .expect("item attrs mutex poisoned");
-        cached.parent_local_id = parent_local_id;
-        cached.item_type = fs_item_type(attrs.item_type);
-        cached.size = attrs.size;
-        cached.modified_time = attrs.modified_time;
-        cached.created_time = attrs.created_time;
-        cached.mode = attrs.mode;
+            .expect("item state mutex poisoned");
+        state.name = fs_filename(name);
+        state.parent_local_id = parent_local_id;
+        state.item_type = fs_item_type(attrs.item_type);
+        state.size = attrs.size;
+        state.modified_time = attrs.modified_time;
+        state.created_time = attrs.created_time;
+        state.mode = attrs.mode;
+    }
+
+    pub(super) fn update_name_and_parent(&self, parent_local_id: u64, name: &str) {
+        let mut state = self
+            .ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned");
+        state.name = fs_filename(name);
+        state.parent_local_id = parent_local_id;
     }
 
     pub(super) fn update_status_len(&self, len: usize) {
-        let mut cached = self
+        let mut state = self
             .ivars()
-            .attrs
+            .state
             .lock()
-            .expect("item attrs mutex poisoned");
-        cached.size = len as u64;
-        cached.modified_time = unix_time();
+            .expect("item state mutex poisoned");
+        state.size = len as u64;
+        state.modified_time = unix_time();
     }
 
     pub(super) fn debug_summary(&self) -> String {
-        let cached = self
+        let state = self
             .ivars()
-            .attrs
+            .state
             .lock()
-            .expect("item attrs mutex poisoned");
+            .expect("item state mutex poisoned");
         format!(
             "local={} backend={} parent={} gen={} name={} kind={} type={:?} mode={:#o} size={}",
             self.ivars().local_item_id,
             self.ivars().backend_item_id,
-            cached.parent_local_id,
+            state.parent_local_id,
             self.ivars().connection_generation,
-            fs_filename_string(&self.ivars().name),
+            fs_filename_string(&state.name),
             self.virtual_kind().label(),
-            cached.item_type,
-            cached.mode,
-            cached.size
+            state.item_type,
+            state.mode,
+            state.size
         )
     }
 }

@@ -29,12 +29,6 @@ impl RustVolume {
         unsafe { msg_send![super(this), initWithVolumeID: &*volume_id, volumeName: &*volume_name] }
     }
 
-    pub(crate) fn root_item(&self) -> Retained<FSItem> {
-        self.get_cached_item(ROOT_LOCAL_ID)
-            .expect("root item should exist")
-            .into_super()
-    }
-
     pub(crate) fn get_cached_item(&self, item_id: u64) -> Option<Retained<RustItem>> {
         self.ivars()
             .items
@@ -57,11 +51,18 @@ impl RustVolume {
         if item_id == ROOT_LOCAL_ID || item_id == VIXENFS_DIR_ID || item_id == STATUS_JSON_ID {
             return;
         }
+
         self.ivars()
             .items
             .lock()
             .expect("items mutex poisoned")
             .remove(&item_id);
+        self.ivars()
+            .routed
+            .lock()
+            .expect("routed items mutex poisoned")
+            .by_key
+            .retain(|_, local_id| *local_id != item_id);
     }
 
     pub(crate) fn local_item_id(&self, generation: u64, backend_item_id: u64) -> u64 {
@@ -76,11 +77,25 @@ impl RustVolume {
             return ROOT_LOCAL_ID;
         }
 
+        let current_generation = root_peer_state().generation();
+        let live_local_ids = self
+            .ivars()
+            .items
+            .lock()
+            .expect("items mutex poisoned")
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+
         let mut routed = self
             .ivars()
             .routed
             .lock()
             .expect("routed items mutex poisoned");
+        routed.by_key.retain(|key, local_id| {
+            key.connection_generation == current_generation && live_local_ids.contains(local_id)
+        });
+
         let key = RoutedItemKey {
             connection_generation: generation,
             backend_item_id,
@@ -95,10 +110,11 @@ impl RustVolume {
             );
             return *existing;
         }
+
         let local_item_id = loop {
             let candidate = routed.next_local_id;
             routed.next_local_id += 1;
-            if self.get_cached_item(candidate).is_none() {
+            if !live_local_ids.contains(&candidate) {
                 break candidate;
             }
             log_event(
@@ -138,7 +154,7 @@ impl RustVolume {
                     item.debug_summary()
                 ),
             );
-            item.update_from_backend(parent_local_id, attrs);
+            item.update_from_backend(parent_local_id, name, attrs);
             log_event(
                 "debug",
                 format!(
@@ -150,6 +166,7 @@ impl RustVolume {
             );
             return item;
         }
+
         let item = RustItem::from_backend(local_item_id, parent_local_id, generation, name, attrs);
         log_event(
             "debug",
@@ -160,6 +177,36 @@ impl RustVolume {
             ),
         );
         self.cache_item(item)
+    }
+
+    pub(crate) fn connected_client_for_item(
+        &self,
+        item: &RustItem,
+    ) -> Result<(vx_services::VfsClient, u64), Retained<NSError>> {
+        let (client, generation) = root_peer_state().connected_client().map_err(posix_error)?;
+        if matches!(item.virtual_kind(), VirtualKind::Root | VirtualKind::None)
+            && item.generation() != 0
+            && item.generation() != generation
+        {
+            log_event(
+                "warn",
+                format!(
+                    "vixen-fskit stale item generation item_gen={} live_gen={} {}",
+                    item.generation(),
+                    generation,
+                    item.debug_summary()
+                ),
+            );
+            return Err(posix_error(libc::ESTALE));
+        }
+        Ok((client, generation))
+    }
+
+    pub(crate) fn directory_allows_mutation(&self, directory: &RustItem) -> bool {
+        matches!(
+            directory.virtual_kind(),
+            VirtualKind::Root | VirtualKind::None
+        )
     }
 
     pub(crate) fn attributes_for_item(
@@ -191,12 +238,9 @@ impl RustVolume {
     ) -> Result<Retained<FSItemAttributes>, Retained<NSError>> {
         let backend_item_id = item.backend_item_id();
         let parent_local_id = item.parent_local_id();
-        let generation = item.generation();
+        let item_name = fs_filename_string(&item.fs_name());
+        let (client, current_generation) = self.connected_client_for_item(item)?;
         let result = block_on_vfs(async move {
-            let (client, current_generation) = root_peer_state().connected_client()?;
-            if generation != 0 && generation != current_generation {
-                return Err(libc::ESTALE);
-            }
             let result = client
                 .get_attributes(backend_item_id)
                 .await
@@ -204,7 +248,7 @@ impl RustVolume {
             Ok::<_, i32>((result, current_generation))
         })?;
 
-        let (result, current_generation) = result;
+        let (result, _) = result;
         if result.error != 0 {
             return Err(posix_error(result.error));
         }
@@ -212,11 +256,10 @@ impl RustVolume {
         log_event(
             "debug",
             format!(
-                "vixen-fskit refresh_backend_item local={} backend={} generation={} current_generation={} result_backend={} type={:?} mode={:#o} size={}",
+                "vixen-fskit refresh_backend_item local={} backend={} generation={} result_backend={} type={:?} mode={:#o} size={}",
                 item.item_id(),
                 backend_item_id,
-                generation,
-                current_generation,
+                item.generation(),
                 result.attrs.item_id,
                 result.attrs.item_type,
                 result.attrs.mode,
@@ -224,10 +267,7 @@ impl RustVolume {
             ),
         );
 
-        item.update_from_backend(parent_local_id, &result.attrs);
-        if generation != 0 && current_generation != generation {
-            return Err(posix_error(libc::ESTALE));
-        }
+        item.update_from_backend(parent_local_id, &item_name, &result.attrs);
         Ok(item.attributes_for_request(request))
     }
 
@@ -278,8 +318,8 @@ impl RustVolume {
         let parent_backend_id = directory.backend_item_id();
         let parent_local_id = directory.item_id();
         let requested_name_for_rpc = requested_name.clone();
+        let (client, generation) = self.connected_client_for_item(directory)?;
         let result = block_on_vfs(async move {
-            let (client, generation) = root_peer_state().connected_client()?;
             let lookup = client
                 .lookup(parent_backend_id, requested_name_for_rpc)
                 .await
@@ -376,66 +416,95 @@ impl RustVolume {
         }
 
         if directory.item_id() == ROOT_LOCAL_ID {
-            let start = if cookie == unsafe { FSDirectoryCookieInitial } {
-                0
-            } else {
-                cookie.saturating_sub(1) as usize
-            };
-
-            let mut root_entries = Vec::<(Retained<RustItem>, u64)>::new();
+            let initial = unsafe { FSDirectoryCookieInitial };
             let meta_dir = self
                 .get_cached_item(VIXENFS_DIR_ID)
                 .expect(".vixenfs dir should be cached");
-            root_entries.push((meta_dir, 1));
+            let backend_cookie = if cookie == initial || cookie == 1 {
+                0
+            } else {
+                cookie.saturating_sub(1)
+            };
 
-            let result = block_on_vfs(async move {
-                let (client, generation) = root_peer_state().connected_client()?;
-                let listing = client
-                    .read_dir(ROOT_BACKEND_ID, 0, 0)
-                    .await
-                    .map_err(|error| vox_rpc_errno("read_dir", error))?;
-                Ok::<_, i32>((listing, generation))
-            });
+            let mut backend_entries = Vec::<(Retained<RustItem>, FSDirectoryCookie)>::new();
+            let mut next_verifier = verifier;
+            let backend_result = root_peer_state()
+                .connected_client()
+                .map_err(posix_error)
+                .and_then(|(client, generation)| {
+                    block_on_vfs(async move {
+                        let listing = client
+                            .read_dir(ROOT_BACKEND_ID, backend_cookie, verifier)
+                            .await
+                            .map_err(|error| vox_rpc_errno("read_dir", error))?;
+                        Ok::<_, i32>((listing, generation))
+                    })
+                });
 
-            if let Ok((
-                ReadDirResult {
-                    entries, error: 0, ..
-                },
-                generation,
-            )) = result
-            {
-                for entry in entries {
-                    let local_item_id = self.local_item_id(generation, entry.item_id);
-                    let item = self.cached_backend_item(
-                        local_item_id,
-                        ROOT_LOCAL_ID,
-                        generation,
-                        &entry.name,
-                        &entry_attributes(&entry),
-                    );
-                    log_event(
-                        "debug",
-                        format!(
-                            "vixen-fskit enumerate root entry local={} backend={} name={} type={:?} size={}",
-                            local_item_id, entry.item_id, entry.name, entry.item_type, entry.size
-                        ),
-                    );
-                    let next_cookie = root_entries.len() as u64 + 1;
-                    root_entries.push((item, next_cookie));
+            let backend_error = match backend_result {
+                Ok((
+                    ReadDirResult {
+                        entries,
+                        next_cookie,
+                        verifier,
+                        error: 0,
+                    },
+                    generation,
+                )) => {
+                    next_verifier = verifier;
+                    let total_entries = entries.len();
+                    for (index, entry) in entries.into_iter().enumerate() {
+                        let local_item_id = self.local_item_id(generation, entry.item_id);
+                        let item = self.cached_backend_item(
+                            local_item_id,
+                            ROOT_LOCAL_ID,
+                            generation,
+                            &entry.name,
+                            &entry_attributes(&entry),
+                        );
+                        let entry_cookie = if index + 1 == total_entries && next_cookie == 0 {
+                            0
+                        } else {
+                            backend_cookie + index as u64 + 2
+                        };
+                        backend_entries.push((item, entry_cookie));
+                    }
+                    None
                 }
-            } else if let Ok((ReadDirResult { error, .. }, _)) = result {
-                return Err(posix_error(error));
-            } else if let Err(error) = result {
+                Ok((ReadDirResult { error, .. }, _)) => Some(posix_error(error)),
+                Err(error) => Some(error),
+            };
+
+            if cookie == initial {
+                let attrs = meta_dir.attributes_for_request(attributes);
+                let next_cookie = if backend_entries.is_empty() { 0 } else { 1 };
+                let packed = unsafe {
+                    packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
+                        &meta_dir.fs_name(),
+                        attrs.r#type(),
+                        FSItemID(meta_dir.item_id()),
+                        next_cookie,
+                        if attributes.is_some() {
+                            Some(attrs.as_ref())
+                        } else {
+                            None
+                        },
+                    )
+                };
+                if !packed {
+                    return Ok(next_verifier);
+                }
+            }
+
+            if let Some(error) = backend_error {
+                if cookie == initial || cookie == 1 {
+                    return Ok(next_verifier);
+                }
                 return Err(error);
             }
 
-            for (index, (item, next_cookie)) in root_entries.iter().enumerate().skip(start) {
+            for (item, next_cookie) in backend_entries {
                 let attrs = item.attributes_for_request(attributes);
-                let next_cookie = if index + 1 < root_entries.len() {
-                    *next_cookie
-                } else {
-                    0
-                };
                 log_event(
                     "debug",
                     format!(
@@ -462,22 +531,18 @@ impl RustVolume {
                 }
             }
 
-            return Ok(0);
+            return Ok(next_verifier);
         }
 
         let directory_backend_id = directory.backend_item_id();
-        let directory_generation = directory.generation();
         let parent_local_id = directory.item_id();
+        let (client, generation) = self.connected_client_for_item(directory)?;
         let result = block_on_vfs(async move {
-            let (client, current_generation) = root_peer_state().connected_client()?;
-            if directory_generation != 0 && directory_generation != current_generation {
-                return Err(libc::ESTALE);
-            }
             let listing = client
                 .read_dir(directory_backend_id, cookie, verifier)
                 .await
                 .map_err(|error| vox_rpc_errno("read_dir", error))?;
-            Ok::<_, i32>((listing, current_generation))
+            Ok::<_, i32>((listing, generation))
         })?;
 
         let (
@@ -493,7 +558,8 @@ impl RustVolume {
             return Err(posix_error(error));
         }
 
-        for entry in entries {
+        let total_entries = entries.len();
+        for (index, entry) in entries.into_iter().enumerate() {
             let local_item_id = self.local_item_id(generation, entry.item_id);
             let item = self.cached_backend_item(
                 local_item_id,
@@ -510,12 +576,17 @@ impl RustVolume {
                     local_item_id, entry.item_id, entry.name, entry.item_type, entry.size
                 ),
             );
+            let entry_cookie = if index + 1 == total_entries && next_cookie == 0 {
+                0
+            } else {
+                cookie + index as u64 + 1
+            };
             let packed = unsafe {
                 packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
                     &item.fs_name(),
                     attrs.r#type(),
                     FSItemID(item.item_id()),
-                    next_cookie,
+                    entry_cookie,
                     if attributes.is_some() {
                         Some(attrs.as_ref())
                     } else {
@@ -575,8 +646,8 @@ impl RustVolume {
 
         let backend_item_id = item.backend_item_id();
         let offset = offset.max(0) as u64;
+        let (client, _) = self.connected_client_for_item(item)?;
         let result = block_on_vfs(async move {
-            let (client, _) = root_peer_state().connected_client()?;
             let result = client
                 .read(backend_item_id, offset, length as u64)
                 .await
