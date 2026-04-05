@@ -76,6 +76,24 @@ struct rebindings_entry {
 
 static struct rebindings_entry *vxn_rebindings_head;
 
+struct vxn_class_imp_entry {
+    Class cls;
+    IMP imp;
+    struct vxn_class_imp_entry *next;
+};
+
+struct vxn_seen_class_entry {
+    Class cls;
+    struct vxn_seen_class_entry *next;
+};
+
+struct vxn_method_imp_entry {
+    Class cls;
+    SEL sel;
+    IMP imp;
+    struct vxn_method_imp_entry *next;
+};
+
 static vxn_set_event_handler_fn vxn_original_set_event_handler;
 static vxn_activate_fn vxn_original_activate;
 static vxn_resume_fn vxn_original_resume;
@@ -99,7 +117,13 @@ static IMP vxn_nsxpc_connection_init_with_mach_service_imp;
 static IMP vxn_nsxpc_listener_resume_imp;
 static IMP vxn_nsxpc_listener_set_delegate_imp;
 static IMP vxn_nsxpc_listener_init_with_mach_service_imp;
-static IMP vxn_listener_should_accept_new_connection_imp;
+static IMP vxn_nsinvocation_invoke_with_target_imp;
+static IMP vxn_nsxpcinterface_set_classes_imp;
+static IMP vxn_nsxpcinterface_set_interface_imp;
+static IMP vxn_nsxpcinterface_set_reply_block_signature_imp;
+static struct vxn_class_imp_entry *vxn_listener_delegate_imps;
+static struct vxn_seen_class_entry *vxn_logged_exported_object_classes;
+static struct vxn_method_imp_entry *vxn_exported_method_imps;
 
 static int vxn_prepend_rebindings(
     struct rebindings_entry **rebindings_head,
@@ -408,7 +432,666 @@ static void vxn_swizzle_method(Class cls, SEL sel, IMP replacement, IMP *origina
     method_setImplementation(method, replacement);
 }
 
+static IMP vxn_lookup_method_imp(struct vxn_method_imp_entry *head, Class cls, SEL sel) {
+    for (Class cursor = cls; cursor != Nil; cursor = class_getSuperclass(cursor)) {
+        for (struct vxn_method_imp_entry *entry = head; entry != NULL; entry = entry->next) {
+            if (entry->cls == cursor && entry->sel == sel) {
+                return entry->imp;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void vxn_store_method_imp(
+    struct vxn_method_imp_entry **head,
+    Class cls,
+    SEL sel,
+    IMP imp
+) {
+    for (struct vxn_method_imp_entry *entry = *head; entry != NULL; entry = entry->next) {
+        if (entry->cls == cls && entry->sel == sel) {
+            entry->imp = imp;
+            return;
+        }
+    }
+
+    struct vxn_method_imp_entry *entry =
+        (struct vxn_method_imp_entry *)calloc(1, sizeof(struct vxn_method_imp_entry));
+    if (entry == NULL) {
+        return;
+    }
+    entry->cls = cls;
+    entry->sel = sel;
+    entry->imp = imp;
+    entry->next = *head;
+    *head = entry;
+}
+
+static IMP vxn_lookup_class_imp(struct vxn_class_imp_entry *head, Class cls) {
+    for (Class cursor = cls; cursor != Nil; cursor = class_getSuperclass(cursor)) {
+        for (struct vxn_class_imp_entry *entry = head; entry != NULL; entry = entry->next) {
+            if (entry->cls == cursor) {
+                return entry->imp;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void vxn_store_class_imp(struct vxn_class_imp_entry **head, Class cls, IMP imp) {
+    for (struct vxn_class_imp_entry *entry = *head; entry != NULL; entry = entry->next) {
+        if (entry->cls == cls) {
+            entry->imp = imp;
+            return;
+        }
+    }
+
+    struct vxn_class_imp_entry *entry =
+        (struct vxn_class_imp_entry *)calloc(1, sizeof(struct vxn_class_imp_entry));
+    if (entry == NULL) {
+        return;
+    }
+    entry->cls = cls;
+    entry->imp = imp;
+    entry->next = *head;
+    *head = entry;
+}
+
+static bool vxn_mark_class_seen(struct vxn_seen_class_entry **head, Class cls) {
+    for (struct vxn_seen_class_entry *entry = *head; entry != NULL; entry = entry->next) {
+        if (entry->cls == cls) {
+            return false;
+        }
+    }
+
+    struct vxn_seen_class_entry *entry =
+        (struct vxn_seen_class_entry *)calloc(1, sizeof(struct vxn_seen_class_entry));
+    if (entry == NULL) {
+        return false;
+    }
+    entry->cls = cls;
+    entry->next = *head;
+    *head = entry;
+    return true;
+}
+
 static void vxn_maybe_swizzle_listener_delegate(id delegate);
+static void vxn_maybe_swizzle_exported_object(id object);
+
+static void vxn_log_method_list_for_object_once(const char *label, id object) {
+    if (object == nil) {
+        return;
+    }
+
+    Class cls = object_getClass(object);
+    if (cls == Nil || !vxn_mark_class_seen(&vxn_logged_exported_object_classes, cls)) {
+        return;
+    }
+
+    unsigned int method_count = 0;
+    Method *methods = class_copyMethodList(cls, &method_count);
+    if (methods == NULL) {
+        vxn_log(
+            "class_methods label=%s class=%s count=0",
+            label,
+            class_getName(cls)
+        );
+        return;
+    }
+
+    vxn_log(
+        "class_methods_begin label=%s class=%s count=%u",
+        label,
+        class_getName(cls),
+        method_count
+    );
+    for (unsigned int i = 0; i < method_count; i++) {
+        SEL method_sel = method_getName(methods[i]);
+        const char *types = method_getTypeEncoding(methods[i]);
+        vxn_log(
+            "class_method label=%s class=%s selector=%s types=%s",
+            label,
+            class_getName(cls),
+            method_sel ? sel_getName(method_sel) : "<null>",
+            types ? types : "<null>"
+        );
+    }
+    vxn_log("class_methods_end label=%s class=%s", label, class_getName(cls));
+    free(methods);
+}
+
+static void vxn_log_exported_call1(const char *label, id self, SEL _cmd, id a1) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *a1_desc = vxn_copy_nsobject_description(a1);
+    vxn_log(
+        "%s self=%s selector=%s arg1=%s",
+        label,
+        self_desc,
+        sel_getName(_cmd),
+        a1_desc
+    );
+    free(self_desc);
+    free(a1_desc);
+}
+
+static void vxn_log_exported_call2(const char *label, id self, SEL _cmd, id a1, id a2) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *a1_desc = vxn_copy_nsobject_description(a1);
+    char *a2_desc = vxn_copy_nsobject_description(a2);
+    vxn_log(
+        "%s self=%s selector=%s arg1=%s arg2=%s",
+        label,
+        self_desc,
+        sel_getName(_cmd),
+        a1_desc,
+        a2_desc
+    );
+    free(self_desc);
+    free(a1_desc);
+    free(a2_desc);
+}
+
+static void vxn_log_exported_call3(
+    const char *label,
+    id self,
+    SEL _cmd,
+    id a1,
+    id a2,
+    id a3
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *a1_desc = vxn_copy_nsobject_description(a1);
+    char *a2_desc = vxn_copy_nsobject_description(a2);
+    char *a3_desc = vxn_copy_nsobject_description(a3);
+    vxn_log(
+        "%s self=%s selector=%s arg1=%s arg2=%s arg3=%s",
+        label,
+        self_desc,
+        sel_getName(_cmd),
+        a1_desc,
+        a2_desc,
+        a3_desc
+    );
+    free(self_desc);
+    free(a1_desc);
+    free(a2_desc);
+    free(a3_desc);
+}
+
+static void vxn_log_connection_state(const char *label, id connection) {
+    if (connection == nil) {
+        return;
+    }
+
+    SEL exported_interface_sel = sel_registerName("exportedInterface");
+    SEL remote_interface_sel = sel_registerName("remoteObjectInterface");
+    SEL exported_object_sel = sel_registerName("exportedObject");
+
+    id exported_interface = nil;
+    id remote_interface = nil;
+    id exported_object = nil;
+
+    if (class_respondsToSelector(object_getClass(connection), exported_interface_sel)) {
+        exported_interface = ((vxn_objc_msgsend_id)objc_msgSend)(connection, exported_interface_sel);
+    }
+    if (class_respondsToSelector(object_getClass(connection), remote_interface_sel)) {
+        remote_interface = ((vxn_objc_msgsend_id)objc_msgSend)(connection, remote_interface_sel);
+    }
+    if (class_respondsToSelector(object_getClass(connection), exported_object_sel)) {
+        exported_object = ((vxn_objc_msgsend_id)objc_msgSend)(connection, exported_object_sel);
+    }
+
+    char *connection_desc = vxn_copy_nsobject_description(connection);
+    char *exported_interface_desc = vxn_copy_nsobject_description(exported_interface);
+    char *remote_interface_desc = vxn_copy_nsobject_description(remote_interface);
+    char *exported_object_desc = vxn_copy_nsobject_description(exported_object);
+    vxn_log(
+        "%s connection=%s exportedInterface=%s remoteInterface=%s exportedObject=%s",
+        label,
+        connection_desc,
+        exported_interface_desc,
+        remote_interface_desc,
+        exported_object_desc
+    );
+    free(connection_desc);
+    free(exported_interface_desc);
+    free(remote_interface_desc);
+    free(exported_object_desc);
+}
+
+static void vxn_swizzle_tracked_method(Class cls, const char *selector_name, IMP replacement) {
+    if (cls == Nil) {
+        return;
+    }
+
+    SEL sel = sel_registerName(selector_name);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method == NULL) {
+        return;
+    }
+
+    IMP current = class_getMethodImplementation(cls, sel);
+    if (current == replacement) {
+        return;
+    }
+
+    vxn_store_method_imp(&vxn_exported_method_imps, cls, sel, current);
+    const char *types = method_getTypeEncoding(method);
+    if (!class_addMethod(cls, sel, replacement, types)) {
+        method_setImplementation(method, replacement);
+    }
+}
+
+static void vxn_fs_module_probe_resource(id self, SEL _cmd, id resource, id reply_handler) {
+    vxn_log_exported_call2("exported.call", self, _cmd, resource, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id))original)(self, _cmd, resource, reply_handler);
+    }
+}
+
+static void vxn_fs_module_load_resource(
+    id self,
+    SEL _cmd,
+    id resource,
+    id options,
+    id reply_handler
+) {
+    vxn_log_exported_call3("exported.call", self, _cmd, resource, options, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id, id))original)(
+            self,
+            _cmd,
+            resource,
+            options,
+            reply_handler
+        );
+    }
+}
+
+static void vxn_fs_module_activate_volume(
+    id self,
+    SEL _cmd,
+    id volume,
+    id resource,
+    id options,
+    id reply_handler
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *volume_desc = vxn_copy_nsobject_description(volume);
+    char *resource_desc = vxn_copy_nsobject_description(resource);
+    char *options_desc = vxn_copy_nsobject_description(options);
+    char *reply_desc = vxn_copy_nsobject_description(reply_handler);
+    vxn_log(
+        "exported.call self=%s selector=%s volume=%s resource=%s options=%s reply=%s",
+        self_desc,
+        sel_getName(_cmd),
+        volume_desc,
+        resource_desc,
+        options_desc,
+        reply_desc
+    );
+    free(self_desc);
+    free(volume_desc);
+    free(resource_desc);
+    free(options_desc);
+    free(reply_desc);
+
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id, id, id))original)(
+            self,
+            _cmd,
+            volume,
+            resource,
+            options,
+            reply_handler
+        );
+    }
+}
+
+static void vxn_fs_module_get_volume_endpoint(
+    id self,
+    SEL _cmd,
+    id volume,
+    id reply_handler
+) {
+    vxn_log_exported_call2("exported.call", self, _cmd, volume, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id))original)(self, _cmd, volume, reply_handler);
+    }
+}
+
+static void vxn_fs_volume_mount(id self, SEL _cmd, id options, id reply_handler) {
+    vxn_log_exported_call2("exported.call", self, _cmd, options, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id))original)(self, _cmd, options, reply_handler);
+    }
+}
+
+static void vxn_fs_volume_get_root_file_handle(id self, SEL _cmd, id reply_handler) {
+    vxn_log_exported_call1("exported.call", self, _cmd, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id))original)(self, _cmd, reply_handler);
+    }
+}
+
+static void vxn_fs_volume_get_standard_item_attributes_data(
+    id self,
+    SEL _cmd,
+    id item,
+    id reply_handler
+) {
+    vxn_log_exported_call2("exported.call", self, _cmd, item, reply_handler);
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id))original)(self, _cmd, item, reply_handler);
+    }
+}
+
+static void vxn_fs_volume_lookup_in(
+    id self,
+    SEL _cmd,
+    id parent,
+    id name,
+    unsigned int flags,
+    unsigned long long request_id,
+    id reply_handler
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *parent_desc = vxn_copy_nsobject_description(parent);
+    char *name_desc = vxn_copy_nsobject_description(name);
+    char *reply_desc = vxn_copy_nsobject_description(reply_handler);
+    vxn_log(
+        "exported.call self=%s selector=%s parent=%s name=%s flags=%u requestID=%llu reply=%s",
+        self_desc,
+        sel_getName(_cmd),
+        parent_desc,
+        name_desc,
+        flags,
+        request_id,
+        reply_desc
+    );
+    free(self_desc);
+    free(parent_desc);
+    free(name_desc);
+    free(reply_desc);
+
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, id, unsigned int, unsigned long long, id))original)(
+            self,
+            _cmd,
+            parent,
+            name,
+            flags,
+            request_id,
+            reply_handler
+        );
+    }
+}
+
+static void vxn_fs_volume_open(
+    id self,
+    SEL _cmd,
+    id item,
+    int mode,
+    unsigned long long request_id,
+    id reply_handler
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *item_desc = vxn_copy_nsobject_description(item);
+    char *reply_desc = vxn_copy_nsobject_description(reply_handler);
+    vxn_log(
+        "exported.call self=%s selector=%s item=%s mode=%d requestID=%llu reply=%s",
+        self_desc,
+        sel_getName(_cmd),
+        item_desc,
+        mode,
+        request_id,
+        reply_desc
+    );
+    free(self_desc);
+    free(item_desc);
+    free(reply_desc);
+
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, int, unsigned long long, id))original)(
+            self,
+            _cmd,
+            item,
+            mode,
+            request_id,
+            reply_handler
+        );
+    }
+}
+
+static void vxn_fs_volume_read_from(
+    id self,
+    SEL _cmd,
+    id item,
+    unsigned long long offset,
+    id buffer,
+    unsigned long long request_id,
+    id reply_handler
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *item_desc = vxn_copy_nsobject_description(item);
+    char *buffer_desc = vxn_copy_nsobject_description(buffer);
+    char *reply_desc = vxn_copy_nsobject_description(reply_handler);
+    vxn_log(
+        "exported.call self=%s selector=%s item=%s offset=%llu buffer=%s requestID=%llu reply=%s",
+        self_desc,
+        sel_getName(_cmd),
+        item_desc,
+        offset,
+        buffer_desc,
+        request_id,
+        reply_desc
+    );
+    free(self_desc);
+    free(item_desc);
+    free(buffer_desc);
+    free(reply_desc);
+
+    IMP original = vxn_lookup_method_imp(vxn_exported_method_imps, object_getClass(self), _cmd);
+    if (original != NULL) {
+        ((void (*)(id, SEL, id, unsigned long long, id, unsigned long long, id))original)(
+            self,
+            _cmd,
+            item,
+            offset,
+            buffer,
+            request_id,
+            reply_handler
+        );
+    }
+}
+
+static void vxn_maybe_swizzle_exported_object(id object) {
+    if (object == nil) {
+        return;
+    }
+
+    Class cls = object_getClass(object);
+    if (cls == Nil) {
+        return;
+    }
+
+    const char *class_name = class_getName(cls);
+    if (class_name == NULL) {
+        return;
+    }
+
+    if (strcmp(class_name, "FSModuleConnector") == 0) {
+        vxn_swizzle_tracked_method(cls, "probeResource:replyHandler:", (IMP)vxn_fs_module_probe_resource);
+        vxn_swizzle_tracked_method(
+            cls,
+            "loadResource:options:replyHandler:",
+            (IMP)vxn_fs_module_load_resource
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "activateVolume:resource:options:replyHandler:",
+            (IMP)vxn_fs_module_activate_volume
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "getVolumeEndpoint:replyHandler:",
+            (IMP)vxn_fs_module_get_volume_endpoint
+        );
+        return;
+    }
+
+    if (strcmp(class_name, "FSVolumeConnector") == 0) {
+        vxn_swizzle_tracked_method(cls, "mount:replyHandler:", (IMP)vxn_fs_volume_mount);
+        vxn_swizzle_tracked_method(
+            cls,
+            "getRootFileHandle:",
+            (IMP)vxn_fs_volume_get_root_file_handle
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "getStandardItemAttributesDataForItem:replyHandler:",
+            (IMP)vxn_fs_volume_get_standard_item_attributes_data
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "lookupIn:name:flags:requestID:replyHandler:",
+            (IMP)vxn_fs_volume_lookup_in
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "open:withMode:requestID:replyHandler:",
+            (IMP)vxn_fs_volume_open
+        );
+        vxn_swizzle_tracked_method(
+            cls,
+            "readFrom:atOffset:intoBuffer:requestID:replyHandler:",
+            (IMP)vxn_fs_volume_read_from
+        );
+    }
+}
+
+static void vxn_nsinvocation_invoke_with_target(id self, SEL _cmd, id target) {
+    SEL selector_sel = sel_registerName("selector");
+    SEL invoked_sel = NULL;
+    if (class_respondsToSelector(object_getClass(self), selector_sel)) {
+        invoked_sel = ((SEL (*)(id, SEL))objc_msgSend)(self, selector_sel);
+    }
+
+    char *target_desc = vxn_copy_nsobject_description(target);
+    vxn_log(
+        "NSInvocation invokeWithTarget target=%s selector=%s",
+        target_desc,
+        invoked_sel ? sel_getName(invoked_sel) : "<null>"
+    );
+    free(target_desc);
+
+    if (vxn_nsinvocation_invoke_with_target_imp != NULL) {
+        ((void (*)(id, SEL, id))vxn_nsinvocation_invoke_with_target_imp)(self, _cmd, target);
+    }
+}
+
+static void vxn_nsxpcinterface_set_classes(
+    id self,
+    SEL _cmd,
+    id classes,
+    SEL selector,
+    unsigned long long argument_index,
+    BOOL of_reply
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *classes_desc = vxn_copy_nsobject_description(classes);
+    vxn_log(
+        "NSXPCInterface setClasses self=%s selector=%s argumentIndex=%llu ofReply=%d classes=%s",
+        self_desc,
+        selector ? sel_getName(selector) : "<null>",
+        argument_index,
+        of_reply ? 1 : 0,
+        classes_desc
+    );
+    free(self_desc);
+    free(classes_desc);
+
+    if (vxn_nsxpcinterface_set_classes_imp != NULL) {
+        ((void (*)(id, SEL, id, SEL, unsigned long long, BOOL))
+             vxn_nsxpcinterface_set_classes_imp)(
+            self,
+            _cmd,
+            classes,
+            selector,
+            argument_index,
+            of_reply
+        );
+    }
+}
+
+static void vxn_nsxpcinterface_set_interface(
+    id self,
+    SEL _cmd,
+    id interface,
+    SEL selector,
+    unsigned long long argument_index,
+    BOOL of_reply
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    char *iface_desc = vxn_copy_nsobject_description(interface);
+    vxn_log(
+        "NSXPCInterface setInterface self=%s selector=%s argumentIndex=%llu ofReply=%d interface=%s",
+        self_desc,
+        selector ? sel_getName(selector) : "<null>",
+        argument_index,
+        of_reply ? 1 : 0,
+        iface_desc
+    );
+    free(self_desc);
+    free(iface_desc);
+
+    if (vxn_nsxpcinterface_set_interface_imp != NULL) {
+        ((void (*)(id, SEL, id, SEL, unsigned long long, BOOL))
+             vxn_nsxpcinterface_set_interface_imp)(
+            self,
+            _cmd,
+            interface,
+            selector,
+            argument_index,
+            of_reply
+        );
+    }
+}
+
+static void vxn_nsxpcinterface_set_reply_block_signature(
+    id self,
+    SEL _cmd,
+    const char *signature,
+    SEL selector
+) {
+    char *self_desc = vxn_copy_nsobject_description(self);
+    vxn_log(
+        "NSXPCInterface setReplyBlockSignature self=%s selector=%s signature=%s",
+        self_desc,
+        selector ? sel_getName(selector) : "<null>",
+        signature ? signature : "<null>"
+    );
+    free(self_desc);
+
+    if (vxn_nsxpcinterface_set_reply_block_signature_imp != NULL) {
+        ((void (*)(id, SEL, const char *, SEL))vxn_nsxpcinterface_set_reply_block_signature_imp)(
+            self,
+            _cmd,
+            signature,
+            selector
+        );
+    }
+}
 
 static void vxn_xpc_connection_set_event_handler(
     xpc_connection_t connection,
@@ -633,6 +1316,8 @@ static void vxn_nsxpc_connection_set_exported_object(id self, SEL _cmd, id objec
     vxn_log("NSXPCConnection setExportedObject self=%s object=%s", self_desc, obj_desc);
     free(self_desc);
     free(obj_desc);
+    vxn_log_method_list_for_object_once("exportedObject", object);
+    vxn_maybe_swizzle_exported_object(object);
 
     if (vxn_nsxpc_connection_set_exported_object_imp != NULL) {
         ((void (*)(id, SEL, id))vxn_nsxpc_connection_set_exported_object_imp)(self, _cmd, object);
@@ -762,16 +1447,19 @@ static BOOL vxn_listener_should_accept_new_connection(
     free(listener_desc);
     free(connection_desc);
 
-    if (vxn_listener_should_accept_new_connection_imp == NULL) {
-        return YES;
+    IMP original = vxn_lookup_class_imp(vxn_listener_delegate_imps, object_getClass(self));
+    BOOL accepted = YES;
+    if (original != NULL) {
+        accepted = ((BOOL (*)(id, SEL, id, id))original)(self, _cmd, listener, connection);
     }
 
-    return ((BOOL (*)(id, SEL, id, id))vxn_listener_should_accept_new_connection_imp)(
-        self,
-        _cmd,
-        listener,
-        connection
+    vxn_log(
+        "listener:shouldAcceptNewConnection: result=%d delegateClass=%s",
+        accepted ? 1 : 0,
+        class_getName(object_getClass(self))
     );
+    vxn_log_connection_state("listener.accept.post", connection);
+    return accepted;
 }
 
 static void vxn_maybe_swizzle_listener_delegate(id delegate) {
@@ -779,12 +1467,22 @@ static void vxn_maybe_swizzle_listener_delegate(id delegate) {
         return;
     }
     Class cls = object_getClass(delegate);
-    vxn_swizzle_method(
-        cls,
-        sel_registerName("listener:shouldAcceptNewConnection:"),
-        (IMP)vxn_listener_should_accept_new_connection,
-        &vxn_listener_should_accept_new_connection_imp
-    );
+    SEL sel = sel_registerName("listener:shouldAcceptNewConnection:");
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method == NULL) {
+        return;
+    }
+
+    IMP current = class_getMethodImplementation(cls, sel);
+    if (current == (IMP)vxn_listener_should_accept_new_connection) {
+        return;
+    }
+
+    vxn_store_class_imp(&vxn_listener_delegate_imps, cls, current);
+    const char *types = method_getTypeEncoding(method);
+    if (!class_addMethod(cls, sel, (IMP)vxn_listener_should_accept_new_connection, types)) {
+        method_setImplementation(method, (IMP)vxn_listener_should_accept_new_connection);
+    }
 }
 
 static void vxn_swizzle_nsxpc_methods(void) {
@@ -794,7 +1492,28 @@ static void vxn_swizzle_nsxpc_methods(void) {
     vxn_did_swizzle_nsxpc = true;
 
     Class nsxpc_connection = objc_getClass("NSXPCConnection");
+    Class nsxpc_interface = objc_getClass("NSXPCInterface");
     Class nsxpc_listener = objc_getClass("NSXPCListener");
+    Class nsinvocation = objc_getClass("NSInvocation");
+
+    vxn_swizzle_method(
+        nsxpc_interface,
+        sel_registerName("setClasses:forSelector:argumentIndex:ofReply:"),
+        (IMP)vxn_nsxpcinterface_set_classes,
+        &vxn_nsxpcinterface_set_classes_imp
+    );
+    vxn_swizzle_method(
+        nsxpc_interface,
+        sel_registerName("setInterface:forSelector:argumentIndex:ofReply:"),
+        (IMP)vxn_nsxpcinterface_set_interface,
+        &vxn_nsxpcinterface_set_interface_imp
+    );
+    vxn_swizzle_method(
+        nsxpc_interface,
+        sel_registerName("setReplyBlockSignature:forSelector:"),
+        (IMP)vxn_nsxpcinterface_set_reply_block_signature,
+        &vxn_nsxpcinterface_set_reply_block_signature_imp
+    );
 
     vxn_swizzle_method(
         nsxpc_connection,
@@ -850,6 +1569,12 @@ static void vxn_swizzle_nsxpc_methods(void) {
         sel_registerName("initWithMachServiceName:"),
         (IMP)vxn_nsxpc_listener_init_with_mach_service,
         &vxn_nsxpc_listener_init_with_mach_service_imp
+    );
+    vxn_swizzle_method(
+        nsinvocation,
+        sel_registerName("invokeWithTarget:"),
+        (IMP)vxn_nsinvocation_invoke_with_target,
+        &vxn_nsinvocation_invoke_with_target_imp
     );
 }
 
