@@ -1,2 +1,0 @@
-{"name":"codec","vers":"1.0.0","deps":[{"name":"logger","req":"1.0.0"}],"yanked":false}
-{"name":"codec","vers":"1.1.0","deps":[{"name":"logger","req":"1.1.0"}],"yanked":false}

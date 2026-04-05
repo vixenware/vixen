@@ -1,8 +1,0 @@
-[package]
-name = "cargo-transitive-root"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-crc32fast = "1"
-miniz_oxide = { version = "0.8.5", default-features = false, features = ["simd"] }

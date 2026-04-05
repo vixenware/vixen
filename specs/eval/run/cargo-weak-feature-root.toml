@@ -1,7 +1,0 @@
-[package]
-name = "root"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-carrier = { version = "1", default-features = false, features = ["weak", "enable"] }
