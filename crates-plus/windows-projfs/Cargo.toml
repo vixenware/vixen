@@ -24,6 +24,9 @@ default-target = "x86_64-pc-windows-msvc"
 features = ["dynamic-import"]
 targets = ["x86_64-pc-windows-msvc"]
 
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies.libloading]
 version = "0.8.1"
 optional = true
