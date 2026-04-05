@@ -4291,7 +4291,6 @@ dependencies = [
  "facet",
  "fastrand",
  "futures-util",
- "libc",
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "owo-colors",
  "strip-ansi-escapes",

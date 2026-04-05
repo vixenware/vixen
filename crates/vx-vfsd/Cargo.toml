@@ -45,9 +45,6 @@ strip-ansi-escapes = "0.2"
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
 [features]
 default = []
 diagnostics = ["moire/diagnostics"]
