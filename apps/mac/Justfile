@@ -32,43 +32,14 @@ build: generate
       -clonedSourcePackagesDirPath build/SourcePackages \
       build
 
-# Retired standalone bootstrap experiment.
-inject-rust-vixen-extension:
-    @echo "inject-rust-vixen-extension is retired."
-    @echo
-    @echo "Use the supported hybrid path instead:"
-    @echo "  just -f apps/mac/Justfile install"
-    @echo
-    @echo "That keeps the Swift FSKit entrypoint and links the Rust runtime from vx-fskit."
-    @exit 1
-
 # Install Vixen.app into /Applications and launch once.
 install: build
     rm -rf /Applications/Vixen.app
     ditto xcode/build/DerivedData/Build/Products/Release/Vixen.app /Applications/Vixen.app
+    scripts/unregister-all.js
     open /Applications/Vixen.app
     @echo "Installed /Applications/Vixen.app"
     @echo "Follow the instructions in Vixen.app to finish setup."
-
-# Legacy trap: this swaps the extension executable and is not the hybrid path.
-install-rust-fs:
-    @echo "install-rust-fs is disabled."
-    @echo
-    @echo "Use one of these instead:"
-    @echo "  just -f apps/mac/Justfile install"
-    @echo "    Hybrid path: Swift FSKit entrypoint, Rust FSKit objects."
-    @echo
-    @echo "See apps/mac/README.md for the registration/reset checklist."
-    @exit 1
-
-verify-fs-extension-signing app_path='/Applications/Vixen.app':
-    repo_root="$(git rev-parse --show-toplevel)" ; \
-    "$repo_root/apps/mac/scripts/verify-fs-extension-signing.sh" {{ app_path }}
-
-reload-fs-extension-registration app_path='/Applications/Vixen.app':
-    repo_root="$(git rev-parse --show-toplevel)" ; \
-    "$repo_root/apps/mac/scripts/reload-vixen-fs-extension.sh" {{ app_path }} ; \
-    "$repo_root/apps/mac/scripts/verify-fs-extension-signing.sh" {{ app_path }}
 
 # Build, sign, and package a release DMG for review.
 
