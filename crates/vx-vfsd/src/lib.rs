@@ -151,26 +151,64 @@ async fn seed_demo_prefix(cas: Arc<vx_services::StoreClient>, vfs: Arc<CasVfs>) 
 impl SharedVfs {
     async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
         if parent_id == ROOT_ITEM_ID && name == self.canary.name {
-            tracing::trace!(parent_id, %name, item_id = self.canary.item_id, "canary lookup hit");
-            return LookupResult {
+            let result = LookupResult {
                 attrs: self.canary_attrs(),
                 error: vx_services::errno::OK,
             };
+            tracing::info!(
+                parent_id,
+                %name,
+                item_id = result.attrs.item_id,
+                item_type = ?result.attrs.item_type,
+                mode = result.attrs.mode,
+                size = result.attrs.size,
+                "canary lookup hit"
+            );
+            return result;
         }
         tracing::trace!(parent_id, %name, "lookup");
-        CasVfs::lookup(self.inner.as_ref(), parent_id, name).await
+        let result = CasVfs::lookup(self.inner.as_ref(), parent_id, name.clone()).await;
+        tracing::debug!(
+            parent_id,
+            %name,
+            item_id = result.attrs.item_id,
+            item_type = ?result.attrs.item_type,
+            mode = result.attrs.mode,
+            size = result.attrs.size,
+            error = result.error,
+            "lookup result"
+        );
+        result
     }
 
     async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
         if item_id == self.canary.item_id {
-            tracing::trace!(item_id, "canary get_attributes hit");
-            return GetAttributesResult {
+            let result = GetAttributesResult {
                 attrs: self.canary_attrs(),
                 error: vx_services::errno::OK,
             };
+            tracing::info!(
+                item_id,
+                result_item_id = result.attrs.item_id,
+                item_type = ?result.attrs.item_type,
+                mode = result.attrs.mode,
+                size = result.attrs.size,
+                "canary get_attributes hit"
+            );
+            return result;
         }
         tracing::trace!(item_id, "get_attributes");
-        CasVfs::get_attributes(self.inner.as_ref(), item_id).await
+        let result = CasVfs::get_attributes(self.inner.as_ref(), item_id).await;
+        tracing::debug!(
+            item_id,
+            result_item_id = result.attrs.item_id,
+            item_type = ?result.attrs.item_type,
+            mode = result.attrs.mode,
+            size = result.attrs.size,
+            error = result.error,
+            "get_attributes result"
+        );
+        result
     }
 
     async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
@@ -178,6 +216,23 @@ impl SharedVfs {
         let mut result = CasVfs::read_dir(self.inner.as_ref(), item_id, cookie, verifier).await;
 
         if item_id != ROOT_ITEM_ID || result.error != vx_services::errno::OK {
+            tracing::debug!(
+                item_id,
+                cookie,
+                verifier,
+                next_cookie = result.next_cookie,
+                response_verifier = result.verifier,
+                error = result.error,
+                entries = ?result
+                    .entries
+                    .iter()
+                    .map(|entry| format!(
+                        "{}:{}:{:?}:{}:{:#o}",
+                        entry.name, entry.item_id, entry.item_type, entry.size, entry.mode
+                    ))
+                    .collect::<Vec<_>>(),
+                "read_dir result"
+            );
             return result;
         }
 
@@ -200,6 +255,24 @@ impl SharedVfs {
             result.entries = vec![canary];
             result.next_cookie = 0;
         }
+
+        tracing::debug!(
+            item_id,
+            cookie,
+            verifier,
+            next_cookie = result.next_cookie,
+            response_verifier = result.verifier,
+            error = result.error,
+            entries = ?result
+                .entries
+                .iter()
+                .map(|entry| format!(
+                    "{}:{}:{:?}:{}:{:#o}",
+                    entry.name, entry.item_id, entry.item_type, entry.size, entry.mode
+                ))
+                .collect::<Vec<_>>(),
+            "read_dir result with canary"
+        );
 
         result
     }

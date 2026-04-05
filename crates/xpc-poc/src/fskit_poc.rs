@@ -7,20 +7,28 @@ use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
+use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Bool};
 use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
-use objc2_foundation::{NSData, NSError, NSObjectProtocol, NSPOSIXErrorDomain, NSString, NSUUID};
+use objc2_foundation::{
+    NSArray, NSData, NSError, NSObjectProtocol, NSPOSIXErrorDomain, NSString, NSUUID,
+};
 use objc2_fs_kit::{
-    FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie, FSDirectoryCookieInitial,
-    FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName, FSFileSystemBase, FSItem,
-    FSItemAttributes, FSItemGetAttributesRequest, FSItemID, FSItemType, FSMutableFileDataBuffer,
-    FSProbeResult, FSResource, FSStatFSResult, FSTaskOptions, FSUnaryFileSystem,
-    FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier, FSVolumeOperations,
-    FSVolumePathConfOperations, FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities,
+    FSAccessMask, FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie,
+    FSDirectoryCookieInitial, FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName,
+    FSFileSystemBase, FSItem, FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest,
+    FSItemID, FSItemType, FSMutableFileDataBuffer, FSProbeResult, FSResource, FSSetXattrPolicy,
+    FSStatFSResult, FSTaskOptions, FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
+    FSVolumeAccessCheckOperations, FSVolumeIdentifier, FSVolumeOpenCloseOperations,
+    FSVolumeOpenModes, FSVolumeOperations, FSVolumePathConfOperations, FSVolumeReadWriteOperations,
+    FSVolumeSupportedCapabilities, FSVolumeXattrOperations,
 };
 use tokio::runtime::{Builder, Runtime};
-use vox::{ConnectionAcceptor, ConnectionRequest, Metadata, PendingConnection, acceptor_on};
+use vox::{
+    ClientLogging, ClientLoggingOptions, ConnectionAcceptor, ConnectionRequest, Metadata,
+    PendingConnection, acceptor_on,
+};
 use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes as VfsItemAttributes,
     ItemType as VfsItemType, LookupResult, ReadDirResult, ReadResult, SetAttributesParams,
@@ -33,7 +41,7 @@ const ROOT_LOCAL_ID: u64 = FSItemID::RootDirectory.0;
 const ROOT_BACKEND_ID: u64 = 1;
 const VIXENFS_DIR_ID: u64 = 0xFFFF_FFFF_FFFE_0001;
 const STATUS_JSON_ID: u64 = 0xFFFF_FFFF_FFFE_0002;
-const ROUTED_ITEM_ID_START: u64 = 2;
+const ROUTED_ITEM_ID_START: u64 = ROOT_LOCAL_ID + 1;
 const DIRECTORY_VERIFIER: FSDirectoryVerifier = 1;
 const VOLUME_NAME: &str = "Vixen";
 const APP_GROUP_ID: &str = "B2N6FSRTPV.vixenfs";
@@ -43,6 +51,21 @@ const STATUS_JSON_NAME: &str = "status.json";
 
 static TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ObjcTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+unsafe impl Encode for ObjcTimespec {
+    const ENCODING: Encoding = Encoding::Struct("timespec", &[i64::ENCODING, i64::ENCODING]);
+}
+
+unsafe impl RefEncode for ObjcTimespec {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VirtualKind {
@@ -216,12 +239,20 @@ impl RustItem {
     }
 
     fn attributes(&self) -> Retained<FSItemAttributes> {
+        self.attributes_for_request(None)
+    }
+
+    fn attributes_for_request(
+        &self,
+        request: Option<&FSItemGetAttributesRequest>,
+    ) -> Retained<FSItemAttributes> {
         let attrs = self
             .ivars()
             .attrs
             .lock()
             .expect("item attrs mutex poisoned");
         fs_item_attributes(
+            request,
             self.item_id(),
             attrs.parent_local_id,
             attrs.item_type,
@@ -254,6 +285,37 @@ impl RustItem {
             .expect("item attrs mutex poisoned");
         cached.size = len as u64;
         cached.modified_time = unix_time();
+    }
+
+    fn debug_summary(&self) -> String {
+        let cached = self
+            .ivars()
+            .attrs
+            .lock()
+            .expect("item attrs mutex poisoned");
+        format!(
+            "local={} backend={} parent={} gen={} name={} kind={} type={:?} mode={:#o} size={}",
+            self.ivars().local_item_id,
+            self.ivars().backend_item_id,
+            cached.parent_local_id,
+            self.ivars().connection_generation,
+            fs_filename_string(&self.ivars().name),
+            self.virtual_kind().label(),
+            cached.item_type,
+            cached.mode,
+            cached.size
+        )
+    }
+}
+
+impl VirtualKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::MetaDir => "meta_dir",
+            Self::StatusJson => "status_json",
+            Self::None => "backend",
+        }
     }
 }
 
@@ -295,6 +357,26 @@ define_class!(
         fn truncatesLongNames(&self) -> bool {
             false
         }
+
+        #[unsafe(method(maximumXattrSize))]
+        fn maximumXattrSize(&self) -> isize {
+            64 * 1024
+        }
+
+        #[unsafe(method(maximumXattrSizeInBits))]
+        fn maximumXattrSizeInBits(&self) -> isize {
+            17
+        }
+
+        #[unsafe(method(maximumFileSize))]
+        fn maximumFileSize(&self) -> u64 {
+            i64::MAX as u64
+        }
+
+        #[unsafe(method(maximumFileSizeInBits))]
+        fn maximumFileSizeInBits(&self) -> isize {
+            64
+        }
     }
 
     unsafe impl FSVolumeOperations for RustVolume {
@@ -333,6 +415,15 @@ define_class!(
             let active = unsafe { FSContainerStatus::active() };
             unsafe { FSFileSystemBase::setContainerStatus(&*self.ivars().file_system, &active) };
             let root = self.root_item();
+            if let Some(root_item) = as_rust_item(root.as_ref()) {
+                log_event(
+                    "info",
+                    format!(
+                        "fskit-poc activateWithOptions root {}",
+                        root_item.debug_summary()
+                    ),
+                );
+            }
             reply.call((Retained::into_raw(root), ptr::null_mut()));
         }
 
@@ -388,9 +479,31 @@ define_class!(
                 ));
                 return;
             };
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc getAttributes wanted_mask={:#x} {}",
+                    unsafe { _desired_attributes.wantedAttributes().0 },
+                    item.debug_summary()
+                ),
+            );
 
-            match self.attributes_for_item(item) {
-                Ok(attrs) => reply.call((Retained::into_raw(attrs), ptr::null_mut())),
+            match self.attributes_for_item(item, Some(_desired_attributes)) {
+                Ok(attrs) => {
+                    log_event(
+                        "debug",
+                        format!(
+                            "fskit-poc getAttributes.reply valid_mask={:#x} file_id={} parent={} type={:?} mode={:#o} size={}",
+                            attr_valid_mask(&attrs),
+                            unsafe { attrs.fileID().0 },
+                            unsafe { attrs.parentID().0 },
+                            unsafe { attrs.r#type() },
+                            unsafe { attrs.mode() },
+                            unsafe { attrs.size() }
+                        ),
+                    );
+                    reply.call((Retained::into_raw(attrs), ptr::null_mut()))
+                }
                 Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
             }
         }
@@ -445,7 +558,7 @@ define_class!(
             });
 
             match result {
-                Ok(VfsResult { error: 0 }) => match self.refresh_backend_item(item) {
+                Ok(VfsResult { error: 0 }) => match self.refresh_backend_item(item, None) {
                     Ok(attrs) => reply.call((Retained::into_raw(attrs), ptr::null_mut())),
                     Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
                 },
@@ -471,13 +584,30 @@ define_class!(
                 ));
                 return;
             };
+            let requested_name = fs_filename_string(name);
+            log_event(
+                "info",
+                format!(
+                    "fskit-poc lookupItem name={} dir={}",
+                    requested_name,
+                    directory.debug_summary()
+                ),
+            );
 
             match self.lookup_item(directory, name) {
-                Ok((item, item_name)) => reply.call((
-                    Retained::into_raw(item),
-                    Retained::into_raw(item_name),
-                    ptr::null_mut(),
-                )),
+                Ok((item, item_name)) => {
+                    if let Some(item) = as_rust_item(item.as_ref()) {
+                        log_event(
+                            "info",
+                            format!("fskit-poc lookupItem.reply {}", item.debug_summary()),
+                        );
+                    }
+                    reply.call((
+                        Retained::into_raw(item),
+                        Retained::into_raw(item_name),
+                        ptr::null_mut(),
+                    ))
+                }
                 Err(error) => {
                     reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
                 }
@@ -711,6 +841,15 @@ define_class!(
                 reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
                 return;
             };
+            log_event(
+                "info",
+                format!(
+                    "fskit-poc enumerateDirectory cookie={} verifier={} {}",
+                    cookie,
+                    verifier,
+                    directory.debug_summary()
+                ),
+            );
 
             match self.enumerate_directory(directory, cookie, verifier, attributes, packer) {
                 Ok(next_verifier) => reply.call((next_verifier, ptr::null_mut())),
@@ -749,6 +888,15 @@ define_class!(
                 reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
                 return;
             };
+            log_event(
+                "info",
+                format!(
+                    "fskit-poc readFromFile offset={} length={} {}",
+                    offset,
+                    length,
+                    item.debug_summary()
+                ),
+            );
 
             match self.read_item(item, offset, length, buffer) {
                 Ok(actual) => reply.call((actual, ptr::null_mut())),
@@ -800,6 +948,112 @@ define_class!(
                 }
                 Err(error) => reply.call((0, Retained::into_raw(error))),
             }
+        }
+    }
+
+    unsafe impl FSVolumeOpenCloseOperations for RustVolume {
+        #[unsafe(method(isOpenCloseInhibited))]
+        fn isOpenCloseInhibited(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(openItem:withModes:replyHandler:))]
+        fn openItem_withModes_replyHandler(
+            &self,
+            item: &FSItem,
+            modes: FSVolumeOpenModes,
+            reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!("fskit-poc openItem modes={:#x} {}", modes.0, details),
+            );
+            reply.call((ptr::null_mut(),));
+        }
+
+        #[unsafe(method(closeItem:keepingModes:replyHandler:))]
+        fn closeItem_keepingModes_replyHandler(
+            &self,
+            item: &FSItem,
+            modes: FSVolumeOpenModes,
+            reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!("fskit-poc closeItem keep_modes={:#x} {}", modes.0, details),
+            );
+            reply.call((ptr::null_mut(),));
+        }
+    }
+
+    unsafe impl FSVolumeAccessCheckOperations for RustVolume {
+        #[unsafe(method(isAccessCheckInhibited))]
+        fn isAccessCheckInhibited(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(checkAccessToItem:requestedAccess:replyHandler:))]
+        fn checkAccessToItem_requestedAccess_replyHandler(
+            &self,
+            item: &FSItem,
+            access: FSAccessMask,
+            reply: &block2::DynBlock<dyn Fn(Bool, *mut NSError)>,
+        ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "debug",
+                format!("fskit-poc checkAccess access={:#x} {}", access.0, details),
+            );
+            reply.call((Bool::YES, ptr::null_mut()));
+        }
+    }
+
+    unsafe impl FSVolumeXattrOperations for RustVolume {
+        #[unsafe(method(xattrOperationsInhibited))]
+        fn xattrOperationsInhibited(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method(getXattrNamed:ofItem:replyHandler:))]
+        fn getXattrNamed_ofItem_replyHandler(
+            &self,
+            _name: &FSFileName,
+            _item: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut NSData, *mut NSError)>,
+        ) {
+            reply.call((
+                ptr::null_mut(),
+                Retained::into_raw(posix_error(libc::ENOATTR)),
+            ));
+        }
+
+        #[unsafe(method(setXattrNamed:toData:onItem:policy:replyHandler:))]
+        fn setXattrNamed_toData_onItem_policy_replyHandler(
+            &self,
+            _name: &FSFileName,
+            _value: Option<&NSData>,
+            _item: &FSItem,
+            _policy: FSSetXattrPolicy,
+            reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            reply.call((Retained::into_raw(posix_error(libc::ENOTSUP)),));
+        }
+
+        #[unsafe(method(listXattrsOfItem:replyHandler:))]
+        fn listXattrsOfItem_replyHandler(
+            &self,
+            _item: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut NSArray<FSFileName>, *mut NSError)>,
+        ) {
+            reply.call((ptr::null_mut(), ptr::null_mut()));
         }
     }
 );
@@ -870,6 +1124,13 @@ impl RustVolume {
 
     fn local_item_id(&self, generation: u64, backend_item_id: u64) -> u64 {
         if backend_item_id == ROOT_BACKEND_ID {
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc local_item_id root backend={} generation={} -> local={}",
+                    backend_item_id, generation, ROOT_LOCAL_ID
+                ),
+            );
             return ROOT_LOCAL_ID;
         }
 
@@ -883,11 +1144,34 @@ impl RustVolume {
             backend_item_id,
         };
         if let Some(existing) = routed.by_key.get(&key) {
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc local_item_id reuse backend={} generation={} -> local={}",
+                    backend_item_id, generation, existing
+                ),
+            );
             return *existing;
         }
-        let local_item_id = routed.next_local_id;
-        routed.next_local_id += 1;
+        let local_item_id = loop {
+            let candidate = routed.next_local_id;
+            routed.next_local_id += 1;
+            if self.get_cached_item(candidate).is_none() {
+                break candidate;
+            }
+            log_event(
+                "debug",
+                format!("fskit-poc local_item_id skip collision local={candidate}"),
+            );
+        };
         routed.by_key.insert(key, local_item_id);
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc local_item_id insert backend={} generation={} -> local={}",
+                backend_item_id, generation, local_item_id
+            ),
+        );
         local_item_id
     }
 
@@ -900,42 +1184,68 @@ impl RustVolume {
         attrs: &VfsItemAttributes,
     ) -> Retained<RustItem> {
         if let Some(item) = self.get_cached_item(local_item_id) {
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc cached_backend_item hit local={} backend={} parent={} generation={} requested_name={} existing={}",
+                    local_item_id,
+                    attrs.item_id,
+                    parent_local_id,
+                    generation,
+                    name,
+                    item.debug_summary()
+                ),
+            );
             item.update_from_backend(parent_local_id, attrs);
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc cached_backend_item updated local={} backend={} now={}",
+                    local_item_id,
+                    attrs.item_id,
+                    item.debug_summary()
+                ),
+            );
             return item;
         }
-        self.cache_item(RustItem::from_backend(
-            local_item_id,
-            parent_local_id,
-            generation,
-            name,
-            attrs,
-        ))
+        let item = RustItem::from_backend(local_item_id, parent_local_id, generation, name, attrs);
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc cached_backend_item insert requested_name={} {}",
+                name,
+                item.debug_summary()
+            ),
+        );
+        self.cache_item(item)
     }
 
     fn attributes_for_item(
         &self,
         item: &RustItem,
+        request: Option<&FSItemGetAttributesRequest>,
     ) -> Result<Retained<FSItemAttributes>, Retained<NSError>> {
         match item.virtual_kind() {
-            VirtualKind::Root => Ok(item.attributes()),
-            VirtualKind::MetaDir => Ok(item.attributes()),
+            VirtualKind::Root => Ok(item.attributes_for_request(request)),
+            VirtualKind::MetaDir => Ok(item.attributes_for_request(request)),
             VirtualKind::StatusJson => {
                 let bytes = root_peer_state().status_json_bytes();
                 if let Some(status_item) = self.get_cached_item(STATUS_JSON_ID) {
                     status_item.update_status_len(bytes.len());
-                    Ok(status_item.attributes())
+                    Ok(status_item.attributes_for_request(request))
                 } else {
                     let status_item = self.cache_item(RustItem::status_json(bytes.len()));
-                    Ok(status_item.attributes())
+                    Ok(status_item.attributes_for_request(request))
                 }
             }
-            VirtualKind::None => self.refresh_backend_item(item),
+            VirtualKind::None => self.refresh_backend_item(item, request),
         }
     }
 
     fn refresh_backend_item(
         &self,
         item: &RustItem,
+        request: Option<&FSItemGetAttributesRequest>,
     ) -> Result<Retained<FSItemAttributes>, Retained<NSError>> {
         let backend_item_id = item.backend_item_id();
         let parent_local_id = item.parent_local_id();
@@ -957,11 +1267,26 @@ impl RustVolume {
             return Err(posix_error(result.error));
         }
 
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc refresh_backend_item local={} backend={} generation={} current_generation={} result_backend={} type={:?} mode={:#o} size={}",
+                item.item_id(),
+                backend_item_id,
+                generation,
+                current_generation,
+                result.attrs.item_id,
+                result.attrs.item_type,
+                result.attrs.mode,
+                result.attrs.size
+            ),
+        );
+
         item.update_from_backend(parent_local_id, &result.attrs);
         if generation != 0 && current_generation != generation {
             return Err(posix_error(libc::ESTALE));
         }
-        Ok(item.attributes())
+        Ok(item.attributes_for_request(request))
     }
 
     fn lookup_item(
@@ -1025,7 +1350,37 @@ impl RustVolume {
             return Err(posix_error(error));
         }
 
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc lookup_item.rpc name={} parent_backend={} generation={} result_backend={} type={:?} mode={:#o} size={}",
+                requested_name,
+                parent_backend_id,
+                generation,
+                attrs.item_id,
+                attrs.item_type,
+                attrs.mode,
+                attrs.size
+            ),
+        );
+        if requested_name != "." && requested_name != ".." && attrs.item_id == ROOT_BACKEND_ID {
+            log_event(
+                "error",
+                format!(
+                    "fskit-poc lookup_item.rpc returned root for name={} parent_backend={}",
+                    requested_name, parent_backend_id
+                ),
+            );
+        }
+
         let local_item_id = self.local_item_id(generation, attrs.item_id);
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc lookup_item.map name={} backend={} generation={} -> local={}",
+                requested_name, attrs.item_id, generation, local_item_id
+            ),
+        );
         let item = self.cached_backend_item(
             local_item_id,
             parent_local_id,
@@ -1053,7 +1408,11 @@ impl RustVolume {
                 self.cache_item(RustItem::status_json(bytes.len()))
             };
             if cookie == unsafe { FSDirectoryCookieInitial } {
-                let attrs = item.attributes();
+                let attrs = item.attributes_for_request(attributes);
+                log_event(
+                    "debug",
+                    format!("fskit-poc enumerate virtual entry {}", item.debug_summary()),
+                );
                 let _ = unsafe {
                     packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
                         &item.fs_name(),
@@ -1109,6 +1468,13 @@ impl RustVolume {
                         &entry.name,
                         &entry_attributes(&entry),
                     );
+                    log_event(
+                        "debug",
+                        format!(
+                            "fskit-poc enumerate root entry local={} backend={} name={} type={:?} size={}",
+                            local_item_id, entry.item_id, entry.name, entry.item_type, entry.size
+                        ),
+                    );
                     let next_cookie = root_entries.len() as u64 + 1;
                     root_entries.push((item, next_cookie));
                 }
@@ -1119,12 +1485,20 @@ impl RustVolume {
             }
 
             for (index, (item, next_cookie)) in root_entries.iter().enumerate().skip(start) {
-                let attrs = item.attributes();
+                let attrs = item.attributes_for_request(attributes);
                 let next_cookie = if index + 1 < root_entries.len() {
                     *next_cookie
                 } else {
                     0
                 };
+                log_event(
+                    "debug",
+                    format!(
+                        "fskit-poc pack root entry next_cookie={} {}",
+                        next_cookie,
+                        item.debug_summary()
+                    ),
+                );
                 let packed = unsafe {
                     packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
                         &item.fs_name(),
@@ -1183,7 +1557,14 @@ impl RustVolume {
                 &entry.name,
                 &entry_attributes(&entry),
             );
-            let attrs = item.attributes();
+            let attrs = item.attributes_for_request(attributes);
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc enumerate entry local={} backend={} name={} type={:?} size={}",
+                    local_item_id, entry.item_id, entry.name, entry.item_type, entry.size
+                ),
+            );
             let packed = unsafe {
                 packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
                     &item.fs_name(),
@@ -1212,6 +1593,15 @@ impl RustVolume {
         length: usize,
         buffer: &FSMutableFileDataBuffer,
     ) -> Result<usize, Retained<NSError>> {
+        log_event(
+            "debug",
+            format!(
+                "fskit-poc read_item.begin offset={} length={} {}",
+                offset,
+                length,
+                item.debug_summary()
+            ),
+        );
         if item.virtual_kind() == VirtualKind::StatusJson {
             let data = root_peer_state().status_json_bytes();
             let start = offset.max(0) as usize;
@@ -1228,6 +1618,13 @@ impl RustVolume {
                     );
                 }
             }
+            log_event(
+                "debug",
+                format!(
+                    "fskit-poc read_item.virtual actual={actual} {}",
+                    item.debug_summary()
+                ),
+            );
             return Ok(actual);
         }
 
@@ -1257,13 +1654,24 @@ impl RustVolume {
                 log_event(
                     "info",
                     format!(
-                        "fskit-poc read item={} offset={offset} actual={actual}",
-                        item.item_id()
+                        "fskit-poc read item={} backend={} offset={offset} actual={actual}",
+                        item.item_id(),
+                        item.backend_item_id()
                     ),
                 );
                 Ok(actual)
             }
-            ReadResult { error, .. } => Err(posix_error(error)),
+            ReadResult { error, .. } => {
+                log_event(
+                    "error",
+                    format!(
+                        "fskit-poc read_item.error errno={} {}",
+                        error,
+                        item.debug_summary()
+                    ),
+                );
+                Err(posix_error(error))
+            }
         }
     }
 }
@@ -1537,7 +1945,10 @@ impl ConnectionAcceptor for RootPeerAcceptor {
             "info",
             format!("root listener request.service={}", request.service()),
         );
-        let client: VfsClient = connection.handle_with_client(());
+        let client = connection.handle_with_client::<VfsClient>(());
+        let client: VfsClient = client.with_middleware(ClientLogging::new(ClientLoggingOptions {
+            log_metadata: true,
+        }));
         let generation = self.state.record_connected(client.clone());
         log_event(
             "info",
@@ -1665,40 +2076,66 @@ fn fs_item_type(item_type: VfsItemType) -> FSItemType {
 }
 
 fn fs_item_attributes(
+    _request: Option<&FSItemGetAttributesRequest>,
     item_id: u64,
     parent_id: u64,
     item_type: FSItemType,
     size: u64,
-    _modified_time: u64,
-    _created_time: u64,
+    modified_time: u64,
+    created_time: u64,
     mode: u32,
 ) -> Retained<FSItemAttributes> {
     let attrs = unsafe { FSItemAttributes::new() };
-    let mode = full_mode(item_type, mode);
     unsafe {
         attrs.setType(item_type);
         attrs.setMode(mode);
         attrs.setFileID(FSItemID(item_id));
         attrs.setParentID(FSItemID(parent_id));
         attrs.setLinkCount(1);
+        attrs.setFlags(0);
         attrs.setSize(size);
         attrs.setAllocSize(size);
         attrs.setUid(libc::getuid());
         attrs.setGid(libc::getgid());
+        let _: () = msg_send![&*attrs, setModifyTime: objc_timespec(modified_time)];
+        let _: () = msg_send![&*attrs, setChangeTime: objc_timespec(modified_time)];
+        let _: () = msg_send![&*attrs, setAccessTime: objc_timespec(modified_time)];
+        let _: () = msg_send![&*attrs, setBirthTime: objc_timespec(created_time)];
     }
     attrs
 }
 
-fn full_mode(item_type: FSItemType, permissions: u32) -> u32 {
-    let file_type_bits = if item_type == FSItemType::Directory {
-        libc::S_IFDIR
-    } else if item_type == FSItemType::Symlink {
-        libc::S_IFLNK
-    } else {
-        libc::S_IFREG
-    } as u32;
+fn attr_valid_mask(attrs: &FSItemAttributes) -> isize {
+    let tracked = [
+        FSItemAttribute::Type,
+        FSItemAttribute::Mode,
+        FSItemAttribute::LinkCount,
+        FSItemAttribute::UID,
+        FSItemAttribute::GID,
+        FSItemAttribute::Flags,
+        FSItemAttribute::Size,
+        FSItemAttribute::AllocSize,
+        FSItemAttribute::FileID,
+        FSItemAttribute::ParentID,
+        FSItemAttribute::AccessTime,
+        FSItemAttribute::ModifyTime,
+        FSItemAttribute::ChangeTime,
+        FSItemAttribute::BirthTime,
+    ];
+    tracked.into_iter().fold(0, |mask, attribute| {
+        if unsafe { attrs.isValid(attribute) } {
+            mask | attribute.0
+        } else {
+            mask
+        }
+    })
+}
 
-    file_type_bits | (permissions & 0o7777)
+fn objc_timespec(seconds: u64) -> ObjcTimespec {
+    ObjcTimespec {
+        tv_sec: seconds.min(i64::MAX as u64) as i64,
+        tv_nsec: 0,
+    }
 }
 
 fn vox_rpc_errno(context: &str, error: impl Display) -> i32 {

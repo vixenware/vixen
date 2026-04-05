@@ -13,7 +13,7 @@ use moire::sync::{mpsc, watch};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use vox::NoopClient;
+use vox::{NoopClient, ServerLogging, ServerLoggingOptions};
 use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
 use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
@@ -120,7 +120,14 @@ where
 
     let client = loop {
         match vox::connect::<NoopClient>(&addr)
-            .on_connection(VfsDispatcher::new(vfs.clone()))
+            .on_connection(
+                VfsDispatcher::new(vfs.clone()).with_middleware(ServerLogging::new(
+                    ServerLoggingOptions {
+                        log_metadata: true,
+                        ..Default::default()
+                    },
+                )),
+            )
             .connect_timeout(CONNECT_ATTEMPT_TIMEOUT)
             .establish()
             .await
