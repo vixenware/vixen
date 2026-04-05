@@ -9,6 +9,8 @@ use std::rc::Rc;
 
 #[cfg(test)]
 use block2::RcBlock;
+#[cfg(test)]
+use objc2::ClassType;
 use objc2::rc::Retained;
 #[cfg(test)]
 use objc2_foundation::NSError;
@@ -26,7 +28,7 @@ use root_peer::root_peer_state;
 
 mod support;
 #[cfg(test)]
-use support::{VIXENFS_DIR_NAME, fs_filename};
+use support::{ROOT_LOCAL_ID, VIXENFS_DIR_NAME, fs_filename};
 
 mod volume;
 #[cfg(test)]
@@ -56,7 +58,9 @@ pub fn run_fskit_smoke() {
     unsafe { FSUnaryFileSystemOperations::didFinishLoading(&*fs) };
 
     let volume = RustVolume::new(fs.as_super());
-    let root = volume.root_item();
+    let root = volume
+        .get_cached_item(ROOT_LOCAL_ID)
+        .expect("root item should be cached");
     let lookup_name = fs_filename(VIXENFS_DIR_NAME);
     let looked_up_item = Rc::new(RefCell::new(None::<Retained<FSItem>>));
     let looked_up_name = Rc::new(RefCell::new(None::<Retained<FSFileName>>));

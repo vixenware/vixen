@@ -5,6 +5,10 @@ import SwiftUI
 
 @main
 struct VixenApp: App {
+    private static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
+    private static let lsregisterPath =
+        "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
+
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
     init() {
@@ -47,28 +51,138 @@ struct VixenApp: App {
             return
         }
 
-        NSLog("Registering VixenFS extension from: %@", extensionURL.path)
+        let desiredPath = extensionURL.path
+        NSLog("Repairing VixenFS registration toward: %@", desiredPath)
 
+        if let snapshot = currentExtensionRegistrationSnapshot() {
+            if !snapshot.paths.isEmpty {
+                NSLog("Current VixenFS registrations: %@", snapshot.paths.joined(separator: ", "))
+            }
+            if !snapshot.uuids.isEmpty {
+                NSLog("Current VixenFS registration UUIDs: %@", snapshot.uuids.joined(separator: ", "))
+            }
+            for stalePath in snapshot.paths where stalePath != desiredPath {
+                NSLog("Unregistering stale VixenFS registration: %@", stalePath)
+                _ = runTool("/usr/bin/pluginkit", arguments: ["-r", stalePath])
+            }
+        }
+
+        _ = runTool("/usr/bin/pluginkit", arguments: ["-a", desiredPath])
+        if FileManager.default.isExecutableFile(atPath: Self.lsregisterPath) {
+            _ = runTool(Self.lsregisterPath, arguments: ["-f", "-R", "-trusted", bundleURL.path])
+        }
+
+        if let snapshot = currentExtensionRegistrationSnapshot() {
+            if snapshot.paths.contains(desiredPath) {
+                NSLog("VixenFS registration now includes bundled appex: %@", desiredPath)
+            } else {
+                NSLog(
+                    "VixenFS registration still does not point at bundled appex. Snapshot:\n%@",
+                    snapshot.rawOutput
+                )
+            }
+        }
+    }
+
+    private func currentExtensionRegistrationSnapshot() -> RegistrationSnapshot? {
+        guard
+            let result = runTool(
+                "/usr/bin/pluginkit",
+                arguments: ["-mAvvv", "-i", Self.extensionBundleIdentifier]
+            )
+        else {
+            return nil
+        }
+
+        if result.status != 0 {
+            NSLog(
+                "pluginkit registration query failed (status %d): %@",
+                result.status,
+                result.stderr
+            )
+        }
+
+        return RegistrationSnapshot(rawOutput: result.stdout)
+    }
+
+    @discardableResult
+    private func runTool(_ path: String, arguments: [String]) -> CommandResult? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        process.arguments = ["-a", extensionURL.path]
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
 
-        let errPipe = Pipe()
-        process.standardOutput = nil
-        process.standardError = errPipe
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
 
         do {
             try process.run()
             process.waitUntilExit()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            if !errData.isEmpty, let errStr = String(data: errData, encoding: .utf8) {
-                NSLog("pluginkit stderr: %@", errStr)
-            }
-            if process.terminationStatus != 0 {
-                NSLog("pluginkit exited with status %d", process.terminationStatus)
-            }
         } catch {
-            NSLog("Failed to register extension: %@", error.localizedDescription)
+            NSLog("Failed to run %@ %@: %@", path, arguments.joined(separator: " "), error.localizedDescription)
+            return nil
+        }
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(decoding: stdoutData, as: UTF8.self)
+        let stderr = String(decoding: stderrData, as: UTF8.self)
+
+        if !stdout.isEmpty {
+            NSLog("%@ stdout:\n%@", path, stdout)
+        }
+        if !stderr.isEmpty {
+            NSLog("%@ stderr:\n%@", path, stderr)
+        }
+        if process.terminationStatus != 0 {
+            NSLog("%@ exited with status %d", path, process.terminationStatus)
+        }
+
+        return CommandResult(status: process.terminationStatus, stdout: stdout, stderr: stderr)
+    }
+}
+
+private struct CommandResult {
+    let status: Int32
+    let stdout: String
+    let stderr: String
+}
+
+private struct RegistrationSnapshot {
+    let rawOutput: String
+    let paths: [String]
+    let uuids: [String]
+
+    init(rawOutput: String) {
+        self.rawOutput = rawOutput
+        self.paths = Self.extractPaths(from: rawOutput)
+        self.uuids = Self.extractUUIDs(from: rawOutput)
+    }
+
+    private static func extractPaths(from rawOutput: String) -> [String] {
+        let nsRange = NSRange(rawOutput.startIndex..<rawOutput.endIndex, in: rawOutput)
+        let regex = try? NSRegularExpression(pattern: #"/[^\s]+\.appex"#)
+        let matches = regex?.matches(in: rawOutput, range: nsRange) ?? []
+        var seen = Set<String>()
+        return matches.compactMap { match in
+            guard let range = Range(match.range, in: rawOutput) else { return nil }
+            let path = String(rawOutput[range])
+            return seen.insert(path).inserted ? path : nil
+        }
+    }
+
+    private static func extractUUIDs(from rawOutput: String) -> [String] {
+        let nsRange = NSRange(rawOutput.startIndex..<rawOutput.endIndex, in: rawOutput)
+        let regex = try? NSRegularExpression(
+            pattern: #"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"#
+        )
+        let matches = regex?.matches(in: rawOutput, range: nsRange) ?? []
+        var seen = Set<String>()
+        return matches.compactMap { match in
+            guard let range = Range(match.range, in: rawOutput) else { return nil }
+            let uuid = String(rawOutput[range])
+            return seen.insert(uuid).inserted ? uuid : nil
         }
     }
 }
