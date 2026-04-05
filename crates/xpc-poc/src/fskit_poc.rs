@@ -12,12 +12,12 @@ use objc2::runtime::AnyObject;
 use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSData, NSError, NSObjectProtocol, NSPOSIXErrorDomain, NSString, NSUUID};
 use objc2_fs_kit::{
-    FSContainerStatus, FSDirectoryCookie, FSDirectoryCookieInitial, FSDirectoryEntryPacker,
-    FSDirectoryVerifier, FSFileName, FSFileSystemBase, FSItem, FSItemAttributes,
-    FSItemGetAttributesRequest, FSItemID, FSItemType, FSMutableFileDataBuffer, FSProbeResult,
-    FSResource, FSStatFSResult, FSTaskOptions, FSUnaryFileSystem, FSUnaryFileSystemOperations,
-    FSVolume, FSVolumeIdentifier, FSVolumeOperations, FSVolumePathConfOperations,
-    FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities,
+    FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie, FSDirectoryCookieInitial,
+    FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName, FSFileSystemBase, FSItem,
+    FSItemAttributes, FSItemGetAttributesRequest, FSItemID, FSItemType, FSMutableFileDataBuffer,
+    FSProbeResult, FSResource, FSStatFSResult, FSTaskOptions, FSUnaryFileSystem,
+    FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier, FSVolumeOperations,
+    FSVolumePathConfOperations, FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities,
 };
 use tokio::runtime::{Builder, Runtime};
 use vox::{ConnectionAcceptor, ConnectionRequest, Metadata, PendingConnection, acceptor_on};
@@ -343,6 +343,16 @@ define_class!(
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
             log_event("info", "fskit-poc mountWithOptions");
+            reply.call((ptr::null_mut(),));
+        }
+
+        #[unsafe(method(deactivateWithOptions:replyHandler:))]
+        fn deactivateWithOptions_replyHandler(
+            &self,
+            _options: FSDeactivateOptions,
+            reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            log_event("info", "fskit-poc deactivateWithOptions");
             reply.call((ptr::null_mut(),));
         }
 
@@ -1664,6 +1674,7 @@ fn fs_item_attributes(
     mode: u32,
 ) -> Retained<FSItemAttributes> {
     let attrs = unsafe { FSItemAttributes::new() };
+    let mode = full_mode(item_type, mode);
     unsafe {
         attrs.setType(item_type);
         attrs.setMode(mode);
@@ -1676,6 +1687,18 @@ fn fs_item_attributes(
         attrs.setGid(libc::getgid());
     }
     attrs
+}
+
+fn full_mode(item_type: FSItemType, permissions: u32) -> u32 {
+    let file_type_bits = if item_type == FSItemType::Directory {
+        libc::S_IFDIR
+    } else if item_type == FSItemType::Symlink {
+        libc::S_IFLNK
+    } else {
+        libc::S_IFREG
+    } as u32;
+
+    file_type_bits | (permissions & 0o7777)
 }
 
 fn vox_rpc_errno(context: &str, error: impl Display) -> i32 {

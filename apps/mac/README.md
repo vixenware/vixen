@@ -81,6 +81,26 @@ There are three moving parts in local development:
 - PlugInKit's current registration for `eu.bearcove.vixenfs`
 - the `fskit_agent` / `extensionkitservice` processes that try to launch the registered extension
 
+### Pick the right install path for the experiment
+
+There are two different extension launch shapes in this repo.
+
+- Hybrid Swift entrypoint plus Rust FSKit objects:
+  - use `just -f apps/mac/Justfile install`
+  - the extension entrypoint stays [VixenFS.swift](xcode/VixenFS/VixenFS.swift)
+  - Swift calls into [RustFSKitBootstrap.swift](xcode/VixenFS/RustFSKitBootstrap.swift)
+  - this is the path to use when debugging the real FSKit host with Rust-backed `FSUnaryFileSystem` / `FSVolume` / `FSItem` objects
+- Standalone injected Rust executable:
+  - use `just -f apps/mac/Justfile install-rust-fs`
+  - this replaces `VixenFS.appex/Contents/MacOS/VixenFS` with `target/release/xpc-poc`
+  - this is only for bootstrap / raw-XPC experiments
+
+Do not mix them up.
+
+If you are trying to debug the hybrid Swift-plus-Rust extension and you run `install-rust-fs`,
+you have changed the experiment. The failure will move earlier into bootstrap because the live
+extension executable is no longer the Swift FSKit host.
+
 ### What actually registers the extension
 
 - `Vixen.app` calls `pluginkit -a <appex-path>` on launch from [VixenApp.swift](xcode/Vixen/VixenApp.swift).
@@ -144,6 +164,24 @@ For a specific build product:
 - `pluginkit -mAvvv -i eu.bearcove.vixenfs`
 
 Do not trust a successful build alone. Always verify the active registration path afterward.
+
+### Minimal debugging checklist
+
+Before debugging a mount failure, check these in order:
+
+1. Confirm which experiment you mean to run.
+   - Hybrid FSKit host: `just -f apps/mac/Justfile install`
+   - Standalone injected Rust executable: `just -f apps/mac/Justfile install-rust-fs`
+2. Verify the winning registration:
+   - `pluginkit -mAvvv -i eu.bearcove.vixenfs`
+3. If FSKit host state looks stale, restart the daemons:
+   - `sudo killall fskitd fskit_agent`
+4. Re-register the installed app if needed:
+   - `just apps/mac/reload-fs-extension-registration /Applications/Vixen.app`
+5. Only then retry the mount or `vx eval`.
+
+If step 2 shows a path other than the app copy you intend to test, stop there and fix registration
+first. Otherwise you are debugging the wrong binary.
 
 ## Runtime expectations from `vx-vfs`
 
