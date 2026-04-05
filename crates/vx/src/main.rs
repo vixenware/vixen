@@ -146,7 +146,7 @@ fn force_shutdown_local_daemon(address: &str) -> eyre::Result<()> {
             }
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
