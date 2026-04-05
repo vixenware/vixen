@@ -84,6 +84,7 @@ pub(super) fn fs_item_type(item_type: VfsItemType) -> FSItemType {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn fs_item_attributes(
     _request: Option<&FSItemGetAttributesRequest>,
     item_id: u64,
@@ -106,6 +107,7 @@ pub(super) fn fs_item_attributes(
         attrs.setAllocSize(size);
         attrs.setUid(libc::getuid());
         attrs.setGid(libc::getgid());
+        // TODO: is that _truly_ necessary?
         let _: () = msg_send![&*attrs, setModifyTime: objc_timespec(modified_time)];
         let _: () = msg_send![&*attrs, setChangeTime: objc_timespec(modified_time)];
         let _: () = msg_send![&*attrs, setAccessTime: objc_timespec(modified_time)];

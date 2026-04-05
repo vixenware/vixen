@@ -49,6 +49,7 @@ define_class!(
 );
 
 impl RustItem {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         local_item_id: u64,
         backend_item_id: u64,

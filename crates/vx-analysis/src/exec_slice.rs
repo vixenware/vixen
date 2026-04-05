@@ -712,6 +712,7 @@ struct BodyLowering<'a> {
 }
 
 impl<'a> BodyLowering<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         body: BodyId,
         analyzed: &'a AnalyzedBody,

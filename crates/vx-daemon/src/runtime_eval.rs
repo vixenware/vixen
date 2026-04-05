@@ -895,6 +895,7 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn eval_runtime_boundary(
         &mut self,
         function_name: &str,

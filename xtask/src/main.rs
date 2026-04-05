@@ -1,12 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 
 use eyre::{Context, ContextCompat, Result};
-
-mod integration;
-mod registry_vx;
 
 enum InstallMode {
     Release,
@@ -24,28 +20,8 @@ fn main() {
             };
             install(mode)
         }
-        Some("vixenfs-codegen") => {
-            if let Err(error) = vixenfs_codegen() {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        }
-        Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
         Some("perfetto-proto") => {
             if let Err(error) = perfetto_proto() {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        }
-        Some("smoke") => smoke(&args[1..]),
-        Some("integration") => {
-            if let Err(error) = integration::run(&args[1..]) {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        }
-        Some("registry-vx") => {
-            if let Err(error) = registry_vx::run(&args[1..]) {
                 eprintln!("{error:#}");
                 std::process::exit(1);
             }
@@ -159,93 +135,6 @@ fn install(mode: InstallMode) {
     }
 }
 
-fn vixenfs_codegen() -> Result<(), eyre::Error> {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| eyre::eyre!("failed to locate workspace root"))?
-        .to_path_buf();
-
-    let service = vx_services::vfs_service_descriptor();
-    let swift = vox_codegen::targets::swift::generate_service_with_bindings(
-        service,
-        vox_codegen::targets::swift::SwiftBindings::Client,
-    );
-
-    let output = workspace_root.join("apps/mac/xcode/VixenFS/VfsClient.swift");
-
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&output, &swift)?;
-    println!("Wrote {}", output.display());
-
-    Ok(())
-}
-
-fn bump_roam(rev: Option<&str>) {
-    let workspace_root = find_workspace_root().expect("Could not find workspace root");
-    let mac_dir = workspace_root.join("apps/mac");
-
-    let new_rev = match rev {
-        Some(r) => r.to_string(),
-        None => {
-            let output = Command::new("git")
-                .args(["ls-remote", "https://github.com/bearcove/roam.git", "HEAD"])
-                .output()
-                .expect("Failed to run git ls-remote");
-            if !output.status.success() {
-                eprintln!("Failed to fetch latest roam revision");
-                std::process::exit(1);
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout
-                .split_whitespace()
-                .next()
-                .expect("Empty output from git ls-remote")
-                .to_string()
-        }
-    };
-
-    println!("Bumping roam to revision: {}", new_rev);
-
-    let project_yml_path = mac_dir.join("xcode/project.yml");
-    let package_swift_path = mac_dir.join("Package.swift");
-
-    for path in [&project_yml_path, &package_swift_path] {
-        if !path.exists() {
-            eprintln!("Warning: {} does not exist, skipping", path.display());
-            continue;
-        }
-
-        let content = fs::read_to_string(path).expect("Failed to read file");
-        let mut new_content = String::new();
-        for line in content.lines() {
-            if line.contains("revision:") {
-                let prefix = line.split("revision:").next().unwrap();
-                if path.ends_with("project.yml") {
-                    new_content.push_str(prefix);
-                    new_content.push_str(&format!("revision: {}", new_rev));
-                } else {
-                    new_content.push_str(prefix);
-                    let suffix = if line.trim_end().ends_with(',') {
-                        "\","
-                    } else {
-                        "\""
-                    };
-                    new_content.push_str(&format!("revision: \"{}{}", new_rev, suffix));
-                }
-                new_content.push('\n');
-            } else {
-                new_content.push_str(line);
-                new_content.push('\n');
-            }
-        }
-
-        fs::write(path, new_content).expect("Failed to write file");
-        println!("Updated {}", path.display());
-    }
-}
-
 fn perfetto_proto() -> Result<()> {
     let workspace_root = find_workspace_root().context("Could not find workspace root")?;
     let proto_root = workspace_root.join("third_party/perfetto-proto");
@@ -287,162 +176,6 @@ fn perfetto_proto() -> Result<()> {
     }
 
     println!("Wrote {}", output_file.display());
-    Ok(())
-}
-
-fn smoke(raw_args: &[String]) {
-    let (build_file, extra_args) = match raw_args.split_first() {
-        Some((build_file, extra_args)) => (build_file, extra_args),
-        None => {
-            eprintln!("Usage: cargo xtask smoke <build.vx> [-- <extra vx build args>]");
-            std::process::exit(1);
-        }
-    };
-    let extra_args = match extra_args.split_first() {
-        Some((dash_dash, rest)) if dash_dash == "--" => rest,
-        _ => extra_args,
-    };
-
-    let workspace_root = find_workspace_root().expect("Could not find workspace root");
-    let build_status = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .current_dir(&workspace_root)
-        .status()
-        .expect("Failed to run cargo build for smoke test");
-    if !build_status.success() {
-        std::process::exit(build_status.code().unwrap_or(1));
-    }
-
-    let vx_home = std::env::var("VX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("vx-smoke-home"));
-
-    prepare_smoke_home(&vx_home).expect("Failed to prepare smoke VX_HOME");
-
-    let mut cmd = Command::new(workspace_root.join("target/release/vx"));
-    cmd.arg("build")
-        .arg("--release")
-        .arg("--no-tui")
-        .arg("-f")
-        .arg(build_file);
-    for arg in extra_args {
-        cmd.arg(arg);
-    }
-    cmd.current_dir(&workspace_root)
-        .env("VX_HOME", &vx_home)
-        .env("VX_TEST", "1");
-    eprintln!("Launching: {cmd:?}");
-
-    let status = cmd.status().expect("Failed to run vx smoke build");
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-}
-
-fn prepare_smoke_home(vx_home: &PathBuf) -> Result<()> {
-    kill_smoke_vxd(vx_home).context("failed to stop previous smoke vxd")?;
-
-    if vx_home.exists() {
-        fs::remove_dir_all(vx_home).with_context(|| {
-            format!("failed to remove previous smoke home {}", vx_home.display())
-        })?;
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn kill_smoke_vxd(vx_home: &PathBuf) -> Result<()> {
-    let needle = vx_home.display().to_string();
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,args="])
-        .output()
-        .context("failed to enumerate processes with ps")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut vxd_pids = Vec::new();
-
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let Some(pid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(_ppid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
-            continue;
-        };
-        let args = parts.collect::<Vec<_>>().join(" ");
-        if args.contains(&needle) && args.contains("vxd") {
-            vxd_pids.push(pid);
-        }
-    }
-
-    if vxd_pids.is_empty() {
-        return Ok(());
-    }
-
-    eprintln!(
-        "Stopping previous smoke vxd for {}: {:?}",
-        vx_home.display(),
-        vxd_pids
-    );
-
-    for pid in &vxd_pids {
-        let status = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .with_context(|| format!("failed to signal pid {pid}"))?;
-        if !status.success() {
-            eyre::bail!("kill -TERM {pid} failed with status {status}");
-        }
-    }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        let mut alive = Vec::new();
-        for pid in &vxd_pids {
-            let status = Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .with_context(|| format!("failed to probe pid {pid}"))?;
-            if status.success() {
-                alive.push(*pid);
-            }
-        }
-        if alive.is_empty() {
-            thread::sleep(std::time::Duration::from_millis(100));
-            return Ok(());
-        }
-        thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    for pid in &vxd_pids {
-        let status = Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .with_context(|| format!("failed to probe pid {pid}"))?;
-        if !status.success() {
-            continue;
-        }
-        let status = Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()
-            .with_context(|| format!("failed to force-kill pid {pid}"))?;
-        if !status.success() {
-            eyre::bail!("kill -KILL {pid} failed with status {status}");
-        }
-    }
-
-    thread::sleep(std::time::Duration::from_millis(200));
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn kill_smoke_vxd(_vx_home: &PathBuf) -> Result<()> {
     Ok(())
 }
 

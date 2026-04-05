@@ -111,6 +111,8 @@ impl UnmanagedStrictFragmentString {
         self.len == 0
     }
 
+    /// # Safety
+    ///
     /// Caller must ensure the returned memory remains valid for the borrow.
     pub unsafe fn as_bytes<'a>(&self) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len()) }
@@ -118,10 +120,13 @@ impl UnmanagedStrictFragmentString {
 
     /// Copies the returned string bytes into an owned Rust `String`.
     ///
+    /// # Safety
+    ///
     /// The backing storage is treated as frame-valid and borrowed for the
     /// duration of the boundary crossing. This helper performs the required
     /// promotion into an owned runtime string.
     pub unsafe fn to_owned_string(&self) -> Result<String, Utf8Error> {
+        // FIXME: this feels turbo-unsound
         let bytes = unsafe { self.as_bytes() };
         std::str::from_utf8(bytes).map(str::to_owned)
     }
@@ -159,6 +164,9 @@ pub fn compile_strict_fragment(
     Ok(crate::kajit_backend::compile(function)?)
 }
 
+/// # Safety
+///
+/// Many different ways this can go south
 pub unsafe fn execute_compiled_unmanaged_strict_fragment(
     function: &StrictFragmentFunction,
     compiled: &CompiledFunction,
@@ -180,6 +188,10 @@ pub unsafe fn execute_compiled_unmanaged_strict_fragment(
 
 /// Executes a compiled strict fragment and promotes frame-valid string returns
 /// into owned Rust strings for use outside the strict-fragment boundary.
+///
+/// # Safety
+///
+/// None
 pub unsafe fn execute_compiled_copying_strict_fragment_strings(
     function: &StrictFragmentFunction,
     compiled: &CompiledFunction,

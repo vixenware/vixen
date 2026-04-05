@@ -205,6 +205,9 @@ pub fn interpret_source_text_u64_add_function(
     interpreter::interpret_u64(&function, &[lhs, rhs]).map_err(SourceLoweringError::Interpret)
 }
 
+/// # Safety
+///
+/// lol
 pub unsafe fn run_source_text_u64_add_function(
     source: &str,
     function_name: &str,

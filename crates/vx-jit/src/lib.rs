@@ -82,6 +82,9 @@ pub fn interpret_u64_add(lhs: u64, rhs: u64) -> Result<u64, StrictFragmentInterp
     interpret_u64(&lower_u64_add_strict_fragment(), &[lhs, rhs])
 }
 
+/// # Safety
+///
+/// ??? why is this a function
 pub unsafe fn run_u64_add(lhs: u64, rhs: u64) -> Result<u64, KajitBackendError> {
     let compiled = compile_u64_add()?;
     let add: unsafe extern "C" fn(u64, u64) -> u64 =

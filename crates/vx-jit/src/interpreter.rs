@@ -210,6 +210,7 @@ fn ensure_value_type(
     value: &StrictFragmentValue,
 ) -> Result<(), StrictFragmentInterpretError> {
     let found = value.kind();
+    #[allow(clippy::match_like_matches_macro)]
     let matches = match (expected, found) {
         (StrictFragmentType::U64, StrictFragmentValueKind::U64) => true,
         (StrictFragmentType::Bool, StrictFragmentValueKind::Bool) => true,

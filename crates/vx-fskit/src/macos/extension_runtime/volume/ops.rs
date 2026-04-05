@@ -117,13 +117,13 @@ unsafe impl FSVolumeOperations for RustVolume {
             mode: unsafe {
                 new_attributes
                     .isValid(FSItemAttribute::Mode)
-                    .then(|| new_attributes.mode() as u32)
+                    .then(|| new_attributes.mode())
             },
             modified_time: None,
             size: unsafe {
                 new_attributes
                     .isValid(FSItemAttribute::Size)
-                    .then(|| new_attributes.size() as u64)
+                    .then(|| new_attributes.size())
             },
         };
 
@@ -240,7 +240,7 @@ unsafe impl FSVolumeOperations for RustVolume {
 
         let requested_name = fs_filename_string(name);
         let mode = if unsafe { new_attributes.isValid(FSItemAttribute::Mode) } {
-            unsafe { new_attributes.mode() as u32 }
+            unsafe { new_attributes.mode() }
         } else if item_type == FSItemType::Directory {
             0o755
         } else {
