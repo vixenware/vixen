@@ -23,7 +23,7 @@
 #include <xpc/xpc.h>
 
 #define VIXEN_APP_GROUP_ID "B2N6FSRTPV.vixenfs"
-#define VIXEN_XPC_SPY_LOG_NAME "vixenfs-xpc-spy.log"
+#define VIXEN_EXTENSION_PROBE_LOG_NAME "vixenfs-extension-probe.log"
 
 #ifdef __LP64__
 typedef struct mach_header_64 vxn_mach_header_t;
@@ -321,7 +321,7 @@ static const char *vxn_log_path(void) {
             "%s/Library/Group Containers/%s/Logs/%s",
             home,
             VIXEN_APP_GROUP_ID,
-            VIXEN_XPC_SPY_LOG_NAME
+            VIXEN_EXTENSION_PROBE_LOG_NAME
         );
     });
     return path;
@@ -364,7 +364,12 @@ static void vxn_log(const char *format, ...) {
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    dprintf(fd, "[%lld.%03d] [xpc-spy] ", (long long)ts.tv_sec, (int)(ts.tv_nsec / 1000000));
+    dprintf(
+        fd,
+        "[%lld.%03d] [extension-probe] ",
+        (long long)ts.tv_sec,
+        (int)(ts.tv_nsec / 1000000)
+    );
 
     va_list args;
     va_start(args, format);
