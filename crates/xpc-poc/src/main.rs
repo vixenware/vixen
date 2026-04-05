@@ -1,6 +1,6 @@
 use xpc_poc::{
-    init_logging, log_event, log_process_context, request_hour, request_read_file,
-    run_dispatch_main, start_anonymous_hour_service, start_mach_hour_service,
+    fskit_poc::run_fskit_smoke, init_logging, log_event, log_process_context, request_hour,
+    request_read_file, run_dispatch_main, start_anonymous_hour_service, start_mach_hour_service,
 };
 
 const DEFAULT_EXTENSION_MACH_SERVICE: &str = "eu.bearcove.vixenfs";
@@ -33,6 +33,9 @@ fn main() {
                 }
             });
             run_dispatch_main();
+        }
+        (Some("fskit-smoke"), None) => {
+            run_fskit_smoke();
         }
         _ => {
             let service_name = std::env::var("VIXEN_XPC_MACH_SERVICE")

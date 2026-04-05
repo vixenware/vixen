@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::PathBuf;
@@ -8,6 +8,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use block::{Block, ConcreteBlock};
+use objc2::rc::Retained;
+use objc2_fs_kit::FSUnaryFileSystem;
 use xpc_connection_sys::{
     _xpc_error_connection_interrupted, _xpc_error_connection_invalid,
     _xpc_error_termination_imminent, _xpc_type_connection, _xpc_type_dictionary, _xpc_type_error,
@@ -19,6 +21,8 @@ use xpc_connection_sys::{
     xpc_dictionary_create_reply, xpc_dictionary_get_string, xpc_dictionary_set_string,
     xpc_endpoint_create, xpc_get_type, xpc_object_t, xpc_release, xpc_retain,
 };
+
+pub mod fskit_poc;
 
 pub const PING_KEY: &str = "ping";
 pub const HOUR_KEY: &str = "hour";
@@ -52,13 +56,28 @@ fn log_file_path() -> PathBuf {
     if let Ok(path) = std::env::var("VIXEN_XPC_LOG_FILE") {
         return PathBuf::from(path);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home)
+    real_home_dir()
         .join("Library")
         .join("Group Containers")
         .join(APP_GROUP_ID)
         .join("Logs")
         .join(LOG_FILE_NAME)
+}
+
+fn real_home_dir() -> PathBuf {
+    let uid = unsafe { libc::getuid() };
+    let passwd = unsafe { libc::getpwuid(uid) };
+    if !passwd.is_null() {
+        let dir = unsafe { CStr::from_ptr((*passwd).pw_dir) };
+        return PathBuf::from(dir.to_string_lossy().into_owned());
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    if let Some(prefix) = home.split("/Library/Containers/").next() {
+        if prefix.starts_with("/Users/") {
+            return PathBuf::from(prefix);
+        }
+    }
+    PathBuf::from(home)
 }
 
 fn append_group_log(level: &str, message: &str) {
@@ -86,6 +105,13 @@ pub fn log_event(level: &str, message: impl AsRef<str>) {
 pub fn init_logging() {
     let _ = LOG_MUTEX.set(Mutex::new(()));
     log_event("info", "xpc-poc logging initialized");
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn VixenRustCreateFileSystem() -> *mut c_void {
+    let file_system: Retained<FSUnaryFileSystem> = fskit_poc::create_file_system();
+    log_event("info", "created Rust FSKit filesystem object");
+    Retained::into_raw(file_system).cast()
 }
 
 pub fn log_process_context(args: &[String]) {

@@ -60,6 +60,20 @@ targets:
   VixenFS:
     type: extensionkit-extension
     platform: macOS
+    preBuildScripts:
+      - name: Build Rust FSKit bridge
+        script: |
+          set -euo pipefail
+          repo_root="$(cd "$SRCROOT/../../.." && pwd)"
+          out_dir="$SRCROOT/build/RustLibs"
+          mkdir -p "$out_dir"
+          if [[ "$CONFIGURATION" == "Release" ]]; then
+            cargo build --manifest-path "$repo_root/Cargo.toml" --package xpc-poc --lib --release
+            cp "$repo_root/target/release/libxpc_poc.a" "$out_dir/libxpc_poc.a"
+          else
+            cargo build --manifest-path "$repo_root/Cargo.toml" --package xpc-poc --lib
+            cp "$repo_root/target/debug/libxpc_poc.a" "$out_dir/libxpc_poc.a"
+          fi
     sources:
       - path: VixenFS
         excludes:
@@ -83,6 +97,13 @@ targets:
         MARKETING_VERSION: 0.0.0
         CURRENT_PROJECT_VERSION: 0.0.0
         CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
+        SWIFT_OBJC_BRIDGING_HEADER: VixenFS/VixenFS-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/build/RustLibs
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lxpc_poc
     dependencies:
       - package: vox-runtime
         product: VoxRuntime

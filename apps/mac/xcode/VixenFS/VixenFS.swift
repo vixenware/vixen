@@ -12,6 +12,6 @@ struct VixenFS: UnaryFileSystemExtension {
 
     var fileSystem: FSUnaryFileSystem & FSUnaryFileSystemOperations {
         bootLog.error("🔌 fileSystem property accessed")
-        return Bridge.shared
+        return RustFSKitBootstrap.fileSystem
     }
 }

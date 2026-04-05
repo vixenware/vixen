@@ -10,9 +10,23 @@ repository.workspace = true
 [package.metadata."docs.rs"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 block = "0.1.6"
+block2 = { version = "0.6.2", features = ["alloc"] }
 libc.workspace = true
+objc2 = { version = "0.6.4", features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSDictionary",
+    "NSData",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSUUID",
+] }
+objc2-fs-kit = "0.3.2"
 xpc-connection-sys = "0.1.1"
 
 [lints]
