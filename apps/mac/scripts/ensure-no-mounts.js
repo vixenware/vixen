@@ -48,7 +48,11 @@ for (const line of mountOutput.split("\n")) {
   if (line.includes("(vixenfs,")) {
     const match = line.match(/on\s+(.+?)\s+\(/);
     if (match) {
-      const mountPath = match[1];
+      let mountPath = match[1];
+      if (mountPath.startsWith("/private")) {
+        mountPath = mountPath.replace(/^\/private/, "/tmp");
+      }
+
       console.log(`${emojis.mount} Unmounting vixenfs at ${colorize("cyan", mountPath)}...`);
       run(`umount "${mountPath}"`, { ignoreError: true, stdio: "pipe" });
       unmounted++;
@@ -72,7 +76,8 @@ for (let i = 0; i < 10; i++) {
 }
 const stillRunning = run("pgrep -x VixenFS", { ignoreError: true });
 if (stillRunning) {
-  console.log(`${emojis.warning} ${colorize("yellow", "Warning: VixenFS is still running after 2s timeout.")}`);
+  console.log(`${emojis.warning} ${colorize("yellow", "Error: VixenFS is still running after 2s timeout — you should NOT proceed with build")}`);
+  process.exit(1);
 }
 
 console.log(`\n${emojis.success} ${colorize("green", "Cleanup complete.")}`);
