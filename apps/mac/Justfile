@@ -29,6 +29,7 @@ validate-profile profile='Debug':
 build profile='Debug' version='':
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
+    node scripts/ensure-no-mounts.js
     if [[ "{{ version }}" == "" ]]; then
       just bump-version
       VERSION=$(cat dev-version.txt)
@@ -51,27 +52,22 @@ build profile='Debug' version='':
       build | xcbeautify
 
 # Install Vixen.app into /Applications and launch once.
-install profile='Debug': build
+install profile='Debug': (build profile)
     #!/bin/bash -eux -o pipefail
-    node scripts/ensure-no-mounts.js
     just validate-profile "{{ profile }}"
-    just build {{ profile }}
     rm -rf /Applications/Vixen.app
     ditto xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app /Applications/Vixen.app
-    # scripts/fix-registration.js /Applications/Vixen.app
     just open {{ profile }}
 
 open profile='Debug':
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
-    # open xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
     open /Applications/Vixen.app/
 
 fix-registration profile='Debug':
     #!/bin/bash
     just validate-profile "{{ profile }}"
     scripts/fix-registration.js /Applications/Vixen.app
-    # scripts/fix-registration.js xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
 
 # Build, sign, and package a release DMG for review.
 
