@@ -55,16 +55,16 @@ install profile='Debug': build
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
     just build {{ profile }}
-    just open {{ profile }}
-    # rm -rf /Applications/Vixen.app
-    # ditto xcode/build/DerivedData/Build/Products/$profile/Vixen.app /Applications/Vixen.app
+    rm -rf /Applications/Vixen.app
+    ditto xcode/build/DerivedData/Build/Products/$profile/Vixen.app /Applications/Vixen.app
     # scripts/fix-registration.js /Applications/Vixen.app
-    # open /Applications/Vixen.app/
+    just open {{ profile }}
 
 open profile='Debug':
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
-    open xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
+    # open xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
+    open /Applications/Vixen.app/
 
 fix-registration profile='Debug':
     #!/bin/bash
