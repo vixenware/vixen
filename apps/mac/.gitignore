@@ -27,3 +27,6 @@ DerivedData/
 
 .handoffs
 .tracey/
+
+# version number for dev
+dev-version.txt

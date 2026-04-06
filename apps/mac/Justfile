@@ -12,9 +12,33 @@ generate:
     plutil -lint xcode/VixenFS/VixenFS.entitlements
     plutil -lint xcode/Vixen/Vixen.entitlements
 
+# Bump the development version in dev-version.txt.
+bump-version:
+    node scripts/bump-version.js
+
 # Build Vixen.app in Release configuration.
-build profile='debug':
-    cd xcode && xcodebuild \
+
+validate-profile profile='Debug':
+    #!/bin/bash
+    if [[ "{{ profile }}" != "Debug" && "{{ profile }}" != "Release" ]]; then
+      echo "Invalid profile: {{ profile }}"
+      exit 1
+    fi
+
+# If version is not specified, reads from dev-version.txt.
+build profile='debug' version='':
+    #!/bin/bash
+    just validate-profile profile="{{ profile }}"
+    if [[ "{{ version }}" == "" ]]; then
+      just bump-version
+      VERSION=$(cat dev-version.txt)
+    else
+      VERSION="{{ version }}"
+    fi
+    echo "Building version ${VERSION}"
+    cd xcode
+    xcbeautify --version || echo "brew install xcbeautify"
+    xcodebuild \
       -project Vixen.xcodeproj \
       -scheme Vixen \
       -configuration {{ profile }} \
@@ -22,10 +46,14 @@ build profile='debug':
       CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
       -derivedDataPath build/DerivedData \
       -clonedSourcePackagesDirPath build/SourcePackages \
-      build
+      MARKETING_VERSION="$(VERSION)" \
+      CURRENT_PROJECT_VERSION="$(VERSION)" \
+      build | xcbeautify
 
 # Install Vixen.app into /Applications and launch once.
-install profile='debug': build
+install profile='Debug': build
+    #!/bin/bash
+    just validate-profile profile="{{ profile }}"
     just build {{ profile }}
     open xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
     # rm -rf /Applications/Vixen.app
@@ -33,7 +61,9 @@ install profile='debug': build
     # scripts/fix-registration.js /Applications/Vixen.app
     # open /Applications/Vixen.app/
 
-fix-registration profile='debug':
+fix-registration profile='Debug':
+    #!/bin/bash
+    just validate-profile profile="{{ profile }}"
     # scripts/fix-registration.js /Applications/Vixen.app
     scripts/fix-registration.js xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
 
