@@ -14,8 +14,8 @@ use vx_analysis::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 use vx_jit::StrictFragmentValue;
 use vx_parser::{
     AstNode, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, Expr, FnDecl, IfExpr,
-    IndexExpr, Item, LetStmt, LiteralExpr, NameRefExpr, Parameter, Stmt, SyntaxKind, SyntaxToken,
-    TupleExpr, parse_source_file,
+    IndexExpr, Item, LetStmt, LiteralExpr, NameRefExpr, Parameter, Stmt, StructLiteralExpr,
+    SyntaxKind, SyntaxToken, TupleExpr, parse_source_file,
 };
 
 use crate::{EvalResult, EvalTrace};
@@ -101,8 +101,13 @@ enum Value {
     U64(u64),
     Bool(bool),
     String(String),
-    /// A lazy product — fields are shared thunks.
+    /// A lazy product — fields are shared thunks (positional).
     Product(Vec<SharedThunk>),
+    /// A struct value — named fields are shared thunks (lazy).
+    Struct {
+        name: String,
+        fields: Vec<(String, SharedThunk)>,
+    },
     /// A closure with captured environment.
     Closure {
         params: Vec<String>,
@@ -253,6 +258,8 @@ fn eval_block(
             Stmt::Expr(expr) => {
                 last_value = Some(eval_expr(&expr, &mut env, functions, compiled, trace)?);
             }
+            // Struct declarations are type-level — no runtime action needed.
+            Stmt::StructDecl(_) => {}
             _ => return Err(format!("unsupported statement: {:?}", stmt.syntax().kind())),
         }
     }
@@ -294,27 +301,8 @@ fn eval_expr(
         Expr::If(if_expr) => eval_if(if_expr, env, functions, compiled, trace),
         Expr::Tuple(tuple) => eval_tuple(tuple, env),
         Expr::Index(index) => eval_index(index, env, functions, compiled, trace),
-        Expr::Field(field) => {
-            let receiver = field.receiver().ok_or("field without receiver")?;
-            let field_token = field.field_name().ok_or("field without name")?;
-            let field_text = field_token.text().to_string();
-            let idx_str = field_text.strip_prefix('_').unwrap_or(&field_text);
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                let recv_val = eval_expr(&receiver, env, functions, compiled, trace)?;
-                match recv_val {
-                    Value::Product(fields) => {
-                        if idx < fields.len() {
-                            fields[idx].force(functions, compiled, trace)
-                        } else {
-                            Err(format!("field index {idx} out of bounds"))
-                        }
-                    }
-                    _ => Err(format!("field access on non-product: {recv_val:?}")),
-                }
-            } else {
-                Err(format!("unsupported field: {field_text}"))
-            }
-        }
+        Expr::Field(field) => eval_field(field, env, functions, compiled, trace),
+        Expr::StructLiteral(sl) => eval_struct_literal(&sl, env),
         Expr::Block(block) => eval_block(block, env, functions, compiled, trace),
         Expr::Closure(closure) => eval_closure(closure, env),
         _ => Err(format!(
@@ -581,6 +569,80 @@ fn eval_index(
         }
         _ => Err(format!("index on non-product: {recv_val:?}")),
     }
+}
+
+fn eval_field(
+    field: &vx_parser::FieldExpr,
+    env: &mut Env,
+    functions: &HashMap<String, FnDecl>,
+    compiled: &CompiledEnv,
+    trace: &mut EvalTrace,
+) -> Result<Value, String> {
+    let receiver = field.receiver().ok_or("field without receiver")?;
+    let field_token = field.field_name().ok_or("field without name")?;
+    let field_text = field_token.text().to_string();
+
+    // Try positional access first (_0, _1, ...)
+    let idx_str = field_text.strip_prefix('_').unwrap_or(&field_text);
+    if let Ok(idx) = idx_str.parse::<usize>() {
+        let recv_val = eval_expr(&receiver, env, functions, compiled, trace)?;
+        return match recv_val {
+            Value::Product(fields) => {
+                if idx < fields.len() {
+                    fields[idx].force(functions, compiled, trace)
+                } else {
+                    Err(format!("field index {idx} out of bounds"))
+                }
+            }
+            _ => Err(format!("field access on non-product: {recv_val:?}")),
+        };
+    }
+
+    // Named field access — works on structs
+    let recv_val = eval_expr(&receiver, env, functions, compiled, trace)?;
+    match recv_val {
+        Value::Struct { name, fields } => {
+            for (fname, thunk) in &fields {
+                if *fname == field_text {
+                    return thunk.force(functions, compiled, trace);
+                }
+            }
+            Err(format!(
+                "struct `{name}` has no field `{field_text}` (fields: {})",
+                fields
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        _ => Err(format!(
+            "named field `{field_text}` on non-struct: {recv_val:?}"
+        )),
+    }
+}
+
+fn eval_struct_literal(sl: &StructLiteralExpr, env: &Env) -> Result<Value, String> {
+    let name = sl
+        .name()
+        .ok_or("struct literal without name")?
+        .text()
+        .to_string();
+
+    let fields: Vec<(String, SharedThunk)> = sl
+        .fields()
+        .map(|f| {
+            let fname = f
+                .name()
+                .expect("struct literal field without name")
+                .text()
+                .to_string();
+            let expr = f.expr().expect("struct literal field without expression");
+            (fname, SharedThunk::suspended(expr, env.clone()))
+        })
+        .collect();
+
+    Ok(Value::Struct { name, fields })
 }
 
 fn eval_closure(closure: &ClosureExpr, env: &Env) -> Result<Value, String> {

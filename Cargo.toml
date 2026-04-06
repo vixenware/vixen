@@ -175,9 +175,9 @@ strip = "none"
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
-vox = { path = "../vox/rust/vox" }
-vox-core = { path = "../vox/rust/vox-core" }
-vox-stream = { path = "../vox/rust/vox-stream" }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
+vox-core = { path = "/Users/amos/bearcove/vox/rust/vox-core" }
+vox-stream = { path = "/Users/amos/bearcove/vox/rust/vox-stream" }
 
 windows-projfs = { path = "vendor/windows-projfs" }
 
