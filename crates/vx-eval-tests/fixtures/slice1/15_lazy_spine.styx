@@ -1,0 +1,27 @@
+source <<VX,vixen
+enum List {
+  struct Cons { head: U64, tail: List }
+  struct Nil {}
+}
+
+fn bomb() -> U64 ( trap("boom") )
+
+fn first(list: List) -> U64 (
+  match list (
+    Cons { head, tail } => head,
+    Nil {} => 0,
+  )
+)
+
+fn main() -> U64 (
+  let list = Cons { head: 42, tail: Cons { head: bomb(), tail: Nil {} } };
+  first(list)
+)
+VX
+
+entry main
+expect @u64"42"
+
+trace {
+  not_entered (bomb)
+}

@@ -154,6 +154,12 @@ pub enum KernelOp {
         source: SourceExpr,
         label: String,
     },
+    AllocThunk {
+        dst: SlotId,
+        source: SourceExpr,
+        thunk_body: BodyId,
+        captures: Vec<Operand>,
+    },
     AssignCallableAddConst {
         dst: SlotId,
         source: SourceExpr,
@@ -348,6 +354,11 @@ pub fn lower_executable_program(
         )?
         .lower()?;
 
+        // Merge thunk bodies synthesized during lowering
+        for (thunk_id, thunk_body) in lowered.thunk_bodies {
+            bodies.insert(thunk_id, thunk_body);
+        }
+
         bodies.insert(
             analyzed.id,
             ExecutableBody {
@@ -425,6 +436,10 @@ pub fn lower_executable_program_for_entry_body(
             &lowerable_bodies,
         )?
         .lower()?;
+
+        for (thunk_id, thunk_body) in lowered.thunk_bodies {
+            bodies.insert(thunk_id, thunk_body);
+        }
 
         bodies.insert(
             analyzed.id,
@@ -693,6 +708,7 @@ struct LoweredBody {
     ops: Vec<KernelOp>,
     result: SlotId,
     local_call_dependencies: Vec<BodyId>,
+    thunk_bodies: Vec<(BodyId, ExecutableBody)>,
 }
 
 struct LoweredClosure {
@@ -725,6 +741,8 @@ struct BodyLowering<'a> {
     lazy_fields_by_expr: HashMap<ExprId, BTreeSet<u32>>,
     local_call_dependencies: BTreeSet<BodyId>,
     awaited_runtime_nodes: BTreeSet<RuntimeNodeId>,
+    thunk_bodies: Vec<(BodyId, ExecutableBody)>,
+    next_thunk_body_id: u32,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -878,6 +896,8 @@ impl<'a> BodyLowering<'a> {
             lazy_fields_by_expr,
             local_call_dependencies: BTreeSet::new(),
             awaited_runtime_nodes: BTreeSet::new(),
+            thunk_bodies: vec![],
+            next_thunk_body_id: 10000,
         })
     }
 
@@ -889,6 +909,7 @@ impl<'a> BodyLowering<'a> {
             ops: self.ops,
             result,
             local_call_dependencies: self.local_call_dependencies.into_iter().collect(),
+            thunk_bodies: self.thunk_bodies,
         })
     }
 
@@ -943,6 +964,105 @@ impl<'a> BodyLowering<'a> {
         let slot = SlotId(self.next_slot);
         self.next_slot += 1;
         slot
+    }
+
+    fn alloc_thunk_body_id(&mut self) -> BodyId {
+        let id = BodyId(self.next_thunk_body_id);
+        self.next_thunk_body_id += 1;
+        id
+    }
+
+    /// Synthesize a thunk body for a lazy field expression.
+    ///
+    /// The thunk body is a new `ExecutableBody` whose parameters are the
+    /// captured bindings from the parent scope. The lazy field expression is
+    /// lowered inside a child `BodyLowering` that maps parent bindings to
+    /// the thunk's parameter slots.
+    fn synthesize_thunk_body(
+        &mut self,
+        item_id: ExprId,
+    ) -> Result<(BodyId, Vec<Operand>), ExecSliceError> {
+        let thunk_body_id = self.alloc_thunk_body_id();
+
+        // Collect all materialized bindings and their current slots — these are
+        // the potential captures. The thunk body will get fresh param slots for
+        // each one, and the parent emits the current slot values as captures.
+        let parent_bindings: Vec<(BridgeLocalBindingId, SlotId)> = self
+            .slot_by_binding
+            .iter()
+            .map(|(binding, slot)| (*binding, *slot))
+            .collect();
+
+        // Build capture mapping: thunk param slots for each parent binding
+        let mut thunk_slot_by_binding = HashMap::new();
+        let mut thunk_params = Vec::new();
+        let mut capture_operands = Vec::new();
+        let mut thunk_next_slot = 0u32;
+
+        for (binding, parent_slot) in &parent_bindings {
+            let thunk_slot = SlotId(thunk_next_slot);
+            thunk_next_slot += 1;
+            thunk_slot_by_binding.insert(*binding, thunk_slot);
+            thunk_params.push(thunk_slot);
+            capture_operands.push(Operand::Slot(*parent_slot));
+        }
+
+        // Create child lowering context for the thunk body
+        let mut child = BodyLowering {
+            bridge: self.bridge,
+            analyzed: self.analyzed,
+            body: self.body,
+            body_source_id: self.body_source_id,
+            expr_nodes: self.expr_nodes,
+            entry_expr: item_id,
+            use_binding_by_expr: self.use_binding_by_expr.clone(),
+            use_binding_by_span: self.use_binding_by_span.clone(),
+            binding_by_name_span: self.binding_by_name_span.clone(),
+            binding_initializers: self.binding_initializers.clone(),
+            slot_by_binding: thunk_slot_by_binding,
+            runtime_node_by_expr: self.runtime_node_by_expr.clone(),
+            runtime_kind_by_expr: self.runtime_kind_by_expr.clone(),
+            lowerable_bodies: self.lowerable_bodies.clone(),
+            params: thunk_params.clone(),
+            next_slot: thunk_next_slot,
+            ops: vec![],
+            materialized_bindings: HashSet::new(),
+            lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
+            local_call_dependencies: BTreeSet::new(),
+            awaited_runtime_nodes: BTreeSet::new(),
+            thunk_bodies: vec![],
+            next_thunk_body_id: self.next_thunk_body_id,
+        };
+
+        let result_operand = child.lower_expr(item_id)?;
+        let result_slot = child.ensure_slot(result_operand, child.source_for(item_id));
+
+        // Absorb any nested thunk bodies and advance the ID counter
+        self.next_thunk_body_id = child.next_thunk_body_id;
+        self.thunk_bodies.extend(child.thunk_bodies);
+
+        let kernel = self
+            .analyzed
+            .kernel_entries
+            .first()
+            .map(|entry| entry.kernel)
+            .unwrap_or(KernelId(0));
+
+        self.thunk_bodies.push((
+            thunk_body_id,
+            ExecutableBody {
+                id: thunk_body_id,
+                kernel,
+                kernel_kind: KernelKind::Interpreted,
+                params: thunk_params,
+                ops: child.ops,
+                result_source: ResultSource::Slot(result_slot),
+                runtime_boundary_extractions: vec![],
+                local_call_dependencies: child.local_call_dependencies.into_iter().collect(),
+            },
+        ));
+
+        Ok((thunk_body_id, capture_operands))
     }
 
     fn lower_string_member_call(
@@ -1206,6 +1326,8 @@ impl<'a> BodyLowering<'a> {
             lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
             local_call_dependencies: BTreeSet::new(),
             awaited_runtime_nodes: BTreeSet::new(),
+            thunk_bodies: vec![],
+            next_thunk_body_id: self.next_thunk_body_id,
         }
         .lower_closure(param_bindings)?;
 
@@ -1501,11 +1623,13 @@ impl<'a> BodyLowering<'a> {
                                 .get(&expr_id)
                                 .is_some_and(|fields| fields.contains(&(index as u32))) =>
                         {
+                            let (thunk_body_id, captures) = self.synthesize_thunk_body(item_id)?;
                             let lazy = self.alloc_temp();
-                            self.ops.push(KernelOp::AssignLazyPoison {
+                            self.ops.push(KernelOp::AllocThunk {
                                 dst: lazy,
                                 source: self.source_for(item_id),
-                                label: format!("lazy-field-{}:{}", expr_id.0, index),
+                                thunk_body: thunk_body_id,
+                                captures,
                             });
                             operands.push(Operand::Slot(lazy));
                         }

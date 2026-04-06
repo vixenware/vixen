@@ -43,3 +43,16 @@ fn main() -> U64 (
 
 Only `head` is demanded — `tail` (and `bomb_list()`) never forced.
 This is where lazy evaluation on structured data really shines.
+
+## Status: DONE
+
+All 8 fixtures pass (slice1 08–15):
+
+- `08_list_sum` — linked list sum via recursive match
+- `09_list_head_only` — lazy: only access head, tail has bomb()
+- `10_tree_left_only` — lazy: traverse only left branch, right has bomb()
+- `11_list_length` — recursive list length
+- `12_nested_option` — match Option, dead branch has bomb()
+- `13_tree_sum_leaves` — sum all leaves in binary tree
+- `14_list_map` — map double over list then sum
+- `15_lazy_spine` — first element of list where second element's head is bomb()
