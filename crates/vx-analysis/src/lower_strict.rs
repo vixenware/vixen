@@ -311,6 +311,7 @@ impl StrictLowerer {
         locals_by_name: &HashMap<String, BoundLocal>,
         state: &mut LoweringState,
     ) -> Result<Vec<VixenTypedStmt>, StrictLoweringError> {
+        let expr = &peel_expr_wrappers(expr.clone());
         match expr {
             Expr::If(if_expr) => {
                 let condition = if_expr.condition().ok_or_else(|| {
@@ -507,15 +508,15 @@ impl StrictLowerer {
                                     base: Box::new(receiver),
                                     field: "ptr".to_owned(),
                                 }),
-                                rhs: Box::new(start),
+                                rhs: Box::new(start.clone()),
                             },
                         ),
                         (
                             "len".to_owned(),
                             VixenTypedExpr::Binary {
                                 op: BinaryOp::Sub,
-                                lhs: Box::new(end.clone()),
-                                rhs: Box::new(end), // FIXME: need separate start for len computation
+                                lhs: Box::new(end),
+                                rhs: Box::new(start),
                             },
                         ),
                     ],
