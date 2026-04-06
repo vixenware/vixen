@@ -19,10 +19,24 @@ pub struct ExecutableProgram {
     pub runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
 }
 
+/// Whether this kernel was compiled to a strict fragment (ready for Kajit)
+/// or lowered to interpreted KernelOp bytecode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum KernelKind {
+    /// Interpreted: ops + result_source on the ExecutableBody are populated.
+    #[default]
+    Interpreted,
+    /// Strict scalar kernel ready for Kajit compilation.
+    /// The body's ops/result_source are still populated as a fallback,
+    /// but this carries the `VixenTypedFunction` for JIT compilation.
+    Strict { vtf: kajit_hir::VixenTypedFunction },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutableBody {
     pub id: BodyId,
     pub kernel: KernelId,
+    pub kernel_kind: KernelKind,
     pub params: Vec<SlotId>,
     pub ops: Vec<KernelOp>,
     pub result_source: ResultSource,
@@ -339,6 +353,7 @@ pub fn lower_executable_program(
             ExecutableBody {
                 id: analyzed.id,
                 kernel,
+                kernel_kind: KernelKind::Interpreted,
                 params: lowered.params,
                 ops: lowered.ops,
                 result_source: ResultSource::Slot(lowered.result),
@@ -416,6 +431,7 @@ pub fn lower_executable_program_for_entry_body(
             ExecutableBody {
                 id: analyzed.id,
                 kernel,
+                kernel_kind: KernelKind::Interpreted,
                 params: lowered.params,
                 ops: lowered.ops,
                 result_source: ResultSource::Slot(lowered.result),

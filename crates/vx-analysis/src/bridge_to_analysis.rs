@@ -17,12 +17,8 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         .map(|body| analyzed_body_shell(body, &bridge.exprs))
         .collect::<Vec<_>>();
 
-    let mut kernels = bridge
-        .bodies
-        .iter()
-        .map(|body| kernel_shell(body, &bridge.exprs))
-        .collect::<Vec<_>>();
-
+    // Seed extracted nodes onto bodies BEFORE building kernels, so that
+    // kernel expr sets can exclude extracted expressions.
     let mut runtime_nodes = Vec::new();
     let mut next_runtime_node = 0u32;
 
@@ -89,6 +85,27 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
+
+    // Build kernels AFTER extracted nodes are seeded, so we can exclude
+    // extracted expressions from each kernel's expr set.
+    let extracted_exprs_by_body = {
+        let mut map: BTreeMap<BodyId, BTreeSet<ExprId>> = BTreeMap::new();
+        for body in &bodies {
+            for extracted in &body.extracted_nodes {
+                map.entry(body.id)
+                    .or_default()
+                    .insert(extracted.source.expr);
+            }
+        }
+        map
+    };
+
+    let mut kernels = bridge
+        .bodies
+        .iter()
+        .map(|body| kernel_shell(body, bridge, extracted_exprs_by_body.get(&body.id)))
+        .collect::<Vec<_>>();
+
     let mut closure_layouts = seed_closure_layouts(bridge);
     seed_callee_targets(&mut bodies, bridge);
     seed_source_local_callee_origins(&mut bodies, bridge);
@@ -696,19 +713,63 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
     }
 }
 
-fn kernel_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> KernelRegion {
-    let body_exprs = exprs
+fn kernel_shell(
+    body: &BridgeBody,
+    bridge: &SingleSourceBridge,
+    extracted_exprs: Option<&BTreeSet<ExprId>>,
+) -> KernelRegion {
+    let body_exprs = bridge
+        .exprs
         .iter()
         .filter(|expr| expr.body == Some(body.id))
+        .filter(|expr| {
+            extracted_exprs
+                .map(|set| !set.contains(&expr.id))
+                .unwrap_or(true)
+        })
         .map(|expr| expr.id)
         .collect::<BTreeSet<_>>();
+
+    // Build typed kernel params from the body's parameters and local bindings.
+    let params = body
+        .params
+        .iter()
+        .filter_map(|param| {
+            let binding = bridge
+                .local_bindings
+                .iter()
+                .find(|b| b.body == body.id && b.name_span == param.span)?;
+            let ty = bridge.expr_types.values().next().and_then(|_| {
+                // Look up the type from binding_types or expr_types by finding
+                // an expression at this param's span
+                bridge
+                    .exprs
+                    .iter()
+                    .find(|expr| expr.body == Some(body.id) && expr.span == param.span)
+                    .and_then(|expr| bridge.expr_types.get(&expr.id).cloned())
+            });
+            Some(crate::KernelParam {
+                name: param.name.clone(),
+                source: None,
+                ty,
+                binding: Some(binding.id),
+            })
+        })
+        .collect();
+
+    // Result type: find the last expression in the body and look up its type.
+    let result_ty = body_exprs
+        .iter()
+        .max()
+        .and_then(|expr_id| bridge.expr_types.get(expr_id).cloned());
 
     KernelRegion {
         id: KernelId(body.id.0),
         body: body.id,
         exprs: body_exprs,
-        params: vec![],
+        params,
         result_obs: Observation::NeedValue,
+        result_ty,
     }
 }
 

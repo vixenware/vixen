@@ -604,6 +604,34 @@ fn compiles_and_executes_sparse_prefix() {
 }
 
 #[test]
+fn unified_path_marks_strict_add_as_strict() {
+    let bridge = vx_analysis::SingleSourceBridge::from_source_text(SOURCE_ADD_U64);
+    let analysis = vx_analysis::build_minimal_analysis(&bridge);
+    let program = vx_analysis::lower::lower_executable_program(&analysis, &bridge)
+        .expect("unified lowering should succeed");
+
+    // The add function should be marked as strict
+    let body = program.bodies.values().next().expect("should have a body");
+    assert!(
+        matches!(body.kernel_kind, vx_analysis::KernelKind::Strict { .. }),
+        "add(U64, U64) -> U64 should be lowered as strict, got {:?}",
+        body.kernel_kind
+    );
+
+    // Extract the VTF and compile it via Kajit
+    let vx_analysis::KernelKind::Strict { vtf } = &body.kernel_kind else {
+        panic!("expected strict");
+    };
+    let module = kajit_hir::Module::new()
+        .lower_vixen_typed_function_into_module(vtf)
+        .expect("should lower to HIR");
+    let compiled = kajit::compile_hir_module(&module);
+    let add: unsafe extern "C" fn(u64, u64) -> u64 =
+        unsafe { core::mem::transmute(compiled.as_ptr()) };
+    assert_eq!(unsafe { add(41, 1) }, 42);
+}
+
+#[test]
 fn compiles_and_executes_registry_entry_key_from_cargo_resolve() {
     let source = cargo_resolve_function_source("registry_entry_key");
     let function = lower_source_text_strict_fragment(&source, "registry_entry_key")

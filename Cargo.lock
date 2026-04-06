@@ -3712,6 +3712,7 @@ dependencies = [
 name = "vx-analysis"
 version = "0.1.0"
 dependencies = [
+ "kajit-hir",
  "vx-parser",
  "vx-resolve",
  "vx-types",

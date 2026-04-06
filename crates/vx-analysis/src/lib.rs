@@ -26,11 +26,14 @@ mod boundary;
 mod bridge_to_analysis;
 pub use bridge_to_analysis::build_minimal_analysis;
 
+pub mod lower;
+pub mod lower_strict;
+
 mod exec_slice;
 pub use exec_slice::{
     DiscoverBoundaryPayload, ExecBoundaryPayload, ExecSliceError, ExecutableBody,
-    ExecutableClosure, ExecutableProgram, ExecutableRuntimeNode, KernelOp, Operand, ResultSource,
-    RuntimeBoundaryInputSpec, RuntimeBoundaryPayload, RuntimeField, RuntimeMemberOp,
+    ExecutableClosure, ExecutableProgram, ExecutableRuntimeNode, KernelKind, KernelOp, Operand,
+    ResultSource, RuntimeBoundaryInputSpec, RuntimeBoundaryPayload, RuntimeField, RuntimeMemberOp,
     SharedKeyedBoundaryPayload, SlotId, TreeFilePath, lower_executable_program,
     lower_executable_program_for_entry_body,
 };

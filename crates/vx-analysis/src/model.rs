@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use vx_resolve::DefId;
+use vx_types::Ty;
+
+use crate::BridgeLocalBindingId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BodyId(pub u32);
@@ -67,6 +70,8 @@ pub struct ExtractedNode {
 pub struct KernelParam {
     pub name: String,
     pub source: Option<SourceExpr>,
+    pub ty: Option<Ty>,
+    pub binding: Option<BridgeLocalBindingId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +81,7 @@ pub struct KernelRegion {
     pub exprs: BTreeSet<ExprId>,
     pub params: Vec<KernelParam>,
     pub result_obs: Observation,
+    pub result_ty: Option<Ty>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
