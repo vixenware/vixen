@@ -56,4 +56,4 @@ function calls with callable arguments.
 
 ## Status
 
-Not started.
+Done. All four programs pass through vx-rt demand-driven runtime.

@@ -34,6 +34,7 @@ pub enum RtValue {
     Bool(bool),
     String(String),
     Pair(Thunk, Thunk),
+    CallableAddConst(Box<RtValue>),
     Closure(BodyId, Vec<RtValue>),
     Thunk(Thunk),
     Failure(String),
@@ -46,6 +47,7 @@ impl RtValue {
             RtValue::Bool(_) => "bool",
             RtValue::String(_) => "string",
             RtValue::Pair(_, _) => "pair",
+            RtValue::CallableAddConst(_) => "callable_add_const",
             RtValue::Closure(_, _) => "closure",
             RtValue::Thunk(_) => "thunk",
             RtValue::Failure(_) => "failure",
@@ -225,6 +227,25 @@ fn eval_op(
         }
         KernelOp::AssignConstString { value, .. } => Ok(RtValue::String(value.clone())),
         KernelOp::AssignAlias { value, .. } => resolve_operand(program, producers, slots, value),
+        KernelOp::AssignCallableAddConst { addend, .. } => {
+            let addend = resolve_operand(program, producers, slots, addend)?;
+            Ok(RtValue::CallableAddConst(Box::new(addend)))
+        }
+
+        KernelOp::ApplyCallable { callable, arg, .. } => {
+            let callable = resolve_and_force(program, producers, slots, callable)?;
+            let arg = resolve_and_force(program, producers, slots, arg)?;
+            match callable {
+                RtValue::CallableAddConst(addend) => Ok(RtValue::U64(
+                    expect_u64(&arg)?.wrapping_add(expect_u64(&addend)?),
+                )),
+                other => Err(RtError::TypeError {
+                    expected: "callable",
+                    actual: other.kind_name().to_owned(),
+                }),
+            }
+        }
+
         KernelOp::AssignLazyPoison { label, .. } => {
             Ok(RtValue::Failure(format!("lazy poison: {label}")))
         }

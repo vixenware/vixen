@@ -92,6 +92,43 @@ fn main() -> U64 ( 42 )
     }
 }
 
+/// Program B: closure capture
+/// `add_n = (x) => x + n; (add_n(1), add_n(2))._1` returns n+2
+#[test]
+fn program_b_closure_capture() {
+    let source = r#"
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  let pair = (add_n(1), add_n(2));
+  pair._1
+)
+"#;
+    let result = compile_and_run(source, "main", &[RtValue::U64(10)]);
+    match result {
+        RtValue::U64(12) => {}
+        other => panic!("expected U64(12), got {:?}", other),
+    }
+}
+
+/// Program D: higher-order helper
+/// `apply(f, x)` with 2 args — tests multi-arg callable calls
+#[test]
+fn program_d_higher_order() {
+    let source = r#"
+fn apply(f: Fn(U64) -> U64, x: U64) -> U64 ( f(x) )
+
+fn main(n: U64) -> U64 (
+  let add_n = (x) => x + n;
+  apply(add_n, 41)
+)
+"#;
+    let result = compile_and_run(source, "main", &[RtValue::U64(1)]);
+    match result {
+        RtValue::U64(42) => {}
+        other => panic!("expected U64(42), got {:?}", other),
+    }
+}
+
 /// Addition with parameter
 #[test]
 fn add_with_param() {
