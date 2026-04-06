@@ -17,6 +17,7 @@ static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
 pub(super) struct RootPeerState {
     app_group_root: PathBuf,
     socket_path: PathBuf,
+    bundle_version: String,
     inner: Arc<Mutex<RootPeerSnapshot>>,
 }
 
@@ -29,7 +30,7 @@ struct RootPeerSnapshot {
 }
 
 impl RootPeerState {
-    fn new() -> Self {
+    fn new(bundle_version: String) -> Self {
         let app_group_root = real_home_dir()
             .join("Library")
             .join("Group Containers")
@@ -39,6 +40,7 @@ impl RootPeerState {
         let state = Self {
             app_group_root,
             socket_path,
+            bundle_version,
             inner: Arc::new(Mutex::new(RootPeerSnapshot {
                 client: None,
                 connected: false,
@@ -181,6 +183,7 @@ impl RootPeerState {
         let payload = super::super::StatusPayload {
             connected: snapshot.connected,
             ever_connected: snapshot.ever_connected,
+            bundle_version: Some(self.bundle_version.clone()),
             app_group_path: Some(self.app_group_root.display().to_string()),
             connected_at: None,
             disconnected_at: None,
@@ -226,6 +229,6 @@ impl ConnectionAcceptor for RootPeerAcceptor {
     }
 }
 
-pub(super) fn root_peer_state() -> &'static RootPeerState {
-    ROOT_PEER_STATE.get_or_init(RootPeerState::new)
+pub(super) fn root_peer_state(bundle_version: String) -> &'static RootPeerState {
+    ROOT_PEER_STATE.get_or_init(|| RootPeerState::new(bundle_version))
 }

@@ -18,7 +18,8 @@ enum RustFSKitBootstrap {
         makeFileSystem()
 
     static func makeFileSystem() -> FSUnaryFileSystem & FSUnaryFileSystemOperations {
-        guard let raw = VixenRustCreateFileSystem() else {
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+        guard let raw = bundleVersion.withCString({ VixenRustCreateFileSystem($0) }) else {
             fatalError("Rust FSKit bootstrap returned null")
         }
         let object = Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue()

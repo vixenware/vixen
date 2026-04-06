@@ -69,6 +69,9 @@ pub struct StatusPayload {
     pub connected: bool,
 
     #[facet(default)]
+    pub bundle_version: Option<String>,
+
+    #[facet(default)]
     pub ever_connected: bool,
 
     #[facet(default)]

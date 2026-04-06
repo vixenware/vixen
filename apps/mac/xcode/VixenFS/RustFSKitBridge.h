@@ -4,7 +4,7 @@
 extern "C" {
 #endif
 
-void * _Nullable VixenRustCreateFileSystem(void);
+void * _Nullable VixenRustCreateFileSystem(const char * _Nullable bundle_version);
 
 #ifdef __cplusplus
 }
