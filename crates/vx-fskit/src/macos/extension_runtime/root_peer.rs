@@ -9,7 +9,7 @@ use vx_services::VfsClient;
 
 use super::log_event;
 use super::logging::real_home_dir;
-use super::support::{APP_GROUP_ID, SOCKET_NAME, json_string, runtime};
+use super::support::{APP_GROUP_ID, SOCKET_NAME, runtime};
 
 static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
 
@@ -178,27 +178,18 @@ impl RootPeerState {
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
-        let app_group_path = json_string(self.app_group_root.display().to_string());
-        let disconnect_reason = snapshot
-            .disconnect_reason
-            .as_deref()
-            .map(json_string)
-            .unwrap_or_else(|| "null".to_owned());
-        format!(
-            concat!(
-                "{{\n",
-                "  \"connected\": {},\n",
-                "  \"ever_connected\": {},\n",
-                "  \"app_group_path\": {},\n",
-                "  \"connected_at\": null,\n",
-                "  \"disconnected_at\": null,\n",
-                "  \"uptime_seconds\": null,\n",
-                "  \"disconnect_reason\": {}\n",
-                "}}\n"
-            ),
-            snapshot.connected, snapshot.ever_connected, app_group_path, disconnect_reason
-        )
-        .into_bytes()
+        let payload = super::super::StatusPayload {
+            connected: snapshot.connected,
+            ever_connected: snapshot.ever_connected,
+            app_group_path: Some(self.app_group_root.display().to_string()),
+            connected_at: None,
+            disconnected_at: None,
+            uptime_seconds: None,
+            disconnect_reason: snapshot.disconnect_reason.clone(),
+        };
+        facet_json::to_string(&payload)
+            .expect("StatusPayload serialization should not fail")
+            .into_bytes()
     }
 }
 
