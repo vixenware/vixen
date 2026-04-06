@@ -11,21 +11,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 eyre = { workspace = true }
-facet = { workspace = true }
-facet-json = { workspace = true }
-figue = { workspace = true }
-flate2 = "1"
-hex = { workspace = true }
-indicatif = { workspace = true }
-owo-colors = { workspace = true }
-prost-build = "0.13"
-protoc-bin-vendored = "3"
-vox-codegen.workspace = true
-sha2 = "0.10"
-tar = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true }
-vx-services.workspace = true
 
 [lints]
 workspace = true
