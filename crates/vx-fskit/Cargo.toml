@@ -27,13 +27,13 @@ libc = { workspace = true }
 block2 = { version = "0.6.2", features = ["alloc"] }
 objc2 = { version = "0.6.4", features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
-    "NSDictionary",
-    "NSArray",
-    "NSData",
-    "NSError",
-    "NSObject",
-    "NSString",
-    "NSUUID",
+  "NSDictionary",
+  "NSArray",
+  "NSData",
+  "NSError",
+  "NSObject",
+  "NSString",
+  "NSUUID",
 ] }
 objc2-fs-kit = "0.3.2"
 vox = { workspace = true }
@@ -41,3 +41,6 @@ vx-services = { workspace = true }
 
 [lints]
 workspace = true
+
+[dependencies]
+vx-fskit-types = { version = "0.1.0", path = "../vx-fskit-types" }

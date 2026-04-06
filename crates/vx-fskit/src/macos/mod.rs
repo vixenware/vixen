@@ -1,174 +1,101 @@
-mod extension_runtime;
-mod probe;
-mod process;
-mod setup_impl;
-mod teardown_impl;
+//! Rust-backed FSKit runtime for the macOS extension.
 
-pub use setup_impl::setup;
-pub use teardown_impl::teardown;
+use std::ffi::{CStr, c_char, c_void};
+use std::path::PathBuf;
 
-use camino::Utf8PathBuf;
-use jiff::Zoned;
-
-/// Result of a setup() or teardown() operation.
-pub struct FsKitResult {
-    /// Chronological log of everything that happened.
-    pub log: Vec<LogEntry>,
-
-    /// None on success, Some on failure with suggested remediation.
-    pub error: Option<FsKitError>,
+/// Configuration passed from Swift during extension bootstrap.
+/// Must match the Swift-side struct layout exactly.
+#[repr(C)]
+pub struct VixenFsConfig {
+    pub bundle_version: *const c_char,
+    pub bundle_identifier: *const c_char,
+    pub app_group_path: *const c_char,
+    pub socket_path: *const c_char,
+    pub is_debug: bool,
 }
 
-impl FsKitResult {
-    fn success(log: Vec<LogEntry>) -> Self {
-        Self { log, error: None }
-    }
-
-    fn failure(log: Vec<LogEntry>, summary: impl Into<String>, remediation: Vec<String>) -> Self {
-        Self {
-            log,
-            error: Some(FsKitError {
-                summary: summary.into(),
-                remediation,
-            }),
+impl VixenFsConfig {
+    /// Safely read C string pointers into owned Rust strings.
+    /// Panics if any required pointer is null.
+    pub fn to_owned(&self) -> OwnedVixenFsConfig {
+        let bundle_version = unsafe {
+            CStr::from_ptr(self.bundle_version)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let bundle_identifier = unsafe {
+            CStr::from_ptr(self.bundle_identifier)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let app_group_path = unsafe {
+            PathBuf::from(
+                CStr::from_ptr(self.app_group_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let socket_path = unsafe {
+            PathBuf::from(
+                CStr::from_ptr(self.socket_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        OwnedVixenFsConfig {
+            bundle_version,
+            bundle_identifier,
+            app_group_path,
+            socket_path,
+            is_debug: self.is_debug,
         }
     }
-
-    pub fn is_ok(&self) -> bool {
-        self.error.is_none()
-    }
 }
 
-pub struct LogEntry {
-    pub timestamp: Zoned,
-    pub message: String,
-    pub level: LogLevel,
+pub struct OwnedVixenFsConfig {
+    pub bundle_version: String,
+    pub bundle_identifier: String,
+    pub app_group_path: PathBuf,
+    pub socket_path: PathBuf,
+    pub is_debug: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    /// A check passed successfully.
-    Ok,
-    /// Neutral/informational step.
-    Info,
-    /// Something failed.
-    Fail,
-}
+use objc2::rc::Retained;
+use objc2_fs_kit::FSUnaryFileSystem;
 
-pub struct FsKitError {
-    /// What went wrong.
-    pub summary: String,
-    /// What the user can try manually.
-    pub remediation: Vec<String>,
-}
+mod filesystem;
+use filesystem::RustUnaryFileSystem;
 
-/// Status payload served by the extension at `/.vixenfs/status.json`.
-#[derive(Debug, facet::Facet)]
-#[facet(rename_all = "snake_case")]
-pub struct StatusPayload {
-    pub connected: bool,
+mod item;
+mod logging;
+mod root_peer;
+use root_peer::init_root_peer_state;
 
-    #[facet(default)]
-    pub bundle_version: Option<String>,
+mod support;
+mod volume;
 
-    #[facet(default)]
-    pub bundle_identifier: Option<String>,
+use self::logging::{init_logging, log_event};
 
-    #[facet(default)]
-    pub ever_connected: bool,
-
-    #[facet(default)]
-    pub app_group_path: Option<String>,
-
-    #[facet(default)]
-    pub socket_path: Option<String>,
-
-    #[facet(default)]
-    pub extension_pid: Option<u32>,
-
-    #[facet(default)]
-    pub connected_at: Option<String>,
-
-    #[facet(default)]
-    pub disconnected_at: Option<String>,
-
-    #[facet(default)]
-    pub uptime_seconds: Option<f64>,
-
-    #[facet(default)]
-    pub disconnect_reason: Option<String>,
-}
-
-/// Accumulates log entries with timestamps.
-pub(crate) struct Log {
-    pub entries: Vec<LogEntry>,
-}
-
-impl Log {
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
-    }
-
-    pub fn ok(&mut self, message: impl Into<String>) {
-        self.push(message, LogLevel::Ok);
-    }
-
-    pub fn info(&mut self, message: impl Into<String>) {
-        self.push(message, LogLevel::Info);
-    }
-
-    pub fn fail(&mut self, message: impl Into<String>) {
-        self.push(message, LogLevel::Fail);
-    }
-
-    fn push(&mut self, message: impl Into<String>, level: LogLevel) {
-        let msg = message.into();
-        tracing::debug!("{msg}");
-        self.entries.push(LogEntry {
-            timestamp: Zoned::now(),
-            message: msg,
-            level,
-        });
-    }
-
-    pub fn into_entries(self) -> Vec<LogEntry> {
-        self.entries
-    }
-}
-
-const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
-const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
-
-/// Build the set of candidate paths for a mount point.
+/// # Safety
 ///
-/// Dead FSKit mounts don't always show up under the same path. macOS has
-/// `/tmp` → `/private/tmp` symlinks, and `lsof`/`df` may report either form.
-async fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
-    let canonical = canonicalize_without_stat(mount_path).await;
-    let mut candidates: Vec<String> = vec![canonical.to_string()];
-    let raw = mount_path.to_string();
-    if raw != candidates[0] {
-        candidates.push(raw);
-    }
-    // /tmp → /private/tmp on macOS
-    let private_prefixed = format!("/private{mount_path}");
-    if !candidates.contains(&private_prefixed) {
-        candidates.push(private_prefixed);
-    }
-    candidates
+/// `config` must be valid yada yada.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn VixenRustCreateFileSystem(config: *const VixenFsConfig) -> *mut c_void {
+    let config = unsafe { &*config };
+    let owned = config.to_owned();
+    init_logging(&owned.app_group_path, owned.is_debug);
+    let file_system: Retained<FSUnaryFileSystem> = create_file_system(&owned);
+    log_event(
+        "info",
+        format!(
+            "created Rust FSKit filesystem object bundle_version={}",
+            owned.bundle_version
+        ),
+    );
+    Retained::into_raw(file_system).cast()
 }
 
-/// Resolve the canonical form of a mount path without touching the mount point
-/// itself — which may be a dead FSKit mount that hangs on any access.
-async fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
-    if let Some(parent) = mount_path.parent()
-        && let Ok(canonical_parent) = moire::fs::canonicalize(parent.as_std_path()).await
-        && let Ok(canonical_parent) = Utf8PathBuf::try_from(canonical_parent)
-        && let Some(name) = mount_path.file_name()
-    {
-        return canonical_parent.join(name);
-    }
-    mount_path.clone()
+pub fn create_file_system(config: &OwnedVixenFsConfig) -> Retained<FSUnaryFileSystem> {
+    init_root_peer_state(config);
+    RustUnaryFileSystem::new().into_super()
 }

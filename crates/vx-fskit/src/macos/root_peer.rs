@@ -5,6 +5,7 @@ use vox::{
     ClientLogging, ClientLoggingOptions, ConnectionAcceptor, ConnectionRequest, Metadata,
     PendingConnection, acceptor_on,
 };
+use vx_fskit_types::StatusPayload;
 use vx_services::VfsClient;
 
 use super::OwnedVixenFsConfig;
@@ -176,7 +177,8 @@ impl RootPeerState {
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
-        let payload = super::super::StatusPayload {
+
+        let payload = StatusPayload {
             connected: snapshot.connected,
             ever_connected: snapshot.ever_connected,
             bundle_version: Some(self.bundle_version.clone()),

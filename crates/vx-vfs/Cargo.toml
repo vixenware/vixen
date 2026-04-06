@@ -19,6 +19,7 @@ cfg-if = "1"
 tracing = { workspace = true }
 vx-vfs-types = { workspace = true }
 vox = { workspace = true }
+vx-fskit-types = { version = "0.1.0", path = "../vx-fskit-types" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }

@@ -3611,7 +3611,16 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "vox",
+ "vx-fskit-types",
  "vx-services",
+]
+
+[[package]]
+name = "vx-fskit-types"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "facet-json",
 ]
 
 [[package]]
@@ -3764,6 +3773,7 @@ dependencies = [
  "tracing",
  "vox",
  "vx-fskit",
+ "vx-fskit-types",
  "vx-services",
  "vx-vfs-types",
  "windows-projfs",
