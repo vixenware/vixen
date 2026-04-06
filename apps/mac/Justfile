@@ -56,18 +56,51 @@ build profile='Debug' version='': (build-rust profile)
     fi
     echo "Building version ${VERSION}"
     cd xcode
-    xcbeautify --version || echo "brew install xcbeautify"
     xcodebuild \
       -project Vixen.xcodeproj \
       -scheme Vixen \
       -configuration {{ profile }} \
       -sdk macosx \
-      CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
       -derivedDataPath build/DerivedData \
       -clonedSourcePackagesDirPath build/SourcePackages \
+      -parallelizeTargets \
+      -jobs "$(sysctl -n hw.ncpu)" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackageUpdates \
+      CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
       MARKETING_VERSION="${VERSION}" \
       CURRENT_PROJECT_VERSION="${VERSION}" \
       build | xcbeautify
+
+# Build with timing summary (no xcbeautify, raw output).
+build-timing profile='Debug' version='': (build-rust profile)
+    #!/bin/bash -eux -o pipefail
+    just validate-profile "{{ profile }}"
+    node scripts/ensure-no-mounts.js
+    if [[ "{{ version }}" == "" ]]; then
+      just bump-version
+      VERSION=$(cat dev-version.txt)
+    else
+      VERSION="{{ version }}"
+    fi
+    echo "Building version ${VERSION}"
+    cd xcode
+    xcodebuild \
+      -project Vixen.xcodeproj \
+      -scheme Vixen \
+      -configuration {{ profile }} \
+      -sdk macosx \
+      -derivedDataPath build/DerivedData \
+      -clonedSourcePackagesDirPath build/SourcePackages \
+      -parallelizeTargets \
+      -jobs "$(sysctl -n hw.ncpu)" \
+      -onlyUsePackageVersionsFromResolvedFile \
+      -skipPackageUpdates \
+      -showBuildTimingSummary \
+      CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
+      MARKETING_VERSION="${VERSION}" \
+      CURRENT_PROJECT_VERSION="${VERSION}" \
+      build
 
 # Install Vixen.app into /Applications and launch once.
 install profile='Debug': (build profile)
