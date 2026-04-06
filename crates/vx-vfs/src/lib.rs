@@ -14,8 +14,6 @@ mod types;
 mod windows;
 
 pub use types::{VfsConfig, VfsError, VfsStart};
-#[cfg(target_os = "macos")]
-pub use vx_vfs_types::{VIXEN_APP_PATH, VfsHealth};
 pub use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
 /// Mount VFS end-to-end (server startup, health checks, mount, verification).

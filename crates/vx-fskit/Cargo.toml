@@ -15,12 +15,9 @@ crate-type = ["rlib", "staticlib"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tokio = { workspace = true }
-moire = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-camino = { workspace = true }
-jiff = { workspace = true }
 facet = { workspace = true }
 facet-json = { workspace = true }
 libc = { workspace = true }
@@ -44,3 +41,6 @@ workspace = true
 
 [dependencies]
 vx-fskit-types = { version = "0.1.0", path = "../vx-fskit-types" }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cbindgen = "0.28"

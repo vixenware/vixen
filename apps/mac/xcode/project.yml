@@ -68,10 +68,15 @@ targets:
           if [[ "$CONFIGURATION" == "Release" ]]; then
             cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib --release
             cp "$repo_root/target/release/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+            header_dir="$repo_root/target/release/build"
           else
             cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib
             cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+            header_dir="$repo_root/target/debug/build"
           fi
+          # Copy cbindgen-generated header
+          generated_header=$(find "$header_dir" -path '*/vx-fskit-*/out/RustFSKitBridge.h' | head -1)
+          cp "$generated_header" "$SRCROOT/VixenFS/RustFSKitBridge.h"
         outputFiles:
           - $(SRCROOT)/build/RustLibs/libvx_fskit.a
     sources:
