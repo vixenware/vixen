@@ -69,13 +69,13 @@ fix-registration profile='Debug':
 
 # Build, sign, and package a release DMG for review.
 
-# Optional argument: `just release-build 1.2.3`
+# Optional argument: 'just release-build 1.2.3'
 release-build version='':
     ./scripts/build.sh {{ version }}
 
 # Notarize, generate appcast, and publish to GitHub.
 
-# Optional argument: `just release-publish 1.2.3`
+# Optional argument: 'just release-publish 1.2.3'
 release-publish version='':
     ./scripts/publish.sh {{ version }}
 
@@ -86,18 +86,18 @@ release version='':
 
 # Create GitHub release with DMG and appcast.
 
-# Optional argument: `just github-release 1.2.3`
+# Optional argument: 'just github-release 1.2.3'
 github-release version='':
     ./scripts/github-release.sh {{ version }}
 
 # Update Homebrew tap with the release DMG SHA256.
 
-# Optional argument: `just update-tap 1.2.3`
+# Optional argument: 'just update-tap 1.2.3'
 update-tap version='':
     ./scripts/update-tap.sh {{ version }}
 
 # Validate release prerequisites without building artifacts.
 
-# Optional argument: `just preflight 1.2.3`
+# Optional argument: 'just preflight 1.2.3'
 preflight version='':
     ./scripts/preflight.sh {{ version }}

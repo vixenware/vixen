@@ -2,14 +2,40 @@
 
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
+
+// ANSI color codes
+const colors = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  red: "\x1b[31m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  cyan: "\x1b[36m",
+};
+
+const emojis = {
+  error: "❌",
+  success: "✅",
+  warning: "⚠️",
+  info: "ℹ️",
+  tool: "🔧",
+  bundle: "📦",
+  search: "🔍",
+  keep: "✔️",
+};
+
+function colorize(color, text) {
+  return `${colors[color]}${text}${colors.reset}`;
+}
 
 const lsRegisterPath =
   "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister";
 
-const bundleURL = process.argv[2];
+const bundleURL = resolve(process.argv[2]);
 if (!bundleURL) {
-  console.error("Usage: fix-registration.js <path-to-Vixen.app>");
+  console.error(`${emojis.error} Usage: fix-registration.js <path-to-Vixen.app>`);
   process.exit(1);
 }
 
@@ -21,21 +47,22 @@ const candidates = [
 ];
 const desiredPath = candidates.find((p) => existsSync(p));
 if (!desiredPath) {
-  console.error(
-    `VixenFS extension not found in:\n${candidates.join("\n")}`
-  );
+  console.error(`${emojis.error} VixenFS extension not found in:`);
+  for (const c of candidates) {
+    console.error(`  ${c}`);
+  }
   process.exit(1);
 }
 
-console.log(`Repairing VixenFS registration toward: ${desiredPath}`);
+console.log(`${emojis.bundle} Repairing VixenFS registration toward: ${colorize("cyan", desiredPath)}`);
 
 function runTool(cmd, args) {
-  console.log(`+ ${cmd} ${args.join(" ")}`);
+  console.log(`${emojis.tool} ${cmd} ${colorize("cyan", args.join(" "))}`);
   const result = spawnSync(cmd, args, { encoding: "utf-8" });
   if (result.stdout?.trim()) console.log(result.stdout.trimEnd());
   if (result.stderr?.trim()) console.error(result.stderr.trimEnd());
   if (result.status !== 0) {
-    console.error(`  (exited with status ${result.status})`);
+    console.error(`  ${emojis.error} exited with status ${result.status}`);
   }
   return result;
 }
@@ -46,6 +73,7 @@ function currentRegisteredPaths() {
     ["-mAvvv", "-i", "eu.bearcove.vixenfs"],
     { encoding: "utf-8" }
   );
+  // Silent check
 
   const output = result.stdout ?? "";
   // Extract every .appex path from the output, deduplicated
@@ -60,35 +88,36 @@ function currentRegisteredPaths() {
 // 1. Unregister stale registrations (anything that is NOT the desired path)
 const before = currentRegisteredPaths();
 if (before.length > 0) {
-  console.log(`Current VixenFS registrations: ${before.join(", ")}`);
+  console.log(`${emojis.info} Current VixenFS registrations: ${colorize("cyan", before.join(", "))}`);
 }
 
 for (const stalePath of before) {
   if (stalePath === desiredPath) {
-    console.log(`Keeping (already correct): ${stalePath}`);
+    console.log(`${emojis.keep} Keeping: ${colorize("cyan", stalePath)}`);
     continue;
   }
-  console.log(`Unregistering stale registration: ${stalePath}`);
+  console.log(`${emojis.warning} Unregistering: ${colorize("cyan", stalePath)}`);
   runTool("/usr/bin/pluginkit", ["-r", stalePath]);
 }
 
 // 2. Register the correct extension
+console.log(`${emojis.success} Registering: ${colorize("cyan", desiredPath)}`);
 runTool("/usr/bin/pluginkit", ["-a", desiredPath]);
 
 // 3. Run lsregister on the app bundle, same flags as VixenApp.swift
 if (existsSync(lsRegisterPath)) {
   runTool(lsRegisterPath, ["-f", "-R", "-trusted", bundleURL]);
 } else {
-  console.warn(`lsregister not found at ${lsRegisterPath}, skipping`);
+  console.warn(`${emojis.warning} lsregister not found, skipping`);
 }
 
 // 4. Verify
 const after = currentRegisteredPaths();
 if (after.includes(desiredPath)) {
-  console.log(`\nVixenFS registration now includes bundled appex: ${desiredPath}`);
+  console.log(`\n${emojis.success} VixenFS registration complete: ${colorize("cyan", desiredPath)}`);
 } else {
-  console.error(
-    `\nVixenFS registration still does not point at bundled appex.\nCurrent registrations: ${after.join(", ") || "(none)"}`
-  );
+  console.error(`\n${emojis.error} VixenFS registration failed.`);
+  console.error(`  Desired: ${colorize("green", desiredPath)}`);
+  console.error(`  Current: ${colorize("red", after.join(", ") || "(none)")}`);
   process.exit(1);
 }
