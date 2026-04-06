@@ -1,0 +1,771 @@
+Filtering the log data using "process == "VixenFS" OR process == "fskit_agent" OR process == "fskitd""
+Timestamp               Ty Process[PID:TID]
+2026-04-06 08:25:22.136 Df fskit_agent[82640:237ab23] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:25:22.485 Df fskit_agent[82640:237ab23] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:25:22.486 Df fskit_agent[82640:237adbd] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xa2b088000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:25:22.486 A  fskit_agent[82640:237adbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:22.487 A  fskit_agent[82640:237adbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:22.487 A  fskit_agent[82640:237adbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:22.487 A  fskit_agent[82640:237adbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:22.488 Df fskit_agent[82640:237adbd] [com.apple.FSKit:default] New module list (
+    "Instance 0xa2b0899c0 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0xa2b088de0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0xa2b0896c0 ID 'Extension identity [2930ECE9-5A39-4CE8-BF35-CA1AC85FD6D2]: eu.bearcove.vixenfs platform: 1' UUID 2930ECE9-5A39-4CE8-BF35-CA1AC85FD6D2",
+    "Instance 0xa2b0894a0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8"
+)
+2026-04-06 08:25:22.488 Df fskit_agent[82640:237adbd] [com.apple.FSKit:default] Old modules {
+    "com.apple.fskit.exfat" = "Instance 0xa2b088620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE";
+    "com.apple.fskit.ftp" = "Instance 0xa2b0887c0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8";
+    "com.apple.fskit.msdos" = "Instance 0xa2b0886a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7";
+    "eu.bearcove.vixenfs" = "Instance 0xa2b0888c0 ID 'Extension identity [74C10872-6D4B-4943-8D9C-D8CB9EC685A6]: eu.bearcove.vixenfs platform: 1' UUID 74C10872-6D4B-4943-8D9C-D8CB9EC685A6";
+}
+2026-04-06 08:25:25.192 Df fskit_agent[82640:237adbd] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:25:25.538 Df fskit_agent[82640:237adbd] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:25:25.538 Df fskit_agent[82640:237ab23] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xa2b088000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:25:25.538 A  fskit_agent[82640:237ab23] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:25.538 A  fskit_agent[82640:237ab23] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:25.538 A  fskit_agent[82640:237ab23] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:25.539 A  fskit_agent[82640:237ab23] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:25:25.540 Df fskit_agent[82640:237ab23] [com.apple.FSKit:default] New module list (
+    "Instance 0xa2b089580 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0xa2b088fc0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0xa2b0895a0 ID 'Extension identity [8045871E-0B32-4919-8659-3864CDD80F65]: eu.bearcove.vixenfs platform: 1' UUID 8045871E-0B32-4919-8659-3864CDD80F65",
+    "Instance 0xa2b0899c0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8"
+)
+2026-04-06 08:25:25.540 Df fskit_agent[82640:237ab23] [com.apple.FSKit:default] Old modules {
+    "com.apple.fskit.exfat" = "Instance 0xa2b088620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE";
+    "com.apple.fskit.ftp" = "Instance 0xa2b0887c0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8";
+    "com.apple.fskit.msdos" = "Instance 0xa2b0886a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7";
+    "eu.bearcove.vixenfs" = "Instance 0xa2b0888c0 ID 'Extension identity [74C10872-6D4B-4943-8D9C-D8CB9EC685A6]: eu.bearcove.vixenfs platform: 1' UUID 74C10872-6D4B-4943-8D9C-D8CB9EC685A6";
+}
+2026-04-06 08:25:27.025 Df fskitd[82639:237a963] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:25:27.025 Df fskitd[82639:237a963] [com.apple.xpc:connection] [0xc1ccd0a80] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[94901].0xc1ccd0a80
+2026-04-06 08:25:27.025 Df fskitd[82639:237a963] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:25:27.027 Df fskitd[82639:237a963] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:25:27.028 Df fskitd[82639:237afa6] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:25:27.028 Df fskit_agent[82640:237ab23] [com.apple.extensionkit:launch] Launching process with config: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 0CFB8F17-165D-4122-88F8-9103E80890C8])
+2026-04-06 08:25:27.028 Df fskit_agent[82640:237ab23] [com.apple.BoardServices:XPCErrors] [C:b] Alloc XPCService:82640:com.apple.extensionkitservice
+2026-04-06 08:25:27.028 Df fskit_agent[82640:237ab23] [com.apple.xpc:connection] [0xa2ac88280] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:25:27.033 E  fskit_agent[82640:237ab23] [com.apple.extensionkit:launch] Launch failed with error: Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}
+2026-04-06 08:25:27.033 E  fskit_agent[82640:237ab23] [com.apple.extensionkit:default] Failed to create extensionProcess for extension 'eu.bearcove.vixenfs' error: Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xa2ac0cf90 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:25:27.033 E  fskit_agent[82640:237ab23] [com.apple.FSKit:default] -[fskitAgentConnectionDelegate startExtension:instanceID:replyHandler:]: couldn't start extension (eu.bearcove.vixenfs), error (Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xa2ac0cf90 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}})
+2026-04-06 08:25:27.033 Df fskitd[82639:237afa6] [com.apple.FSKit:default] Failed to start instance 0CFB8F17-165D-4122-88F8-9103E80890C8: Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xc1cc20b70 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:25:27.033 Df fskitd[82639:237afa6] [com.apple.FSKit:default] -[fskitdXPCServer applyResource:usingIdentity:instanceID:initiatorAuditToken:authorizingAuditToken:usingBlock:]: Starting extension for eu.bearcove.vixenfs reported error Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xc1cc20b70 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:25:27.035 Df fskitd[82639:237afa6] [com.apple.xpc:connection] [0xc1ccd0a80] invalidated because the client process (pid 94901) either cancelled the connection or exited
+Filtering the log data using "process == "VixenFS" OR process == "fskit_agent" OR process == "fskitd""
+Timestamp               Ty Process[PID:TID]
+2026-04-06 08:29:10.706 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:11.204 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:11.704 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:11.727 Df fskitd[82639:237afa6] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:29:11.727 Df fskitd[82639:237afa6] [com.apple.xpc:connection] [0xc1ccd0a80] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[95451].0xc1ccd0a80
+2026-04-06 08:29:11.728 Df fskitd[82639:237afa6] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:29:11.730 Df fskitd[82639:237afa6] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:29:11.731 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:29:11.731 Df fskit_agent[82640:237c029] [com.apple.extensionkit:launch] Launching process with config: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 7B44D035-BBD7-4B9A-A970-FA4CD0CE8A8B])
+2026-04-06 08:29:11.731 Df fskit_agent[82640:237c029] [com.apple.BoardServices:XPCErrors] [C:c] Alloc XPCService:82640:com.apple.extensionkitservice
+2026-04-06 08:29:11.731 Df fskit_agent[82640:237c029] [com.apple.xpc:connection] [0xa2ac88280] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:29:11.736 E  fskit_agent[82640:237c029] [com.apple.extensionkit:launch] Launch failed with error: Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}
+2026-04-06 08:29:11.736 E  fskit_agent[82640:237c029] [com.apple.extensionkit:default] Failed to create extensionProcess for extension 'eu.bearcove.vixenfs' error: Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xa2ac0cde0 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:29:11.736 E  fskit_agent[82640:237c029] [com.apple.FSKit:default] -[fskitAgentConnectionDelegate startExtension:instanceID:replyHandler:]: couldn't start extension (eu.bearcove.vixenfs), error (Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xa2ac0cde0 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}})
+2026-04-06 08:29:11.736 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] Failed to start instance 7B44D035-BBD7-4B9A-A970-FA4CD0CE8A8B: Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xc1cc20ea0 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:29:11.736 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] -[fskitdXPCServer applyResource:usingIdentity:instanceID:initiatorAuditToken:authorizingAuditToken:usingBlock:]: Starting extension for eu.bearcove.vixenfs reported error Error Domain=com.apple.extensionKit.errorDomain Code=2 "(null)" UserInfo={NSUnderlyingError=0xc1cc20ea0 {Error Domain=NSCocoaErrorDomain Code=4099 "The connection to service with pid 82641 named (null) was invalidated." UserInfo={NSDebugDescription=The connection to service with pid 82641 named (null) was invalidated.}}}
+2026-04-06 08:29:11.739 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccd0a80] invalidated because the client process (pid 95451) either cancelled the connection or exited
+2026-04-06 08:29:12.200 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:12.704 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:13.204 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:13.700 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:14.200 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:14.704 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:15.205 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:15.700 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:16.205 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:16.700 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:16.985 Df fskit_agent[82640:237c029] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:16.985 Df fskit_agent[82640:237ab23] [com.apple.xpc:connection] [0xa2ac88280] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:29:17.705 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:18.204 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:18.704 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:19.204 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:19.704 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:20.205 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:20.703 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:21.200 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:21.702 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:22.204 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:22.705 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:23.206 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:23.700 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:24.201 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:24.700 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:25.200 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:25.700 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:26.200 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:26.700 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:27.200 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:27.703 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:28.203 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:28.706 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:29.206 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:29.704 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:30.203 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:30.704 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:31.205 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:31.700 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:32.200 Df fskit_agent[82640:237c2ce] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:32.704 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:33.204 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:33.704 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:34.205 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:34.705 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:35.205 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:35.704 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:36.204 Df fskit_agent[82640:237ab23] [com.apple.xpc.transaction:all] Remaining transactions after SIGTERM: 0 (0 os_transaction + 0 xpc_transaction_begin)
+2026-04-06 08:29:54.844 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccb4280] Re-initialization successful; calling out to event handler with XPC_ERROR_CONNECTION_INTERRUPTED
+2026-04-06 08:29:54.844 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccb4280] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:30:05.872 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:30:05.872 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccd0a80] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[95776].0xc1ccd0a80
+2026-04-06 08:30:05.872 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:30:05.872 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccb4280] activating connection: mach=true listener=false peer=false name=com.apple.fskit.fskit_agent
+2026-04-06 08:30:05.895 A  fskit_agent[95777:237c7be] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:30:05.898 A  fskit_agent[95777:237c7be] (libsystem_info.dylib) Membership API: translate identifier
+2026-04-06 08:30:05.898 Df fskit_agent[95777:237c7be] [com.apple.libcoreservices:] _dirhelper_update_tmpdir: old=/var/folders/_9/7kq7hqnj3m36k_x5fypjyfy00000gn/T/, new=/var/folders/_9/7kq7hqnj3m36k_x5fypjyfy00000gn/T/com.apple.fskit.fskit_agent//
+2026-04-06 08:30:05.926 A  fskit_agent[95777:237c7be] (libsystem_containermanager.dylib) container_create_or_lookup_app_group_path_by_app_group_identifier
+2026-04-06 08:30:05.926 Df fskit_agent[95777:237c7be] [com.apple.containermanager:xpc] Requesting app group container lookup; personaid = 4294967295, type = NOPERSONA, name = <unknown>, origin [pid = 0, personaid = 0], proximate [pid = 0, personaid = 0], identifier = group.com.apple.fskit.settings, euid = 501, uid = 501, platform = 1
+2026-04-06 08:30:05.928 Df fskit_agent[95777:237c7be] [com.apple.containermanager:sandbox] Consumed sandbox extension; path = [/Users/amos/Library/Group Containers/group.com.apple.fskit.settings], handle = 1
+2026-04-06 08:30:05.928 Df fskit_agent[95777:237c7be] [com.apple.containermanager:unspecified] container_create_or_lookup_app_group_path_by_app_group_identifier: success
+2026-04-06 08:30:05.929 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] Loading modules from LS
+2026-04-06 08:30:05.930 Df fskit_agent[95777:237c7be] [com.apple.xpc:connection] [0x1010dd6c0] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:30:05.931 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] Returning extension types (
+    "com.apple.fskit.fsmodule"
+)
+2026-04-06 08:30:05.931 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] Adding LS record <LSExtensionPointRecord 0x907084000> { table: 28, unit: 480, attached: yes }
+2026-04-06 08:30:05.931 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0x907084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:30:05.931 A  fskit_agent[95777:237c7be] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:30:05.935 Df fskit_agent[95777:237c7be] [com.apple.xpc:connection] [0x1010dffa0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:30:05.935 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c84000] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent
+2026-04-06 08:30:05.938 A  fskit_agent[95777:237c7be] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:30:05.938 A  fskit_agent[95777:237c7be] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:30:05.938 A  fskit_agent[95777:237c7be] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:30:05.940 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] New module list (
+    "Instance 0x907084620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0x9070847a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0x9070848a0 ID 'Extension identity [8045871E-0B32-4919-8659-3864CDD80F65]: eu.bearcove.vixenfs platform: 1' UUID 8045871E-0B32-4919-8659-3864CDD80F65",
+    "Instance 0x9070849c0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8"
+)
+2026-04-06 08:30:05.940 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] Old modules (null)
+2026-04-06 08:30:05.940 Df fskit_agent[95777:237c7be] [com.apple.FSKit:default] Added 4 identifiers: (
+    "com.apple.fskit.exfat",
+    "com.apple.fskit.msdos",
+    "eu.bearcove.vixenfs",
+    "com.apple.fskit.ftp"
+)
+2026-04-06 08:30:05.940 Df fskit_agent[95777:237c7be] [com.apple.xpc:connection] [0x906c84140] activating connection: mach=true listener=true peer=false name=com.apple.fskit.fskit_agent
+2026-04-06 08:30:05.940 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x907100480] activating connection: mach=false listener=false peer=true name=com.apple.fskit.fskit_agent.peer[82639].0x907100480
+2026-04-06 08:30:05.942 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:30:05.943 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:30:05.943 Df fskit_agent[95777:237c7c0] [com.apple.extensionkit:launch] Launching process with config: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 29583628-CF8E-4370-B5B0-E4561A613922])
+2026-04-06 08:30:05.946 Df fskit_agent[95777:237c7c0] [com.apple.BoardServices:XPCErrors] [C:1] Alloc XPCService:95777:com.apple.extensionkitservice
+2026-04-06 08:30:05.946 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c84280] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:30:05.947 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c843c0] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c84500] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:connection] Creating side-channel connection to com.apple.runningboard
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c84640] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:30:06.114 Df fskit_agent[95777:237c7c1] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:30:06.115 Df fskit_agent[95777:237c7c1] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:30:06.115 Df fskit_agent[95777:237c7c1] [com.apple.runningboard:connection] Identity resolved as osservice<com.apple.fskit.fskit_agent(501)>
+2026-04-06 08:30:06.115 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:process] Hit the server for a process handle 1fb6a3cf00017623 that resolved to: [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:95777])(501)>{vt hash: 190433970}[uuid:29583628-CF8E-4370-B5B0-E4561A613922]{definition:eu.bearcove.vixenfs[extension][client]}:95779]
+2026-04-06 08:30:06.115 A  fskit_agent[95777:237c7c0] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:30:06.116 Df fskit_agent[95777:237c7c0] [com.apple.runningboard:process] Starting death monitoring for handle [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:95777])(501)>{vt hash: 190433970}[uuid:29583628-CF8E-4370-B5B0-E4561A613922]{definition:eu.bearcove.vixenfs[extension][client]}:95779]
+2026-04-06 08:30:06.117 Df fskit_agent[95777:237c7c0] [com.apple.extensionkit:launch] Created new process ExtensionProcess: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 29583628-CF8E-4370-B5B0-E4561A613922]) pid: 95779.
+2026-04-06 08:30:06.117 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] About to grab assertion on pid 95779
+2026-04-06 08:30:06.117 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:30:06.117 Df fskit_agent[95777:237c7c0] [com.apple.FSKit:default] -[fskitAgentConnectionDelegate getNSXPCListenerEndpoint:instanceID:replyHandler:] looking for instance <FSItemPair: 0x9070852a0>, got <fskitAgentExtensionInstance: 0x907079100>
+2026-04-06 08:30:06.117 Df fskit_agent[95777:237c7c0] [com.apple.BoardServices:XPCErrors] [C:2] Alloc XPCService:95778:eu.bearcove.vixenfs:29583628-CF8E-4370-B5B0-E4561A613922
+2026-04-06 08:30:06.117 Df fskit_agent[95777:237c7c0] [com.apple.xpc:connection] [0x906c848c0] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:30:06.117 Df fskit_agent[95777:237c7c0] [com.apple.FSKit:default] Starting new connection for (eu.bearcove.vixenfs), with connection (<NSXPCConnection: 0x907028a00> connection to service with pid -1 named (null))
+2026-04-06 08:30:06.118 Df fskit_agent[95777:237c7c0] [com.apple.FSKit:default] About to fetch endpoint
+2026-04-06 08:30:06.682 A  VixenFS[95779:237c7cd] (libsystem_secinit.dylib) AppSandbox
+2026-04-06 08:30:06.701 A  VixenFS[95779:237c7cd] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:30:06.705 Df VixenFS[95779:237c7cd] [com.apple.extensionkit:default] Extension `/Users/amos/bearcove/vixen/apps/mac/xcode/build/DerivedData/Build/Products/Debug/Vixen.app/Contents/Extensions/VixenFS.appex/Contents/MacOS/VixenFS` of type: `1` launched.
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7cd] [com.apple.extensionkit:launch] Extension Type: 'service' : <ExtensionFoundation._EXRunningExtension: 0x100f10470>
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7cd] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7cd] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7e9] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7e9] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:30:06.707 Df VixenFS[95779:237c7e9] [com.apple.xpc:connection] [0x100f11d00] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:30:06.709 Df VixenFS[95779:237c7e9] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:30:06.709 Df VixenFS[95779:237c7e9] [com.apple.runningboard:connection] Identity resolved as xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:95777])(501)>{vt hash: 190433970}[uuid:29583628-CF8E-4370-B5B0-E4561A613922]{definition:eu.bearcove.vixenfs[extension][client]}
+2026-04-06 08:30:06.712 Df VixenFS[95779:237c7cd] [com.apple.xpc:connection] [0xa6f074000] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:30:06.717 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🚀 VixenFS init() called - EXTENSION IS RUNNING
+2026-04-06 08:30:06.717 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:30:06.724 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:RustFSKitBootstrap] Rust FSKit bootstrap returned vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.726 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.727 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:30:06.727 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14855
+2026-04-06 08:30:06.727 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:30:06.729 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.729 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:30:06.729 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14855
+2026-04-06 08:30:06.729 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:30:06.732 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.732 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:30:06.732 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14855
+2026-04-06 08:30:06.732 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:30:06.734 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.734 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:30:06.734 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14855
+2026-04-06 08:30:06.736 Df VixenFS[95779:237c7cd] [com.apple.xpc:connection] [0xa6f0743c0] readying connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:30:06.738 Df VixenFS[95779:237c7cd] [com.apple.BoardServices:Bootstrap] initializing domain XPCService
+2026-04-06 08:30:06.740 Df VixenFS[95779:237c7cd] [com.apple.xpc:connection] [0xa6f074500] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:30:06.740 Df VixenFS[95779:237c7e9] [com.apple.xpc:connection] [0xa6f074640] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent
+2026-04-06 08:30:06.742 E  VixenFS[95779:237c7cd] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:30:06.744 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:30:06.744 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:30:06.744 Df VixenFS[95779:237c7cd] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14855
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7cd] [com.apple.xpc:connection] [0xa6f0743c0] activating connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7e9] [com.apple.BoardServices:XPCErrors] [S:1] Alloc XPCServiceListener:95779:eu.bearcove.vixenfs:29583628-CF8E-4370-B5B0-E4561A613922
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7e9] [com.apple.xpc:connection] [0x100f25cc0] activating connection: mach=false listener=false peer=true name=eu.bearcove.vixenfs.peer[95777].0x100f25cc0
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7ea] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7ea] [com.apple.xpc:connection] [0xa6f074780] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7ea] [com.apple.FSKit:default] Set secondary listener up <NSXPCListener: 0xa6ec11100> service: (null)
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7ea] [com.apple.FSKit:default] getModuleListenerEndpoint got listener <NSXPCListener: 0xa6ec11100> service: (null)
+2026-04-06 08:30:06.745 Df VixenFS[95779:237c7ea] [com.apple.xpc:connection] [0xa6f074780] Connection returned listener port: 0x4403
+2026-04-06 08:30:06.746 Df fskit_agent[95777:237c7c0] (libxpc.dylib) Could not get attrs using bssendp for connection com.apple.xpc.anonymous.0x906c848c0, pid -1: 135: Process is not managed
+2026-04-06 08:30:06.746 Df fskit_agent[95777:237c7c1] [com.apple.FSKit:default] endpoint fetch got endpoint <NSXPCListenerEndpoint: 0x907085880> error (null)
+2026-04-06 08:30:06.746 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] Got ep <NSXPCListenerEndpoint: 0xc1cc7da40> error (null)
+2026-04-06 08:30:06.746 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] non-ours instance connection got <NSXPCConnection: 0xc1d01cc80> connection to service created from an endpoint
+2026-04-06 08:30:06.746 Df fskitd[82639:237c7bc] [com.apple.xpc:connection] [0xc1ccb4500] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:30:06.746 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] About to talk to the connection for eu.bearcove.vixenfs
+2026-04-06 08:30:06.746 Df VixenFS[95779:237c7ea] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:30:06.746 Df VixenFS[95779:237c7ea] [com.apple.xpc:connection] [0x100f28440] activating connection: mach=false listener=false peer=true name=com.apple.xpc.anonymous.0xa6f074780.peer[82639].0x100f28440
+2026-04-06 08:30:06.746 Df VixenFS[95779:237c7e9] [com.apple.FSKit:default] FSModuleExtension.checkIn:extensionID:29583628-CF8E-4370-B5B0-E4561A613922
+2026-04-06 08:30:06.746 Df VixenFS[95779:237c7e9] [com.apple.FSKit:default] FSModuleExtension.checkIn returning (null)
+2026-04-06 08:30:06.747 Df VixenFS[95779:237c7e9] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]:start
+2026-04-06 08:30:06.747 Df fskitd[82639:237c0d4] [com.apple.FSKit:default] -[fskitdExtensionClient configureUserClient:replyHandler:]: pid 95779 pidversion 21856878 enableBlockResource 0
+2026-04-06 08:30:06.747 Df VixenFS[95779:237c7e9] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]_block_invoke_2: configureUserClient for FSModule eu.bearcove.vixenfs returned error ((null))
+2026-04-06 08:30:06.747 Df VixenFS[95779:237c7e9] [com.apple.xpc:connection] [0xa6f074b40] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:30:06.747 Df VixenFS[95779:237c7e9] [com.apple.FSKit:default] Built listener <NSXPCListener: 0xa6ec11280> service: (null)
+2026-04-06 08:30:06.749 Df fskitd[82639:237c7bc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:30:06.755 E  fskitd[82639:237c0d4] [com.apple.FSKit:default] -[fskitdXPCServer canStartActivateTask:resource:]:FSGenericURLResource:vixen://session: Can't start new task, previous task is running: {(
+    23A2172F-CE1C-41F0-B00F-6180D7E7F8A6,
+    444B6DE0-B039-4CF7-A7EF-F30278C38798,
+    D869396A-DB58-4B17-A3A2-5D056AFF08DE,
+    8B5907E5-1A28-459F-B9B4-9CAE2F676185,
+    CD5E29E9-4E9B-44F7-9940-2E355F1640BC,
+    6E4663F3-0A20-42AB-B99E-23D558D2DC5C,
+    84A99EFA-D9D2-49DE-AF9B-2D499A784936,
+    2FB96F42-6B91-4F01-8799-C682D71D167D,
+    7F0C37BA-23C6-41DC-8666-FCAA0165E580,
+    B4F92CC5-1D31-445B-821C-234BE64F3311
+)}, error: The operation couldn’t be completed. Resource busy
+2026-04-06 08:30:06.759 Df fskitd[82639:237c0d4] [com.apple.xpc:connection] [0xc1ccd0a80] invalidated because the client process (pid 95776) either cancelled the connection or exited
+Filtering the log data using "process == "VixenFS" OR process == "fskit_agent" OR process == "fskitd""
+Timestamp               Ty Process[PID:TID]
+2026-04-06 08:36:47.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:47.006 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:47.006 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:47.006 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:47.006 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:48.003 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:48.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:48.004 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:48.004 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:48.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:48.714 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:48.714 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:48.715 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:48.715 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:48.715 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:49.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:49.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:49.004 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:49.004 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:49.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:50.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:50.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:50.005 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:50.005 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:50.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:51.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:51.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:51.004 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:51.004 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:51.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:52.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:52.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:52.005 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:52.005 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:52.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:52.306 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:53.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:53.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:53.005 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:53.005 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:53.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:54.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:54.005 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:54.005 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:54.005 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:54.005 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:54.895 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:54.895 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:54.895 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:54.895 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:54.895 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:55.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:55.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:55.004 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:55.004 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:55.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:56.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:56.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:56.005 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:56.005 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:56.005 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:57.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:57.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:57.004 E  fskitd[97271:237da31] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:57.004 E  fskitd[97271:237da31] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:57.004 E  fskitd[97271:237da31] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:58.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] connect called on dead mount entry
+2026-04-06 08:36:58.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] Auto-connect failed with error 'Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"', mount id 1
+2026-04-06 08:36:58.004 E  fskitd[97271:237da40] Could not connect with status Error Domain=NSPOSIXErrorDomain Code=61 "Connection refused"
+2026-04-06 08:36:58.004 E  fskitd[97271:237da40] [com.apple.FSKit:default] Connection cannot be nil
+2026-04-06 08:36:58.004 E  fskitd[97271:237da40] [com.apple.LiveFS:default] lifs_getattr_send: Unable to get fsobj for idx 1
+2026-04-06 08:36:58.828 Df fskit_agent[97272:237f8a1] [com.apple.xpc:connection] [0x7150f8480] invalidated because the client process (pid 97271) either cancelled the connection or exited
+2026-04-06 08:36:58.833 Df fskit_agent[97272:237f8a1] [com.apple.FSKit:default] fskit_agent exiting as fskitd died
+2026-04-06 08:37:05.711 Df fskitd[98381:237fac8] [com.apple.LiveFS:default] main:lifs:v2:1
+2026-04-06 08:37:05.712 Df fskitd[98381:237fac8] [com.apple.LiveFS:default] Done setting up mach ports
+2026-04-06 08:37:05.712 Df fskitd[98381:237fac8] [com.apple.LiveFS:default] Done setting up mach ports
+2026-04-06 08:37:05.712 A  fskitd[98381:237fac8] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:37:05.713 Df fskitd[98381:237fac8] [com.apple.libcoreservices:] _dirhelper_update_tmpdir: old=(null), new=/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/com.apple.fskitd//
+2026-04-06 08:37:05.733 Df fskitd[98381:237fac8] [com.apple.LiveFS:default] checkIfUnlocked:Device was unlocked, proceed with main flow.
+2026-04-06 08:37:05.733 A  fskitd[98381:237fac8] (libsystem_containermanager.dylib) container_create_or_lookup_app_group_path_by_app_group_identifier
+2026-04-06 08:37:05.733 Df fskitd[98381:237fac8] [com.apple.containermanager:xpc] Requesting app group container lookup; personaid = 4294967295, type = NOPERSONA, name = <unknown>, origin [pid = 0, personaid = 0], proximate [pid = 0, personaid = 0], identifier = group.com.apple.fskit.settings, euid = 0, uid = 0, platform = 1
+2026-04-06 08:37:05.734 Df fskitd[98381:237fac8] [com.apple.containermanager:sandbox] Consumed sandbox extension; path = [/private/var/root/Library/Group Containers/group.com.apple.fskit.settings], handle = 1
+2026-04-06 08:37:05.734 Df fskitd[98381:237fac8] [com.apple.containermanager:unspecified] container_create_or_lookup_app_group_path_by_app_group_identifier: success
+2026-04-06 08:37:05.734 Df fskitd[98381:237fac8] [com.apple.FSKit:default] Loading modules from LS
+2026-04-06 08:37:05.735 Df fskitd[98381:237fac8] [com.apple.xpc:connection] [0x102b76dd0] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:37:05.735 Df fskitd[98381:237fac8] [com.apple.FSKit:default] Returning extension types (
+    "com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:05.735 Df fskitd[98381:237fac8] [com.apple.FSKit:default] Adding LS record <LSExtensionPointRecord 0x842c78080> { table: 28, unit: 480, attached: yes }
+2026-04-06 08:37:05.735 Df fskitd[98381:237fac8] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0x842c78080 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:05.736 A  fskitd[98381:237fac8] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.738 A  fskitd[98381:237fac8] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.738 A  fskitd[98381:237fac8] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.738 Df fskitd[98381:237fac8] [com.apple.xpc:connection] [0x102b7c7f0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:37:05.740 Df fskitd[98381:237fac8] [com.apple.FSKit:default] New module list (
+    "Instance 0x842c78260 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8",
+    "Instance 0x842c78500 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0x842c78660 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7"
+)
+2026-04-06 08:37:05.740 Df fskitd[98381:237fac8] [com.apple.FSKit:default] Old modules (null)
+2026-04-06 08:37:05.740 Df fskitd[98381:237fac8] [com.apple.FSKit:default] Added 3 identifiers: (
+    "com.apple.fskit.ftp",
+    "com.apple.fskit.exfat",
+    "com.apple.fskit.msdos"
+)
+2026-04-06 08:37:05.740 Df fskitd[98381:237fac8] [com.apple.xpc:connection] [0x842cac000] activating connection: mach=true listener=true peer=false name=com.apple.filesystems.fskitd.livefs
+2026-04-06 08:37:05.740 Df fskitd[98381:237fac8] [com.apple.xpc:connection] [0x842cac140] activating connection: mach=true listener=true peer=false name=com.apple.filesystems.fskitd
+2026-04-06 08:37:05.740 Df fskitd[98381:237facb] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:37:05.740 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cc8180] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[98380].0x842cc8180
+2026-04-06 08:37:05.740 Df fskitd[98381:237facb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:05.740 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cac280] activating connection: mach=true listener=false peer=false name=com.apple.fskit.fskit_agent
+2026-04-06 08:37:05.763 A  fskit_agent[98382:237face] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:37:05.767 A  fskit_agent[98382:237face] (libsystem_info.dylib) Membership API: translate identifier
+2026-04-06 08:37:05.767 Df fskit_agent[98382:237face] [com.apple.libcoreservices:] _dirhelper_update_tmpdir: old=/var/folders/_9/7kq7hqnj3m36k_x5fypjyfy00000gn/T/, new=/var/folders/_9/7kq7hqnj3m36k_x5fypjyfy00000gn/T/com.apple.fskit.fskit_agent//
+2026-04-06 08:37:05.794 A  fskit_agent[98382:237face] (libsystem_containermanager.dylib) container_create_or_lookup_app_group_path_by_app_group_identifier
+2026-04-06 08:37:05.794 Df fskit_agent[98382:237face] [com.apple.containermanager:xpc] Requesting app group container lookup; personaid = 4294967295, type = NOPERSONA, name = <unknown>, origin [pid = 0, personaid = 0], proximate [pid = 0, personaid = 0], identifier = group.com.apple.fskit.settings, euid = 501, uid = 501, platform = 1
+2026-04-06 08:37:05.797 Df fskit_agent[98382:237face] [com.apple.containermanager:sandbox] Consumed sandbox extension; path = [/Users/amos/Library/Group Containers/group.com.apple.fskit.settings], handle = 1
+2026-04-06 08:37:05.797 Df fskit_agent[98382:237face] [com.apple.containermanager:unspecified] container_create_or_lookup_app_group_path_by_app_group_identifier: success
+2026-04-06 08:37:05.798 Df fskit_agent[98382:237face] [com.apple.FSKit:default] Loading modules from LS
+2026-04-06 08:37:05.798 Df fskit_agent[98382:237face] [com.apple.xpc:connection] [0x1014796c0] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:37:05.800 Df fskit_agent[98382:237face] [com.apple.FSKit:default] Returning extension types (
+    "com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:05.800 Df fskit_agent[98382:237face] [com.apple.FSKit:default] Adding LS record <LSExtensionPointRecord 0xbef084000> { table: 28, unit: 480, attached: yes }
+2026-04-06 08:37:05.800 Df fskit_agent[98382:237face] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xbef084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:05.801 A  fskit_agent[98382:237face] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.805 Df fskit_agent[98382:237face] [com.apple.xpc:connection] [0x10147bfa0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:37:05.805 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec84000] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent
+2026-04-06 08:37:05.808 A  fskit_agent[98382:237face] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.808 A  fskit_agent[98382:237face] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.808 A  fskit_agent[98382:237face] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.809 Df fskit_agent[98382:237face] [com.apple.FSKit:default] New module list (
+    "Instance 0xbef084620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0xbef0847a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0xbef0848a0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8",
+    "Instance 0xbef0849a0 ID 'Extension identity [08B31D58-926B-4AAF-8645-D9F7D2AAA642]: eu.bearcove.vixenfs platform: 1' UUID 08B31D58-926B-4AAF-8645-D9F7D2AAA642"
+)
+2026-04-06 08:37:05.809 Df fskit_agent[98382:237face] [com.apple.FSKit:default] Old modules (null)
+2026-04-06 08:37:05.809 Df fskit_agent[98382:237face] [com.apple.FSKit:default] Added 4 identifiers: (
+    "com.apple.fskit.exfat",
+    "com.apple.fskit.msdos",
+    "com.apple.fskit.ftp",
+    "eu.bearcove.vixenfs"
+)
+2026-04-06 08:37:05.810 Df fskit_agent[98382:237face] [com.apple.xpc:connection] [0xbeec84140] activating connection: mach=true listener=true peer=false name=com.apple.fskit.fskit_agent
+2026-04-06 08:37:05.810 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbef100480] activating connection: mach=false listener=false peer=true name=com.apple.fskit.fskit_agent.peer[98381].0xbef100480
+2026-04-06 08:37:05.812 Df fskitd[98381:237facb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:05.813 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:05.813 Df fskit_agent[98382:237facf] [com.apple.extensionkit:launch] Launching process with config: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: B8A5FAE6-715D-425E-8E89-5C29F679CAC9])
+2026-04-06 08:37:05.817 Df fskit_agent[98382:237facf] [com.apple.BoardServices:XPCErrors] [C:1] Alloc XPCService:98382:com.apple.extensionkitservice
+2026-04-06 08:37:05.817 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec84280] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:05.817 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec843c0] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec84500] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.runningboard:connection] Creating side-channel connection to com.apple.runningboard
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec84640] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:37:05.921 Df fskit_agent[98382:237fad0] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:37:05.922 Df fskit_agent[98382:237fad0] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:37:05.922 Df fskit_agent[98382:237facf] [com.apple.runningboard:process] Hit the server for a process handle 16892f3300018050 that resolved to: [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:B8A5FAE6-715D-425E-8E89-5C29F679CAC9]{definition:eu.bearcove.vixenfs[extension][client]}:98384]
+2026-04-06 08:37:05.922 Df fskit_agent[98382:237fad0] [com.apple.runningboard:connection] Identity resolved as osservice<com.apple.fskit.fskit_agent(501)>
+2026-04-06 08:37:05.922 A  fskit_agent[98382:237facf] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:05.922 Df fskit_agent[98382:237facf] [com.apple.runningboard:process] Starting death monitoring for handle [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:B8A5FAE6-715D-425E-8E89-5C29F679CAC9]{definition:eu.bearcove.vixenfs[extension][client]}:98384]
+2026-04-06 08:37:05.923 Df fskit_agent[98382:237facf] [com.apple.extensionkit:launch] Created new process ExtensionProcess: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: B8A5FAE6-715D-425E-8E89-5C29F679CAC9]) pid: 98384.
+2026-04-06 08:37:05.923 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to grab assertion on pid 98384
+2026-04-06 08:37:05.924 Df fskitd[98381:237facc] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:37:05.924 Df fskitd[98381:237facc] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:37:05.924 Df fskitd[98381:237facb] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:37:05.924 Df fskitd[98381:237facb] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:37:05.924 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cac3c0] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:37:05.925 Df fskitd[98381:237facb] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:37:05.925 Df fskitd[98381:237facb] [com.apple.runningboard:connection] Identity resolved as osservice<com.apple.filesystems.fskitd>
+2026-04-06 08:37:05.925 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:05.926 Df fskit_agent[98382:237facf] [com.apple.FSKit:default] -[fskitAgentConnectionDelegate getNSXPCListenerEndpoint:instanceID:replyHandler:] looking for instance <FSItemPair: 0xbef0852e0>, got <fskitAgentExtensionInstance: 0xbef079100>
+2026-04-06 08:37:05.926 Df fskit_agent[98382:237facf] [com.apple.BoardServices:XPCErrors] [C:2] Alloc XPCService:98383:eu.bearcove.vixenfs:B8A5FAE6-715D-425E-8E89-5C29F679CAC9
+2026-04-06 08:37:05.926 Df fskit_agent[98382:237facf] [com.apple.xpc:connection] [0xbeec84780] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:05.926 Df fskit_agent[98382:237facf] [com.apple.FSKit:default] Starting new connection for (eu.bearcove.vixenfs), with connection (<NSXPCConnection: 0xbef028820> connection to service with pid -1 named (null))
+2026-04-06 08:37:05.926 Df fskit_agent[98382:237facf] [com.apple.FSKit:default] About to fetch endpoint
+2026-04-06 08:37:05.928 A  VixenFS[98384:237fadf] (libsystem_secinit.dylib) AppSandbox
+2026-04-06 08:37:06.106 A  VixenFS[98384:237fadf] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:37:06.110 Df VixenFS[98384:237fadf] [com.apple.extensionkit:default] Extension `/Applications/Vixen.app/Contents/Extensions/VixenFS.appex/Contents/MacOS/VixenFS` of type: `1` launched.
+2026-04-06 08:37:06.110 Df VixenFS[98384:237fadf] [com.apple.extensionkit:launch] Extension Type: 'service' : <ExtensionFoundation._EXRunningExtension: 0x1035c1250>
+2026-04-06 08:37:06.111 Df VixenFS[98384:237fadf] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:37:06.111 Df VixenFS[98384:237fadf] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:37:06.111 Df VixenFS[98384:237faf4] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:37:06.111 Df VixenFS[98384:237faf4] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:37:06.111 Df VixenFS[98384:237faf4] [com.apple.xpc:connection] [0x1035c2800] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:37:06.113 Df VixenFS[98384:237faf4] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:37:06.113 Df VixenFS[98384:237faf4] [com.apple.runningboard:connection] Identity resolved as xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:B8A5FAE6-715D-425E-8E89-5C29F679CAC9]{definition:eu.bearcove.vixenfs[extension][client]}
+2026-04-06 08:37:06.116 Df VixenFS[98384:237fadf] [com.apple.xpc:connection] [0x1035c7ae0] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:37:06.122 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🚀 VixenFS init() called - EXTENSION IS RUNNING
+2026-04-06 08:37:06.122 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:06.130 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:RustFSKitBootstrap] Rust FSKit bootstrap returned vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.133 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.133 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:06.133 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14355
+2026-04-06 08:37:06.133 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:06.136 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.136 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:06.136 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14355
+2026-04-06 08:37:06.136 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:06.139 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.139 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:06.139 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14355
+2026-04-06 08:37:06.139 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:06.141 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.141 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:06.141 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14355
+2026-04-06 08:37:06.142 Df VixenFS[98384:237fadf] [com.apple.xpc:connection] [0x71b0a8000] readying connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:37:06.145 Df VixenFS[98384:237fadf] [com.apple.BoardServices:Bootstrap] initializing domain XPCService
+2026-04-06 08:37:06.147 Df VixenFS[98384:237fadf] [com.apple.xpc:connection] [0x71b0a8140] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:37:06.147 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71b0a8280] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent
+2026-04-06 08:37:06.151 E  VixenFS[98384:237fadf] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:06.153 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:06.153 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:06.153 Df VixenFS[98384:237fadf] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14355
+2026-04-06 08:37:06.153 Df VixenFS[98384:237fadf] [com.apple.xpc:connection] [0x71b0a8000] activating connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.BoardServices:XPCErrors] [S:1] Alloc XPCServiceListener:98384:eu.bearcove.vixenfs:B8A5FAE6-715D-425E-8E89-5C29F679CAC9
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x1035d3d20] activating connection: mach=false listener=false peer=true name=eu.bearcove.vixenfs.peer[98382].0x1035d3d20
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71b0a83c0] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] Set secondary listener up <NSXPCListener: 0x71ac09100> service: (null)
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] getModuleListenerEndpoint got listener <NSXPCListener: 0x71ac09100> service: (null)
+2026-04-06 08:37:06.154 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71b0a83c0] Connection returned listener port: 0x4e03
+2026-04-06 08:37:06.155 Df fskit_agent[98382:237facf] (libxpc.dylib) Could not get attrs using bssendp for connection com.apple.xpc.anonymous.0xbeec84780, pid -1: 135: Process is not managed
+2026-04-06 08:37:06.155 Df fskit_agent[98382:237fadc] [com.apple.FSKit:default] endpoint fetch got endpoint <NSXPCListenerEndpoint: 0xbef085880> error (null)
+2026-04-06 08:37:06.155 Df fskitd[98381:237faea] [com.apple.FSKit:default] Got ep <NSXPCListenerEndpoint: 0x842c78ee0> error (null)
+2026-04-06 08:37:06.155 Df fskitd[98381:237facc] [com.apple.FSKit:default] non-ours instance connection got <NSXPCConnection: 0x843024820> connection to service created from an endpoint
+2026-04-06 08:37:06.155 Df fskitd[98381:237facc] [com.apple.xpc:connection] [0x842cac500] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:06.155 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to talk to the connection for eu.bearcove.vixenfs
+2026-04-06 08:37:06.155 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:37:06.155 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x1035d5080] activating connection: mach=false listener=false peer=true name=com.apple.xpc.anonymous.0x71b0a83c0.peer[98381].0x1035d5080
+2026-04-06 08:37:06.156 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] FSModuleExtension.checkIn:extensionID:B8A5FAE6-715D-425E-8E89-5C29F679CAC9
+2026-04-06 08:37:06.156 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] FSModuleExtension.checkIn returning (null)
+2026-04-06 08:37:06.156 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]:start
+2026-04-06 08:37:06.156 Df fskitd[98381:237faea] [com.apple.FSKit:default] -[fskitdExtensionClient configureUserClient:replyHandler:]: pid 98384 pidversion 21860548 enableBlockResource 0
+2026-04-06 08:37:06.156 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]_block_invoke_2: configureUserClient for FSModule eu.bearcove.vixenfs returned error ((null))
+2026-04-06 08:37:06.157 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71b0a8780] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:37:06.157 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] Built listener <NSXPCListener: 0x71ac09280> service: (null)
+2026-04-06 08:37:06.160 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:06.161 Df fskitd[98381:237faea] [com.apple.FSKit:default] About to talk to the connection for eu.bearcove.vixenfs
+2026-04-06 08:37:06.161 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] FSModuleExtension.checkIn:extensionID:B8A5FAE6-715D-425E-8E89-5C29F679CAC9
+2026-04-06 08:37:06.161 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] FSModuleExtension.checkIn returning (null)
+2026-04-06 08:37:06.161 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector activateVolume:resource:options:replyHandler:]:start
+2026-04-06 08:37:06.162 Df fskitd[98381:237faea] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:37:06.162 Df fskitd[98381:237faea] [com.apple.xpc:connection] [0x842cc8480] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.livefs.peer[98380].0x842cc8480
+2026-04-06 08:37:06.162 Df fskitd[98381:237faea] [com.apple.LiveFS:default] ReallyMountVolume: Enter for provider com.apple.filesystems.UserFS.FileProvider mounting: /private/tmp/vx/vfs
+2026-04-06 08:37:06.163 Df fskitd[98381:237faea] [com.apple.LiveFS:default] asked to create domain on macOS, ignoring
+2026-04-06 08:37:06.164 Df fskitd[98381:237facc] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:06.164 Df fskitd[98381:237facc] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]: Trying to find a FSVolumeConnector using bundleID (eu.bearcove.vixenfs) and volumeID (B4274ABC-991A-4B24-98A0-FEC83FA096E4)
+2026-04-06 08:37:06.164 Df fskitd[98381:237facc] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:594: Found extension instance for bundleID (eu.bearcove.vixenfs) volumeID (B4274ABC-991A-4B24-98A0-FEC83FA096E4)
+2026-04-06 08:37:06.164 Df fskitd[98381:237facc] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:600: creating FSModuleXPC sync proxy
+2026-04-06 08:37:06.164 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector getVolumeEndpoint:replyHandler:]:start:volID:B4274ABC-991A-4B24-98A0-FEC83FA096E4
+2026-04-06 08:37:06.164 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71b0a8780] Connection returned listener port: 0x4d03
+2026-04-06 08:37:06.164 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector getVolumeEndpoint:replyHandler:]:end:found:volID:B4274ABC-991A-4B24-98A0-FEC83FA096E4 listener <NSXPCListener: 0x71ac09280> service: (null) returning ep <NSXPCListenerEndpoint: 0x71ac71500>
+2026-04-06 08:37:06.165 Df fskitd[98381:237facc] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:618: FSVolumeConnector endpoint found
+2026-04-06 08:37:06.165 Df fskitd[98381:237facc] [com.apple.LiveFS:default] Got connection
+2026-04-06 08:37:06.165 Df fskitd[98381:237facc] [com.apple.xpc:connection] [0x842cac640] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:06.165 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleVolume(Project) listener:shouldAcceptNewConnection:]:start
+2026-04-06 08:37:06.165 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleVolume(Project) listener:shouldAcceptNewConnection:]:accepted
+2026-04-06 08:37:06.165 Df VixenFS[98384:237faf5] [com.apple.xpc:connection] [0x71ad34000] activating connection: mach=false listener=false peer=true name=com.apple.xpc.anonymous.0x71b0a8780.peer[98381].0x71ad34000
+2026-04-06 08:37:06.165 Df fskitd[98381:237facc] [com.apple.FSKit:default] creating mount task to vixen://session with type vixenfs
+2026-04-06 08:37:06.165 Df fskitd[98381:237faea] [com.apple.LiveFS:default] -[mountEntry mount:options:auditToken:]: will mount over LIFSv2
+2026-04-06 08:37:06.167 Df fskitd[98381:237faea] [com.apple.LiveFS:default] /private/tmp/vx/vfs: FMT CAPS: 0x00000300
+2026-04-06 08:37:06.167 Df fskitd[98381:237faea] [com.apple.LiveFS:default] /private/tmp/vx/vfs: INT CAPS: 0x00004b00
+2026-04-06 08:37:06.168 Df fskitd[98381:237faea] [com.apple.xpc:connection] [0x842cc8180] invalidated because the client process (pid 98380) either cancelled the connection or exited
+2026-04-06 08:37:06.168 Df fskitd[98381:237facc] [com.apple.xpc:connection] [0x842cc8480] invalidated because the client process (pid 98380) either cancelled the connection or exited
+2026-04-06 08:37:09.842 Df fskitd[98381:237facc] [com.apple.LiveFS:default] Unmounting /private/tmp/vx/vfs how 02
+2026-04-06 08:37:09.842 Df fskitd[98381:237facb] [com.apple.FSKit:default] -[mountEntry forgetModuleVolumeWithFlags:reply:]: Creating FSModuleXPC sync proxy
+2026-04-06 08:37:09.842 Df VixenFS[98384:237faf5] [com.apple.FSKit:default] -[FSModuleConnector deactivateVolume:numericOptions:replyHandler:]:start
+2026-04-06 08:37:09.842 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cac780] activating connection: mach=true listener=false peer=false name=com.apple.fskit.fskit_helper
+2026-04-06 08:37:09.842 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cac780] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:09.842 Df fskitd[98381:237facb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:09.843 Df fskit_agent[98382:237facf] [com.apple.extensionkit:launch] Assertion for extension process 'ExtensionProcess: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: B8A5FAE6-715D-425E-8E89-5C29F679CAC9]) pid: 98384' invalidated
+2026-04-06 08:37:09.844 Df fskitd[98381:237facb] [com.apple.xpc:connection] [0x842cac500] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:09.844 Df fskitd[98381:237facc] [com.apple.xpc:connection] [0x842cac640] Re-initialization successful; calling out to event handler with XPC_ERROR_CONNECTION_INTERRUPTED
+2026-04-06 08:37:09.844 E  fskitd[98381:237faea] [com.apple.LiveFS:default] -[mountEntry handleConnectionInterrupted]_block_invoke: interrupted
+2026-04-06 08:37:09.844 Df fskitd[98381:237faea] [com.apple.FSKit:default] xpc connection interrupted for auto eject me
+2026-04-06 08:37:09.844 Df fskitd[98381:237faea] [com.apple.xpc:connection] [0x842cac640] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:09.844 E  fskitd[98381:237faea] [com.apple.LiveFS:default] -[mountEntry doConnect]_block_invoke: invalidation with strongSelf <mountEntry: 0x842d1c380>
+2026-04-06 08:37:09.844 E  fskit_agent[98382:237facf] [com.apple.BoardServices:XPCErrors] [C:2] Error received: Connection interrupted.
+2026-04-06 08:37:09.852 A  fskit_agent[98382:237fadc] (RunningBoardServices) processDidExit
+2026-04-06 08:37:09.852 Df fskit_agent[98382:237fadc] [com.apple.runningboard:process] Firing exit handlers for 98384 with context <RBSProcessExitContext| specific, status:<RBSProcessExitStatus| domain:runningboard(15) code:0>>
+2026-04-06 08:37:09.852 Df fskit_agent[98382:237fadc] [com.apple.runningboard:process] Calling process death completion block for handle [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:B8A5FAE6-715D-425E-8E89-5C29F679CAC9]{definition:eu.bearcove.vixenfs[extension][client]}:98384]
+2026-04-06 08:37:16.628 Df fskit_agent[98382:237fb85] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:37:16.979 Df fskit_agent[98382:237fb85] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:37:16.979 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xbef084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:16.980 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:16.980 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:16.980 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:16.981 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:19.301 Df fskit_agent[98382:237fcbd] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:37:19.651 Df fskit_agent[98382:237fb85] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:37:19.651 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xbef084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:19.652 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:19.652 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:19.652 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:19.652 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:19.653 A  fskit_agent[98382:237fcbd] (CoreFoundation) Loading Preferences From System CFPrefsD
+2026-04-06 08:37:19.654 E  fskit_agent[98382:237fcbd] [com.apple.launchservices:default] could not resolve URL while initializing a bundle record!
+2026-04-06 08:37:19.654 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] New module list (
+    "Instance 0xbef085660 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0xbef085620 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0xbef0856c0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8"
+)
+2026-04-06 08:37:19.655 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] Old modules {
+    "com.apple.fskit.exfat" = "Instance 0xbef084620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE";
+    "com.apple.fskit.ftp" = "Instance 0xbef0848a0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8";
+    "com.apple.fskit.msdos" = "Instance 0xbef0847a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7";
+    "eu.bearcove.vixenfs" = "Instance 0xbef0849a0 ID 'Extension identity [08B31D58-926B-4AAF-8645-D9F7D2AAA642]: eu.bearcove.vixenfs platform: 1' UUID 08B31D58-926B-4AAF-8645-D9F7D2AAA642";
+}
+2026-04-06 08:37:19.655 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] Removed 1 identifiers: (
+    "eu.bearcove.vixenfs"
+)
+2026-04-06 08:37:19.711 Df fskit_agent[98382:237fcbd] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:37:20.062 Df fskit_agent[98382:237fb85] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:37:20.062 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xbef084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:20.064 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:20.065 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:20.065 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:20.065 A  fskit_agent[98382:237fcbd] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:20.070 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] New module list (
+    "Instance 0xbef084fc0 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE",
+    "Instance 0xbef0853e0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7",
+    "Instance 0xbef084580 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8",
+    "Instance 0xbef084560 ID 'Extension identity [E9DF6331-D503-4496-86FF-C148C22A535F]: eu.bearcove.vixenfs platform: 1' UUID E9DF6331-D503-4496-86FF-C148C22A535F"
+)
+2026-04-06 08:37:20.070 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] Old modules {
+    "com.apple.fskit.exfat" = "Instance 0xbef084620 ID 'Extension identity [F37A531D-2A43-5297-92B4-4BA9F875FAAE]: com.apple.fskit.exfat platform: 1' UUID F37A531D-2A43-5297-92B4-4BA9F875FAAE";
+    "com.apple.fskit.ftp" = "Instance 0xbef0848a0 ID 'Extension identity [4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8]: com.apple.fskit.ftp platform: 1' UUID 4E075EFF-BFD7-5EB3-920C-7470ECFE6DA8";
+    "com.apple.fskit.msdos" = "Instance 0xbef0847a0 ID 'Extension identity [02098493-9D1F-5DD8-A507-7827C7EF14E7]: com.apple.fskit.msdos platform: 1' UUID 02098493-9D1F-5DD8-A507-7827C7EF14E7";
+}
+2026-04-06 08:37:20.070 Df fskit_agent[98382:237fcbd] [com.apple.FSKit:default] Added 1 identifiers: (
+    "eu.bearcove.vixenfs"
+)
+2026-04-06 08:37:20.547 Df fskitd[98381:237fb09] [com.apple.FSKit:default] Incomming connection, entitled 0
+2026-04-06 08:37:20.547 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cc8d80] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[98579].0x842cc8d80
+2026-04-06 08:37:20.547 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:20.564 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:24.158 Df fskitd[98381:237fb09] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:37:24.158 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cc8a80] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[98622].0x842cc8a80
+2026-04-06 08:37:24.158 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:24.726 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:25.161 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:26.526 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cc8a80] invalidated because the client process (pid 98622) either cancelled the connection or exited
+2026-04-06 08:37:26.567 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:27.352 Df fskit_agent[98382:237fb85] [com.apple.launchservices:db] NotifyToken::RegisterDispatch(user.uid.501.com.apple.LaunchServices.database) fired for session key LSSessionKey(system: 0 uid: 501)
+2026-04-06 08:37:27.704 Df fskit_agent[98382:237fb85] [com.apple.FSKit:default] Got LS database change
+2026-04-06 08:37:27.704 Df fskit_agent[98382:23803f1] [com.apple.FSKit:default] returning ep records (
+    "LSExtensionPointRecord 0xbef084000 identifier 'com.apple.fskit.fsmodule' name com.apple.fskit.fsmodule"
+)
+2026-04-06 08:37:27.705 A  fskit_agent[98382:23803f1] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:27.706 A  fskit_agent[98382:23803f1] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:27.706 A  fskit_agent[98382:23803f1] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:27.707 A  fskit_agent[98382:23803f1] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:31.383 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:37:31.383 Df fskitd[98381:237ffdb] [com.apple.xpc:connection] [0x842cc8480] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.peer[98682].0x842cc8480
+2026-04-06 08:37:31.383 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.385 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.386 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.386 Df fskit_agent[98382:23803f1] [com.apple.extensionkit:launch] Launching process with config: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 47E72718-9465-4B8D-B618-2D4598B125F7])
+2026-04-06 08:37:31.428 Df fskit_agent[98382:23803f1] [com.apple.runningboard:process] Hit the server for a process handle 11cd59400001817b that resolved to: [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:47E72718-9465-4B8D-B618-2D4598B125F7]{definition:eu.bearcove.vixenfs[extension][client]}:98683]
+2026-04-06 08:37:31.428 A  fskit_agent[98382:23803f1] (CoreServicesInternal) CFURLResolveBookmarkData
+2026-04-06 08:37:31.428 Df fskit_agent[98382:23803f1] [com.apple.runningboard:process] Starting death monitoring for handle [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:47E72718-9465-4B8D-B618-2D4598B125F7]{definition:eu.bearcove.vixenfs[extension][client]}:98683]
+2026-04-06 08:37:31.429 Df fskit_agent[98382:23803f1] [com.apple.extensionkit:launch] Created new process ExtensionProcess: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 47E72718-9465-4B8D-B618-2D4598B125F7]) pid: 98683.
+2026-04-06 08:37:31.429 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to grab assertion on pid 98683
+2026-04-06 08:37:31.429 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.429 Df fskit_agent[98382:23803f1] [com.apple.FSKit:default] -[fskitAgentConnectionDelegate getNSXPCListenerEndpoint:instanceID:replyHandler:] looking for instance <FSItemPair: 0xbef0852e0>, got <fskitAgentExtensionInstance: 0xbef079b40>
+2026-04-06 08:37:31.430 Df fskit_agent[98382:23803f1] [com.apple.BoardServices:XPCErrors] [C:3] Alloc XPCService:98383:eu.bearcove.vixenfs:47E72718-9465-4B8D-B618-2D4598B125F7
+2026-04-06 08:37:31.430 Df fskit_agent[98382:23803f1] [com.apple.xpc:connection] [0xbeec84780] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:31.430 Df fskit_agent[98382:23803f1] [com.apple.FSKit:default] Starting new connection for (eu.bearcove.vixenfs), with connection (<NSXPCConnection: 0xbef028b40> connection to service with pid -1 named (null))
+2026-04-06 08:37:31.430 Df fskit_agent[98382:23803f1] [com.apple.FSKit:default] About to fetch endpoint
+2026-04-06 08:37:31.437 A  VixenFS[98683:23804bb] (libsystem_secinit.dylib) AppSandbox
+2026-04-06 08:37:31.452 A  VixenFS[98683:23804bb] (libsystem_info.dylib) Retrieve User by ID
+2026-04-06 08:37:31.455 Df VixenFS[98683:23804bb] [com.apple.extensionkit:default] Extension `/Applications/Vixen.app/Contents/Extensions/VixenFS.appex/Contents/MacOS/VixenFS` of type: `1` launched.
+2026-04-06 08:37:31.455 Df VixenFS[98683:23804bb] [com.apple.extensionkit:launch] Extension Type: 'service' : <ExtensionFoundation._EXRunningExtension: 0x104c94960>
+2026-04-06 08:37:31.456 Df VixenFS[98683:23804bb] [com.apple.runningboard:connection] Initializing connection
+2026-04-06 08:37:31.456 Df VixenFS[98683:23804bb] [com.apple.runningboard:process] Removing all cached process handles
+2026-04-06 08:37:31.456 Df VixenFS[98683:23804c5] [com.apple.runningboard:connection] Sending handshake request attempt #1 to server
+2026-04-06 08:37:31.456 Df VixenFS[98683:23804c5] [com.apple.runningboard:connection] Creating connection to com.apple.runningboard
+2026-04-06 08:37:31.456 Df VixenFS[98683:23804c5] [com.apple.xpc:connection] [0x104c96260] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+2026-04-06 08:37:31.457 Df VixenFS[98683:23804c5] [com.apple.runningboard:connection] Handshake succeeded
+2026-04-06 08:37:31.457 Df VixenFS[98683:23804c5] [com.apple.runningboard:connection] Identity resolved as xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:47E72718-9465-4B8D-B618-2D4598B125F7]{definition:eu.bearcove.vixenfs[extension][client]}
+2026-04-06 08:37:31.460 Df VixenFS[98683:23804bb] [com.apple.xpc:connection] [0x104c9e490] activating connection: mach=true listener=false peer=false name=com.apple.lsd.mapdb
+2026-04-06 08:37:31.464 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🚀 VixenFS init() called - EXTENSION IS RUNNING
+2026-04-06 08:37:31.464 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:31.472 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:RustFSKitBootstrap] Rust FSKit bootstrap returned vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.475 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.475 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:31.475 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14347
+2026-04-06 08:37:31.475 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:31.477 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.477 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:31.477 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14347
+2026-04-06 08:37:31.477 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:31.480 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.480 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:31.480 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14347
+2026-04-06 08:37:31.480 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:31.482 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.483 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:31.483 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14347
+2026-04-06 08:37:31.484 Df VixenFS[98683:23804bb] [com.apple.xpc:connection] [0x91d0c8000] readying connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:37:31.487 Df VixenFS[98683:23804bb] [com.apple.BoardServices:Bootstrap] initializing domain XPCService
+2026-04-06 08:37:31.489 Df VixenFS[98683:23804bb] [com.apple.xpc:connection] [0x91d0c8140] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-04-06 08:37:31.489 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x91d0c8280] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.agent
+2026-04-06 08:37:31.491 E  VixenFS[98683:23804bb] [eu.bearcove.vixenfs:Boot] 🔌 fileSystem property accessed
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] Have delegate, class vx_fskit::macos::extension_runtime::filesystem::RustUnaryFileSystem0.1.0
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] file system extension backpointer loaded
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804bb] [com.apple.FSKit:default] -[FSModuleExtension didFinishLaunching]: Created FSMachPort = 14347
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804bb] [com.apple.xpc:connection] [0x91d0c8000] activating connection: mach=false listener=true peer=false name=eu.bearcove.vixenfs
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.BoardServices:XPCErrors] [S:1] Alloc XPCServiceListener:98683:eu.bearcove.vixenfs:47E72718-9465-4B8D-B618-2D4598B125F7
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x104caa7e0] activating connection: mach=false listener=false peer=true name=eu.bearcove.vixenfs.peer[98382].0x104caa7e0
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x91d0c83c0] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] Set secondary listener up <NSXPCListener: 0x91cc0d100> service: (null)
+2026-04-06 08:37:31.494 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] getModuleListenerEndpoint got listener <NSXPCListener: 0x91cc0d100> service: (null)
+2026-04-06 08:37:31.495 Df fskit_agent[98382:23803f1] (libxpc.dylib) Could not get attrs using bssendp for connection com.apple.xpc.anonymous.0xbeec84780, pid -1: 135: Process is not managed
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x91d0c83c0] Connection returned listener port: 0x4e03
+2026-04-06 08:37:31.495 Df fskit_agent[98382:23804c2] [com.apple.FSKit:default] endpoint fetch got endpoint <NSXPCListenerEndpoint: 0xbef085960> error (null)
+2026-04-06 08:37:31.495 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] Got ep <NSXPCListenerEndpoint: 0x842c78920> error (null)
+2026-04-06 08:37:31.495 Df fskitd[98381:237fb09] [com.apple.FSKit:default] non-ours instance connection got <NSXPCConnection: 0x843024460> connection to service created from an endpoint
+2026-04-06 08:37:31.495 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cac640] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:31.495 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to talk to the connection for eu.bearcove.vixenfs
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] -[FSModuleExtension(Project) shouldAcceptConnection:] returning YES
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x104cabde0] activating connection: mach=false listener=false peer=true name=com.apple.xpc.anonymous.0x91d0c83c0.peer[98381].0x104cabde0
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] FSModuleExtension.checkIn:extensionID:47E72718-9465-4B8D-B618-2D4598B125F7
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] FSModuleExtension.checkIn returning (null)
+2026-04-06 08:37:31.495 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]:start
+2026-04-06 08:37:31.496 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] -[fskitdExtensionClient configureUserClient:replyHandler:]: pid 98683 pidversion 21861073 enableBlockResource 0
+2026-04-06 08:37:31.496 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] -[FSModuleConnector loadResource:options:replyHandler:]_block_invoke_2: configureUserClient for FSModule eu.bearcove.vixenfs returned error ((null))
+2026-04-06 08:37:31.496 Df VixenFS[98683:23804c6] [com.apple.xpc:connection] [0x91d0c8780] activating connection: mach=false listener=true peer=false name=(anonymous)
+2026-04-06 08:37:31.496 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] Built listener <NSXPCListener: 0x91cc0d280> service: (null)
+2026-04-06 08:37:31.498 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.499 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] About to talk to the connection for eu.bearcove.vixenfs
+2026-04-06 08:37:31.499 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] FSModuleExtension.checkIn:extensionID:47E72718-9465-4B8D-B618-2D4598B125F7
+2026-04-06 08:37:31.499 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] FSModuleExtension.checkIn returning (null)
+2026-04-06 08:37:31.499 Df VixenFS[98683:23804c6] [com.apple.FSKit:default] -[FSModuleConnector activateVolume:resource:options:replyHandler:]:start
+2026-04-06 08:37:31.500 Df fskitd[98381:237ffdb] [com.apple.FSKit:default] Incomming connection, entitled 1
+2026-04-06 08:37:31.500 Df fskitd[98381:237ffdb] [com.apple.xpc:connection] [0x842cc8f00] activating connection: mach=false listener=false peer=true name=com.apple.filesystems.fskitd.livefs.peer[98682].0x842cc8f00
+2026-04-06 08:37:31.500 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] ReallyMountVolume: Enter for provider com.apple.filesystems.UserFS.FileProvider mounting: /private/tmp/vx/vfs
+2026-04-06 08:37:31.501 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] asked to create domain on macOS, ignoring
+2026-04-06 08:37:31.501 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:31.501 Df fskitd[98381:237fb09] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]: Trying to find a FSVolumeConnector using bundleID (eu.bearcove.vixenfs) and volumeID (009BBD98-FE3F-4A62-86B2-174AFE6B77CD)
+2026-04-06 08:37:31.501 Df fskitd[98381:237fb09] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:594: Found extension instance for bundleID (eu.bearcove.vixenfs) volumeID (009BBD98-FE3F-4A62-86B2-174AFE6B77CD)
+2026-04-06 08:37:31.501 Df fskitd[98381:237fb09] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:600: creating FSModuleXPC sync proxy
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.FSKit:default] -[FSModuleConnector getVolumeEndpoint:replyHandler:]:start:volID:009BBD98-FE3F-4A62-86B2-174AFE6B77CD
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.xpc:connection] [0x91d0c8780] Connection returned listener port: 0x4c03
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.FSKit:default] -[FSModuleConnector getVolumeEndpoint:replyHandler:]:end:found:volID:009BBD98-FE3F-4A62-86B2-174AFE6B77CD listener <NSXPCListener: 0x91cc0d280> service: (null) returning ep <NSXPCListenerEndpoint: 0x91cc55500>
+2026-04-06 08:37:31.502 Df fskitd[98381:237fb09] [com.apple.FSKit:default] -[mountEntry getLiveFilesConnectionForPath:withCompletionHandler:]:618: FSVolumeConnector endpoint found
+2026-04-06 08:37:31.502 Df fskitd[98381:237fb09] [com.apple.LiveFS:default] Got connection
+2026-04-06 08:37:31.502 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cac500] activating connection: mach=false listener=false peer=false name=(anonymous)
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.FSKit:default] -[FSModuleVolume(Project) listener:shouldAcceptNewConnection:]:start
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.FSKit:default] -[FSModuleVolume(Project) listener:shouldAcceptNewConnection:]:accepted
+2026-04-06 08:37:31.502 Df VixenFS[98683:23804c5] [com.apple.xpc:connection] [0x91d11c000] activating connection: mach=false listener=false peer=true name=com.apple.xpc.anonymous.0x91d0c8780.peer[98381].0x91d11c000
+2026-04-06 08:37:31.502 Df fskitd[98381:237fb09] [com.apple.FSKit:default] creating mount task to vixen://session with type vixenfs
+2026-04-06 08:37:31.502 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] -[mountEntry mount:options:auditToken:]: will mount over LIFSv2
+2026-04-06 08:37:31.505 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] /private/tmp/vx/vfs: FMT CAPS: 0x00000300
+2026-04-06 08:37:31.505 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] /private/tmp/vx/vfs: INT CAPS: 0x00004b00
+2026-04-06 08:37:31.505 Df fskitd[98381:237ffdb] [com.apple.xpc:connection] [0x842cc8480] invalidated because the client process (pid 98682) either cancelled the connection or exited
+2026-04-06 08:37:31.505 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cc8f00] invalidated because the client process (pid 98682) either cancelled the connection or exited
+2026-04-06 08:37:43.172 Df fskitd[98381:237ffdb] [com.apple.LiveFS:default] Unmounting /private/tmp/vx/vfs how 02
+2026-04-06 08:37:43.172 Df fskitd[98381:237fb09] [com.apple.FSKit:default] -[mountEntry forgetModuleVolumeWithFlags:reply:]: Creating FSModuleXPC sync proxy
+2026-04-06 08:37:43.172 Df VixenFS[98683:23804c5] [com.apple.FSKit:default] -[FSModuleConnector deactivateVolume:numericOptions:replyHandler:]:start
+2026-04-06 08:37:43.172 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cacc80] activating connection: mach=true listener=false peer=false name=com.apple.fskit.fskit_helper
+2026-04-06 08:37:43.172 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cacc80] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:43.172 Df fskitd[98381:237fb09] [com.apple.FSKit:default] About to get current agent for 501
+2026-04-06 08:37:43.172 Df fskit_agent[98382:23804c2] [com.apple.extensionkit:launch] Assertion for extension process 'ExtensionProcess: bundleID: eu.bearcove.vixenfs instance ID: Optional([_EXExtensionInstanceIdentifier: 47E72718-9465-4B8D-B618-2D4598B125F7]) pid: 98683' invalidated
+2026-04-06 08:37:43.173 Df fskitd[98381:237fb09] [com.apple.xpc:connection] [0x842cac640] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:43.173 Df fskitd[98381:237ffdb] [com.apple.xpc:connection] [0x842cac500] Re-initialization successful; calling out to event handler with XPC_ERROR_CONNECTION_INTERRUPTED
+2026-04-06 08:37:43.173 E  fskitd[98381:23805cb] [com.apple.LiveFS:default] -[mountEntry handleConnectionInterrupted]_block_invoke: interrupted
+2026-04-06 08:37:43.173 Df fskitd[98381:23805cb] [com.apple.FSKit:default] xpc connection interrupted for auto eject me
+2026-04-06 08:37:43.173 E  fskit_agent[98382:23804c2] [com.apple.BoardServices:XPCErrors] [C:3] Error received: Connection interrupted.
+2026-04-06 08:37:43.173 Df fskitd[98381:23805cb] [com.apple.xpc:connection] [0x842cac500] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+2026-04-06 08:37:43.173 E  fskitd[98381:23805cb] [com.apple.LiveFS:default] -[mountEntry doConnect]_block_invoke: invalidation with strongSelf <mountEntry: 0x842d1c380>
+2026-04-06 08:37:43.181 A  fskit_agent[98382:23805c7] (RunningBoardServices) processDidExit
+2026-04-06 08:37:43.182 Df fskit_agent[98382:23805c7] [com.apple.runningboard:process] Firing exit handlers for 98683 with context <RBSProcessExitContext| specific, status:<RBSProcessExitStatus| domain:runningboard(15) code:0>>
+2026-04-06 08:37:43.182 Df fskit_agent[98382:23805c7] [com.apple.runningboard:process] Calling process death completion block for handle [xpcservice<eu.bearcove.vixenfs([osservice<com.apple.fskit.fskit_agent(501)>:98382])(501)>{vt hash: 190433970}[uuid:47E72718-9465-4B8D-B618-2D4598B125F7]{definition:eu.bearcove.vixenfs[extension][client]}:98683]

@@ -53,10 +53,11 @@ build profile='Debug' version='':
 # Install Vixen.app into /Applications and launch once.
 install profile='Debug': build
     #!/bin/bash -eux -o pipefail
+    umount /tmp/vx/vfs
     just validate-profile "{{ profile }}"
     just build {{ profile }}
     rm -rf /Applications/Vixen.app
-    ditto xcode/build/DerivedData/Build/Products/$profile/Vixen.app /Applications/Vixen.app
+    ditto xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app /Applications/Vixen.app
     # scripts/fix-registration.js /Applications/Vixen.app
     just open {{ profile }}
 
@@ -69,8 +70,8 @@ open profile='Debug':
 fix-registration profile='Debug':
     #!/bin/bash
     just validate-profile "{{ profile }}"
-    # scripts/fix-registration.js /Applications/Vixen.app
-    scripts/fix-registration.js xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
+    scripts/fix-registration.js /Applications/Vixen.app
+    # scripts/fix-registration.js xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
 
 # Build, sign, and package a release DMG for review.
 
