@@ -53,7 +53,7 @@ build profile='Debug' version='':
 # Install Vixen.app into /Applications and launch once.
 install profile='Debug': build
     #!/bin/bash -eux -o pipefail
-    umount /tmp/vx/vfs
+    node scripts/ensure-no-mounts.js
     just validate-profile "{{ profile }}"
     just build {{ profile }}
     rm -rf /Applications/Vixen.app
