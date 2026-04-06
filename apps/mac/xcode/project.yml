@@ -72,6 +72,8 @@ targets:
             cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib
             cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
           fi
+        outputFiles:
+          - $(SRCROOT)/build/RustLibs/libvx_fskit.a
     sources:
       - path: VixenFS
         excludes:
