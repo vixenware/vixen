@@ -8,6 +8,9 @@ rust_log := "trace"
 list:
     just --list
 
+build-mac-app:
+    just apps/mac/build
+
 # Run vx-store with full logging
 store *args:
     mkdir -p {{ debug_home }}

@@ -72,10 +72,19 @@ pub struct StatusPayload {
     pub bundle_version: Option<String>,
 
     #[facet(default)]
+    pub bundle_identifier: Option<String>,
+
+    #[facet(default)]
     pub ever_connected: bool,
 
     #[facet(default)]
     pub app_group_path: Option<String>,
+
+    #[facet(default)]
+    pub socket_path: Option<String>,
+
+    #[facet(default)]
+    pub extension_pid: Option<u32>,
 
     #[facet(default)]
     pub connected_at: Option<String>,

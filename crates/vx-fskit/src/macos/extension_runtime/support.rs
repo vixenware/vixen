@@ -19,8 +19,6 @@ pub(super) const VIXENFS_DIR_ID: u64 = 0xFFFF_FFFF_FFFE_0001;
 pub(super) const STATUS_JSON_ID: u64 = 0xFFFF_FFFF_FFFE_0002;
 pub(super) const ROUTED_ITEM_ID_START: u64 = ROOT_LOCAL_ID + 1;
 pub(super) const VOLUME_NAME: &str = "Vixen";
-pub(super) const APP_GROUP_ID: &str = "B2N6FSRTPV.vixenfs";
-pub(super) const SOCKET_NAME: &str = "vixenfs.sock";
 pub(super) const VIXENFS_DIR_NAME: &str = ".vixenfs";
 pub(super) const STATUS_JSON_NAME: &str = "status.json";
 
@@ -156,22 +154,6 @@ pub(super) fn entry_attributes(entry: &DirEntry) -> VfsItemAttributes {
         created_time: entry.created_time,
         mode: entry.mode,
     }
-}
-
-pub(super) fn json_string(value: impl AsRef<str>) -> String {
-    let mut out = String::from("\"");
-    for ch in value.as_ref().chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
 }
 
 pub(super) fn unix_time() -> u64 {

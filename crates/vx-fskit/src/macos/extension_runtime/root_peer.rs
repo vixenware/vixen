@@ -7,17 +7,18 @@ use vox::{
 };
 use vx_services::VfsClient;
 
+use super::OwnedVixenFsConfig;
 use super::log_event;
-use super::logging::real_home_dir;
-use super::support::{APP_GROUP_ID, SOCKET_NAME, runtime};
+use super::support::runtime;
 
 static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
 
 #[derive(Clone)]
 pub(super) struct RootPeerState {
-    app_group_root: PathBuf,
     socket_path: PathBuf,
     bundle_version: String,
+    bundle_identifier: String,
+    app_group_path: PathBuf,
     inner: Arc<Mutex<RootPeerSnapshot>>,
 }
 
@@ -30,17 +31,13 @@ struct RootPeerSnapshot {
 }
 
 impl RootPeerState {
-    fn new(bundle_version: String) -> Self {
-        let app_group_root = real_home_dir()
-            .join("Library")
-            .join("Group Containers")
-            .join(APP_GROUP_ID);
-        let socket_path = app_group_root.join(SOCKET_NAME);
-        let _ = std::fs::create_dir_all(&app_group_root);
+    fn new(config: &OwnedVixenFsConfig) -> Self {
+        let _ = std::fs::create_dir_all(&config.app_group_path);
         let state = Self {
-            app_group_root,
-            socket_path,
-            bundle_version,
+            socket_path: config.socket_path.clone(),
+            bundle_version: config.bundle_version.clone(),
+            bundle_identifier: config.bundle_identifier.clone(),
+            app_group_path: config.app_group_path.clone(),
             inner: Arc::new(Mutex::new(RootPeerSnapshot {
                 client: None,
                 connected: false,
@@ -62,7 +59,6 @@ impl RootPeerState {
 
     async fn run_listener(self) {
         let socket_path = self.socket_path_string();
-        let _ = std::fs::create_dir_all(&self.app_group_root);
         let _ = vox::transport::local::remove_endpoint(&socket_path);
         log_event(
             "info",
@@ -184,7 +180,10 @@ impl RootPeerState {
             connected: snapshot.connected,
             ever_connected: snapshot.ever_connected,
             bundle_version: Some(self.bundle_version.clone()),
-            app_group_path: Some(self.app_group_root.display().to_string()),
+            bundle_identifier: Some(self.bundle_identifier.clone()),
+            app_group_path: Some(self.app_group_path.display().to_string()),
+            socket_path: Some(self.socket_path.display().to_string()),
+            extension_pid: Some(unsafe { libc::getpid() as u32 }),
             connected_at: None,
             disconnected_at: None,
             uptime_seconds: None,
@@ -229,6 +228,12 @@ impl ConnectionAcceptor for RootPeerAcceptor {
     }
 }
 
-pub(super) fn root_peer_state(bundle_version: String) -> &'static RootPeerState {
-    ROOT_PEER_STATE.get_or_init(|| RootPeerState::new(bundle_version))
+pub(super) fn init_root_peer_state(config: &OwnedVixenFsConfig) {
+    ROOT_PEER_STATE.get_or_init(|| RootPeerState::new(config));
+}
+
+pub(super) fn root_peer_state() -> &'static RootPeerState {
+    ROOT_PEER_STATE
+        .get()
+        .expect("root peer state not initialized (init_root_peer_state must be called first)")
 }
