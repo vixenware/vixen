@@ -3958,6 +3958,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-rt"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "vx-analysis",
+]
+
+[[package]]
 name = "vx-runner"
 version = "0.1.0"
 dependencies = [

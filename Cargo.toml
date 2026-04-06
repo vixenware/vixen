@@ -12,6 +12,7 @@ members = [
   ## eval crates
   "crates/vx-analysis",
   "crates/vx-jit",
+  "crates/vx-rt",
   "crates/vx-eval-tests",
   "crates/vx-diagnostics",
 
