@@ -1,0 +1,23 @@
+source <<VX,vixen
+enum Option {
+  struct Some { val: U64 }
+  struct None {}
+}
+
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let opt = Some { val: 42 };
+  match opt (
+    Some { val } => val,
+    None {} => bomb(),
+  )
+)
+VX
+
+entry main
+expect @u64"42"
+
+trace {
+  not_entered (bomb)
+}

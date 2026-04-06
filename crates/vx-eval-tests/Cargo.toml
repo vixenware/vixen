@@ -22,5 +22,9 @@ datatest-stable = { workspace = true }
 name = "slice0"
 harness = false
 
+[[test]]
+name = "slice1"
+harness = false
+
 [lints]
 workspace = true

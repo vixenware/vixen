@@ -1054,6 +1054,10 @@ impl ElseClause {
 }
 
 impl MatchExpr {
+    pub fn scrutinee(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+
     pub fn arms(&self) -> AstChildren<MatchArm> {
         AstChildren::new(self.syntax())
     }

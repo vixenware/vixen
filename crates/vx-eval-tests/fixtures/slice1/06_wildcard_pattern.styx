@@ -1,0 +1,21 @@
+source <<VX,vixen
+enum Color {
+  struct Red {}
+  struct Green {}
+  struct Blue {}
+}
+
+fn to_num(c: Color) -> U64 (
+  match c (
+    Red {} => 1,
+    _ => 0,
+  )
+)
+
+fn main() -> U64 (
+  to_num(Green {})
+)
+VX
+
+entry main
+expect @u64"0"
