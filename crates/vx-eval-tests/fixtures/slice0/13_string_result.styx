@@ -1,0 +1,6 @@
+source <<VX,vixen
+fn main() -> String ( "hello" )
+VX
+
+entry main
+expect @string"hello"

@@ -1,0 +1,11 @@
+source <<VX,vixen
+fn countdown(n: U64, acc: U64) -> U64 (
+  if n == 0 ( acc )
+  else ( countdown(n - 1, acc + n) )
+)
+
+fn main() -> U64 ( countdown(9, 0) )
+VX
+
+entry main
+expect @u64"45"

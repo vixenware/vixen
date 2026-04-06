@@ -1,0 +1,26 @@
+[package]
+name = "vx-eval-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vx-analysis = { workspace = true }
+vx-jit = { workspace = true }
+kajit = { workspace = true }
+kajit-hir = { workspace = true }
+facet = { workspace = true }
+facet-styx = { workspace = true }
+vx-parser = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+datatest-stable = { workspace = true }
+
+[[test]]
+name = "slice0"
+harness = false
+
+[lints]
+workspace = true

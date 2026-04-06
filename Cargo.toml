@@ -12,6 +12,7 @@ members = [
   ## eval crates
   "crates/vx-analysis",
   "crates/vx-jit",
+  "crates/vx-eval-tests",
   "crates/vx-diagnostics",
 
   ## runtime support
@@ -70,6 +71,7 @@ facet-error = { version = "0.44.1" }
 facet-json = { version = "0.44.1" }
 facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-styx = "3.0.0"
+datatest-stable = "0.3"
 
 
 # cmdline parsing

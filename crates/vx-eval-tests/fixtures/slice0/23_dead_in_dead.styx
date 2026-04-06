@@ -1,0 +1,18 @@
+source <<VX,vixen
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> Bool (
+  if true (
+    if true ( true )
+    else ( bomb() == 0 )
+  )
+  else ( bomb() == 1 )
+)
+VX
+
+entry main
+expect @bool"true"
+
+trace {
+  not_entered (bomb)
+}

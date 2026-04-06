@@ -674,13 +674,25 @@ fn lower_binary_op(binary: &vx_parser::BinaryExpr) -> Result<BinaryOp, StrictLow
         .syntax()
         .children_with_tokens()
         .filter_map(|child| child.into_token())
-        .find(|token| matches!(token.kind(), SyntaxKind::PLUS | SyntaxKind::EQ2))
+        .find(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::PLUS
+                    | SyntaxKind::MINUS
+                    | SyntaxKind::STAR
+                    | SyntaxKind::EQ2
+                    | SyntaxKind::BANG_EQ
+            )
+        })
         .ok_or_else(|| {
             StrictLoweringError::UnsupportedBinaryOp(binary.syntax().text().to_string())
         })?;
     match token.kind() {
         SyntaxKind::PLUS => Ok(BinaryOp::Add),
+        SyntaxKind::MINUS => Ok(BinaryOp::Sub),
+        SyntaxKind::STAR => Ok(BinaryOp::Mul),
         SyntaxKind::EQ2 => Ok(BinaryOp::Eq),
+        SyntaxKind::BANG_EQ => Ok(BinaryOp::Ne),
         _ => Err(StrictLoweringError::UnsupportedBinaryOp(
             binary.syntax().text().to_string(),
         )),

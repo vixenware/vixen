@@ -1,0 +1,12 @@
+source <<VX,vixen
+fn main() -> U64 (
+  let make_adder = (n) => (
+    (x) => x + n
+  );
+  let add10 = make_adder(10);
+  add10(32)
+)
+VX
+
+entry main
+expect @u64"42"

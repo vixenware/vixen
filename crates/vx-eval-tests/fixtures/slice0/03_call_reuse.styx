@@ -1,0 +1,15 @@
+source <<VX,vixen
+fn f(n: U64) -> U64 ( n + 1 )
+
+fn main() -> U64 (
+  let x = f(20);
+  x + x
+)
+VX
+
+entry main
+expect @u64"42"
+
+trace {
+  entered_once (f)
+}

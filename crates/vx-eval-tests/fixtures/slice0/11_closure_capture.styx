@@ -1,0 +1,10 @@
+source <<VX,vixen
+fn main() -> U64 (
+  let n = 10;
+  let f = () => n;
+  f()
+)
+VX
+
+entry main
+expect @u64"10"
