@@ -72,6 +72,7 @@ struct LoweringState {
 }
 
 impl StrictLowerer {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut module = Module::new();
         let _ = module.install_runtime_memory_callables();
@@ -566,7 +567,7 @@ impl StrictLowerer {
         }
 
         // Compute total length
-        let len_exprs: Vec<_> = parts.iter().map(|part| string_len_expr(part)).collect();
+        let len_exprs: Vec<_> = parts.iter().map(string_len_expr).collect();
         let total_len_local = state.new_temp(self, "__concat_total_len", StrictTy::U64);
         let buf_local = state.new_temp(self, "__concat_buf", StrictTy::U64);
 

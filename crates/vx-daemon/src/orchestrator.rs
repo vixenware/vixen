@@ -3,7 +3,7 @@ use vx_jit::{StrictFragmentValue, execute_source_text_unified, lower_source_text
 use vx_services::{
     EvalFunctionRequest, EvalFunctionResult, EvalProgressEvent, EvalStrictFunctionFailure,
     EvalStrictFunctionRequest, EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator,
-    RuntimeValue, StoreClient, StrictEvalBackend,
+    RuntimeValue, StoreClient,
 };
 use vx_vfsd::VfsdService;
 

@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 use crate::{
     AnalysisResult, BodyId, SingleSourceBridge,
     exec_slice::{
-        self, ExecSliceError, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode, KernelKind,
-        ResultSource, SlotId,
+        self, ExecSliceError, ExecutableBody, ExecutableProgram, KernelKind, ResultSource,
     },
     lower_strict::StrictLowerer,
 };
@@ -40,22 +39,20 @@ pub fn lower_executable_program(
             .map(|e| e.kernel)
             .unwrap_or(crate::KernelId(analyzed.id.0));
 
-        if let Some(kernel) = kernel {
-            if let Ok(vtf) = lowerer.try_lower_kernel(kernel, bridge) {
-                bodies.insert(
-                    analyzed.id,
-                    ExecutableBody {
-                        id: analyzed.id,
-                        kernel: kernel_id,
-                        kernel_kind: KernelKind::Strict { vtf },
-                        params: vec![],
-                        ops: vec![],
-                        result_source: ResultSource::PendingRuntimeBoundary,
-                        runtime_boundary_extractions: vec![],
-                        local_call_dependencies: vec![],
-                    },
-                );
-            }
+        if let Some(vtf) = kernel.and_then(|k| lowerer.try_lower_kernel(k, bridge).ok()) {
+            bodies.insert(
+                analyzed.id,
+                ExecutableBody {
+                    id: analyzed.id,
+                    kernel: kernel_id,
+                    kernel_kind: KernelKind::Strict { vtf },
+                    params: vec![],
+                    ops: vec![],
+                    result_source: ResultSource::PendingRuntimeBoundary,
+                    runtime_boundary_extractions: vec![],
+                    local_call_dependencies: vec![],
+                },
+            );
         }
     }
 
