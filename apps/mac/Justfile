@@ -25,8 +25,26 @@ validate-profile profile='Debug':
       exit 1
     fi
 
+# Build the Rust static library and cbindgen header for vx-fskit.
+build-rust profile='Debug':
+    #!/bin/bash -eux -o pipefail
+    repo_root="$(cd ../.. && pwd)"
+    out_dir="$(pwd)/xcode/build/RustLibs"
+    mkdir -p "$out_dir"
+    if [[ "{{ profile }}" == "Release" ]]; then
+      cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib --release
+      cp "$repo_root/target/release/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+      header_dir="$repo_root/target/release/build"
+    else
+      cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib
+      cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+      header_dir="$repo_root/target/debug/build"
+    fi
+    generated_header=$(find "$header_dir" -path '*/vx-fskit-*/out/RustFSKitBridge.h' | head -1)
+    cp "$generated_header" "$out_dir/RustFSKitBridge.h"
+
 # If version is not specified, reads from dev-version.txt.
-build profile='Debug' version='':
+build profile='Debug' version='': (build-rust profile)
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
     node scripts/ensure-no-mounts.js

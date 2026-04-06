@@ -58,27 +58,7 @@ targets:
   VixenFS:
     type: extensionkit-extension
     platform: macOS
-    preBuildScripts:
-      - name: Build Rust FSKit bridge
-        script: |
-          set -euo pipefail
-          repo_root="$(cd "$SRCROOT/../../.." && pwd)"
-          out_dir="$SRCROOT/build/RustLibs"
-          mkdir -p "$out_dir"
-          if [[ "$CONFIGURATION" == "Release" ]]; then
-            cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib --release
-            cp "$repo_root/target/release/libvx_fskit.a" "$out_dir/libvx_fskit.a"
-            header_dir="$repo_root/target/release/build"
-          else
-            cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib
-            cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
-            header_dir="$repo_root/target/debug/build"
-          fi
-          # Copy cbindgen-generated header
-          generated_header=$(find "$header_dir" -path '*/vx-fskit-*/out/RustFSKitBridge.h' | head -1)
-          cp "$generated_header" "$SRCROOT/VixenFS/RustFSKitBridge.h"
-        outputFiles:
-          - $(SRCROOT)/build/RustLibs/libvx_fskit.a
+    preBuildScripts: []
     sources:
       - path: VixenFS
         excludes:
@@ -101,6 +81,9 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
         SWIFT_OBJC_BRIDGING_HEADER: VixenFS/VixenFS-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/build/RustLibs
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/build/RustLibs
