@@ -2,8 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use eyre::{Context, ContextCompat, Result};
-
 enum InstallMode {
     Release,
     Dev,

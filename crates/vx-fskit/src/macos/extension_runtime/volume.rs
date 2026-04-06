@@ -58,11 +58,12 @@ define_class!(
     unsafe impl NSObjectProtocol for RustVolume {}
 
     unsafe impl FSVolumeOperations for RustVolume {
-        #[unsafe(method(supportedVolumeCapabilities))]
-        unsafe fn supportedVolumeCapabilities(&self) -> Retained<FSVolumeSupportedapabilities> {
+        #[unsafe(method_id(supportedVolumeCapabilities))]
+        unsafe fn supportedVolumeCapabilities(&self) -> Retained<FSVolumeSupportedCapabilities> {
             unsafe { FSVolumeSupportedCapabilities::new() }
         }
 
+        #[unsafe(method_id(volumeStatistics))]
         unsafe fn volumeStatistics(&self) -> Retained<FSStatFSResult> {
             let stats = unsafe {
                 FSStatFSResult::initWithFileSystemTypeName(
@@ -82,6 +83,7 @@ define_class!(
             stats
         }
 
+        #[unsafe(method(mountWithOptions:replyHandler:))]
         unsafe fn mountWithOptions_replyHandler(
             &self,
             _options: &FSTaskOptions,
@@ -91,6 +93,7 @@ define_class!(
             reply.call((ptr::null_mut(),));
         }
 
+        #[unsafe(method(unmountWithReplyHandler:))]
         unsafe fn unmountWithReplyHandler(&self, reply: &block2::DynBlock<dyn Fn()>) {
             log_event("info", "vixen-fskit unmount");
             let ready = unsafe { FSContainerStatus::ready() };
@@ -98,6 +101,7 @@ define_class!(
             reply.call(());
         }
 
+        #[unsafe(method(synchronizeWithFlags:replyHandler:))]
         unsafe fn synchronizeWithFlags_replyHandler(
             &self,
             _flags: FSSyncFlags,
@@ -107,6 +111,7 @@ define_class!(
             reply.call((ptr::null_mut(),));
         }
 
+        #[unsafe(method(getAttributes:ofItem:replyHandler:))]
         unsafe fn getAttributes_ofItem_replyHandler(
             &self,
             desired_attributes: &FSItemGetAttributesRequest,
@@ -149,6 +154,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(setAttributes:onItem:replyHandler:))]
         unsafe fn setAttributes_onItem_replyHandler(
             &self,
             new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
@@ -213,6 +219,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(lookupItemNamed:inDirectory:replyHandler:))]
         unsafe fn lookupItemNamed_inDirectory_replyHandler(
             &self,
             name: &FSFileName,
@@ -257,6 +264,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(reclaimItem:replyHandler:))]
         unsafe fn reclaimItem_replyHandler(
             &self,
             item: &FSItem,
@@ -272,6 +280,19 @@ define_class!(
             reply.call((ptr::null_mut(),));
         }
 
+        #[unsafe(method(readSymbolicLink:replyHandler:))]
+        unsafe fn readSymbolicLink_replyHandler(
+            &self,
+            _item: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
+        ) {
+            reply.call((
+                ptr::null_mut(),
+                Retained::into_raw(posix_error(libc::ENOTSUP)),
+            ));
+        }
+
+        #[unsafe(method(createItemNamed:type:inDirectory:attributes:replyHandler:))]
         unsafe fn createItemNamed_type_inDirectory_attributes_replyHandler(
             &self,
             name: &FSFileName,
@@ -400,6 +421,37 @@ define_class!(
             }
         }
 
+        #[unsafe(method(createSymbolicLinkNamed:inDirectory:attributes:linkContents:replyHandler:))]
+        unsafe fn createSymbolicLinkNamed_inDirectory_attributes_linkContents_replyHandler(
+            &self,
+            _name: &FSFileName,
+            _directory: &FSItem,
+            _new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
+            _contents: &FSFileName,
+            reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
+        ) {
+            reply.call((
+                ptr::null_mut(),
+                ptr::null_mut(),
+                Retained::into_raw(posix_error(libc::ENOTSUP)),
+            ));
+        }
+
+        #[unsafe(method(createLinkToItem:named:inDirectory:replyHandler:))]
+        unsafe fn createLinkToItem_named_inDirectory_replyHandler(
+            &self,
+            _item: &FSItem,
+            _name: &FSFileName,
+            _directory: &FSItem,
+            reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
+        ) {
+            reply.call((
+                ptr::null_mut(),
+                Retained::into_raw(posix_error(libc::ENOTSUP)),
+            ));
+        }
+
+        #[unsafe(method(removeItem:named:fromDirectory:replyHandler:))]
         unsafe fn removeItem_named_fromDirectory_replyHandler(
             &self,
             item: &FSItem,
@@ -443,6 +495,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(renameItem:inDirectory:named:toNewName:inDirectory:overItem:replyHandler:))]
         unsafe fn renameItem_inDirectory_named_toNewName_inDirectory_overItem_replyHandler(
             &self,
             item: &FSItem,
@@ -537,6 +590,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(enumerateDirectory:startingAtCookie:verifier:providingAttributes:usingPacker:replyHandler:))]
         unsafe fn enumerateDirectory_startingAtCookie_verifier_providingAttributes_usingPacker_replyHandler(
             &self,
             directory: &FSItem,
@@ -566,6 +620,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(activateWithOptions:replyHandler:))]
         unsafe fn activateWithOptions_replyHandler(
             &self,
             _options: &FSTaskOptions,
@@ -590,6 +645,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(deactivateWithOptions:replyHandler:))]
         unsafe fn deactivateWithOptions_replyHandler(
             &self,
             _options: FSDeactivateOptions,
@@ -601,40 +657,49 @@ define_class!(
     }
 
     unsafe impl FSVolumePathConfOperations for RustVolume {
+        #[unsafe(method(maximumLinkCount))]
         unsafe fn maximumLinkCount(&self) -> isize {
             1
         }
 
+        #[unsafe(method(maximumNameLength))]
         unsafe fn maximumNameLength(&self) -> isize {
             255
         }
 
+        #[unsafe(method(restrictsOwnershipChanges))]
         unsafe fn restrictsOwnershipChanges(&self) -> bool {
             true
         }
 
+        #[unsafe(method(truncatesLongNames))]
         unsafe fn truncatesLongNames(&self) -> bool {
             false
         }
 
+        #[unsafe(method(maximumXattrSize))]
         unsafe fn maximumXattrSize(&self) -> isize {
             64 * 1024
         }
 
+        #[unsafe(method(maximumXattrSizeInBits))]
         unsafe fn maximumXattrSizeInBits(&self) -> isize {
             17
         }
 
+        #[unsafe(method(maximumFileSize))]
         unsafe fn maximumFileSize(&self) -> u64 {
             i64::MAX as u64
         }
 
+        #[unsafe(method(maximumFileSizeInBits))]
         unsafe fn maximumFileSizeInBits(&self) -> isize {
             64
         }
     }
 
     unsafe impl FSVolumeReadWriteOperations for RustVolume {
+        #[unsafe(method(readFromFile:offset:length:intoBuffer:replyHandler:))]
         unsafe fn readFromFile_offset_length_intoBuffer_replyHandler(
             &self,
             item: &FSItem,
@@ -663,6 +728,7 @@ define_class!(
             }
         }
 
+        #[unsafe(method(writeContents:toFile:atOffset:replyHandler:))]
         unsafe fn writeContents_toFile_atOffset_replyHandler(
             &self,
             contents: &NSData,
@@ -712,10 +778,12 @@ define_class!(
     }
 
     unsafe impl FSVolumeXattrOperations for RustVolume {
+        #[unsafe(method(xattrOperationsInhibited))]
         unsafe fn xattrOperationsInhibited(&self) -> bool {
             false
         }
 
+        #[unsafe(method(getXattrNamed:ofItem:replyHandler:))]
         unsafe fn getXattrNamed_ofItem_replyHandler(
             &self,
             _name: &FSFileName,
@@ -728,6 +796,7 @@ define_class!(
             ));
         }
 
+        #[unsafe(method(setXattrNamed:toData:onItem:policy:replyHandler:))]
         unsafe fn setXattrNamed_toData_onItem_policy_replyHandler(
             &self,
             _name: &FSFileName,
@@ -739,6 +808,7 @@ define_class!(
             reply.call((Retained::into_raw(posix_error(libc::ENOTSUP)),));
         }
 
+        #[unsafe(method(listXattrsOfItem:replyHandler:))]
         unsafe fn listXattrsOfItem_replyHandler(
             &self,
             _item: &FSItem,
@@ -749,10 +819,12 @@ define_class!(
     }
 
     unsafe impl FSVolumeOpenCloseOperations for RustVolume {
+        #[unsafe(method(isOpenCloseInhibited))]
         unsafe fn isOpenCloseInhibited(&self) -> bool {
             true
         }
 
+        #[unsafe(method(openItem:withModes:replyHandler:))]
         unsafe fn openItem_withModes_replyHandler(
             &self,
             item: &FSItem,
@@ -769,6 +841,7 @@ define_class!(
             reply.call((ptr::null_mut(),));
         }
 
+        #[unsafe(method(closeItem:keepingModes:replyHandler:))]
         unsafe fn closeItem_keepingModes_replyHandler(
             &self,
             item: &FSItem,
@@ -790,10 +863,12 @@ define_class!(
     }
 
     unsafe impl FSVolumeAccessCheckOperations for RustVolume {
+        #[unsafe(method(isAccessCheckInhibited))]
         unsafe fn isAccessCheckInhibited(&self) -> bool {
             true
         }
 
+        #[unsafe(method(checkAccessToItem:requestedAccess:replyHandler:))]
         unsafe fn checkAccessToItem_requestedAccess_replyHandler(
             &self,
             item: &FSItem,

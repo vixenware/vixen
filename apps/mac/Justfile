@@ -46,8 +46,8 @@ build profile='Debug' version='':
       CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES \
       -derivedDataPath build/DerivedData \
       -clonedSourcePackagesDirPath build/SourcePackages \
-      MARKETING_VERSION="$(VERSION)" \
-      CURRENT_PROJECT_VERSION="$(VERSION)" \
+      MARKETING_VERSION="${VERSION}" \
+      CURRENT_PROJECT_VERSION="${VERSION}" \
       build | xcbeautify
 
 # Install Vixen.app into /Applications and launch once.
