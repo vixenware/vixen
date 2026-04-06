@@ -19,16 +19,16 @@ bump-version:
 # Build Vixen.app in Release configuration.
 
 validate-profile profile='Debug':
-    #!/bin/bash
+    #!/bin/bash -eux -o pipefail
     if [[ "{{ profile }}" != "Debug" && "{{ profile }}" != "Release" ]]; then
       echo "Invalid profile: {{ profile }}"
       exit 1
     fi
 
 # If version is not specified, reads from dev-version.txt.
-build profile='debug' version='':
-    #!/bin/bash
-    just validate-profile profile="{{ profile }}"
+build profile='Debug' version='':
+    #!/bin/bash -eux -o pipefail
+    just validate-profile "{{ profile }}"
     if [[ "{{ version }}" == "" ]]; then
       just bump-version
       VERSION=$(cat dev-version.txt)
@@ -52,8 +52,8 @@ build profile='debug' version='':
 
 # Install Vixen.app into /Applications and launch once.
 install profile='Debug': build
-    #!/bin/bash
-    just validate-profile profile="{{ profile }}"
+    #!/bin/bash -eux -o pipefail
+    just validate-profile "{{ profile }}"
     just build {{ profile }}
     open xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
     # rm -rf /Applications/Vixen.app
@@ -63,7 +63,7 @@ install profile='Debug': build
 
 fix-registration profile='Debug':
     #!/bin/bash
-    just validate-profile profile="{{ profile }}"
+    just validate-profile "{{ profile }}"
     # scripts/fix-registration.js /Applications/Vixen.app
     scripts/fix-registration.js xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app
 
