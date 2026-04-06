@@ -1,10 +1,5 @@
 use vox::Tx;
-use vx_jit::{
-    StrictFragmentClassification, StrictFragmentValue, classify_source_text_function,
-    compile_strict_fragment, execute_compiled_copying_strict_fragment_strings,
-    interpret_source_text_function, lower_source_text_hir, lower_source_text_ir,
-    lower_source_text_strict_fragment,
-};
+use vx_jit::{StrictFragmentValue, execute_source_text_unified, lower_source_text_unified};
 use vx_services::{
     EvalFunctionRequest, EvalFunctionResult, EvalProgressEvent, EvalStrictFunctionFailure,
     EvalStrictFunctionRequest, EvalStrictFunctionResult, EvalStrictFunctionSuccess, Orchestrator,
@@ -57,33 +52,6 @@ impl OrchestratorService {
         &self,
         request: EvalStrictFunctionRequest,
     ) -> EvalStrictFunctionResult {
-        let strict_fragment =
-            match lower_source_text_strict_fragment(&request.source_text, &request.function_name) {
-                Ok(strict_fragment) => strict_fragment,
-                Err(error) => {
-                    if error.describes_non_strict_shape() {
-                        let function_name = request.function_name.clone();
-                        let reason = match classify_source_text_function(
-                            &request.source_text,
-                            &function_name,
-                        ) {
-                            Ok(StrictFragmentClassification::NotStrict { reason }) => reason,
-                            Ok(StrictFragmentClassification::StrictFragment) | Err(_) => {
-                                error.to_string()
-                            }
-                        };
-                        return EvalStrictFunctionResult::Err(failure(
-                            request,
-                            format!(
-                                "function `{}` is not a strict fragment: {reason}",
-                                function_name
-                            ),
-                        ));
-                    }
-                    return EvalStrictFunctionResult::Err(failure(request, error.to_string()));
-                }
-            };
-
         let args = match request
             .args
             .iter()
@@ -95,28 +63,42 @@ impl OrchestratorService {
             Err(message) => return EvalStrictFunctionResult::Err(failure(request, message)),
         };
 
+        // Try unified lowering to get the VTF
+        let lowered = match lower_source_text_unified(&request.source_text, &request.function_name)
+        {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                return EvalStrictFunctionResult::Err(failure(
+                    request,
+                    format!("unified lowering failed: {error}"),
+                ));
+            }
+        };
+
         let strict_fragment_dump = request
             .include_strict_fragment_dump
-            .then(|| format!("{strict_fragment:#?}"));
+            .then(|| format!("{:#?}", lowered.vtf));
+
         let hir = if request.include_hir {
-            match lower_source_text_hir(&request.source_text, &request.function_name) {
-                Ok(hir) => Some(hir.to_string()),
+            match vx_jit::lower_vtf_to_hir(&lowered.vtf, &lowered.module) {
+                Ok(module) => Some(module.to_string()),
                 Err(error) => {
                     return EvalStrictFunctionResult::Err(failure_with_dump(
                         strict_fragment_dump,
-                        format!("failed to lower HIR: {error}"),
+                        format!("failed to lower HIR: {error:?}"),
                     ));
                 }
             }
         } else {
             None
         };
+
         let ir = if request.include_ir {
-            match lower_source_text_ir(&request.source_text, &request.function_name) {
-                Ok(ir) => Some(ir.to_string()),
+            match vx_jit::lower_vtf_to_ir(&lowered.vtf, &lowered.module) {
+                Ok(ir_func) => Some(ir_func.to_string()),
                 Err(error) => {
                     return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                        message: format!("failed to lower IR: {error}"),
+                        message: format!("failed to lower IR: {error:?}"),
                         strict_fragment_dump,
                         hir,
                         ir: None,
@@ -127,33 +109,17 @@ impl OrchestratorService {
             None
         };
 
-        let value = match request.backend {
-            StrictEvalBackend::Interpreter => match interpret_source_text_function(
-                &request.source_text,
-                &request.function_name,
-                &args,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                        message: format!("interpreter failed: {error}"),
-                        strict_fragment_dump,
-                        hir,
-                        ir,
-                    });
-                }
-            },
-            StrictEvalBackend::Kajit => match execute_with_kajit(&strict_fragment, &args) {
-                Ok(value) => value,
-                Err(message) => {
-                    return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                        message,
-                        strict_fragment_dump,
-                        hir,
-                        ir,
-                    });
-                }
-            },
+        let value = match execute_with_unified(&request.source_text, &request.function_name, &args)
+        {
+            Ok(value) => value,
+            Err(message) => {
+                return EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
+                    message,
+                    strict_fragment_dump,
+                    hir,
+                    ir,
+                });
+            }
         };
 
         EvalStrictFunctionResult::Ok(EvalStrictFunctionSuccess {
@@ -288,13 +254,11 @@ fn runtime_value_from_strict_fragment(value: StrictFragmentValue) -> RuntimeValu
     }
 }
 
-fn execute_with_kajit(
-    strict_fragment: &vx_jit::StrictFragmentFunction,
+fn execute_with_unified(
+    source: &str,
+    function_name: &str,
     args: &[StrictFragmentValue],
 ) -> Result<StrictFragmentValue, String> {
-    let compiled = compile_strict_fragment(strict_fragment)
-        .map_err(|error| format!("Kajit compile failed: {error}"))?;
-
-    unsafe { execute_compiled_copying_strict_fragment_strings(strict_fragment, &compiled, args) }
-        .map_err(|error| format!("Kajit execution failed: {error}"))
+    unsafe { execute_source_text_unified(source, function_name, args) }
+        .map_err(|error| format!("unified execution failed: {error}"))
 }

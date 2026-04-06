@@ -3,93 +3,95 @@
 mod abi;
 pub use abi::{
     CompiledStrictFragmentOutput, MAX_STRICT_FRAGMENT_ABI_WORDS, StrictFragmentAbiError,
-    StrictFragmentAbiLayout, UnmanagedStrictFragmentString, compile_strict_fragment,
+    StrictFragmentAbiLayout, StrictFragmentValue, StrictFragmentValueKind,
+    UnmanagedStrictFragmentString, compile_strict_fragment,
     execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
 };
 
-mod analysis_adapter;
-pub use analysis_adapter::{
-    SourceLoweringError, StrictFragmentClassification, classify_source_text_function,
-    compile_source_text_function, compile_source_text_u64_add_function,
-    interpret_source_text_function, interpret_source_text_string_function,
-    interpret_source_text_u64_add_function, lower_source_text_hir, lower_source_text_ir,
-    lower_source_text_strict_fragment, lower_source_text_u64_add_hir, lower_source_text_u64_add_ir,
-    lower_source_text_u64_add_strict_fragment, run_source_text_u64_add_function,
-};
-
-mod interpreter;
-pub use interpreter::{interpret, interpret_string, interpret_u64};
-
 mod kajit_backend;
 pub use kajit_backend::KajitBackendError;
+pub use kajit_backend::{lower_hir as lower_vtf_to_hir, lower_ir as lower_vtf_to_ir};
 
-mod strict_fragment;
-pub use strict_fragment::{
-    StrictFragmentBinaryOp, StrictFragmentExpr, StrictFragmentFunction,
-    StrictFragmentInterpretError, StrictFragmentIntrinsic, StrictFragmentLocal,
-    StrictFragmentLocalId, StrictFragmentParam, StrictFragmentStmt, StrictFragmentType,
-    StrictFragmentValue, StrictFragmentValueKind,
-};
+use kajit::CompiledFunction;
+use kajit_hir::VixenTypedFunction;
+use thiserror::Error;
+use vx_analysis::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 
-use kajit::{CompiledFunction, ir::IrFunc};
-use kajit_hir::Module;
-
-pub fn lower_u64_add_strict_fragment() -> StrictFragmentFunction {
-    StrictFragmentFunction {
-        name: "add_u64".to_owned(),
-        params: vec![
-            StrictFragmentParam {
-                local: StrictFragmentLocalId(0),
-                name: "lhs".to_owned(),
-                ty: StrictFragmentType::U64,
-            },
-            StrictFragmentParam {
-                local: StrictFragmentLocalId(1),
-                name: "rhs".to_owned(),
-                ty: StrictFragmentType::U64,
-            },
-        ],
-        return_type: StrictFragmentType::U64,
-        body: vec![StrictFragmentStmt::Return(StrictFragmentExpr::Binary {
-            op: StrictFragmentBinaryOp::Add,
-            lhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(0))),
-            rhs: Box::new(StrictFragmentExpr::Local(StrictFragmentLocalId(1))),
-        })],
-    }
+/// Error from the unified strict-fragment pipeline.
+#[derive(Debug, Error)]
+pub enum UnifiedStrictError {
+    #[error("function `{function_name}` was not lowered as strict")]
+    NotStrict { function_name: String },
+    #[error("unified lowering failed: {0}")]
+    Lowering(String),
+    #[error("compilation failed: {0}")]
+    Compile(#[from] KajitBackendError),
+    #[error("ABI error: {0}")]
+    Abi(#[from] StrictFragmentAbiError),
 }
 
-pub fn lower_u64_add_hir() -> Result<Module, KajitBackendError> {
-    kajit_backend::lower_hir(&lower_u64_add_strict_fragment())
+/// Result of lowering source text through the unified path: the VTF plus
+/// the module it was built on (needed for compilation).
+pub struct UnifiedLowered {
+    pub vtf: VixenTypedFunction,
+    pub module: kajit_hir::Module,
 }
 
-pub fn lower_u64_add_hir_text() -> Result<String, KajitBackendError> {
-    lower_u64_add_hir().map(|module| module.to_string())
+/// Lower source text for a named function through the unified path.
+/// Returns the `VixenTypedFunction` and its module if the function is strict.
+pub fn lower_source_text_unified(
+    source: &str,
+    function_name: &str,
+) -> Result<UnifiedLowered, UnifiedStrictError> {
+    let bridge = SingleSourceBridge::from_source_text(source);
+    let analysis = build_minimal_analysis(&bridge);
+    let program = vx_analysis::lower::lower_executable_program(&analysis, &bridge)
+        .map_err(|e| UnifiedStrictError::Lowering(format!("{e:?}")))?;
+
+    let body = program
+        .bodies
+        .values()
+        .find(|b| matches!(&b.kernel_kind, KernelKind::Strict { vtf } if vtf.name == function_name))
+        .ok_or_else(|| UnifiedStrictError::NotStrict {
+            function_name: function_name.to_owned(),
+        })?;
+
+    let KernelKind::Strict { vtf } = &body.kernel_kind else {
+        unreachable!();
+    };
+
+    let lowerer = vx_analysis::lower_strict::StrictLowerer::new();
+    Ok(UnifiedLowered {
+        vtf: vtf.clone(),
+        module: lowerer.module,
+    })
 }
 
-pub fn lower_u64_add_ir() -> Result<IrFunc, KajitBackendError> {
-    kajit_backend::lower_ir(&lower_u64_add_strict_fragment())
+/// Compile source text for a named function through the unified path.
+pub fn compile_source_text_unified(
+    source: &str,
+    function_name: &str,
+) -> Result<(CompiledFunction, VixenTypedFunction), UnifiedStrictError> {
+    let lowered = lower_source_text_unified(source, function_name)?;
+    let compiled = kajit_backend::compile(&lowered.vtf, &lowered.module)?;
+    Ok((compiled, lowered.vtf))
 }
 
-pub fn lower_u64_add_ir_text() -> Result<String, KajitBackendError> {
-    lower_u64_add_ir().map(|func| func.to_string())
-}
-
-pub fn compile_u64_add() -> Result<CompiledFunction, KajitBackendError> {
-    kajit_backend::compile(&lower_u64_add_strict_fragment())
-}
-
-pub fn interpret_u64_add(lhs: u64, rhs: u64) -> Result<u64, StrictFragmentInterpretError> {
-    interpret_u64(&lower_u64_add_strict_fragment(), &[lhs, rhs])
-}
-
+/// Compile and execute a strict function from source text.
+///
 /// # Safety
 ///
-/// ??? why is this a function
-pub unsafe fn run_u64_add(lhs: u64, rhs: u64) -> Result<u64, KajitBackendError> {
-    let compiled = compile_u64_add()?;
-    let add: unsafe extern "C" fn(u64, u64) -> u64 =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    Ok(unsafe { add(lhs, rhs) })
+/// Compiled code executes with full memory access.
+pub unsafe fn execute_source_text_unified(
+    source: &str,
+    function_name: &str,
+    args: &[StrictFragmentValue],
+) -> Result<StrictFragmentValue, UnifiedStrictError> {
+    let (compiled, vtf) = compile_source_text_unified(source, function_name)?;
+    unsafe {
+        execute_compiled_copying_strict_fragment_strings(&vtf, &compiled, args)
+            .map_err(UnifiedStrictError::Abi)
+    }
 }
 
 #[cfg(test)]

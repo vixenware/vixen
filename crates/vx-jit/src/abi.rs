@@ -8,12 +8,10 @@
 use std::str::Utf8Error;
 
 use kajit::CompiledFunction;
+use kajit_hir::{Type, VixenTypedFunction};
 use thiserror::Error;
 
-use crate::{
-    KajitBackendError, StrictFragmentFunction, StrictFragmentType, StrictFragmentValue,
-    StrictFragmentValueKind,
-};
+use crate::KajitBackendError;
 
 pub const MAX_STRICT_FRAGMENT_ABI_WORDS: usize = 8;
 
@@ -24,12 +22,43 @@ pub enum StrictFragmentAbiLayout {
     String,
 }
 
+/// The runtime values that can cross the strict-fragment ABI boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrictFragmentValue {
+    U64(u64),
+    Bool(bool),
+    String(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictFragmentValueKind {
+    U64,
+    Bool,
+    String,
+}
+
+impl StrictFragmentValue {
+    pub fn kind(&self) -> StrictFragmentValueKind {
+        match self {
+            Self::U64(_) => StrictFragmentValueKind::U64,
+            Self::Bool(_) => StrictFragmentValueKind::Bool,
+            Self::String(_) => StrictFragmentValueKind::String,
+        }
+    }
+}
+
 impl StrictFragmentAbiLayout {
-    pub const fn from_type(ty: StrictFragmentType) -> Self {
-        match ty {
-            StrictFragmentType::U64 => Self::U64,
-            StrictFragmentType::Bool => Self::Bool,
-            StrictFragmentType::String => Self::String,
+    pub fn from_hir_type(ty: &Type) -> Option<Self> {
+        if *ty == Type::u(64) {
+            Some(Self::U64)
+        } else if *ty == Type::bool() {
+            Some(Self::Bool)
+        } else {
+            // Any named type with ptr+len fields is treated as String
+            match ty {
+                Type::Named { .. } => Some(Self::String),
+                _ => None,
+            }
         }
     }
 
@@ -37,14 +66,6 @@ impl StrictFragmentAbiLayout {
         match self {
             Self::U64 | Self::Bool => 1,
             Self::String => 2,
-        }
-    }
-
-    pub const fn strict_fragment_type(self) -> StrictFragmentType {
-        match self {
-            Self::U64 => StrictFragmentType::U64,
-            Self::Bool => StrictFragmentType::Bool,
-            Self::String => StrictFragmentType::String,
         }
     }
 
@@ -64,7 +85,7 @@ impl StrictFragmentAbiLayout {
             (layout, found) => {
                 return Err(StrictFragmentAbiError::ArgumentTypeMismatch {
                     index,
-                    expected: layout.strict_fragment_type(),
+                    expected: format!("{layout:?}"),
                     found: found.kind(),
                 });
             }
@@ -142,12 +163,16 @@ pub enum CompiledStrictFragmentOutput {
 pub enum StrictFragmentAbiError {
     #[error("arity mismatch: expected {expected} args, got {actual}")]
     ArityMismatch { expected: usize, actual: usize },
-    #[error("parameter {index} expected {expected:?}, got {found:?}")]
+    #[error("parameter {index} expected {expected}, got {found:?}")]
     ArgumentTypeMismatch {
         index: usize,
-        expected: StrictFragmentType,
+        expected: String,
         found: StrictFragmentValueKind,
     },
+    #[error("parameter {index} has unsupported HIR type")]
+    UnsupportedParamType { index: usize },
+    #[error("unsupported return type")]
+    UnsupportedReturnType,
     #[error("compiled signature uses {actual} ABI words, max supported is {max}")]
     TooManyAbiWords { actual: usize, max: usize },
     #[error("bool result word must be 0 or 1, got {0}")]
@@ -158,22 +183,25 @@ pub enum StrictFragmentAbiError {
     Compile(#[from] KajitBackendError),
 }
 
+/// Compile a `VixenTypedFunction` into machine code.
 pub fn compile_strict_fragment(
-    function: &StrictFragmentFunction,
+    vtf: &VixenTypedFunction,
+    module: &kajit_hir::Module,
 ) -> Result<CompiledFunction, StrictFragmentAbiError> {
-    Ok(crate::kajit_backend::compile(function)?)
+    Ok(crate::kajit_backend::compile(vtf, module)?)
 }
 
 /// # Safety
 ///
 /// Many different ways this can go south
 pub unsafe fn execute_compiled_unmanaged_strict_fragment(
-    function: &StrictFragmentFunction,
+    vtf: &VixenTypedFunction,
     compiled: &CompiledFunction,
     args: &[StrictFragmentValue],
 ) -> Result<CompiledStrictFragmentOutput, StrictFragmentAbiError> {
-    let arg_words = flatten_args(function, args)?;
-    let return_layout = StrictFragmentAbiLayout::from_type(function.return_type);
+    let arg_words = flatten_args_from_vtf(vtf, args)?;
+    let return_layout = StrictFragmentAbiLayout::from_hir_type(&vtf.return_type)
+        .ok_or(StrictFragmentAbiError::UnsupportedReturnType)?;
     let ret_words = return_layout.word_count();
     if arg_words.len() > MAX_STRICT_FRAGMENT_ABI_WORDS {
         return Err(StrictFragmentAbiError::TooManyAbiWords {
@@ -193,11 +221,11 @@ pub unsafe fn execute_compiled_unmanaged_strict_fragment(
 ///
 /// None
 pub unsafe fn execute_compiled_copying_strict_fragment_strings(
-    function: &StrictFragmentFunction,
+    vtf: &VixenTypedFunction,
     compiled: &CompiledFunction,
     args: &[StrictFragmentValue],
 ) -> Result<StrictFragmentValue, StrictFragmentAbiError> {
-    match unsafe { execute_compiled_unmanaged_strict_fragment(function, compiled, args)? } {
+    match unsafe { execute_compiled_unmanaged_strict_fragment(vtf, compiled, args)? } {
         CompiledStrictFragmentOutput::Value(value) => Ok(value),
         CompiledStrictFragmentOutput::UnmanagedString(value) => {
             Ok(StrictFragmentValue::String(unsafe {
@@ -207,20 +235,22 @@ pub unsafe fn execute_compiled_copying_strict_fragment_strings(
     }
 }
 
-fn flatten_args(
-    function: &StrictFragmentFunction,
+fn flatten_args_from_vtf(
+    vtf: &VixenTypedFunction,
     args: &[StrictFragmentValue],
 ) -> Result<Vec<u64>, StrictFragmentAbiError> {
-    if function.params.len() != args.len() {
+    if vtf.params.len() != args.len() {
         return Err(StrictFragmentAbiError::ArityMismatch {
-            expected: function.params.len(),
+            expected: vtf.params.len(),
             actual: args.len(),
         });
     }
 
     let mut words = Vec::new();
-    for (index, (param, value)) in function.params.iter().zip(args).enumerate() {
-        StrictFragmentAbiLayout::from_type(param.ty).flatten_arg(index, value, &mut words)?;
+    for (index, (param, value)) in vtf.params.iter().zip(args).enumerate() {
+        let layout = StrictFragmentAbiLayout::from_hir_type(&param.ty)
+            .ok_or(StrictFragmentAbiError::UnsupportedParamType { index })?;
+        layout.flatten_arg(index, value, &mut words)?;
     }
 
     Ok(words)

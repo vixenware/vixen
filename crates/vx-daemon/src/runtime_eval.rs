@@ -15,10 +15,7 @@ use vx_analysis::{
     RuntimeField, RuntimeMemberOp, SingleSourceBridge, SlotId, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
-use vx_jit::{
-    StrictFragmentFunction, StrictFragmentValue, compile_strict_fragment,
-    execute_compiled_copying_strict_fragment_strings, interpret, lower_source_text_strict_fragment,
-};
+use vx_jit::{StrictFragmentValue, execute_source_text_unified};
 use vx_services::EvalProgressEvent;
 use vx_services::{
     BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
@@ -155,14 +152,8 @@ fn try_execute_strict_fragment_fast_path(
     source: &str,
     function_name: &str,
     args: &[RuntimeValue],
-    backend: StrictEvalBackend,
+    _backend: StrictEvalBackend,
 ) -> Result<Option<RuntimeValue>, RuntimeEvalError> {
-    let strict_fragment = match lower_source_text_strict_fragment(source, function_name) {
-        Ok(strict_fragment) => strict_fragment,
-        Err(error) if error.describes_non_strict_shape() => return Ok(None),
-        Err(_) => return Ok(None),
-    };
-
     let args = match args
         .iter()
         .cloned()
@@ -173,56 +164,9 @@ fn try_execute_strict_fragment_fast_path(
         Err(_) => return Ok(None),
     };
 
-    let executor: &dyn StrictFragmentExecutor = match backend {
-        StrictEvalBackend::Interpreter => &StrictFragmentInterpreterExecutor,
-        StrictEvalBackend::Kajit => &StrictFragmentKajitExecutor,
-    };
-    let value = executor.execute(&strict_fragment, &args)?;
-    runtime_value_from_strict_fragment(value).map(Some)
-}
-
-trait StrictFragmentExecutor {
-    fn execute(
-        &self,
-        function: &StrictFragmentFunction,
-        args: &[StrictFragmentValue],
-    ) -> Result<StrictFragmentValue, RuntimeEvalError>;
-}
-
-struct StrictFragmentInterpreterExecutor;
-
-impl StrictFragmentExecutor for StrictFragmentInterpreterExecutor {
-    fn execute(
-        &self,
-        function: &StrictFragmentFunction,
-        args: &[StrictFragmentValue],
-    ) -> Result<StrictFragmentValue, RuntimeEvalError> {
-        interpret(function, args).map_err(|error| RuntimeEvalError::UnsupportedOperation {
-            function: function.name.clone(),
-            detail: format!("strict-fragment interpreter failed: {error}"),
-        })
-    }
-}
-
-struct StrictFragmentKajitExecutor;
-
-impl StrictFragmentExecutor for StrictFragmentKajitExecutor {
-    fn execute(
-        &self,
-        function: &StrictFragmentFunction,
-        args: &[StrictFragmentValue],
-    ) -> Result<StrictFragmentValue, RuntimeEvalError> {
-        let compiled = compile_strict_fragment(function).map_err(|error| {
-            RuntimeEvalError::UnsupportedOperation {
-                function: function.name.clone(),
-                detail: format!("Kajit compile failed: {error}"),
-            }
-        })?;
-        unsafe { execute_compiled_copying_strict_fragment_strings(function, &compiled, args) }
-            .map_err(|error| RuntimeEvalError::UnsupportedOperation {
-                function: function.name.clone(),
-                detail: format!("Kajit execution failed: {error}"),
-            })
+    match unsafe { execute_source_text_unified(source, function_name, &args) } {
+        Ok(value) => runtime_value_from_strict_fragment(value).map(Some),
+        Err(_) => Ok(None),
     }
 }
 
