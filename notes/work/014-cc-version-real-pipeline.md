@@ -1,4 +1,4 @@
-# 011: Toward `zoo/cc-version.vx` Through The Real Pipeline
+# 014: Toward `zoo/cc-version.vx` Through The Real Pipeline
 
 Close the gap to `zoo/cc-version.vx` — the near-term trajectory target from
 eval3-axes.md.
@@ -35,5 +35,5 @@ Once 008 is done, cc-version should be close.
 
 ## Depends on
 
-010 (inline product laziness), 013 (recursive projection base resolution), 014 (demand roots/propagation cleanup),
-015 (kernel entry exprs/types), and 018 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.
+010-done (inline product laziness), 013-done (recursive projection base resolution), 014-done (demand roots/propagation cleanup),
+011 (kernel entry exprs/types), and 013 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.

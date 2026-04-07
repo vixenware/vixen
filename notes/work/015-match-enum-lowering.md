@@ -1,4 +1,4 @@
-# 012: Match/Enum Lowering + Port `.styx` Fixtures
+# 015: Match/Enum Lowering + Port `.styx` Fixtures
 
 Extend exec_slice to lower match expressions and enum construction, then port
 the 16 slice1 .styx fixtures through the real pipeline.
@@ -26,4 +26,4 @@ Status: Not started.
 
 ## Depends on
 
-014 (demand propagation cleanup), 015 (kernel entry exprs/types).
+014-done (demand propagation cleanup), 011 (kernel entry exprs/types).

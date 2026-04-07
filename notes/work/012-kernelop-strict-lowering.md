@@ -1,4 +1,4 @@
-# 017: Replace Span-Keyed `lower_strict.rs` With KernelOp-Based Strict Lowering
+# 012: Replace Span-Keyed `lower_strict.rs` With KernelOp-Based Strict Lowering
 
 Status: Not started.
 
@@ -42,7 +42,7 @@ KernelOps are already a statement-like IR that is closer to the intended lazy-co
 
 - Existing tests remain green.
 - At least one existing fixture that previously compiled strictly still compiles strictly.
-- We can strict-compile a synthesized closure body or thunk body once 018 is done (or via a targeted unit test).
+- We can strict-compile a synthesized closure body or thunk body once 013 is done (or via a targeted unit test).
 
 ## Notes
 

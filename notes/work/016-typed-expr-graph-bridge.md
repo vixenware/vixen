@@ -1,4 +1,4 @@
-# 019: Incremental Typed Expression Graph In The Bridge (Replace Ad Hoc AST Walks)
+# 016: Incremental Typed Expression Graph In The Bridge (Replace Ad Hoc AST Walks)
 
 Status: Not started.
 
@@ -8,7 +8,7 @@ Move from “lowering by re-walking parser AST” to “lowering by stable, type
 
 ## Motivation
 
-Even after 017, we still rely on span matching and raw AST access in multiple places (bridge enrichment, exec_slice lowering, evaluator tests). A small typed expression graph in the bridge gives us:
+Even after 012, we still rely on span matching and raw AST access in multiple places (bridge enrichment, exec_slice lowering, evaluator tests). A small typed expression graph in the bridge gives us:
 
 - stable ExprId addressing without span heuristics
 - explicit child edges (no `syntax().descendants()` re-discovery)

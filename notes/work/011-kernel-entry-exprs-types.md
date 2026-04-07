@@ -1,4 +1,4 @@
-# 015: Kernel Entrypoint ExprIds + Types (Stop Using “Max ExprId” Heuristics)
+# 011: Kernel Entrypoint ExprIds + Types (Stop Using “Max ExprId” Heuristics)
 
 Status: Not started.
 

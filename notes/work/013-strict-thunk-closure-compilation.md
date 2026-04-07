@@ -1,4 +1,4 @@
-# 018: Strict Compilation For Extracted Thunks + Closure Bodies (Partial Compilation In Mixed Programs)
+# 013: Strict Compilation For Extracted Thunks + Closure Bodies (Partial Compilation In Mixed Programs)
 
 Status: Not started.
 
@@ -18,7 +18,7 @@ The extracted thunk bodies are the natural unit of partial compilation because:
 
 ## Work
 
-- Prerequisite: 017 (KernelOp-based strict lowering).
+- Prerequisite: 012 (KernelOp-based strict lowering).
 - Ensure `lower::lower_executable_program` attempts strict compilation for:
 - the entry body
 - any additional bodies in the program map, including synthesized body IDs (>= 10000)

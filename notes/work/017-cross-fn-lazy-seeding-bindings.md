@@ -1,4 +1,4 @@
-# 020: Cross-Function Lazy Seeding Through Bindings
+# 017: Cross-Function Lazy Seeding Through Bindings
 
 Status: Not started.
 
