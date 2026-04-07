@@ -484,82 +484,62 @@ fn seed_lazy_product_fields(
         }
     }
 
-    // Inline product field keys (without sub-expr info)
-    let inline_product_keys: HashMap<(BodyId, ExprId), Vec<FieldKey>> = bridge
-        .products
-        .iter()
-        .map(|product| {
-            let keys: Vec<FieldKey> = product.fields.iter().map(|(k, _)| k.clone()).collect();
-            ((product.body, product.expr), keys)
-        })
-        .collect();
-
-    // Resolve the product that an expression ultimately refers to, following
-    // bindings and projection chains recursively. Returns the product's field keys.
-    fn resolve_product_fields<'a>(
+    /// Resolve an expression to the product it ultimately refers to, returning
+    /// (product_expr_id, fields). Follows bindings and projection chains recursively.
+    fn resolve_to_product<'a>(
         expr: ExprId,
         body: BodyId,
         use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
-        all_binding_products: &HashMap<BridgeLocalBindingId, Vec<FieldKey>>,
-        inline_product_keys: &HashMap<(BodyId, ExprId), Vec<FieldKey>>,
         products_by_expr: &HashMap<(BodyId, ExprId), &'a Vec<(FieldKey, Option<ExprId>)>>,
         projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
         binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
         visited: &mut HashSet<ExprId>,
-    ) -> Option<Vec<FieldKey>> {
+    ) -> Option<(ExprId, &'a Vec<(FieldKey, Option<ExprId>)>)> {
         if !visited.insert(expr) {
-            return None; // cycle guard
+            return None;
         }
 
         // Direct product?
-        if let Some(keys) = inline_product_keys.get(&(body, expr)) {
-            return Some(keys.clone());
+        if let Some(product) = products_by_expr.get(&(body, expr)) {
+            return Some((expr, product));
         }
 
         // Binding use → follow initializer
         if let Some(&binding_id) = use_by_expr.get(&expr) {
-            if let Some(fields) = all_binding_products.get(&binding_id) {
-                return Some(fields.clone());
-            }
-            // Follow through binding initializer
             if let Some(&init) = binding_inits.get(&binding_id) {
-                if let Some(fields) = resolve_product_fields(
+                if let Some(result) = resolve_to_product(
                     init,
                     body,
                     use_by_expr,
-                    all_binding_products,
-                    inline_product_keys,
                     products_by_expr,
                     projection_by_expr,
                     binding_inits,
                     visited,
                 ) {
-                    return Some(fields);
+                    return Some(result);
                 }
             }
         }
 
-        // Projection → resolve base.field to get intermediate, check if that's a product
+        // Projection → resolve base recursively, then follow the projected field
         if let Some(proj) = projection_by_expr.get(&(body, expr)) {
-            // Resolve what base.field points to
-            if let Some(base_product) = products_by_expr.get(&(body, proj.base)).or_else(|| {
-                // base might be a binding — follow to its init
-                let &bid = use_by_expr.get(&proj.base)?;
-                let &init = binding_inits.get(&bid)?;
-                products_by_expr.get(&(body, init))
-            }) {
-                // Find the sub-expression for proj.field
+            if let Some((_base_expr, base_product)) = resolve_to_product(
+                proj.base,
+                body,
+                use_by_expr,
+                products_by_expr,
+                projection_by_expr,
+                binding_inits,
+                visited,
+            ) {
                 if let Some(sub_expr) = base_product
                     .iter()
                     .find_map(|(k, e)| if *k == proj.field { *e } else { None })
                 {
-                    // Is sub_expr a product?
-                    return resolve_product_fields(
+                    return resolve_to_product(
                         sub_expr,
                         body,
                         use_by_expr,
-                        all_binding_products,
-                        inline_product_keys,
                         products_by_expr,
                         projection_by_expr,
                         binding_inits,
@@ -567,11 +547,58 @@ fn seed_lazy_product_fields(
                     );
                 }
             }
-            // base itself might need recursive resolution
-            // (e.g. outer._0._0 where outer._0's base is another projection)
         }
 
         None
+    }
+
+    /// Resolve an expression to the product field keys and the product's
+    /// construction ExprId. Used for seeding lazy fields.
+    fn resolve_product_fields_and_expr(
+        expr: ExprId,
+        body: BodyId,
+        use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
+        all_binding_products: &HashMap<BridgeLocalBindingId, Vec<FieldKey>>,
+        products_by_expr: &HashMap<(BodyId, ExprId), &Vec<(FieldKey, Option<ExprId>)>>,
+        projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+        binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Option<(ExprId, Vec<FieldKey>)> {
+        // Check pre-computed binding products — resolve to the product construction expr
+        if let Some(&binding_id) = use_by_expr.get(&expr) {
+            if let Some(fields) = all_binding_products.get(&binding_id) {
+                // Still need the product ExprId for seeding
+                if let Some(&init) = binding_inits.get(&binding_id) {
+                    if let Some((product_expr, _)) = resolve_to_product(
+                        init,
+                        body,
+                        use_by_expr,
+                        products_by_expr,
+                        projection_by_expr,
+                        binding_inits,
+                        &mut visited.clone(),
+                    ) {
+                        return Some((product_expr, fields.clone()));
+                    }
+                }
+                // Fallback: use the base expr (may not be ideal but preserves existing behavior)
+                return Some((expr, fields.clone()));
+            }
+        }
+
+        let (product_expr, product) = resolve_to_product(
+            expr,
+            body,
+            use_by_expr,
+            products_by_expr,
+            projection_by_expr,
+            binding_inits,
+            visited,
+        )?;
+        Some((
+            product_expr,
+            product.iter().map(|(k, _)| k.clone()).collect(),
+        ))
     }
 
     // Build binding init map for the resolver
@@ -585,12 +612,11 @@ fn seed_lazy_product_fields(
         .projections
         .iter()
         .flat_map(|projection| {
-            let fields = resolve_product_fields(
+            let (product_expr, fields) = resolve_product_fields_and_expr(
                 projection.base,
                 projection.body,
                 &use_by_expr,
                 &all_binding_products,
-                &inline_product_keys,
                 &products_by_expr,
                 &projection_by_expr,
                 &binding_inits,
@@ -600,12 +626,12 @@ fn seed_lazy_product_fields(
                 return None;
             }
 
-            // All siblings (not just min) should be lazy
+            // All siblings should be lazy, keyed by the product construction ExprId
             let siblings: Vec<_> = fields
                 .iter()
                 .filter(|field| **field != projection.field)
                 .cloned()
-                .map(|sibling| (projection.body, projection.base, sibling))
+                .map(|sibling| (projection.body, product_expr, sibling))
                 .collect();
             Some(siblings)
         })
