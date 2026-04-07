@@ -16,7 +16,9 @@ use crate::item::ItemKind;
 use crate::pattern::PatternKind;
 use crate::stmt::StmtKind;
 use crate::type_ref::TypeRefKind;
-use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
+use crate::{
+    BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId, TypeRefId,
+};
 
 /// A visitor for walking the VIR tree.
 ///
@@ -56,22 +58,31 @@ pub trait VirVisitor {
         walk_type_ref(self, arena, id);
     }
 
-    /// Called for each scope. Default: visits the scope's bindings.
+    /// Called for each scope.
     fn visit_scope(&mut self, arena: &VirArena, id: ScopeId) {
         walk_scope(self, arena, id);
+    }
+
+    /// Called for each source unit (per-file root).
+    fn visit_source_unit(&mut self, arena: &VirArena, id: SourceUnitId) {
+        walk_source_unit(self, arena, id);
     }
 }
 
 /// Walk the children of an expression.
 pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId) {
     match &arena[id].kind {
-        ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Import(_) => {
-            // Leaf or near-leaf — path literal parts walked below if needed.
+        ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Error => {}
+        ExprKind::PathLiteral(pl) => {
+            for part in &pl.parts {
+                if let StringPart::Expr(id) = part {
+                    v.visit_expr(arena, *id);
+                }
+            }
         }
-        ExprKind::NameRef(_) => {
-            // Leaf — resolved target is not a child to walk.
-        }
+        ExprKind::NameRef(_) => {}
         ExprKind::Block(block) => {
+            v.visit_scope(arena, block.scope);
             for &stmt_id in &block.stmts {
                 v.visit_stmt(arena, stmt_id);
             }
@@ -162,6 +173,7 @@ pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId
         ExprKind::Match(m) => {
             v.visit_expr(arena, m.scrutinee);
             for arm in &m.arms {
+                v.visit_scope(arena, arm.scope);
                 v.visit_pattern(arena, arm.pattern);
                 v.visit_expr(arena, arm.body);
             }
@@ -174,8 +186,12 @@ pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId
             v.visit_expr(arena, pre.operand);
         }
         ExprKind::Range(range) => {
-            v.visit_expr(arena, range.start);
-            v.visit_expr(arena, range.end);
+            if let Some(s) = range.start {
+                v.visit_expr(arena, s);
+            }
+            if let Some(e) = range.end {
+                v.visit_expr(arena, e);
+            }
         }
         ExprKind::TypeOp(top) => {
             v.visit_expr(arena, top.expr);
@@ -198,15 +214,6 @@ pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId
         ExprKind::Fail(f) => {
             if let Some(msg) = f.message {
                 v.visit_expr(arena, msg);
-            }
-        }
-    }
-
-    // Walk path literal parts (interpolated expressions).
-    if let ExprKind::PathLiteral(pl) = &arena[id].kind {
-        for part in &pl.parts {
-            if let StringPart::Expr(id) = part {
-                v.visit_expr(arena, *id);
             }
         }
     }
@@ -256,6 +263,7 @@ pub fn walk_stmt<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: StmtId
         StmtKind::Expr(expr_id) => {
             v.visit_expr(arena, *expr_id);
         }
+        StmtKind::Error => {}
     }
 }
 
@@ -265,7 +273,10 @@ pub fn walk_pattern<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Pat
         PatternKind::Binding(b) => {
             v.visit_binding(arena, b.binding);
         }
-        PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
+        PatternKind::Wildcard
+        | PatternKind::Literal(_)
+        | PatternKind::Unit
+        | PatternKind::Error => {}
         PatternKind::Tuple(t) => {
             for &elem in &t.elements {
                 v.visit_pattern(arena, elem);
@@ -308,8 +319,8 @@ pub fn walk_pattern<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Pat
 /// Walk the children of a body.
 pub fn walk_body<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: BodyId) {
     let body = &arena[id];
+    v.visit_scope(arena, body.scope);
     for param in &body.params {
-        v.visit_binding(arena, param.binding);
         v.visit_pattern(arena, param.pattern);
         if let Some(tref) = param.ty {
             v.visit_type_ref(arena, tref);
@@ -360,6 +371,7 @@ pub fn walk_item<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ItemId
             }
         }
         ItemKind::Namespace(ns) => {
+            v.visit_scope(arena, ns.scope);
             for &child_id in &ns.items {
                 v.visit_item(arena, child_id);
             }
@@ -394,6 +406,7 @@ pub fn walk_type_ref<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Ty
                 v.visit_type_ref(arena, alt);
             }
         }
+        TypeRefKind::Error => {}
     }
 }
 
@@ -403,4 +416,13 @@ pub fn walk_scope<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Scope
     for &binding_id in &scope.bindings {
         v.visit_binding(arena, binding_id);
     }
+}
+
+/// Walk a source unit: visits all top-level items and the top-level body.
+pub fn walk_source_unit<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: SourceUnitId) {
+    let su = &arena[id];
+    for &item_id in &su.items {
+        v.visit_item(arena, item_id);
+    }
+    v.visit_body(arena, su.top_level_body);
 }

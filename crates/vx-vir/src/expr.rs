@@ -1,11 +1,11 @@
 //! Expression nodes.
 //!
 //! Every expression in a Vixen program becomes an [`Expr`] with a unique
-//! [`ExprId`](crate::ExprId). The [`ExprKind`] enum has one variant per
-//! language construct (27 total). Parenthesized expressions are eliminated
+//! [`ExprId`](crate::ExprId). The [`ExprKind`] enum has 28 variants (27
+//! language constructs + Error). Parenthesized expressions are eliminated
 //! during the CST-to-VIR walk — the inner expression is used directly.
 
-use crate::{BindingId, BodyId, ExprId, PatternId, ScopeId, StmtId, TypeRefId};
+use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
 use vx_resolve::{DefId, SourceSpan};
 use vx_types::Ty;
 
@@ -15,6 +15,10 @@ pub struct Expr {
     /// The source location of this expression in the original source file.
     /// Populated during: CST walk.
     pub span: SourceSpan,
+
+    /// The body this expression belongs to.
+    /// Populated during: CST walk.
+    pub body: BodyId,
 
     /// The syntactic form of this expression.
     /// Populated during: CST walk.
@@ -120,6 +124,12 @@ pub enum ExprKind {
 
     /// A fail expression: `fail "message"` or `fail expr`.
     Fail(FailExpr),
+
+    /// An error recovery node. Produced when the CST contains a broken or
+    /// unparseable expression. Carries any child expressions that were
+    /// successfully parsed, so the type checker can still process them.
+    /// The type of an error expression is always `Ty::Poison`.
+    Error,
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +312,9 @@ pub struct StructLiteralExpr {
     pub name: String,
     /// Span of the struct name, for diagnostics.
     pub name_span: SourceSpan,
+    /// The resolved target of the struct name.
+    /// Populated during: name resolution pass.
+    pub resolved: Option<ItemId>,
     /// The field initializers.
     pub fields: Vec<StructLiteralField>,
 }
@@ -372,14 +385,23 @@ pub struct IndexExpr {
     pub index: ExprId,
 }
 
+/// A key identifying a field on a product type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FieldKey {
+    /// A named field: `.name`.
+    Name(String),
+    /// A positional (tuple) index: `.0`, `.1`, etc.
+    Index(u32),
+}
+
 /// A field access: `a.field` or `a.0`.
 #[derive(Debug, Clone)]
 pub struct FieldExpr {
     /// The expression whose field is being accessed.
     pub receiver: ExprId,
-    /// The field name (or numeric index as string, e.g. `"0"`).
-    pub field: String,
-    /// Span of the field name token.
+    /// The field being accessed.
+    pub field: FieldKey,
+    /// Span of the field name/index token.
     pub field_span: SourceSpan,
 }
 
@@ -484,13 +506,13 @@ pub struct PrefixExpr {
     pub operand: ExprId,
 }
 
-/// A range expression: `a..b` or `a..=b`.
+/// A range expression: `a..b`, `a..=b`, `a..`, `..b`, `..=b`, or `..`.
 #[derive(Debug, Clone)]
 pub struct RangeExpr {
-    /// The start of the range.
-    pub start: ExprId,
-    /// The end of the range.
-    pub end: ExprId,
+    /// The start of the range. `None` for `..b` or `..`.
+    pub start: Option<ExprId>,
+    /// The end of the range. `None` for `a..` or `..`.
+    pub end: Option<ExprId>,
     /// Whether the range is inclusive (`..=`) or exclusive (`..`).
     pub inclusive: bool,
 }

@@ -4,8 +4,8 @@
 //! a tree via [`parent`](Body::parent) for capture analysis — a closure
 //! body's parent is the body it's lexically nested within.
 
-use crate::{BindingId, BodyId, ExprId, PatternId, ScopeId, TypeRefId};
-use vx_resolve::{DefId, SourceId, SourceSpan};
+use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
+use vx_resolve::{SourceId, SourceSpan};
 
 /// A body is a scope-owning unit: a function, closure, or top-level thunk.
 #[derive(Debug, Clone)]
@@ -51,11 +51,11 @@ pub struct Body {
 #[derive(Debug, Clone)]
 pub enum BodyOwner {
     /// A named function: `fn name(...) ( ... )`.
+    /// Links to the function's [`Item`](crate::item::Item) rather than
+    /// duplicating name/def_id — the item is the source of truth.
     Function {
-        /// The [`DefId`] of the function definition from the resolver.
-        def_id: DefId,
-        /// The function name.
-        name: String,
+        /// The [`ItemId`] of the function declaration item.
+        item: ItemId,
     },
 
     /// A closure expression: `(x, y) => body`.
@@ -71,16 +71,15 @@ pub enum BodyOwner {
 
 /// A parameter in a function or closure.
 ///
-/// `Param` is intentionally thin — it points to a [`Binding`](crate::Binding)
-/// for name, kind, and type information. No duplication.
+/// `Param` does NOT carry a direct `BindingId` — bindings come from the
+/// pattern tree. A destructuring parameter like `(a, b)` introduces
+/// multiple bindings through its pattern. For simple identifier params,
+/// the pattern is a `PatternKind::Binding` which holds the `BindingId`.
 #[derive(Debug, Clone)]
 pub struct Param {
-    /// The binding introduced by this parameter.
-    /// Populated during: CST walk.
-    pub binding: BindingId,
-
-    /// The pattern for this parameter (usually a simple binding pattern,
-    /// but could be a destructuring pattern).
+    /// The pattern for this parameter. Usually a simple binding pattern
+    /// (`PatternKind::Binding`), but may be a destructuring pattern that
+    /// introduces multiple bindings.
     /// Populated during: CST walk.
     pub pattern: PatternId,
 

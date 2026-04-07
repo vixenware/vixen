@@ -4,7 +4,7 @@
 //! [`StmtId`](crate::StmtId).
 
 use crate::expr::UpdateField;
-use crate::{BindingId, ExprId, ItemId, PatternId, TypeRefId};
+use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, TypeRefId};
 use vx_resolve::SourceSpan;
 
 /// A statement node in the VIR.
@@ -13,6 +13,10 @@ pub struct Stmt {
     /// The source location of this statement.
     /// Populated during: CST walk.
     pub span: SourceSpan,
+
+    /// The body this statement belongs to.
+    /// Populated during: CST walk.
+    pub body: BodyId,
 
     /// The syntactic form of this statement.
     /// Populated during: CST walk.
@@ -42,6 +46,9 @@ pub enum StmtKind {
 
     /// An expression used as a statement (its value is discarded).
     Expr(ExprId),
+
+    /// An error recovery node. Produced when the CST contains a broken statement.
+    Error,
 }
 
 /// A let statement: `let pattern = expr`.
@@ -89,13 +96,19 @@ pub struct CompoundUpdateStmt {
 /// A field assignment statement: `a.b.c = expr`.
 #[derive(Debug, Clone)]
 pub struct FieldAssignStmt {
-    /// The dotted path to the field: first element is the base name,
-    /// rest are field names.
-    pub target: Vec<String>,
+    /// The base name being assigned through (the `a` in `a.b.c = ...`).
+    pub base: String,
+    /// Span of the base name token.
+    pub base_span: SourceSpan,
+    /// The field path after the base (e.g. `["b", "c"]` for `a.b.c = ...`).
+    pub field_path: Vec<String>,
     /// Span of the entire target path.
     pub target_span: SourceSpan,
     /// The new value expression.
     pub value: ExprId,
+    /// The binding being assigned through (resolves `base`).
+    /// Populated during: name resolution pass.
+    pub resolved: Option<BindingId>,
 }
 
 /// A return statement: `return expr` or bare `return`.

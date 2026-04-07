@@ -23,7 +23,7 @@ fn arena_round_trip() {
     // Scope
     let scope_id = arena.alloc_scope(Scope {
         parent: None,
-        owner: ScopeOwner::Body(BodyId(0)), // will be body_id below
+        owner: ScopeOwner::Body(BodyId(0)),
         bindings: vec![],
     });
 
@@ -44,6 +44,7 @@ fn arena_round_trip() {
     // Pattern for param
     let pat_id = arena.alloc_pattern(Pattern {
         span: dummy_span(),
+        body: BodyId(0),
         kind: PatternKind::Binding(PatternBinding {
             name: "x".into(),
             binding: binding_id,
@@ -54,25 +55,36 @@ fn arena_round_trip() {
     // Literal expression: 42
     let lit_id = arena.alloc_expr(Expr {
         span: dummy_span(),
+        body: BodyId(0),
         kind: ExprKind::Literal(LiteralExpr {
             value: LitKind::Int(42),
         }),
         ty: None,
     });
 
+    // We need an item_id first to reference in BodyOwner::Function.
+    // Allocate a placeholder item, then body, then fix up the item.
+    let item_id = arena.alloc_item(Item {
+        span: dummy_span(),
+        def_id: DefId::Source {
+            source: SourceId(0),
+            local: 0,
+        },
+        kind: ItemKind::Function(FunctionItem {
+            name: "add".into(),
+            name_span: dummy_span(),
+            body: BodyId(0), // placeholder, fixed below
+            type_id: None,
+            attributes: vec![],
+        }),
+    });
+
     // Body
     let body_id = arena.alloc_body(Body {
         span: dummy_span(),
-        owner: BodyOwner::Function {
-            def_id: DefId::Source {
-                source: SourceId(0),
-                local: 0,
-            },
-            name: "add".into(),
-        },
+        owner: BodyOwner::Function { item: item_id },
         scope: scope_id,
         params: vec![Param {
-            binding: binding_id,
             pattern: pat_id,
             ty: None,
             is_keyword: false,
@@ -83,21 +95,10 @@ fn arena_round_trip() {
         capabilities: vec![],
     });
 
-    // Item
-    let item_id = arena.alloc_item(Item {
-        span: dummy_span(),
-        def_id: DefId::Source {
-            source: SourceId(0),
-            local: 0,
-        },
-        kind: ItemKind::Function(FunctionItem {
-            name: "add".into(),
-            name_span: dummy_span(),
-            body: body_id,
-            type_id: None,
-            attributes: vec![],
-        }),
-    });
+    // Fix up item's body reference
+    if let ItemKind::Function(ref mut f) = arena[item_id].kind {
+        f.body = body_id;
+    }
 
     // Source unit
     let su_id = arena.alloc_source_unit(SourceUnit {
@@ -136,9 +137,9 @@ fn visitor_traversal_count() {
     let mut arena = VirArena::new();
 
     // Build: x + 1
-    // NameRef "x"
     let name_ref_id = arena.alloc_expr(Expr {
         span: dummy_span(),
+        body: BodyId(0),
         kind: ExprKind::NameRef(NameRefExpr {
             name: "x".into(),
             resolved: None,
@@ -146,18 +147,18 @@ fn visitor_traversal_count() {
         ty: None,
     });
 
-    // Literal 1
     let lit_id = arena.alloc_expr(Expr {
         span: dummy_span(),
+        body: BodyId(0),
         kind: ExprKind::Literal(LiteralExpr {
             value: LitKind::Int(1),
         }),
         ty: None,
     });
 
-    // Binary: name_ref + lit
     let bin_id = arena.alloc_expr(Expr {
         span: dummy_span(),
+        body: BodyId(0),
         kind: ExprKind::Binary(BinaryExpr {
             lhs: name_ref_id,
             op: BinOp::Add,
@@ -184,8 +185,11 @@ fn visitor_traversal_count() {
         mutable: false,
     });
 
+    arena[scope_id].bindings.push(binding_id);
+
     let pat_id = arena.alloc_pattern(Pattern {
         span: dummy_span(),
+        body: BodyId(0),
         kind: PatternKind::Binding(PatternBinding {
             name: "x".into(),
             binding: binding_id,
@@ -193,18 +197,27 @@ fn visitor_traversal_count() {
         ty: None,
     });
 
+    // Item placeholder for BodyOwner::Function
+    let item_id = arena.alloc_item(Item {
+        span: dummy_span(),
+        def_id: DefId::Source {
+            source: SourceId(0),
+            local: 0,
+        },
+        kind: ItemKind::Function(FunctionItem {
+            name: "add".into(),
+            name_span: dummy_span(),
+            body: BodyId(0),
+            type_id: None,
+            attributes: vec![],
+        }),
+    });
+
     let body_id = arena.alloc_body(Body {
         span: dummy_span(),
-        owner: BodyOwner::Function {
-            def_id: DefId::Source {
-                source: SourceId(0),
-                local: 0,
-            },
-            name: "add".into(),
-        },
+        owner: BodyOwner::Function { item: item_id },
         scope: scope_id,
         params: vec![Param {
-            binding: binding_id,
             pattern: pat_id,
             ty: None,
             is_keyword: false,
@@ -215,11 +228,16 @@ fn visitor_traversal_count() {
         capabilities: vec![],
     });
 
+    if let ItemKind::Function(ref mut f) = arena[item_id].kind {
+        f.body = body_id;
+    }
+
     // Count visits
     struct Counter {
         exprs: u32,
         bindings: u32,
         patterns: u32,
+        scopes: u32,
     }
 
     impl VirVisitor for Counter {
@@ -234,18 +252,24 @@ fn visitor_traversal_count() {
             self.patterns += 1;
             visitor::walk_pattern(self, arena, id);
         }
+        fn visit_scope(&mut self, arena: &VirArena, id: vx_vir::ScopeId) {
+            self.scopes += 1;
+            visitor::walk_scope(self, arena, id);
+        }
     }
 
     let mut counter = Counter {
         exprs: 0,
         bindings: 0,
         patterns: 0,
+        scopes: 0,
     };
 
     counter.visit_body(&arena, body_id);
 
-    // Body walk visits: 1 binding (param) + 1 pattern (param) + 3 exprs (binary + 2 children)
-    assert_eq!(counter.exprs, 3, "should visit binary + lhs + rhs");
-    assert_eq!(counter.bindings, 2, "param binding + pattern binding");
+    // walk_body visits: scope (1 binding in it) + param pattern (1 binding) + root expr (3: binary+lhs+rhs)
+    assert_eq!(counter.exprs, 3, "binary + lhs + rhs");
     assert_eq!(counter.patterns, 1, "param pattern");
+    assert_eq!(counter.bindings, 2, "scope binding + pattern binding");
+    assert_eq!(counter.scopes, 1, "body scope");
 }

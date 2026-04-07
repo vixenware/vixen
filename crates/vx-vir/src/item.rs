@@ -3,7 +3,7 @@
 //! Items are the top-level declarations in a source file or namespace.
 //! They also appear as statement-level declarations inside blocks.
 
-use crate::{BodyId, ExprId, ItemId, TypeRefId};
+use crate::{BodyId, ExprId, ItemId, ScopeId, TypeRefId};
 use vx_resolve::{DefId, SourceSpan};
 use vx_types::TypeId;
 
@@ -166,6 +166,9 @@ pub struct NamespaceItem {
     pub name: String,
     /// Span of the name token.
     pub name_span: SourceSpan,
+    /// The scope introduced by this namespace.
+    /// Populated during: CST walk.
+    pub scope: ScopeId,
     /// The contained items (for `namespace Name { ... }` form).
     pub items: Vec<ItemId>,
     /// Attributes on this namespace.

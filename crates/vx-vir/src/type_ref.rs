@@ -40,6 +40,9 @@ pub enum TypeRefKind {
 
     /// A sum type: `A | B | C`.
     Sum(SumTypeRef),
+
+    /// An error recovery node. Produced when the CST contains a broken type annotation.
+    Error,
 }
 
 /// A path type reference: `Foo`, `Foo.Bar`, `Foo[T, U]`.

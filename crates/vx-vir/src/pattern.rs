@@ -5,7 +5,7 @@
 //! during the CST walk.
 
 use crate::expr::LitKind;
-use crate::{BindingId, PatternId};
+use crate::{BindingId, BodyId, ItemId, PatternId};
 use vx_resolve::SourceSpan;
 use vx_types::Ty;
 
@@ -15,6 +15,10 @@ pub struct Pattern {
     /// Source location of this pattern.
     /// Populated during: CST walk.
     pub span: SourceSpan,
+
+    /// The body this pattern belongs to.
+    /// Populated during: CST walk.
+    pub body: BodyId,
 
     /// The syntactic form of this pattern.
     /// Populated during: CST walk.
@@ -63,6 +67,10 @@ pub enum PatternKind {
 
     /// An or-pattern: `pat1 | pat2`. Matches if either alternative matches.
     Or(OrPattern),
+
+    /// An error recovery node. Produced when the CST contains a broken pattern.
+    /// The type of an error pattern is always `Ty::Poison`.
+    Error,
 }
 
 /// A binding pattern: `x`.
@@ -132,6 +140,10 @@ pub struct VariantPattern {
     pub name: String,
     /// Span of the variant name.
     pub name_span: SourceSpan,
+    /// The resolved target of the variant name (points to the variant's
+    /// struct item in the enum declaration).
+    /// Populated during: name resolution pass.
+    pub resolved: Option<ItemId>,
     /// Optional struct destructuring of the variant's fields.
     /// `None` for unit variants like `None`.
     pub fields: Option<Vec<StructPatternField>>,
