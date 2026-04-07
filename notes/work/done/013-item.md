@@ -1,6 +1,6 @@
 # 013: Recursive Projection Base Resolution (No “Base Must Be Binding” Loopholes)
 
-Status: In progress (partially addressed in commit `13bfeb8e`, but not yet accepted).
+Status: Done (commits `13bfeb8e`, `a5aab51c`, `56c3594a`).
 
 ## Goal
 

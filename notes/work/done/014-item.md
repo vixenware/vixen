@@ -1,6 +1,6 @@
 # 014: Demand Roots + Transitive Demand Propagation (Remove `mains.is_empty()` Hack)
 
-Status: Not started.
+Status: Done (commit `bf5731ff`).
 
 ## Goal
 
@@ -35,3 +35,12 @@ This is analysis-level only. It should not change parsing, resolution, or type c
 ## Notes
 
 This work item is intentionally scoped to “demand at the body granularity” (call graph reachability). It does not yet implement expression-level observation propagation through products, projections, `if`, `match`, etc.
+
+## Implementation Notes (What Changed)
+
+- Removed the `mains.is_empty()` gate so transitive demand propagation always runs from selected `entry_ids`.
+- Added cross-function lazy field seeding for direct param projections (e.g. `pick_first(p) { p._0 }`), which seeds `LazyProductField` at the caller’s product construction ExprId.
+- Added thunk capture pruning in `synthesize_thunk_body` to avoid cycles and unnecessary captures.
+- Unwrapped parens in call-site argument ExprIds so `(p)` resolves to `p` for arg-to-param mapping.
+
+Verified by: `vx-analysis::lazy_seeding::{demand_propagation_transitive_call_chain, demand_propagation_disconnected_stays_noobs, cross_function_lazy_seeding}` and `vx-rt::demand_driven::pair_passed_to_fn_dead_sibling`.
