@@ -9,7 +9,7 @@
 //! [`DefId`](vx_resolve::DefId) (for top-level definitions). There is exactly
 //! one canonical `Binding` per introduced name — no second lookup mechanism.
 
-use crate::{BodyId, ScopeId};
+use crate::{BodyId, ExprId, ScopeId};
 use vx_resolve::SourceSpan;
 use vx_types::Ty;
 
@@ -41,6 +41,12 @@ pub struct Binding {
     /// The inferred or declared type of this binding.
     /// Populated during: type checking pass. `None` before that.
     pub ty: Option<Ty>,
+
+    /// The initializer expression for this binding, if it's a simple `let`
+    /// binding (not destructuring). `None` for parameters, match bindings,
+    /// destructuring patterns, and other non-let bindings.
+    /// Populated during: CST walk (back-patched after pattern is built).
+    pub init_expr: Option<ExprId>,
 
     /// Whether this binding is the target of an assignment statement.
     /// Populated during: name resolution pass (detected when `=` statement

@@ -37,6 +37,7 @@ fn arena_round_trip() {
         body: BodyId(0),
         scope: scope_id,
         ty: None,
+        init_expr: None,
         mutable: false,
     });
 
@@ -198,6 +199,7 @@ fn visitor_traversal_count() {
         body: BodyId(0),
         scope: scope_id,
         ty: None,
+        init_expr: None,
         mutable: false,
     });
 

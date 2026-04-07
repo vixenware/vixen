@@ -618,6 +618,7 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             ty: None,
+            init_expr: None,
             mutable: false,
         });
         let scope = self.current_scope();
@@ -654,6 +655,7 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             ty: None,
+            init_expr: None,
             mutable: false,
         });
         let scope = self.current_scope();
@@ -1325,6 +1327,7 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             ty: None,
+            init_expr: None,
             mutable: false,
         });
         let scope = self.current_scope();
@@ -2516,6 +2519,15 @@ impl VirBuilder {
             .map(|p| self.build_pattern(&p))
             .unwrap_or_else(|| self.error_pattern(let_span));
 
+        // Back-patch init_expr for simple binding patterns.
+        let binding_id = match self.arena[pattern].kind {
+            PatternKind::Binding(ref b) => Some(b.binding),
+            _ => None,
+        };
+        if let Some(bid) = binding_id {
+            self.arena[bid].init_expr = Some(init);
+        }
+
         self.arena.alloc_stmt(Stmt {
             span: let_span,
             body: self.current_body(),
@@ -2696,6 +2708,7 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             ty: None,
+            init_expr: None,
             mutable,
         });
         let scope = self.current_scope();
@@ -2792,6 +2805,7 @@ impl VirBuilder {
                                 body: self.current_body(),
                                 scope: self.current_scope(),
                                 ty: None,
+                                init_expr: None,
                                 mutable: false,
                             });
                             let scope = self.current_scope();
@@ -2871,6 +2885,7 @@ impl VirBuilder {
                 body: self.current_body(),
                 scope: self.current_scope(),
                 ty: None,
+                init_expr: None,
                 mutable: false,
             });
             let scope = self.current_scope();
@@ -2922,6 +2937,7 @@ impl VirBuilder {
                                         body: self.current_body(),
                                         scope: self.current_scope(),
                                         ty: None,
+                                        init_expr: None,
                                         mutable: false,
                                     });
                                     let scope = self.current_scope();
@@ -2991,6 +3007,7 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             ty: None,
+            init_expr: None,
             mutable,
         });
         let scope = self.current_scope();
