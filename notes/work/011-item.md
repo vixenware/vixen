@@ -1,7 +1,9 @@
-# 009: Toward cc-version.vx through the real pipeline
+# 011: Toward `zoo/cc-version.vx` Through The Real Pipeline
 
 Close the gap to `zoo/cc-version.vx` — the near-term trajectory target from
 eval3-axes.md.
+
+Status: Not started.
 
 ## Good news
 
@@ -33,8 +35,5 @@ Once 008 is done, cc-version should be close.
 
 ## Depends on
 
-007 (demand-driven runtime), possibly 006 (thunks for lazy observer fields)
-
-## Status
-
-Not started.
+010 (inline product laziness), 013 (demand roots/propagation cleanup), 014 (kernel entry exprs/types),
+and 017 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.
