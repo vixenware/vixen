@@ -4,15 +4,14 @@
 let-bound products. Inline projections like `Pair { a: 42, b: bomb() }.a`
 never get lazy extraction because there's no `base_binding`.
 
-Status: Not started.
+Status: Done (commit `3ce8651e`).
 
-## What needs to change
+## What changed
 
-In `bridge_to_analysis.rs`, `seed_lazy_product_fields` needs to also
-track `bridge.products` (not just `binding_products`) and match
-projections by `base` expr, not just `base_binding`.
+- The bridge and analysis now seed lazy sibling fields for inline tuple/struct projections.
+- Exec-slice lowering resolves projection chains and named field selection for slice0 shapes.
 
-## Fixtures blocked
+## Fixtures fixed
 
 - 20_partial_force — nested inline tuple projection
 - 29_struct_dead_field — inline struct literal projection

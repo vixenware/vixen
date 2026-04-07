@@ -1,49 +1,38 @@
-# 016: Replace Span-Keyed `lower_strict.rs` With KernelOp-Based Strict Lowering
+# 016: Capture Pruning For Synthesized Thunk Bodies (`AllocThunk`)
 
 Status: Not started.
 
 ## Goal
 
-Stop generating Kajit strict fragments by re-walking the raw parser AST keyed by spans. Instead, generate strict fragments from the already-lowered executable slice (`ExecutableBody.ops`) when those ops are in the strict-compatible subset.
-
-This makes “strict compilation” a property of the lowering output, not a property of a second independent AST walk.
+Stop `synthesize_thunk_body` from over-capturing every in-scope binding by default. Captures for extracted thunk bodies should be pruned to only the bindings actually referenced by the thunk body after lowering, matching the closure pruning approach added in work item 009.
 
 ## Motivation
 
-The current strict path:
+Even if runtime forcing is demand-driven, “capture everything” makes:
 
-- is brittle (span matching, wrapper peeling, duplicate expression discovery)
-- bypasses analysis decisions (the strict lowerer ignores `KernelRegion.exprs` and extracted nodes)
-- makes it hard to compile synthesized bodies (thunk bodies and closure bodies) because they do not correspond to a source `FnDecl`
+- thunk allocation heavier
+- later remapping / specialization harder
+- correctness reasoning around “what escapes” fuzzier
 
-KernelOps are already a statement-like IR that is closer to the intended lazy-core direction, and they can be used as the strict fragment source of truth.
+Closures already have a capture-pruning pass based on `collect_referenced_slots`. Thunks should use the same mechanism.
 
 ## Work
 
-- Define a strict-compatible subset of `KernelOp` that can be compiled:
-- scalar const ops
-- scalar arithmetic and comparisons
-- string ops if Kajit supports them (or exclude initially)
-- pure `Select` with strict bool condition
-- Define a new strict lowerer that takes:
-- `params: &[SlotId]`
-- `ops: &[KernelOp]`
-- `result_slot: SlotId`
-- and produces a `kajit_hir::VixenTypedFunction`
-- Wire this into `vx-analysis` lowering:
-- After `exec_slice::lower_executable_program(...)`, attempt strict-lowering for each `ExecutableBody`.
-- If strict lowering succeeds, set `kernel_kind = Strict { vtf }`, otherwise keep interpreted.
-- Keep the existing AST-based strict lowerer temporarily as a fallback path for bodies that have no KernelOps representation yet (if any).
-- Add tests that validate:
-- a simple scalar function compiles strictly via the KernelOp path
-- mixed bodies (runtime boundaries) stay interpreted
+- Apply the same “lower then prune” algorithm used in `synthesize_closure_body` to `synthesize_thunk_body`:
+- Provisionally assign capture param slots for all candidate parent bindings.
+- Lower the thunk body.
+- Compute `used_slots` from ops + result slot.
+- Keep only used capture slots, remap slots, and rebuild `params` and `captures`.
+- Ensure the returned `captures: Vec<Operand>` matches the pruned `params` ordering.
+- Add a unit test that exercises:
+- a lazy product field thunk that mentions only one of several bindings in scope
+- the produced `AllocThunk.captures.len()` is minimal (or at least smaller than total bindings).
 
 ## Acceptance
 
-- Existing tests remain green.
-- At least one existing fixture that previously compiled strictly still compiles strictly.
-- We can strict-compile a synthesized closure body or thunk body once 017 is done (or via a targeted unit test).
+- All existing tests stay green.
+- New test asserts pruning behavior (counts, or exact capture binding identity if we expose it).
 
 ## Notes
 
-This item is about eliminating duplicate semantics sources. It does not yet implement the full “typed Ref<T>/Obs<T> lazy core” model. It is the incremental step that makes that transition possible without rewriting strict lowering twice.
+This item is purposely about “capture shape”, not about changing the runtime representation of captures to `Ref<T>` (that is a later, larger shift).

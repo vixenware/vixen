@@ -1,37 +1,39 @@
-# 018: Incremental Typed Expression Graph In The Bridge (Replace Ad Hoc AST Walks)
+# 018: Strict Compilation For Extracted Thunks + Closure Bodies (Partial Compilation In Mixed Programs)
 
 Status: Not started.
 
 ## Goal
 
-Move from “lowering by re-walking parser AST” to “lowering by stable, typed, ID-addressable expression nodes”, without taking on a full new IR all at once.
+Enable “compile some parts through Kajit and evaluate the rest” in the most incremental way: strict-compile the synthesized bodies (thunk bodies and closure bodies) even when the top-level body must remain interpreted due to boundaries or other non-strict ops.
 
 ## Motivation
 
-Even after 016, we still rely on span matching and raw AST access in multiple places (bridge enrichment, exec_slice lowering, evaluator tests). A small typed expression graph in the bridge gives us:
+Right now, strict compilation tends to be “all or nothing per top-level body”. That blocks the main promise of strict fragments: most real code is mixed, especially build-shaped programs where boundaries exist but lots of local computation is still pure and scalar.
 
-- stable ExprId addressing without span heuristics
-- explicit child edges (no `syntax().descendants()` re-discovery)
-- one place to attach expression types
+The extracted thunk bodies are the natural unit of partial compilation because:
 
-This is the incremental path toward a real lazy-core IR.
+- they already exist as separate `ExecutableBody` units
+- they represent “demanded cones” (or at least extracted identity points)
+- they are often scalar/pure, making them good strict fragment candidates
 
 ## Work
 
-- Add a `BridgeExprNode` (or similar) keyed by `ExprId` with:
-- node kind (literal, name ref, binary op, call, tuple, struct literal, field, if, closure)
-- child ExprIds for structural edges
-- optional resolved callee target (for direct calls)
-- type `Ty` (if known)
-- Populate it during bridge construction using the existing `vx_parser::Expr` AST once, but store only stable IDs and small enums.
-- Refactor exec_slice lowering to use `BridgeExprNode` instead of `expr_nodes_by_id` AST scanning.
-- Refactor any remaining “span-keyed” strict lowering machinery to use ExprIds directly.
+- Prerequisite: 017 (KernelOp-based strict lowering).
+- Ensure `lower::lower_executable_program` attempts strict compilation for:
+- the entry body
+- any additional bodies in the program map, including synthesized body IDs (>= 10000)
+- Extend whatever runtime/evaluator path consumes `KernelKind::Strict` so it can execute strict kernels for those bodies.
+- Add a regression test fixture where:
+- the top-level body contains a runtime boundary (so it must stay interpreted)
+- but a sibling extracted thunk is pure scalar and gets strict-compiled
 
 ## Acceptance
 
 - Existing tests remain green.
-- `exec_slice` no longer needs to build a `HashMap<ExprId, Expr>` by scanning AST descendants.
+- Demonstrate in logs or a unit test assertion that:
+- at least one synthesized body is marked `KernelKind::Strict { .. }`
+- the surrounding program still runs and produces the same result
 
 ## Notes
 
-This work item is intentionally “bridge-local” and should not create a new public IR. It is a stepping stone so later work can introduce lazy-core operations with fewer moving parts.
+This item is not yet “real eval3 lazy core”. It is a practical stepping stone that aligns the implementation with the strict-fragment execution strategy described in `notes/eval/compiler-pipeline.md`.

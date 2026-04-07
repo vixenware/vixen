@@ -35,5 +35,5 @@ Once 008 is done, cc-version should be close.
 
 ## Depends on
 
-010 (inline product laziness), 013 (demand roots/propagation cleanup), 014 (kernel entry exprs/types),
-and 017 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.
+010 (inline product laziness), 013 (recursive projection base resolution), 014 (demand roots/propagation cleanup),
+015 (kernel entry exprs/types), and 018 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.

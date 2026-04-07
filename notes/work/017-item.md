@@ -1,39 +1,49 @@
-# 017: Strict Compilation For Extracted Thunks + Closure Bodies (Partial Compilation In Mixed Programs)
+# 017: Replace Span-Keyed `lower_strict.rs` With KernelOp-Based Strict Lowering
 
 Status: Not started.
 
 ## Goal
 
-Enable “compile some parts through Kajit and evaluate the rest” in the most incremental way: strict-compile the synthesized bodies (thunk bodies and closure bodies) even when the top-level body must remain interpreted due to boundaries or other non-strict ops.
+Stop generating Kajit strict fragments by re-walking the raw parser AST keyed by spans. Instead, generate strict fragments from the already-lowered executable slice (`ExecutableBody.ops`) when those ops are in the strict-compatible subset.
+
+This makes “strict compilation” a property of the lowering output, not a property of a second independent AST walk.
 
 ## Motivation
 
-Right now, strict compilation tends to be “all or nothing per top-level body”. That blocks the main promise of strict fragments: most real code is mixed, especially build-shaped programs where boundaries exist but lots of local computation is still pure and scalar.
+The current strict path:
 
-The extracted thunk bodies are the natural unit of partial compilation because:
+- is brittle (span matching, wrapper peeling, duplicate expression discovery)
+- bypasses analysis decisions (the strict lowerer ignores `KernelRegion.exprs` and extracted nodes)
+- makes it hard to compile synthesized bodies (thunk bodies and closure bodies) because they do not correspond to a source `FnDecl`
 
-- they already exist as separate `ExecutableBody` units
-- they represent “demanded cones” (or at least extracted identity points)
-- they are often scalar/pure, making them good strict fragment candidates
+KernelOps are already a statement-like IR that is closer to the intended lazy-core direction, and they can be used as the strict fragment source of truth.
 
 ## Work
 
-- Prerequisite: 016 (KernelOp-based strict lowering).
-- Ensure `lower::lower_executable_program` attempts strict compilation for:
-- the entry body
-- any additional bodies in the program map, including synthesized body IDs (>= 10000)
-- Extend whatever runtime/evaluator path consumes `KernelKind::Strict` so it can execute strict kernels for those bodies.
-- Add a regression test fixture where:
-- the top-level body contains a runtime boundary (so it must stay interpreted)
-- but a sibling extracted thunk is pure scalar and gets strict-compiled
+- Define a strict-compatible subset of `KernelOp` that can be compiled:
+- scalar const ops
+- scalar arithmetic and comparisons
+- string ops if Kajit supports them (or exclude initially)
+- pure `Select` with strict bool condition
+- Define a new strict lowerer that takes:
+- `params: &[SlotId]`
+- `ops: &[KernelOp]`
+- `result_slot: SlotId`
+- and produces a `kajit_hir::VixenTypedFunction`
+- Wire this into `vx-analysis` lowering:
+- After `exec_slice::lower_executable_program(...)`, attempt strict-lowering for each `ExecutableBody`.
+- If strict lowering succeeds, set `kernel_kind = Strict { vtf }`, otherwise keep interpreted.
+- Keep the existing AST-based strict lowerer temporarily as a fallback path for bodies that have no KernelOps representation yet (if any).
+- Add tests that validate:
+- a simple scalar function compiles strictly via the KernelOp path
+- mixed bodies (runtime boundaries) stay interpreted
 
 ## Acceptance
 
 - Existing tests remain green.
-- Demonstrate in logs or a unit test assertion that:
-- at least one synthesized body is marked `KernelKind::Strict { .. }`
-- the surrounding program still runs and produces the same result
+- At least one existing fixture that previously compiled strictly still compiles strictly.
+- We can strict-compile a synthesized closure body or thunk body once 018 is done (or via a targeted unit test).
 
 ## Notes
 
-This item is not yet “real eval3 lazy core”. It is a practical stepping stone that aligns the implementation with the strict-fragment execution strategy described in `notes/eval/compiler-pipeline.md`.
+This item is about eliminating duplicate semantics sources. It does not yet implement the full “typed Ref<T>/Obs<T> lazy core” model. It is the incremental step that makes that transition possible without rewriting strict lowering twice.

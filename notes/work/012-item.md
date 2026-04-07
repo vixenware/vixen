@@ -26,4 +26,4 @@ Status: Not started.
 
 ## Depends on
 
-013 (demand propagation cleanup), 014 (kernel entry exprs/types).
+014 (demand propagation cleanup), 015 (kernel entry exprs/types).
