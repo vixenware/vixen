@@ -354,3 +354,62 @@ fn main() -> U64 (
         "Expected LazyProductField for _1 via cross-function seeding. Got: {lazy_nodes:?}"
     );
 }
+
+/// Thunk capture pruning: a thunk for `bomb()` (which references no parent bindings)
+/// should have zero captures, even when multiple bindings are in scope.
+#[test]
+fn thunk_capture_pruning_minimal() {
+    use vx_analysis::KernelOp;
+
+    // The product is returned (so MakePair is emitted), but _0 is also projected
+    // (making _1 a dead sibling that gets thunked). bomb() doesn't reference
+    // any parent bindings, so the thunk should have zero captures.
+    let source = r#"
+fn bomb() -> U64 ( trap("boom") )
+fn main() -> (U64, U64) (
+  let a = 1;
+  let b = 2;
+  let c = 3;
+  let p = (a + b + c, bomb());
+  let x = p._0;
+  p
+)
+"#;
+    let (program, _bridge, _analysis, body_id) = lower_entry_ops(source);
+
+    let entry_ops = &program
+        .bodies
+        .get(&body_id)
+        .expect("missing entry body")
+        .ops;
+
+    let thunk_ops: Vec<_> = entry_ops
+        .iter()
+        .filter_map(|op| match op {
+            KernelOp::AllocThunk {
+                captures,
+                thunk_body,
+                ..
+            } => Some((captures, thunk_body)),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !thunk_ops.is_empty(),
+        "Expected at least one AllocThunk. Ops: {entry_ops:#?}"
+    );
+
+    for (captures, thunk_body) in &thunk_ops {
+        // bomb() takes no args and references no parent bindings,
+        // so its thunk should have zero captures after pruning.
+        assert_eq!(
+            captures.len(),
+            0,
+            "Expected zero captures for bomb() thunk (body {:?}), got {}: {:?}",
+            thunk_body,
+            captures.len(),
+            captures
+        );
+    }
+}
