@@ -10,7 +10,6 @@ publish = false
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-eyre = { workspace = true }
 
 [lints]
 workspace = true

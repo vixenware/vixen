@@ -3862,7 +3862,6 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "cbindgen",
- "facet",
  "facet-json",
  "libc",
  "objc2",
@@ -3882,7 +3881,6 @@ name = "vx-fskit-types"
 version = "0.1.0"
 dependencies = [
  "facet",
- "facet-json",
 ]
 
 [[package]]
@@ -3920,9 +3918,6 @@ dependencies = [
  "kajit-hir",
  "thiserror 2.0.18",
  "vx-analysis",
- "vx-parser",
- "vx-resolve",
- "vx-types",
 ]
 
 [[package]]
@@ -4564,9 +4559,6 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
-dependencies = [
- "eyre",
-]
 
 [[package]]
 name = "yansi"

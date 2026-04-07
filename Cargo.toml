@@ -124,10 +124,6 @@ arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
 
-
-# time
-jiff = "0.2"
-
 # paths
 camino = "1"
 
