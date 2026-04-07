@@ -85,6 +85,12 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         &mut next_runtime_node,
         bridge,
     );
+    seed_cross_function_lazy_fields(
+        &mut bodies,
+        &mut runtime_nodes,
+        &mut next_runtime_node,
+        bridge,
+    );
 
     // Build kernels AFTER extracted nodes are seeded, so we can exclude
     // extracted expressions from each kernel's expr set.
@@ -156,7 +162,6 @@ fn apply_one_step_local_call_demands(
     }
     mains.sort_by_key(|id| id.0);
     mains.dedup();
-    let use_transitive_local_call_propagation = mains.is_empty();
     let entry_ids = if !mains.is_empty() {
         mains
     } else {
@@ -225,9 +230,7 @@ fn apply_one_step_local_call_demands(
             match edge.callee {
                 crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
                     demanded_bodies.insert(callee_body);
-                    if use_transitive_local_call_propagation {
-                        visit_queue.push(callee_body);
-                    }
+                    visit_queue.push(callee_body);
                 }
                 crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
                     if let Some(layout_id) = caller.callee_closure_layouts.get(&edge.call_expr) {
@@ -664,6 +667,235 @@ fn seed_lazy_product_fields(
             });
         }
     }
+}
+
+/// Cross-function lazy field seeding: when a caller passes a product to a callee
+/// that only projects some fields, the non-projected siblings should be thunked
+/// at the caller's product construction site.
+///
+/// Example: `fn pick_first(p: (U64, U64)) -> U64 ( p._0 )`
+/// called as `pick_first((42, bomb()))` — field _1 is dead and should be thunked.
+fn seed_cross_function_lazy_fields(
+    bodies: &mut [AnalyzedBody],
+    runtime_nodes: &mut Vec<RuntimeNode>,
+    next_runtime_node: &mut u32,
+    bridge: &SingleSourceBridge,
+) {
+    // Index: DefId → BodyId
+    let body_by_def: HashMap<DefId, BodyId> = bridge
+        .bodies
+        .iter()
+        .filter_map(|b| Some((b.def_id?, b.id)))
+        .collect();
+
+    // Index: ExprId → BridgeLocalBindingId (for resolving projection bases)
+    let use_by_expr: HashMap<ExprId, BridgeLocalBindingId> = bridge
+        .local_uses
+        .iter()
+        .map(|u| (u.expr, u.binding))
+        .collect();
+
+    // Products by (body, expr)
+    let products_by_expr: HashMap<(BodyId, ExprId), &Vec<(FieldKey, Option<ExprId>)>> = bridge
+        .products
+        .iter()
+        .map(|product| ((product.body, product.expr), &product.fields))
+        .collect();
+
+    // Projections indexed by expr
+    let projection_by_expr: HashMap<(BodyId, ExprId), &crate::BridgeProjection> = bridge
+        .projections
+        .iter()
+        .map(|p| ((p.body, p.expr), p))
+        .collect();
+
+    // Binding inits
+    let binding_inits: HashMap<BridgeLocalBindingId, ExprId> = bridge
+        .local_bindings
+        .iter()
+        .filter_map(|b| Some((b.id, b.init_expr?)))
+        .collect();
+
+    // For each body, collect parameter bindings in order
+    let params_by_body: HashMap<BodyId, Vec<BridgeLocalBindingId>> = {
+        let mut map: HashMap<BodyId, Vec<_>> = HashMap::new();
+        for binding in &bridge.local_bindings {
+            if binding.kind == crate::BridgeLocalBindingKind::Parameter {
+                map.entry(binding.body).or_default().push(binding.id);
+            }
+        }
+        // Parameters are already sorted before lets in the bindings list,
+        // so they appear in parameter order.
+        map
+    };
+
+    // For each body+param, collect which fields are projected from that param
+    let mut projected_fields_by_param: HashMap<(BodyId, BridgeLocalBindingId), BTreeSet<FieldKey>> =
+        HashMap::new();
+    for proj in &bridge.projections {
+        // Is proj.base a use of a parameter binding?
+        if let Some(&binding_id) = use_by_expr.get(&proj.base) {
+            if bridge
+                .local_bindings
+                .iter()
+                .any(|b| b.id == binding_id && b.kind == crate::BridgeLocalBindingKind::Parameter)
+            {
+                projected_fields_by_param
+                    .entry((proj.body, binding_id))
+                    .or_default()
+                    .insert(proj.field.clone());
+            }
+        }
+    }
+
+    let mut seeds: Vec<(BodyId, ExprId, FieldKey)> = Vec::new();
+
+    for call_site in &bridge.call_sites {
+        // Only handle top-level function calls
+        let Some(target_def) = call_site.target else {
+            continue;
+        };
+        let Some(&callee_body_id) = body_by_def.get(&target_def) else {
+            continue;
+        };
+        let Some(callee_params) = params_by_body.get(&callee_body_id) else {
+            continue;
+        };
+
+        // Match each argument to its corresponding parameter
+        for (arg_index, &arg_expr) in call_site.arg_exprs.iter().enumerate() {
+            let Some(&param_binding) = callee_params.get(arg_index) else {
+                continue;
+            };
+
+            // What fields does the callee project from this param?
+            let Some(projected) = projected_fields_by_param.get(&(callee_body_id, param_binding))
+            else {
+                continue;
+            };
+
+            // Resolve the caller-side argument to its product construction
+            let Some((product_expr, product_fields)) = resolve_to_product(
+                arg_expr,
+                call_site.body,
+                &use_by_expr,
+                &products_by_expr,
+                &projection_by_expr,
+                &binding_inits,
+                &mut HashSet::new(),
+            ) else {
+                continue;
+            };
+
+            let all_fields: Vec<FieldKey> = product_fields.iter().map(|(k, _)| k.clone()).collect();
+
+            if all_fields.len() <= 1 {
+                continue;
+            }
+
+            // Seed non-projected siblings as lazy
+            for field in &all_fields {
+                if !projected.contains(field) {
+                    seeds.push((call_site.body, product_expr, field.clone()));
+                }
+            }
+        }
+    }
+
+    seeds.sort_by_key(|(body, expr, field)| (body.0, expr.0, field.clone()));
+    seeds.dedup();
+
+    for (body_id, source_expr, sibling_field) in seeds {
+        let node_id = RuntimeNodeId(*next_runtime_node);
+        *next_runtime_node += 1;
+
+        let source = SourceExpr {
+            body: body_id,
+            expr: source_expr,
+        };
+        runtime_nodes.push(RuntimeNode::Lazy {
+            id: node_id,
+            source: source.clone(),
+        });
+
+        if let Some(body) = bodies.iter_mut().find(|body| body.id == body_id) {
+            body.extracted_nodes.push(ExtractedNode {
+                id: node_id,
+                source,
+                reason: ExtractedNodeReason::LazyProductField {
+                    field: sibling_field,
+                },
+            });
+        }
+    }
+}
+
+/// Uses the same `resolve_to_product` logic but as a standalone function accessible
+/// from `seed_cross_function_lazy_fields`.
+fn resolve_to_product<'a>(
+    expr: ExprId,
+    body: BodyId,
+    use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
+    products_by_expr: &HashMap<(BodyId, ExprId), &'a Vec<(FieldKey, Option<ExprId>)>>,
+    projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+    binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
+    visited: &mut HashSet<ExprId>,
+) -> Option<(ExprId, &'a Vec<(FieldKey, Option<ExprId>)>)> {
+    if !visited.insert(expr) {
+        return None;
+    }
+
+    // Direct product?
+    if let Some(product) = products_by_expr.get(&(body, expr)) {
+        return Some((expr, product));
+    }
+
+    // Binding use → follow initializer
+    if let Some(&binding_id) = use_by_expr.get(&expr) {
+        if let Some(&init) = binding_inits.get(&binding_id) {
+            if let Some(result) = resolve_to_product(
+                init,
+                body,
+                use_by_expr,
+                products_by_expr,
+                projection_by_expr,
+                binding_inits,
+                visited,
+            ) {
+                return Some(result);
+            }
+        }
+    }
+
+    // Projection → resolve base recursively, then follow the projected field
+    if let Some(proj) = projection_by_expr.get(&(body, expr)) {
+        if let Some((_base_expr, base_product)) = resolve_to_product(
+            proj.base,
+            body,
+            use_by_expr,
+            products_by_expr,
+            projection_by_expr,
+            binding_inits,
+            visited,
+        ) {
+            if let Some(sub_expr) = base_product
+                .iter()
+                .find_map(|(k, e)| if *k == proj.field { *e } else { None })
+            {
+                return resolve_to_product(
+                    sub_expr,
+                    body,
+                    use_by_expr,
+                    products_by_expr,
+                    projection_by_expr,
+                    binding_inits,
+                    visited,
+                );
+            }
+        }
+    }
+
+    None
 }
 
 /// For `let inner = outer._0` where `outer` is `((safe(), bomb()), ...)`,

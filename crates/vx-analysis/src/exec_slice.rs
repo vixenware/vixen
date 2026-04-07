@@ -1132,6 +1132,49 @@ impl<'a> BodyLowering<'a> {
         self.next_thunk_body_id = child.next_thunk_body_id;
         self.thunk_bodies.extend(child.thunk_bodies);
 
+        // Prune unused captures: collect all slots referenced in ops and result
+        let capture_count = parent_bindings.len();
+        let mut used_slots: HashSet<SlotId> = HashSet::new();
+        used_slots.insert(result_slot);
+        for op in &child.ops {
+            collect_referenced_slots(op, &mut used_slots);
+        }
+
+        let mut slot_remap: HashMap<SlotId, SlotId> = HashMap::new();
+        let mut final_params = Vec::new();
+        let mut final_captures = Vec::new();
+        let mut new_slot = 0u32;
+
+        for i in 0..capture_count {
+            let old_slot = SlotId(i as u32);
+            if used_slots.contains(&old_slot) {
+                let (binding, _parent_slot) = parent_bindings[i];
+                self.materialize_binding(binding)?;
+
+                let ns = SlotId(new_slot);
+                new_slot += 1;
+                slot_remap.insert(old_slot, ns);
+                final_params.push(ns);
+                final_captures.push(capture_operands[i].clone());
+            }
+        }
+
+        // Remap generated (non-param) slots
+        for s in (capture_count as u32)..child.next_slot {
+            let old = SlotId(s);
+            if !slot_remap.contains_key(&old) {
+                slot_remap.insert(old, SlotId(new_slot));
+                new_slot += 1;
+            }
+        }
+
+        let final_result_slot = slot_remap.get(&result_slot).copied().unwrap_or(result_slot);
+        let final_ops: Vec<KernelOp> = child
+            .ops
+            .into_iter()
+            .map(|op| remap_op_slots(op, &slot_remap))
+            .collect();
+
         let kernel = self
             .analyzed
             .kernel_entries
@@ -1145,15 +1188,15 @@ impl<'a> BodyLowering<'a> {
                 id: thunk_body_id,
                 kernel,
                 kernel_kind: KernelKind::Interpreted,
-                params: thunk_params,
-                ops: child.ops,
-                result_source: ResultSource::Slot(result_slot),
+                params: final_params,
+                ops: final_ops,
+                result_source: ResultSource::Slot(final_result_slot),
                 runtime_boundary_extractions: vec![],
                 local_call_dependencies: child.local_call_dependencies.into_iter().collect(),
             },
         ));
 
-        Ok((thunk_body_id, capture_operands))
+        Ok((thunk_body_id, final_captures))
     }
 
     fn synthesize_closure_body(

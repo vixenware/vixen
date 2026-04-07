@@ -124,12 +124,14 @@ pub enum BridgeCallSiteKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeCallSite {
     pub body: BodyId,
     pub expr: ExprId,
     pub kind: BridgeCallSiteKind,
     pub target: Option<DefId>,
+    /// ExprIds of positional arguments, in order.
+    pub arg_exprs: Vec<ExprId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1183,11 +1185,26 @@ fn collect_call_sites(
                 target = Some(*def_id);
             }
 
+            let arg_exprs: Vec<ExprId> = call
+                .args()
+                .filter_map(|arg| {
+                    let mut expr = arg.expr()?;
+                    // Unwrap paren expressions to get the inner expression,
+                    // so arg_exprs points to the NameRef/value, not the paren wrapper.
+                    while let Expr::Paren(paren) = &expr {
+                        expr = paren.expr()?;
+                    }
+                    let span = SourceSpan::new(source_id, expr.syntax().text_range());
+                    by_span.get(&span).copied()
+                })
+                .collect();
+
             Some(BridgeCallSite {
                 body,
                 expr: call_expr,
                 kind,
                 target,
+                arg_exprs,
             })
         })
         .collect::<Vec<_>>();

@@ -1,5 +1,5 @@
 use vx_analysis::{
-    BodyId, ExtractedNodeReason, FieldKey, SingleSourceBridge, build_minimal_analysis,
+    BodyId, ExtractedNodeReason, FieldKey, Observation, SingleSourceBridge, build_minimal_analysis,
     lower_executable_program_for_entry_body,
 };
 
@@ -258,4 +258,99 @@ fn main() -> U64 (
              MakePairs: {make_pair_count}, AllocThunks: {alloc_thunk_count}. Ops: {all_ops:#?}"
         );
     }
+}
+
+// --- 014: Demand propagation tests ---
+
+/// main → helper → leaf: all three bodies should have result_observation == NeedValue.
+#[test]
+fn demand_propagation_transitive_call_chain() {
+    let source = r#"
+fn leaf() -> U64 ( 1 )
+fn helper() -> U64 ( leaf() )
+fn main() -> U64 ( helper() )
+"#;
+    let bridge = SingleSourceBridge::from_source_text(source);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let find_body = |name: &str| -> &vx_analysis::AnalyzedBody {
+        let body_id = bridge.bodies.iter().find(|b| b.name == name).unwrap().id;
+        analysis.bodies.iter().find(|b| b.id == body_id).unwrap()
+    };
+
+    assert_eq!(
+        find_body("main").result_observation,
+        Observation::NeedValue,
+        "main should be NeedValue"
+    );
+    assert_eq!(
+        find_body("helper").result_observation,
+        Observation::NeedValue,
+        "helper should be NeedValue (transitively demanded by main)"
+    );
+    assert_eq!(
+        find_body("leaf").result_observation,
+        Observation::NeedValue,
+        "leaf should be NeedValue (transitively demanded by main → helper)"
+    );
+}
+
+/// A disconnected top-level function (not called by main or anyone reachable from main)
+/// should remain NoObs.
+#[test]
+fn demand_propagation_disconnected_stays_noobs() {
+    let source = r#"
+fn disconnected() -> U64 ( 99 )
+fn main() -> U64 ( 42 )
+"#;
+    let bridge = SingleSourceBridge::from_source_text(source);
+    let analysis = build_minimal_analysis(&bridge);
+
+    let find_body = |name: &str| -> &vx_analysis::AnalyzedBody {
+        let body_id = bridge.bodies.iter().find(|b| b.name == name).unwrap().id;
+        analysis.bodies.iter().find(|b| b.id == body_id).unwrap()
+    };
+
+    assert_eq!(
+        find_body("main").result_observation,
+        Observation::NeedValue,
+        "main should be NeedValue"
+    );
+    assert_eq!(
+        find_body("disconnected").result_observation,
+        Observation::NoObs,
+        "disconnected should remain NoObs (not reachable from main)"
+    );
+}
+
+/// Cross-function: when pick_first only projects _0 from its param,
+/// the caller's product should have _1 seeded as lazy.
+#[test]
+fn cross_function_lazy_seeding() {
+    let source = r#"
+fn bomb() -> U64 ( trap("boom") )
+fn pick_first(p: (U64, U64)) -> U64 ( p._0 )
+fn main() -> U64 (
+  let p = (42, bomb());
+  pick_first(p)
+)
+"#;
+    let bridge = SingleSourceBridge::from_source_text(source);
+    let analysis = build_minimal_analysis(&bridge);
+    let body_id = bridge.bodies.iter().find(|b| b.name == "main").unwrap().id;
+    let main_body = analysis.bodies.iter().find(|b| b.id == body_id).unwrap();
+
+    let lazy_nodes: Vec<_> = main_body
+        .extracted_nodes
+        .iter()
+        .filter(|en| matches!(en.reason, ExtractedNodeReason::LazyProductField { .. }))
+        .collect();
+
+    assert!(
+        lazy_nodes.iter().any(|en| matches!(
+            &en.reason,
+            ExtractedNodeReason::LazyProductField { field } if *field == FieldKey::Index(1)
+        )),
+        "Expected LazyProductField for _1 via cross-function seeding. Got: {lazy_nodes:?}"
+    );
 }
