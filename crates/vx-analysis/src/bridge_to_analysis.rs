@@ -390,15 +390,27 @@ fn seed_lazy_product_fields(
     next_runtime_node: &mut u32,
     bridge: &SingleSourceBridge,
 ) {
-    // Direct binding → product field keys
-    let binding_products: HashMap<(BodyId, &str), Vec<FieldKey>> = bridge
+    // Index: binding name → binding ID (for resolving BridgeBindingProduct)
+    let binding_id_by_name: HashMap<(BodyId, &str), BridgeLocalBindingId> = bridge
+        .local_bindings
+        .iter()
+        .map(|b| ((b.body, b.name.as_str()), b.id))
+        .collect();
+
+    // Index: ExprId → binding ID (for resolving projection bases)
+    let use_by_expr: HashMap<ExprId, BridgeLocalBindingId> = bridge
+        .local_uses
+        .iter()
+        .map(|u| (u.expr, u.binding))
+        .collect();
+
+    // Direct binding → product field keys (keyed by binding ID)
+    let binding_products: HashMap<BridgeLocalBindingId, Vec<FieldKey>> = bridge
         .binding_products
         .iter()
-        .map(|product| {
-            (
-                (product.body, product.binding.as_str()),
-                product.fields.clone(),
-            )
+        .filter_map(|product| {
+            let id = binding_id_by_name.get(&(product.body, product.binding.as_str()))?;
+            Some((*id, product.fields.clone()))
         })
         .collect();
 
@@ -419,13 +431,7 @@ fn seed_lazy_product_fields(
     // Derive binding → product field keys by following projection chains.
     // If `let inner = outer._0` and `outer._0` sub-expression is a product,
     // then `inner` is effectively that product.
-    let binding_by_name: HashMap<(BodyId, &str), &crate::BridgeLocalBinding> = bridge
-        .local_bindings
-        .iter()
-        .map(|b| ((b.body, b.name.as_str()), b))
-        .collect();
-
-    let mut all_binding_products: HashMap<(BodyId, &str), Vec<FieldKey>> = binding_products;
+    let mut all_binding_products: HashMap<BridgeLocalBindingId, Vec<FieldKey>> = binding_products;
 
     // Follow one level of projection: let X = Y.field
     for binding in &bridge.local_bindings {
@@ -440,17 +446,13 @@ fn seed_lazy_product_fields(
             continue;
         };
         // Resolve base binding by ExprId (sound under shadowing)
-        let Some(base_use) = bridge
-            .local_uses
-            .iter()
-            .find(|u| u.body == binding.body && u.expr == proj.base)
-        else {
+        let Some(&base_binding_id) = use_by_expr.get(&proj.base) else {
             continue;
         };
         let Some(base_binding) = bridge
             .local_bindings
             .iter()
-            .find(|b| b.id == base_use.binding)
+            .find(|b| b.id == base_binding_id)
         else {
             continue;
         };
@@ -477,7 +479,7 @@ fn seed_lazy_product_fields(
                 .map(|(k, _): &(FieldKey, _)| k.clone())
                 .collect();
             if sub_keys.len() > 1 {
-                all_binding_products.insert((binding.body, &binding.name), sub_keys);
+                all_binding_products.insert(binding.id, sub_keys);
             }
         }
     }
@@ -492,25 +494,21 @@ fn seed_lazy_product_fields(
         })
         .collect();
 
-    let lookup_fields =
-        |body: BodyId, binding: Option<&str>, base_expr: ExprId| -> Option<Vec<FieldKey>> {
-            if let Some(binding) = binding {
-                if let Some(fields) = all_binding_products.get(&(body, binding)) {
-                    return Some(fields.clone());
-                }
+    let lookup_fields = |base_expr: ExprId, body: BodyId| -> Option<Vec<FieldKey>> {
+        // Try resolved binding first (sound under shadowing)
+        if let Some(&binding_id) = use_by_expr.get(&base_expr) {
+            if let Some(fields) = all_binding_products.get(&binding_id) {
+                return Some(fields.clone());
             }
-            inline_product_keys.get(&(body, base_expr)).cloned()
-        };
+        }
+        inline_product_keys.get(&(body, base_expr)).cloned()
+    };
 
     let mut seeds = bridge
         .projections
         .iter()
         .flat_map(|projection| {
-            let fields = lookup_fields(
-                projection.body,
-                projection.base_binding.as_deref(),
-                projection.base,
-            )?;
+            let fields = lookup_fields(projection.base, projection.body)?;
             if fields.len() <= 1 || !fields.contains(&projection.field) {
                 return None;
             }
