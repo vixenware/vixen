@@ -35,6 +35,7 @@ pub mod build;
 pub mod expr;
 pub mod item;
 pub mod pattern;
+pub mod resolve;
 pub mod scope;
 pub mod source_unit;
 pub mod stmt;

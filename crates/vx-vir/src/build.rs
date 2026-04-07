@@ -436,17 +436,25 @@ impl VirBuilder {
         let fn_span = self.span(f.syntax());
 
         // Scope parent for function bodies:
+        // - Nested functions (inside another fn/closure body) → parent = current scope.
+        // - Namespace functions → parent = current scope (the namespace scope).
         // - Top-level functions → parent = module scope (can see sibling items,
         //   NOT top-level lets which live in the thunk block scope).
-        // - Nested functions → parent = current scope (the enclosing block).
         let parent_scope = if parent_body.is_some() {
             Some(self.current_scope())
         } else {
-            // Top-level function: parent to module scope.
-            // The module scope is the parent of the current scope (thunk block).
-            // Walk up to find it.
             let current = self.current_scope();
-            self.arena[current].parent
+            match self.arena[current].owner {
+                ScopeOwner::Namespace(_) => {
+                    // Function inside a namespace: parent to the namespace scope.
+                    Some(current)
+                }
+                _ => {
+                    // Top-level function: parent to module scope.
+                    // The module scope is the parent of the current scope (thunk block).
+                    self.arena[current].parent
+                }
+            }
         };
         let placeholder_body = BodyId(self.arena.bodies.len() as u32);
         let scope_id = self.arena.alloc_scope(Scope {

@@ -5,8 +5,8 @@
 //! language constructs + Error). Parenthesized expressions are eliminated
 //! during the CST-to-VIR walk — the inner expression is used directly.
 
-use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
-use vx_resolve::{DefId, SourceSpan};
+use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
+use vx_resolve::SourceSpan;
 use vx_types::Ty;
 
 /// An expression node in the VIR.
@@ -180,20 +180,7 @@ pub struct NameRefExpr {
     /// What this name resolves to.
     /// Populated during: name resolution pass. `None` means unresolved
     /// (either an error or not yet resolved).
-    pub resolved: Option<DefTarget>,
-}
-
-/// What a name reference resolved to.
-#[derive(Debug, Clone)]
-pub enum DefTarget {
-    /// A local binding (let, parameter, pattern binding) in the same or
-    /// enclosing body.
-    Binding(BindingId),
-
-    /// A top-level definition (function, struct, enum, etc.) identified by
-    /// its resolver DefId. This is transitional — may become VIR-native
-    /// `ItemId` long-term.
-    Definition(DefId),
+    pub resolved: Option<crate::scope::DefTarget>,
 }
 
 /// A block expression: `{ stmts...; tail_expr }`.
