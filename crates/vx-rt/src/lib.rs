@@ -49,6 +49,7 @@ pub enum RtValue {
     Bool(bool),
     String(String),
     Pair(Thunk, Thunk),
+    Struct(Vec<(String, Thunk)>),
     CallableAddConst(Box<RtValue>),
     Closure(BodyId, Vec<RtValue>),
     Thunk(Thunk),
@@ -62,6 +63,7 @@ impl RtValue {
             RtValue::Bool(_) => "bool",
             RtValue::String(_) => "string",
             RtValue::Pair(_, _) => "pair",
+            RtValue::Struct(_) => "struct",
             RtValue::CallableAddConst(_) => "callable_add_const",
             RtValue::Closure(_, _) => "closure",
             RtValue::Thunk(_) => "thunk",
@@ -322,6 +324,19 @@ fn eval_op(
             Ok(RtValue::Pair(first_thunk, second_thunk))
         }
 
+        KernelOp::MakeStruct { fields, .. } => {
+            let mut thunk_fields = Vec::with_capacity(fields.len());
+            for (name, operand) in fields {
+                let val = resolve_operand(program, producers, slots, operand)?;
+                let thunk = match val {
+                    RtValue::Thunk(t) => t,
+                    v => Thunk::ready(v),
+                };
+                thunk_fields.push((name.clone(), thunk));
+            }
+            Ok(RtValue::Struct(thunk_fields))
+        }
+
         KernelOp::ProjectIndex { pair, index, .. } => {
             let pair_val = resolve_operand(program, producers, slots, pair)?;
             let pair_val = force_scalar(pair_val, program)?;
@@ -333,6 +348,28 @@ fn eval_op(
                 },
                 other => Err(RtError::TypeError {
                     expected: "pair",
+                    actual: other.kind_name().to_owned(),
+                }),
+            }
+        }
+
+        KernelOp::ProjectNamedField { value, field, .. } => {
+            let val = resolve_operand(program, producers, slots, value)?;
+            let val = force_scalar(val, program)?;
+            match val {
+                RtValue::Struct(fields) => {
+                    let (_, thunk) =
+                        fields
+                            .iter()
+                            .find(|(name, _)| name == field)
+                            .ok_or_else(|| RtError::TypeError {
+                                expected: "field",
+                                actual: format!("no field `{field}` in struct"),
+                            })?;
+                    thunk.force(program)
+                }
+                other => Err(RtError::TypeError {
+                    expected: "struct",
                     actual: other.kind_name().to_owned(),
                 }),
             }
@@ -432,7 +469,9 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AssignCallableAddConst { dst, .. }
         | KernelOp::ApplyCallable { dst, .. }
         | KernelOp::MakePair { dst, .. }
+        | KernelOp::MakeStruct { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }
+        | KernelOp::ProjectNamedField { dst, .. }
         | KernelOp::Add { dst, .. }
         | KernelOp::AssignConstBool { dst, .. }
         | KernelOp::Equal { dst, .. }

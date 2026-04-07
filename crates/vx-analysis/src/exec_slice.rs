@@ -177,11 +177,22 @@ pub enum KernelOp {
         first: Operand,
         second: Operand,
     },
+    MakeStruct {
+        dst: SlotId,
+        source: SourceExpr,
+        fields: Vec<(String, Operand)>,
+    },
     ProjectIndex {
         dst: SlotId,
         source: SourceExpr,
         pair: Operand,
         index: usize,
+    },
+    ProjectNamedField {
+        dst: SlotId,
+        source: SourceExpr,
+        value: Operand,
+        field: String,
     },
     Add {
         dst: SlotId,
@@ -756,6 +767,7 @@ struct BodyLowering<'a> {
     ops: Vec<KernelOp>,
     materialized_bindings: HashSet<BridgeLocalBindingId>,
     lazy_fields_by_expr: HashMap<ExprId, BTreeSet<u32>>,
+    lazy_named_fields_by_expr: HashMap<ExprId, BTreeSet<String>>,
     local_call_dependencies: BTreeSet<BodyId>,
     awaited_runtime_nodes: BTreeSet<RuntimeNodeId>,
     thunk_bodies: Vec<(BodyId, ExecutableBody)>,
@@ -879,15 +891,26 @@ impl<'a> BodyLowering<'a> {
             }
         }
         let mut lazy_fields_by_expr = HashMap::<ExprId, BTreeSet<u32>>::new();
+        let mut lazy_named_fields_by_expr = HashMap::<ExprId, BTreeSet<String>>::new();
         for extracted in &analyzed.extracted_nodes {
-            if let crate::ExtractedNodeReason::LazyProductField {
-                field: crate::FieldKey::Index(index),
-            } = extracted.reason
-            {
-                lazy_fields_by_expr
-                    .entry(extracted.source.expr)
-                    .or_default()
-                    .insert(index);
+            match &extracted.reason {
+                crate::ExtractedNodeReason::LazyProductField {
+                    field: crate::FieldKey::Index(index),
+                } => {
+                    lazy_fields_by_expr
+                        .entry(extracted.source.expr)
+                        .or_default()
+                        .insert(*index);
+                }
+                crate::ExtractedNodeReason::LazyProductField {
+                    field: crate::FieldKey::Name(name),
+                } => {
+                    lazy_named_fields_by_expr
+                        .entry(extracted.source.expr)
+                        .or_default()
+                        .insert(name.clone());
+                }
+                _ => {}
             }
         }
 
@@ -911,6 +934,7 @@ impl<'a> BodyLowering<'a> {
             ops: vec![],
             materialized_bindings: HashSet::new(),
             lazy_fields_by_expr,
+            lazy_named_fields_by_expr,
             local_call_dependencies: BTreeSet::new(),
             awaited_runtime_nodes: BTreeSet::new(),
             thunk_bodies: vec![],
@@ -1045,6 +1069,7 @@ impl<'a> BodyLowering<'a> {
             ops: vec![],
             materialized_bindings: HashSet::new(),
             lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
+            lazy_named_fields_by_expr: self.lazy_named_fields_by_expr.clone(),
             local_call_dependencies: BTreeSet::new(),
             awaited_runtime_nodes: BTreeSet::new(),
             thunk_bodies: vec![],
@@ -1341,6 +1366,7 @@ impl<'a> BodyLowering<'a> {
             ops: vec![],
             materialized_bindings: HashSet::new(),
             lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
+            lazy_named_fields_by_expr: self.lazy_named_fields_by_expr.clone(),
             local_call_dependencies: BTreeSet::new(),
             awaited_runtime_nodes: BTreeSet::new(),
             thunk_bodies: vec![],
@@ -1791,12 +1817,23 @@ impl<'a> BodyLowering<'a> {
                     .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
                 let value = self.lower_expr(receiver_id)?;
                 let dst = self.alloc_temp();
-                self.ops.push(KernelOp::ProjectField {
-                    dst,
-                    source: self.source_for(expr_id),
-                    value,
-                    field: runtime_field_from_name(&field_name)?,
-                });
+
+                // Try runtime field first (exit_code, stdout, stderr), then named field
+                if let Ok(rf) = runtime_field_from_name(&field_name) {
+                    self.ops.push(KernelOp::ProjectField {
+                        dst,
+                        source: self.source_for(expr_id),
+                        value,
+                        field: rf,
+                    });
+                } else {
+                    self.ops.push(KernelOp::ProjectNamedField {
+                        dst,
+                        source: self.source_for(expr_id),
+                        value,
+                        field: field_name,
+                    });
+                }
                 Ok(Operand::Slot(dst))
             }
             Expr::If(if_expr) => {
@@ -2089,6 +2126,52 @@ impl<'a> BodyLowering<'a> {
                     source,
                     callable,
                     arg: args[0].clone(),
+                });
+                Ok(Operand::Slot(dst))
+            }
+            Expr::StructLiteral(struct_lit) => {
+                let fields = struct_lit.fields().collect::<Vec<_>>();
+                let mut lowered_fields = Vec::with_capacity(fields.len());
+                for field in &fields {
+                    let field_name = field
+                        .name()
+                        .ok_or_else(|| UnsupportedShape("struct field name missing".to_owned()))?
+                        .text()
+                        .to_owned();
+                    let value_expr = field
+                        .expr()
+                        .ok_or_else(|| UnsupportedShape("struct field value missing".to_owned()))?;
+                    let value_id = self
+                        .expr_id(&value_expr)
+                        .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                    let operand = match self.lower_expr(value_id) {
+                        Ok(value) => value,
+                        Err(UnsupportedShape(_))
+                            if self
+                                .lazy_named_fields_by_expr
+                                .get(&expr_id)
+                                .is_some_and(|lazy| lazy.contains(&field_name)) =>
+                        {
+                            let (thunk_body_id, captures) = self.synthesize_thunk_body(value_id)?;
+                            let lazy = self.alloc_temp();
+                            self.ops.push(KernelOp::AllocThunk {
+                                dst: lazy,
+                                source: self.source_for(value_id),
+                                thunk_body: thunk_body_id,
+                                captures,
+                            });
+                            Operand::Slot(lazy)
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    lowered_fields.push((field_name, operand));
+                }
+
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::MakeStruct {
+                    dst,
+                    source: self.source_for(expr_id),
+                    fields: lowered_fields,
                 });
                 Ok(Operand::Slot(dst))
             }

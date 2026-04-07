@@ -383,13 +383,15 @@ impl<'a> ProgramEvaluator<'a> {
                     .await
             }
             KernelOp::AssignLazyPoison { label, .. } => Ok(EvalValue::Pending(label.clone())),
-            KernelOp::AllocThunk { .. } => {
-                // In the eager ProgramEvaluator, thunks are not yet supported.
-                // This will be handled by the demand-driven runtime (007).
-                Ok(EvalValue::Pending(
-                    "thunk (not yet supported in eager evaluator)".to_owned(),
-                ))
-            }
+            KernelOp::AllocThunk { .. } => Ok(EvalValue::Pending(
+                "thunk (not yet supported in eager evaluator)".to_owned(),
+            )),
+            KernelOp::MakeStruct { .. } => Ok(EvalValue::Pending(
+                "struct (not yet supported in eager evaluator)".to_owned(),
+            )),
+            KernelOp::ProjectNamedField { .. } => Ok(EvalValue::Pending(
+                "named field (not yet supported in eager evaluator)".to_owned(),
+            )),
             KernelOp::AssignCallableAddConst { addend, .. } => {
                 let addend = self
                     .resolve_operand(function_name, producers, slots, addend)
@@ -1413,7 +1415,9 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AssignCallableAddConst { dst, .. }
         | KernelOp::ApplyCallable { dst, .. }
         | KernelOp::MakePair { dst, .. }
+        | KernelOp::MakeStruct { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }
+        | KernelOp::ProjectNamedField { dst, .. }
         | KernelOp::Add { dst, .. }
         | KernelOp::AssignConstBool { dst, .. }
         | KernelOp::Equal { dst, .. }
