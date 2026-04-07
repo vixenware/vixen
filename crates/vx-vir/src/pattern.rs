@@ -144,8 +144,9 @@ pub struct VariantPattern {
     pub name: String,
     /// Span of the variant name.
     pub name_span: SourceSpan,
-    /// The resolved target of the variant name (points to the variant's
-    /// struct item in the enum declaration).
+    /// The resolved target of the variant name. Points to the parent enum's
+    /// `ItemId` — VIR does not have a separate VariantId, so the resolver
+    /// pairs this ItemId with the variant name to identify the specific variant.
     /// Populated during: name resolution pass.
     pub resolved: Option<ItemId>,
     /// Optional struct destructuring of the variant's fields.

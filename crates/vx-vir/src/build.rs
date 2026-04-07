@@ -337,9 +337,17 @@ impl VirBuilder {
         let fn_span = self.span(f.syntax());
 
         // Create body + scope.
+        // Top-level functions get scope.parent = None, matching body.parent = None.
+        // This prevents top-level functions from resolving bindings introduced by
+        // top-level let statements — they are isolated from the top-level thunk.
+        let parent_scope = if parent_body.is_some() {
+            Some(self.current_scope())
+        } else {
+            None
+        };
         let placeholder_body = BodyId(self.arena.bodies.len() as u32);
         let scope_id = self.arena.alloc_scope(Scope {
-            parent: Some(self.current_scope()),
+            parent: parent_scope,
             owner: ScopeOwner::Body(placeholder_body),
             bindings: vec![],
         });
@@ -357,31 +365,70 @@ impl VirBuilder {
 
         self.with_body(body_id, |this| {
             this.with_scope(scope_id, |this| {
-                // Build parameters.
+                // Build parameters by walking raw children of the parameter lists.
                 let mut params = Vec::new();
-                for param in f.parameters() {
-                    let pat_id = this.build_parameter(&param);
-                    let ty = param
-                        .slot_type()
-                        .and_then(|st| st.ty())
-                        .map(|t| this.build_type_ref(&t));
-                    params.push(Param {
-                        pattern: pat_id,
-                        ty,
-                        is_keyword: false,
-                    });
-                }
-                for kw_param in f.keyword_parameters() {
-                    let pat_id = this.build_keyword_parameter(&kw_param);
-                    let ty = kw_param
-                        .slot_type()
-                        .and_then(|st| st.ty())
-                        .map(|t| this.build_type_ref(&t));
-                    params.push(Param {
-                        pattern: pat_id,
-                        ty,
-                        is_keyword: true,
-                    });
+                let param_clause = f
+                    .syntax()
+                    .children()
+                    .find(|c| c.kind() == SyntaxKind::PARAMETER_CLAUSE);
+                if let Some(clause) = &param_clause {
+                    // Positional parameters live in PARAMETER_LIST.
+                    if let Some(param_list) = clause
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::PARAMETER_LIST)
+                    {
+                        for child in param_list.children() {
+                            if let Some(param) = vx_parser::Parameter::cast(child.clone()) {
+                                let pat_id = this.build_parameter(&param);
+                                let ty = param
+                                    .slot_type()
+                                    .and_then(|st| st.ty())
+                                    .map(|t| this.build_type_ref(&t));
+                                params.push(Param {
+                                    pattern: pat_id,
+                                    ty,
+                                    is_keyword: false,
+                                });
+                            } else {
+                                // Malformed parameter — emit error param.
+                                let child_span = this.span(&child);
+                                params.push(Param {
+                                    pattern: this.error_pattern(child_span),
+                                    ty: None,
+                                    is_keyword: false,
+                                });
+                            }
+                        }
+                    }
+                    // Keyword parameters live in KEYWORD_PARAMETER_LIST.
+                    if let Some(kw_list) = clause
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST)
+                    {
+                        for child in kw_list.children() {
+                            if let Some(kw_param) = vx_parser::KeywordParameter::cast(child.clone())
+                            {
+                                let pat_id = this.build_keyword_parameter(&kw_param);
+                                let ty = kw_param
+                                    .slot_type()
+                                    .and_then(|st| st.ty())
+                                    .map(|t| this.build_type_ref(&t));
+                                params.push(Param {
+                                    pattern: pat_id,
+                                    ty,
+                                    is_keyword: true,
+                                });
+                            } else {
+                                // Malformed keyword parameter — emit error param.
+                                let child_span = this.span(&child);
+                                params.push(Param {
+                                    pattern: this.error_pattern(child_span),
+                                    ty: None,
+                                    is_keyword: true,
+                                });
+                            }
+                        }
+                    }
                 }
                 this.arena[body_id].params = params;
 
@@ -495,7 +542,33 @@ impl VirBuilder {
         let attributes = self.build_attributes(s.attributes());
         let type_params = self.extract_type_params(s.syntax());
 
-        let fields: Vec<FieldDecl> = s.fields().map(|f| self.build_field_decl(&f)).collect();
+        // Iterate raw STRUCT_BODY children so malformed nodes produce error fields.
+        let fields: Vec<FieldDecl> = {
+            let body_node = s
+                .syntax()
+                .children()
+                .find(|c| c.kind() == SyntaxKind::STRUCT_BODY);
+            let mut fields = Vec::new();
+            if let Some(body_node) = body_node {
+                for child in body_node.children() {
+                    if let Some(fd) = vx_parser::FieldDecl::cast(child.clone()) {
+                        fields.push(self.build_field_decl(&fd));
+                    } else {
+                        // Malformed child — emit error field with span.
+                        let child_span = self.span(&child);
+                        fields.push(FieldDecl {
+                            name: String::new(),
+                            name_span: child_span,
+                            ty: None,
+                            has_default: false,
+                            default_value: None,
+                            attributes: vec![],
+                        });
+                    }
+                }
+            }
+            fields
+        };
 
         self.arena.alloc_item(Item {
             span: item_span,
@@ -519,8 +592,31 @@ impl VirBuilder {
         let attributes = self.build_attributes(e.attributes());
         let type_params = self.extract_type_params(e.syntax());
 
-        let variants: Vec<VirVariantDecl> =
-            e.variants().map(|v| self.build_variant_decl(&v)).collect();
+        // Iterate raw ENUM_BODY children so malformed nodes produce error variants.
+        let variants: Vec<VirVariantDecl> = {
+            let body_node = e
+                .syntax()
+                .children()
+                .find(|c| c.kind() == SyntaxKind::ENUM_BODY);
+            let mut variants = Vec::new();
+            if let Some(body_node) = body_node {
+                for child in body_node.children() {
+                    if let Some(vd) = vx_parser::VariantDecl::cast(child.clone()) {
+                        variants.push(self.build_variant_decl(&vd));
+                    } else {
+                        // Malformed child — emit error variant.
+                        let child_span = self.span(&child);
+                        variants.push(VirVariantDecl {
+                            name: String::new(),
+                            name_span: child_span,
+                            fields: vec![],
+                            attributes: vec![],
+                        });
+                    }
+                }
+            }
+            variants
+        };
 
         self.arena.alloc_item(Item {
             span: item_span,
@@ -607,7 +703,22 @@ impl VirBuilder {
 
         let child_items: Vec<ItemId> = if let Some(body) = ns.body() {
             self.with_scope(scope_id, |this| {
-                body.items().map(|i| this.build_item(&i)).collect()
+                let mut items = Vec::new();
+                for child in body.syntax().children() {
+                    if let Some(item_node) = vx_parser::Item::cast(child.clone()) {
+                        items.push(this.build_item(&item_node));
+                    } else {
+                        // Malformed child inside namespace body — emit error item.
+                        let child_span = this.span(&child);
+                        let def_id = this.next_def_id();
+                        items.push(this.arena.alloc_item(Item {
+                            span: child_span,
+                            def_id,
+                            kind: ItemKind::Error,
+                        }));
+                    }
+                }
+                items
             })
         } else {
             vec![]
@@ -672,7 +783,32 @@ impl VirBuilder {
             .map(|t| self.token_span(&t))
             .unwrap_or_else(|| self.span(v.syntax()));
         let attributes = self.build_attributes(v.attributes());
-        let fields: Vec<FieldDecl> = v.fields().map(|f| self.build_field_decl(&f)).collect();
+        // Iterate raw STRUCT_BODY children for recovery of malformed fields.
+        let fields: Vec<FieldDecl> = {
+            let body_node = v
+                .syntax()
+                .children()
+                .find(|c| c.kind() == SyntaxKind::STRUCT_BODY);
+            let mut fields = Vec::new();
+            if let Some(body_node) = body_node {
+                for child in body_node.children() {
+                    if let Some(fd) = vx_parser::FieldDecl::cast(child.clone()) {
+                        fields.push(self.build_field_decl(&fd));
+                    } else {
+                        let child_span = self.span(&child);
+                        fields.push(FieldDecl {
+                            name: String::new(),
+                            name_span: child_span,
+                            ty: None,
+                            has_default: false,
+                            default_value: None,
+                            attributes: vec![],
+                        });
+                    }
+                }
+            }
+            fields
+        };
 
         VirVariantDecl {
             name,
@@ -689,12 +825,13 @@ impl VirBuilder {
         let Some(list) = attr_list else {
             return vec![];
         };
-        list.attributes()
-            .map(|attr| {
+        let mut attrs = Vec::new();
+        for child in list.syntax().children() {
+            if let Some(attr) = vx_parser::Attribute::cast(child.clone()) {
                 let attr_span = self.span(attr.syntax());
-                let entries = attr
-                    .entries()
-                    .map(|entry| {
+                let mut entries = Vec::new();
+                for entry_child in attr.syntax().children() {
+                    if let Some(entry) = vx_parser::AttributeEntry::cast(entry_child.clone()) {
                         let key = entry
                             .key()
                             .map(|t| t.text().to_string())
@@ -704,19 +841,23 @@ impl VirBuilder {
                             .map(|t| self.token_span(&t))
                             .unwrap_or(attr_span);
                         let value = entry.value_expr().map(|e| self.build_expr(&e));
-                        VirAttributeEntry {
+                        entries.push(VirAttributeEntry {
                             key,
                             key_span,
                             value,
-                        }
-                    })
-                    .collect();
-                VirAttribute {
+                        });
+                    }
+                    // Non-ATTRIBUTE_ENTRY children in attributes are structural
+                    // (e.g. punctuation) — not worth emitting error entries for.
+                }
+                attrs.push(VirAttribute {
                     entries,
                     span: attr_span,
-                }
-            })
-            .collect()
+                });
+            }
+            // Non-ATTRIBUTE children in the list are structural — skip.
+        }
+        attrs
     }
 
     fn build_capabilities_from_fn(&self, f: &vx_parser::FnDecl) -> Vec<String> {
@@ -851,6 +992,16 @@ impl VirBuilder {
                     let stmt = vx_parser::Stmt::cast(child.clone()).unwrap();
                     let stmt_id = this.build_stmt(&stmt);
                     stmts.push(stmt_id);
+                } else {
+                    // Malformed child node that doesn't cast to Item or Stmt.
+                    // Emit an error statement so we never silently skip a CST node.
+                    let stmt_id = this.arena.alloc_stmt(Stmt {
+                        span: this.span(child),
+                        body: this.current_body(),
+                        scope: this.current_scope(),
+                        kind: StmtKind::Error,
+                    });
+                    stmts.push(stmt_id);
                 }
             }
 
@@ -906,18 +1057,31 @@ impl VirBuilder {
 
         self.with_body(body_id, |this| {
             this.with_scope(scope_id, |this| {
-                // Build closure parameters (BindingPattern, not Parameter).
-                let params: Vec<Param> = closure
-                    .parameters()
-                    .map(|bp| {
-                        let pat_id = this.build_binding_pattern_as_param(&bp);
-                        Param {
-                            pattern: pat_id,
-                            ty: None,
-                            is_keyword: false,
+                // Build closure parameters by walking raw CLOSURE_PARAM_CLAUSE children.
+                let mut params: Vec<Param> = Vec::new();
+                if let Some(clause) = closure
+                    .syntax()
+                    .children()
+                    .find(|c| c.kind() == SyntaxKind::CLOSURE_PARAM_CLAUSE)
+                {
+                    for child in clause.children() {
+                        if let Some(bp) = vx_parser::BindingPattern::cast(child.clone()) {
+                            let pat_id = this.build_binding_pattern_as_param(&bp);
+                            params.push(Param {
+                                pattern: pat_id,
+                                ty: None,
+                                is_keyword: false,
+                            });
+                        } else {
+                            let child_span = this.span(&child);
+                            params.push(Param {
+                                pattern: this.error_pattern(child_span),
+                                ty: None,
+                                is_keyword: false,
+                            });
                         }
-                    })
-                    .collect();
+                    }
+                }
                 this.arena[body_id].params = params;
 
                 // Build body expression.
@@ -997,7 +1161,17 @@ impl VirBuilder {
 
         let type_args: Vec<TypeRefId> = call
             .type_args()
-            .map(|ta| ta.types().map(|t| self.build_type_ref(&t)).collect())
+            .map(|ta| {
+                let mut args = Vec::new();
+                for child in ta.syntax().children() {
+                    if let Some(t) = vx_parser::Type::cast(child.clone()) {
+                        args.push(self.build_type_ref(&t));
+                    } else {
+                        args.push(self.error_type_ref(self.span(&child)));
+                    }
+                }
+                args
+            })
             .unwrap_or_default();
 
         self.arena.alloc_expr(Expr {
@@ -1014,31 +1188,68 @@ impl VirBuilder {
     }
 
     fn build_call_args(&mut self, call: &vx_parser::CallExpr) -> Vec<Arg> {
-        // The CST models multi-arg calls as f(TupleExpr) — the arg() is a
-        // single TupleExpr containing the individual args. We unwrap the tuple
-        // to produce one Arg per positional argument.
-        match call.arg() {
-            Some(vx_parser::Expr::Tuple(tuple)) => tuple
-                .items()
-                .map(|item| {
-                    let arg_span = self.span(item.syntax());
-                    let expr = self.build_expr(&item);
-                    Arg {
-                        expr,
-                        span: arg_span,
-                    }
-                })
-                .collect(),
-            Some(arg_expr) => {
-                let arg_span = self.span(arg_expr.syntax());
-                let expr = self.build_expr(&arg_expr);
-                vec![Arg {
-                    expr,
-                    span: arg_span,
-                }]
+        // Walk the raw children of the CALL_EXPR node. The CST structure is:
+        //   CALL_EXPR { callee_expr, arg_expr, [TYPE_ARGS] }
+        // The callee is the first Expr child (already handled by build_call_expr).
+        // The arg is the second Expr child. Multi-arg is encoded as a TupleExpr.
+        //
+        // We identify the callee by syntax pointer (same node as immediate_callee())
+        // so we can skip it precisely and recover error nodes for anything else.
+        let callee_node = call.immediate_callee().map(|c| c.syntax().clone());
+
+        let mut args = Vec::new();
+        for child in call.syntax().children() {
+            // Skip the callee — already built.
+            if callee_node.as_ref().is_some_and(|c| *c == child) {
+                continue;
             }
-            None => vec![],
+            // Skip TYPE_ARGS — already handled separately.
+            if child.kind() == SyntaxKind::TYPE_ARGS {
+                continue;
+            }
+
+            // This child is the arg position. If it casts to Expr, process it.
+            if let Some(expr_node) = vx_parser::Expr::cast(child.clone()) {
+                match expr_node {
+                    // Multi-arg: unwrap the TupleExpr, walk its raw children.
+                    vx_parser::Expr::Tuple(tuple) => {
+                        for tuple_child in tuple.syntax().children() {
+                            if let Some(item) = vx_parser::Expr::cast(tuple_child.clone()) {
+                                let arg_span = self.span(item.syntax());
+                                let expr = self.build_expr(&item);
+                                args.push(Arg {
+                                    expr,
+                                    span: arg_span,
+                                });
+                            } else {
+                                let child_span = self.span(&tuple_child);
+                                args.push(Arg {
+                                    expr: self.error_expr(child_span),
+                                    span: child_span,
+                                });
+                            }
+                        }
+                    }
+                    // Single arg.
+                    other => {
+                        let arg_span = self.span(other.syntax());
+                        let expr = self.build_expr(&other);
+                        args.push(Arg {
+                            expr,
+                            span: arg_span,
+                        });
+                    }
+                }
+            } else {
+                // Malformed child in arg position — emit error arg.
+                let child_span = self.span(&child);
+                args.push(Arg {
+                    expr: self.error_expr(child_span),
+                    span: child_span,
+                });
+            }
         }
+        args
     }
 
     fn build_where_expr(&mut self, w: &vx_parser::WhereExpr) -> ExprId {
@@ -1323,22 +1534,30 @@ impl VirBuilder {
         // We need the match ExprId for MatchArm scope owners — use placeholder, fix up after.
         let placeholder_match = ExprId(self.arena.exprs.len() as u32);
 
-        let arms: Vec<VirMatchArm> = m
-            .arms()
-            .enumerate()
-            .map(|(arm_index, arm)| {
+        // Iterate raw children so we never silently skip a malformed CST node.
+        // The scrutinee is the first Expr child — identify it by syntax pointer
+        // so only that specific node is skipped. All other children that aren't
+        // MatchArm nodes become error arms.
+        let scrutinee_node = m.scrutinee().map(|s| s.syntax().clone());
+        let mut arms: Vec<VirMatchArm> = Vec::new();
+        let mut arm_index: u32 = 0;
+        for child in m.syntax().children() {
+            // Skip the scrutinee — it was already built above.
+            if scrutinee_node.as_ref().is_some_and(|s| *s == child) {
+                continue;
+            }
+            if let Some(arm) = vx_parser::MatchArm::cast(child.clone()) {
                 let arm_span = self.span(arm.syntax());
-
                 let arm_scope = self.arena.alloc_scope(Scope {
                     parent: Some(self.current_scope()),
                     owner: ScopeOwner::MatchArm {
                         match_expr: placeholder_match,
-                        arm_index: arm_index as u32,
+                        arm_index,
                     },
                     bindings: vec![],
                 });
 
-                self.with_scope(arm_scope, |this| {
+                let vir_arm = self.with_scope(arm_scope, |this| {
                     let pattern = arm
                         .pattern()
                         .map(|p| this.build_pattern(&p))
@@ -1354,9 +1573,30 @@ impl VirBuilder {
                         scope: arm_scope,
                         span: arm_span,
                     }
-                })
-            })
-            .collect();
+                });
+                arms.push(vir_arm);
+                arm_index += 1;
+            } else {
+                // Malformed child node — emit an error arm.
+                let child_span = self.span(&child);
+                let arm_scope = self.arena.alloc_scope(Scope {
+                    parent: Some(self.current_scope()),
+                    owner: ScopeOwner::MatchArm {
+                        match_expr: placeholder_match,
+                        arm_index,
+                    },
+                    bindings: vec![],
+                });
+                let vir_arm = self.with_scope(arm_scope, |this| VirMatchArm {
+                    pattern: this.error_pattern(child_span),
+                    body: this.error_expr(child_span),
+                    scope: arm_scope,
+                    span: child_span,
+                });
+                arms.push(vir_arm);
+                arm_index += 1;
+            }
+        }
 
         let match_expr_id = self.arena.alloc_expr(Expr {
             span: match_span,
@@ -1382,7 +1622,14 @@ impl VirBuilder {
 
     fn build_tuple_expr(&mut self, t: &vx_parser::TupleExpr) -> ExprId {
         let tuple_span = self.span(t.syntax());
-        let elements: Vec<ExprId> = t.items().map(|e| self.build_expr(&e)).collect();
+        let mut elements: Vec<ExprId> = Vec::new();
+        for child in t.syntax().children() {
+            if let Some(e) = vx_parser::Expr::cast(child.clone()) {
+                elements.push(self.build_expr(&e));
+            } else {
+                elements.push(self.error_expr(self.span(&child)));
+            }
+        }
 
         self.arena.alloc_expr(Expr {
             span: tuple_span,
@@ -1395,19 +1642,26 @@ impl VirBuilder {
 
     fn build_array_expr(&mut self, a: &vx_parser::ArrayExpr) -> ExprId {
         let arr_span = self.span(a.syntax());
-        let elements: Vec<ArrayElement> = a
-            .items()
-            .map(|item| match item {
-                vx_parser::ArrayItem::Expr(e) => ArrayElement::Expr(self.build_expr(&e)),
-                vx_parser::ArrayItem::Spread(s) => {
-                    let inner = s
-                        .expr()
-                        .map(|e| self.build_expr(&e))
-                        .unwrap_or_else(|| self.error_expr(self.span(s.syntax())));
-                    ArrayElement::Spread(inner)
+        let mut elements: Vec<ArrayElement> = Vec::new();
+        for child in a.syntax().children() {
+            if let Some(item) = vx_parser::ArrayItem::cast(child.clone()) {
+                match item {
+                    vx_parser::ArrayItem::Expr(e) => {
+                        elements.push(ArrayElement::Expr(self.build_expr(&e)));
+                    }
+                    vx_parser::ArrayItem::Spread(s) => {
+                        let inner = s
+                            .expr()
+                            .map(|e| self.build_expr(&e))
+                            .unwrap_or_else(|| self.error_expr(self.span(s.syntax())));
+                        elements.push(ArrayElement::Spread(inner));
+                    }
                 }
-            })
-            .collect();
+            } else {
+                // Malformed child — emit error element.
+                elements.push(ArrayElement::Expr(self.error_expr(self.span(&child))));
+            }
+        }
 
         self.arena.alloc_expr(Expr {
             span: arr_span,
@@ -1420,9 +1674,9 @@ impl VirBuilder {
 
     fn build_record_expr(&mut self, r: &vx_parser::RecordExpr) -> ExprId {
         let rec_span = self.span(r.syntax());
-        let fields: Vec<RecordField> = r
-            .fields()
-            .map(|entry| {
+        let mut fields: Vec<RecordField> = Vec::new();
+        for child in r.syntax().children() {
+            if let Some(entry) = vx_parser::MapEntry::cast(child.clone()) {
                 let name = entry
                     .name()
                     .map(|t| t.text().to_string())
@@ -1432,7 +1686,6 @@ impl VirBuilder {
                     .map(|e| self.build_expr(&e))
                     .unwrap_or_else(|| {
                         // Shorthand: `{ x }` means `{ x: x }`.
-                        // Build a name ref for the shorthand.
                         if !name.is_empty() {
                             let span = entry
                                 .name()
@@ -1452,16 +1705,24 @@ impl VirBuilder {
                             self.error_expr(self.span(entry.syntax()))
                         }
                     });
-                RecordField {
+                fields.push(RecordField {
                     name,
                     name_span: entry
                         .name()
                         .map(|t| self.token_span(&t))
                         .unwrap_or_else(|| self.span(entry.syntax())),
                     value,
-                }
-            })
-            .collect();
+                });
+            } else {
+                // Malformed child — emit error field.
+                let child_span = self.span(&child);
+                fields.push(RecordField {
+                    name: String::new(),
+                    name_span: child_span,
+                    value: self.error_expr(child_span),
+                });
+            }
+        }
 
         self.arena.alloc_expr(Expr {
             span: rec_span,
@@ -1474,15 +1735,15 @@ impl VirBuilder {
 
     fn build_map_expr(&mut self, m: &vx_parser::MapExpr) -> ExprId {
         let map_span = self.span(m.syntax());
-        let entries: Vec<MapElement> = m
-            .entries()
-            .map(|entry| {
+        let mut entries: Vec<MapElement> = Vec::new();
+        for child in m.syntax().children() {
+            if let Some(entry) = vx_parser::MapEntry::cast(child.clone()) {
                 if let Some(spread) = entry.spread() {
                     let inner = spread
                         .expr()
                         .map(|e| self.build_expr(&e))
                         .unwrap_or_else(|| self.error_expr(self.span(spread.syntax())));
-                    MapElement::Spread(inner)
+                    entries.push(MapElement::Spread(inner));
                 } else {
                     let entry_span = self.span(entry.syntax());
                     let key = if let Some(name_tok) = entry.name() {
@@ -1502,14 +1763,25 @@ impl VirBuilder {
                         .value()
                         .map(|e| self.build_expr(&e))
                         .unwrap_or_else(|| self.error_expr(entry_span));
-                    MapElement::Entry(VirMapEntry {
+                    entries.push(MapElement::Entry(VirMapEntry {
                         key,
                         value,
                         span: entry_span,
-                    })
+                    }));
                 }
-            })
-            .collect();
+            } else {
+                // Malformed child — emit error entry.
+                let child_span = self.span(&child);
+                entries.push(MapElement::Entry(VirMapEntry {
+                    key: MapKey::Name {
+                        name: String::new(),
+                        span: child_span,
+                    },
+                    value: self.error_expr(child_span),
+                    span: child_span,
+                }));
+            }
+        }
 
         self.arena.alloc_expr(Expr {
             span: map_span,
@@ -1523,41 +1795,57 @@ impl VirBuilder {
     fn build_struct_literal_expr(&mut self, sl: &vx_parser::StructLiteralExpr) -> ExprId {
         let sl_span = self.span(sl.syntax());
         let name = sl.name().map(|t| t.text().to_string()).unwrap_or_default();
-        let fields: Vec<StructLiteralField> = sl
-            .fields()
-            .map(|f| {
-                let fname = f.name().map(|t| t.text().to_string()).unwrap_or_default();
-                let value = f.expr().map(|e| self.build_expr(&e)).unwrap_or_else(|| {
-                    // Shorthand: `Foo { x }` means `Foo { x: x }`.
-                    if !fname.is_empty() {
-                        let span = f
+
+        // Find the STRUCT_LITERAL_BODY child, then iterate its raw children.
+        let body_node = sl
+            .syntax()
+            .children()
+            .find(|c| c.kind() == SyntaxKind::STRUCT_LITERAL_BODY);
+        let mut fields: Vec<StructLiteralField> = Vec::new();
+        if let Some(body_node) = body_node {
+            for child in body_node.children() {
+                if let Some(f) = vx_parser::StructLiteralField::cast(child.clone()) {
+                    let fname = f.name().map(|t| t.text().to_string()).unwrap_or_default();
+                    let value = f.expr().map(|e| self.build_expr(&e)).unwrap_or_else(|| {
+                        // Shorthand: `Foo { x }` means `Foo { x: x }`.
+                        if !fname.is_empty() {
+                            let span = f
+                                .name()
+                                .map(|t| self.token_span(&t))
+                                .unwrap_or_else(|| self.span(f.syntax()));
+                            self.arena.alloc_expr(Expr {
+                                span,
+                                body: self.current_body(),
+                                scope: self.current_scope(),
+                                kind: ExprKind::NameRef(VirNameRefExpr {
+                                    name: fname.clone(),
+                                    resolved: None,
+                                }),
+                                ty: None,
+                            })
+                        } else {
+                            self.error_expr(self.span(f.syntax()))
+                        }
+                    });
+                    fields.push(StructLiteralField {
+                        name: fname,
+                        name_span: f
                             .name()
                             .map(|t| self.token_span(&t))
-                            .unwrap_or_else(|| self.span(f.syntax()));
-                        self.arena.alloc_expr(Expr {
-                            span,
-                            body: self.current_body(),
-                            scope: self.current_scope(),
-                            kind: ExprKind::NameRef(VirNameRefExpr {
-                                name: fname.clone(),
-                                resolved: None,
-                            }),
-                            ty: None,
-                        })
-                    } else {
-                        self.error_expr(self.span(f.syntax()))
-                    }
-                });
-                StructLiteralField {
-                    name: fname,
-                    name_span: f
-                        .name()
-                        .map(|t| self.token_span(&t))
-                        .unwrap_or_else(|| self.span(f.syntax())),
-                    value,
+                            .unwrap_or_else(|| self.span(f.syntax())),
+                        value,
+                    });
+                } else {
+                    // Malformed child — emit error field.
+                    let child_span = self.span(&child);
+                    fields.push(StructLiteralField {
+                        name: String::new(),
+                        name_span: child_span,
+                        value: self.error_expr(child_span),
+                    });
                 }
-            })
-            .collect();
+            }
+        }
 
         self.arena.alloc_expr(Expr {
             span: sl_span,
@@ -1602,6 +1890,20 @@ impl VirBuilder {
             })
             .unwrap_or_else(|| FieldKey::Name(String::new()));
 
+        // field_span for the field key: use the ident token, or the INT token for
+        // numeric projections, or fall back to the whole expression span.
+        let key_span = f
+            .field_name()
+            .map(|t| self.token_span(&t))
+            .or_else(|| {
+                f.syntax()
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .find(|t| t.kind() == SyntaxKind::INT)
+                    .map(|t| self.token_span(&t))
+            })
+            .unwrap_or(field_span);
+
         self.arena.alloc_expr(Expr {
             span: field_span,
             body: self.current_body(),
@@ -1609,10 +1911,7 @@ impl VirBuilder {
             kind: ExprKind::Field(VirFieldExpr {
                 receiver,
                 field,
-                field_span: f
-                    .field_name()
-                    .map(|t| self.token_span(&t))
-                    .unwrap_or(field_span),
+                field_span: key_span,
             }),
             ty: None,
         })
@@ -2238,7 +2537,14 @@ impl VirBuilder {
 
     fn build_tuple_pattern(&mut self, t: &vx_parser::TuplePattern) -> crate::PatternId {
         let pat_span = self.span(t.syntax());
-        let elements: Vec<crate::PatternId> = t.items().map(|p| self.build_pattern(&p)).collect();
+        let mut elements: Vec<crate::PatternId> = Vec::new();
+        for child in t.syntax().children() {
+            if let Some(p) = vx_parser::Pattern::cast(child.clone()) {
+                elements.push(self.build_pattern(&p));
+            } else {
+                elements.push(self.error_pattern(self.span(&child)));
+            }
+        }
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,
@@ -2251,9 +2557,9 @@ impl VirBuilder {
 
     fn build_struct_pattern(&mut self, s: &vx_parser::StructPattern) -> crate::PatternId {
         let pat_span = self.span(s.syntax());
-        let fields: Vec<VirStructPatternField> = s
-            .fields()
-            .map(|f| {
+        let mut fields: Vec<VirStructPatternField> = Vec::new();
+        for child in s.syntax().children() {
+            if let Some(f) = vx_parser::StructPatternField::cast(child.clone()) {
                 let name = f.name().map(|t| t.text().to_string()).unwrap_or_default();
                 let pattern = f
                     .pattern()
@@ -2287,16 +2593,24 @@ impl VirBuilder {
                             self.error_pattern(self.span(f.syntax()))
                         }
                     });
-                VirStructPatternField {
+                fields.push(VirStructPatternField {
                     name,
                     name_span: f
                         .name()
                         .map(|t| self.token_span(&t))
                         .unwrap_or_else(|| self.span(f.syntax())),
                     pattern,
-                }
-            })
-            .collect();
+                });
+            } else {
+                // Malformed child — emit error field.
+                let child_span = self.span(&child);
+                fields.push(VirStructPatternField {
+                    name: String::new(),
+                    name_span: child_span,
+                    pattern: self.error_pattern(child_span),
+                });
+            }
+        }
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,
@@ -2309,7 +2623,14 @@ impl VirBuilder {
 
     fn build_array_pattern(&mut self, a: &vx_parser::ArrayPattern) -> crate::PatternId {
         let pat_span = self.span(a.syntax());
-        let elements: Vec<crate::PatternId> = a.items().map(|p| self.build_pattern(&p)).collect();
+        let mut elements: Vec<crate::PatternId> = Vec::new();
+        for child in a.syntax().children() {
+            if let Some(p) = vx_parser::Pattern::cast(child.clone()) {
+                elements.push(self.build_pattern(&p));
+            } else {
+                elements.push(self.error_pattern(self.span(&child)));
+            }
+        }
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,
@@ -2363,8 +2684,9 @@ impl VirBuilder {
             .unwrap_or(pat_span);
 
         let fields = v.fields().map(|sp| {
-            sp.fields()
-                .map(|f| {
+            let mut result = Vec::new();
+            for child in sp.syntax().children() {
+                if let Some(f) = vx_parser::StructPatternField::cast(child.clone()) {
                     let fname = f.name().map(|t| t.text().to_string()).unwrap_or_default();
                     let pattern =
                         f.pattern()
@@ -2399,13 +2721,22 @@ impl VirBuilder {
                                     self.error_pattern(self.span(f.syntax()))
                                 }
                             });
-                    VirStructPatternField {
+                    result.push(VirStructPatternField {
                         name: fname,
                         name_span: f.name().map(|t| self.token_span(&t)).unwrap_or(pat_span),
                         pattern,
-                    }
-                })
-                .collect()
+                    });
+                } else {
+                    // Malformed child — emit error field.
+                    let child_span = self.span(&child);
+                    result.push(VirStructPatternField {
+                        name: String::new(),
+                        name_span: child_span,
+                        pattern: self.error_pattern(child_span),
+                    });
+                }
+            }
+            result
         });
 
         self.arena.alloc_pattern(Pattern {
@@ -2506,7 +2837,17 @@ impl VirBuilder {
         let segments: Vec<String> = p.segments().map(|t| t.text().to_string()).collect();
         let type_args: Vec<TypeRefId> = p
             .type_args()
-            .map(|ta| ta.types().map(|t| self.build_type_ref(&t)).collect())
+            .map(|ta| {
+                let mut args = Vec::new();
+                for child in ta.syntax().children() {
+                    if let Some(t) = vx_parser::Type::cast(child.clone()) {
+                        args.push(self.build_type_ref(&t));
+                    } else {
+                        args.push(self.error_type_ref(self.span(&child)));
+                    }
+                }
+                args
+            })
             .unwrap_or_default();
 
         self.arena.alloc_type_ref(TypeRef {
@@ -2520,14 +2861,25 @@ impl VirBuilder {
 
     fn build_function_type_ref(&mut self, f: &vx_parser::FunctionType) -> TypeRefId {
         let type_span = self.span(f.syntax());
-        let params: Vec<TypeRefId> = f
-            .parameter_types()
-            .map(|t| self.build_type_ref(&t))
-            .collect();
-        let ret = f
-            .return_type()
-            .map(|t| self.build_type_ref(&t))
+        // Walk raw children. All Type children except the last are parameters;
+        // the last Type child is the return type. Non-Type children that aren't
+        // CapabilityList or KeywordParameterList get error type refs.
+        let mut type_children: Vec<TypeRefId> = Vec::new();
+        for child in f.syntax().children() {
+            if let Some(t) = vx_parser::Type::cast(child.clone()) {
+                type_children.push(self.build_type_ref(&t));
+            } else if child.kind() == SyntaxKind::CAPABILITY_LIST
+                || child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST
+            {
+                // Expected non-Type structural children — skip.
+            } else {
+                type_children.push(self.error_type_ref(self.span(&child)));
+            }
+        }
+        let ret = type_children
+            .pop()
             .unwrap_or_else(|| self.error_type_ref(type_span));
+        let params = type_children;
 
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,
@@ -2537,7 +2889,14 @@ impl VirBuilder {
 
     fn build_tuple_type_ref(&mut self, t: &vx_parser::TupleType) -> TypeRefId {
         let type_span = self.span(t.syntax());
-        let elements: Vec<TypeRefId> = t.items().map(|t| self.build_type_ref(&t)).collect();
+        let mut elements: Vec<TypeRefId> = Vec::new();
+        for child in t.syntax().children() {
+            if let Some(ty) = vx_parser::Type::cast(child.clone()) {
+                elements.push(self.build_type_ref(&ty));
+            } else {
+                elements.push(self.error_type_ref(self.span(&child)));
+            }
+        }
 
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,
@@ -2560,7 +2919,14 @@ impl VirBuilder {
 
     fn build_sum_type_ref(&mut self, s: &vx_parser::SumType) -> TypeRefId {
         let type_span = self.span(s.syntax());
-        let alternatives: Vec<TypeRefId> = s.variants().map(|t| self.build_type_ref(&t)).collect();
+        let mut alternatives: Vec<TypeRefId> = Vec::new();
+        for child in s.syntax().children() {
+            if let Some(ty) = vx_parser::Type::cast(child.clone()) {
+                alternatives.push(self.build_type_ref(&ty));
+            } else {
+                alternatives.push(self.error_type_ref(self.span(&child)));
+            }
+        }
 
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,

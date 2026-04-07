@@ -43,6 +43,10 @@ pub enum ItemKind {
 
     /// A namespace: `namespace Name { items }`.
     Namespace(NamespaceItem),
+
+    /// A malformed item node that could not be parsed. Preserves the CST node's
+    /// position in the item list so later passes can report diagnostics.
+    Error,
 }
 
 /// A function declaration item.

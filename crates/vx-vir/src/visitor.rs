@@ -376,6 +376,9 @@ pub fn walk_item<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ItemId
                 v.visit_item(arena, child_id);
             }
         }
+        ItemKind::Error => {
+            // Nothing to walk — error items have no children.
+        }
     }
 }
 
