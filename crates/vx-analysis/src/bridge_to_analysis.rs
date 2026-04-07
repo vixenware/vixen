@@ -439,12 +439,19 @@ fn seed_lazy_product_fields(
         let Some(proj) = projection_by_expr.get(&(binding.body, init_expr)) else {
             continue;
         };
-        // The projection's base must be a product — find the sub-expression
-        let Some(base_binding_name) = proj.base_binding.as_deref() else {
+        // Resolve base binding by ExprId (sound under shadowing)
+        let Some(base_use) = bridge
+            .local_uses
+            .iter()
+            .find(|u| u.body == binding.body && u.expr == proj.base)
+        else {
             continue;
         };
-        // Find the product that the base binding is initialized to
-        let Some(base_binding) = binding_by_name.get(&(binding.body, base_binding_name)) else {
+        let Some(base_binding) = bridge
+            .local_bindings
+            .iter()
+            .find(|b| b.id == base_use.binding)
+        else {
             continue;
         };
         let Some(base_init) = base_binding.init_expr else {
@@ -498,7 +505,7 @@ fn seed_lazy_product_fields(
     let mut seeds = bridge
         .projections
         .iter()
-        .filter_map(|projection| {
+        .flat_map(|projection| {
             let fields = lookup_fields(
                 projection.body,
                 projection.base_binding.as_deref(),
@@ -508,13 +515,16 @@ fn seed_lazy_product_fields(
                 return None;
             }
 
-            let sibling = fields
+            // All siblings (not just min) should be lazy
+            let siblings: Vec<_> = fields
                 .iter()
                 .filter(|field| **field != projection.field)
-                .min()
-                .cloned()?;
-            Some((projection.body, projection.base, sibling))
+                .cloned()
+                .map(|sibling| (projection.body, projection.base, sibling))
+                .collect();
+            Some(siblings)
         })
+        .flatten()
         .collect::<Vec<_>>();
     seeds.sort_by_key(|(body, base, field)| (body.0, base.0, field.clone()));
     seeds.dedup();

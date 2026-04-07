@@ -68,6 +68,62 @@ fn main(n: U64) -> U64 (
     );
 }
 
+/// Pair must be constructed (passed to a function), but dead sibling is lowerable.
+/// This catches "only thunk on UnsupportedShape" — bomb() lowers fine but must not run.
+/// Requires cross-function demand propagation (work item 013).
+#[test]
+#[ignore]
+fn pair_passed_to_fn_dead_sibling() {
+    expect_u64(
+        r#"
+fn bomb() -> U64 ( trap("boom") )
+fn pick_first(p: (U64, U64)) -> U64 ( p._0 )
+
+fn main() -> U64 (
+  let p = (42, bomb());
+  pick_first(p)
+)
+"#,
+        &[],
+        42,
+    );
+}
+
+/// Chained projection without intermediate let: outer._0._0
+#[test]
+fn chained_projection_no_let() {
+    expect_u64(
+        r#"
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let outer = ((7, bomb()), (bomb(), bomb()));
+  outer._0._0
+)
+"#,
+        &[],
+        7,
+    );
+}
+
+/// Let-bound struct with named field projection
+#[test]
+fn let_bound_struct_named_field() {
+    expect_u64(
+        r#"
+struct Pair { a: U64, b: U64 }
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let s = Pair { a: 42, b: bomb() };
+  s.a
+)
+"#,
+        &[],
+        42,
+    );
+}
+
 /// Program D: higher-order helper
 #[test]
 fn program_d_higher_order() {

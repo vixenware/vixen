@@ -1513,21 +1513,57 @@ impl<'a> BodyLowering<'a> {
                 FieldKey::Index(i) => *i as usize,
                 FieldKey::Name(_) => return Ok(None),
             };
-            if let Some(base_binding_name) = &proj.base_binding {
-                // Find the base binding
-                if let Some(base_binding) = self
-                    .bridge
-                    .local_bindings
-                    .iter()
-                    .find(|b| b.body == self.body && b.name == *base_binding_name)
+            // Resolve base by ExprId (sound under shadowing, unlike name-based)
+            if let Some(base_binding) = self.use_binding_by_expr.get(&proj.base).copied() {
+                if let Some(intermediate) =
+                    self.resolve_index_for_binding(base_binding, proj_index)?
                 {
-                    // Resolve: what does base_binding._proj_index give us?
-                    if let Some(intermediate) =
-                        self.resolve_index_for_binding(base_binding.id, proj_index)?
+                    return self.resolve_index_for_expr(intermediate, index);
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Resolve `receiver.field_name` through bindings or inline products.
+    fn resolve_named_field_through_bindings(
+        &self,
+        receiver: &Expr,
+        field_name: &str,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        let field_key = FieldKey::Name(field_name.to_owned());
+
+        // Try through binding chain (receiver is a NameRef)
+        if let Some(receiver_id) = self.expr_id(receiver) {
+            if let Some(binding) = self.use_binding_by_expr.get(&receiver_id).copied() {
+                if let Some(init_expr) = self.binding_initializers.get(&binding).copied() {
+                    if let Some(product) = self
+                        .bridge
+                        .products
+                        .iter()
+                        .find(|p| p.body == self.body && p.expr == init_expr)
                     {
-                        // Now resolve ._index from that intermediate expression
-                        return self.resolve_index_for_expr(intermediate, index);
+                        if let Some((_key, Some(sub_expr))) =
+                            product.fields.iter().find(|(k, _)| *k == field_key)
+                        {
+                            return Ok(Some(*sub_expr));
+                        }
                     }
+                }
+            }
+
+            // Try inline: receiver itself is a product
+            if let Some(product) = self
+                .bridge
+                .products
+                .iter()
+                .find(|p| p.body == self.body && p.expr == receiver_id)
+            {
+                if let Some((_key, Some(sub_expr))) =
+                    product.fields.iter().find(|(k, _)| *k == field_key)
+                {
+                    return Ok(Some(*sub_expr));
                 }
             }
         }
@@ -1999,25 +2035,22 @@ impl<'a> BodyLowering<'a> {
                     let item_id = self
                         .expr_id(item)
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    match self.lower_expr(item_id) {
-                        Ok(value) => operands.push(value),
-                        Err(UnsupportedShape(_))
-                            if self
-                                .lazy_fields_by_expr
-                                .get(&expr_id)
-                                .is_some_and(|fields| fields.contains(&(index as u32))) =>
-                        {
-                            let (thunk_body_id, captures) = self.synthesize_thunk_body(item_id)?;
-                            let lazy = self.alloc_temp();
-                            self.ops.push(KernelOp::AllocThunk {
-                                dst: lazy,
-                                source: self.source_for(item_id),
-                                thunk_body: thunk_body_id,
-                                captures,
-                            });
-                            operands.push(Operand::Slot(lazy));
-                        }
-                        Err(err) => return Err(err),
+                    let is_lazy = self
+                        .lazy_fields_by_expr
+                        .get(&expr_id)
+                        .is_some_and(|fields| fields.contains(&(index as u32)));
+                    if is_lazy {
+                        let (thunk_body_id, captures) = self.synthesize_thunk_body(item_id)?;
+                        let lazy = self.alloc_temp();
+                        self.ops.push(KernelOp::AllocThunk {
+                            dst: lazy,
+                            source: self.source_for(item_id),
+                            thunk_body: thunk_body_id,
+                            captures,
+                        });
+                        operands.push(Operand::Slot(lazy));
+                    } else {
+                        operands.push(self.lower_expr(item_id)?);
                     }
                 }
 
@@ -2098,29 +2131,18 @@ impl<'a> BodyLowering<'a> {
                         .parse::<usize>()
                         .map_err(|_| UnsupportedShape(format!("invalid field `{field_name}`")))?;
 
-                    // Try to resolve tuple field through bindings (direct + chained projections)
-                    if let Expr::NameRef(_) = receiver {
-                        if let Some(selected) =
-                            self.resolve_tuple_field_through_bindings(&receiver, index)?
-                        {
-                            return self.lower_expr(selected);
-                        }
+                    // Try to resolve tuple field statically:
+                    // - through bindings (NameRef → binding → product/projection chain)
+                    // - through inline products (receiver is a tuple literal)
+                    // - through chained projections (receiver is itself a field expr)
+                    if let Some(selected) =
+                        self.resolve_tuple_field_through_bindings(&receiver, index)?
+                    {
+                        return self.lower_expr(selected);
                     }
-
-                    // Also try inline tuple: receiver IS a tuple literal (no binding)
                     if let Some(receiver_id) = self.expr_id(&receiver) {
-                        let field_key = FieldKey::Index(index as u32);
-                        if let Some(product) = self
-                            .bridge
-                            .products
-                            .iter()
-                            .find(|p| p.body == self.body && p.expr == receiver_id)
-                        {
-                            if let Some((_key, Some(sub_expr))) =
-                                product.fields.iter().find(|(k, _)| *k == field_key)
-                            {
-                                return self.lower_expr(*sub_expr);
-                            }
+                        if let Some(selected) = self.resolve_index_for_expr(receiver_id, index)? {
+                            return self.lower_expr(selected);
                         }
                     }
 
@@ -2138,23 +2160,11 @@ impl<'a> BodyLowering<'a> {
                     return Ok(Operand::Slot(dst));
                 }
 
-                // Inline struct/product field selection via bridge data:
-                // If the receiver is a product (struct/tuple literal) in the bridge,
-                // directly lower the selected field's sub-expression.
-                if let Some(receiver_id) = self.expr_id(&receiver) {
-                    let field_key = FieldKey::Name(field_name.clone());
-                    if let Some(product) = self
-                        .bridge
-                        .products
-                        .iter()
-                        .find(|p| p.body == self.body && p.expr == receiver_id)
-                    {
-                        if let Some((_key, Some(sub_expr))) =
-                            product.fields.iter().find(|(k, _)| *k == field_key)
-                        {
-                            return self.lower_expr(*sub_expr);
-                        }
-                    }
+                // Resolve named field through bindings or inline product
+                if let Some(selected) =
+                    self.resolve_named_field_through_bindings(&receiver, &field_name)?
+                {
+                    return self.lower_expr(selected);
                 }
 
                 let receiver_id = self
@@ -2462,25 +2472,22 @@ impl<'a> BodyLowering<'a> {
                     let value_id = self
                         .expr_id(&value_expr)
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                    let operand = match self.lower_expr(value_id) {
-                        Ok(value) => value,
-                        Err(UnsupportedShape(_))
-                            if self
-                                .lazy_named_fields_by_expr
-                                .get(&expr_id)
-                                .is_some_and(|lazy| lazy.contains(&field_name)) =>
-                        {
-                            let (thunk_body_id, captures) = self.synthesize_thunk_body(value_id)?;
-                            let lazy = self.alloc_temp();
-                            self.ops.push(KernelOp::AllocThunk {
-                                dst: lazy,
-                                source: self.source_for(value_id),
-                                thunk_body: thunk_body_id,
-                                captures,
-                            });
-                            Operand::Slot(lazy)
-                        }
-                        Err(err) => return Err(err),
+                    let is_lazy = self
+                        .lazy_named_fields_by_expr
+                        .get(&expr_id)
+                        .is_some_and(|lazy| lazy.contains(&field_name));
+                    let operand = if is_lazy {
+                        let (thunk_body_id, captures) = self.synthesize_thunk_body(value_id)?;
+                        let lazy = self.alloc_temp();
+                        self.ops.push(KernelOp::AllocThunk {
+                            dst: lazy,
+                            source: self.source_for(value_id),
+                            thunk_body: thunk_body_id,
+                            captures,
+                        });
+                        Operand::Slot(lazy)
+                    } else {
+                        self.lower_expr(value_id)?
                     };
                     lowered_fields.push((field_name, operand));
                 }
