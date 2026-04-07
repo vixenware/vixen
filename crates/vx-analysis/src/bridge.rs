@@ -63,7 +63,7 @@ pub struct BridgeResolvedRef {
 pub struct BridgeProduct {
     pub expr: ExprId,
     pub body: BodyId,
-    pub fields: Vec<FieldKey>,
+    pub fields: Vec<(FieldKey, Option<ExprId>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,8 @@ pub struct BridgeLocalBinding {
     pub name_span: SourceSpan,
     pub kind: BridgeLocalBindingKind,
     pub def_id: DefId,
+    /// For let bindings: the ExprId of the initializer expression, if available.
+    pub init_expr: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,7 +488,8 @@ fn collect_project_bridge_data(
         let local_products = collect_products(source_id, &file, &local_exprs);
         let local_projections = collect_projections(source_id, &file, &local_exprs);
         let local_binding_products = collect_binding_products(source_id, &file, &local_bodies);
-        let local_bindings = collect_local_bindings(source_id, resolution, &local_bodies);
+        let local_bindings =
+            collect_local_bindings(source_id, resolution, &local_bodies, &file, &local_exprs);
         let local_uses = collect_local_uses(resolution, &local_exprs, &local_bindings);
         let local_closure_inits = collect_local_closure_inits(
             source_id,
@@ -649,26 +652,42 @@ fn parse_field_key(token: &str) -> FieldKey {
 }
 
 fn product_fields_for_expr(expr: &Expr) -> Option<Vec<FieldKey>> {
+    product_fields_with_spans(expr).map(|fields| fields.into_iter().map(|(key, _)| key).collect())
+}
+
+/// Returns field keys and the text range of each field's value expression.
+fn product_fields_with_spans(expr: &Expr) -> Option<Vec<(FieldKey, Option<vx_parser::TextRange>)>> {
     match expr {
         Expr::Tuple(tuple) => Some(
             tuple
                 .items()
                 .enumerate()
-                .map(|(index, _)| FieldKey::Index(index as u32))
+                .map(|(index, item)| {
+                    (
+                        FieldKey::Index(index as u32),
+                        Some(item.syntax().text_range()),
+                    )
+                })
                 .collect(),
         ),
         Expr::Record(record) => Some(
             record
                 .fields()
-                .filter_map(|field| field.name())
-                .map(|name| FieldKey::Name(name.text().to_owned()))
+                .filter_map(|field| {
+                    let name = field.name()?;
+                    let value_range = field.value().map(|e| e.syntax().text_range());
+                    Some((FieldKey::Name(name.text().to_owned()), value_range))
+                })
                 .collect(),
         ),
         Expr::StructLiteral(struct_lit) => Some(
             struct_lit
                 .fields()
-                .filter_map(|field| field.name())
-                .map(|name| FieldKey::Name(name.text().to_owned()))
+                .filter_map(|field| {
+                    let name = field.name()?;
+                    let value_range = field.expr().map(|e| e.syntax().text_range());
+                    Some((FieldKey::Name(name.text().to_owned()), value_range))
+                })
                 .collect(),
         ),
         _ => None,
@@ -787,11 +806,19 @@ fn collect_products(
         .descendants()
         .filter_map(Expr::cast)
         .filter_map(|expr| {
-            let fields = product_fields_for_expr(&expr)?;
+            let fields_with_spans = product_fields_with_spans(&expr)?;
             let span = SourceSpan::new(source_id, expr.syntax().text_range());
 
             let expr_id = by_span.get(&span).copied()?;
             let body = by_id.get(&expr_id)?.body?;
+            let fields = fields_with_spans
+                .into_iter()
+                .map(|(key, value_range)| {
+                    let value_expr = value_range
+                        .and_then(|range| by_span.get(&SourceSpan::new(source_id, range)).copied());
+                    (key, value_expr)
+                })
+                .collect();
             Some(BridgeProduct {
                 expr: expr_id,
                 body,
@@ -907,7 +934,28 @@ fn collect_local_bindings(
     source_id: SourceId,
     resolution: &NameResolution,
     bodies: &[BridgeBody],
+    file: &SourceFile,
+    exprs: &[BridgeExpr],
 ) -> Vec<BridgeLocalBinding> {
+    let by_span = expr_id_by_span(exprs);
+
+    // Build map: let-binding name_span → init expr ExprId
+    let mut init_by_name_span: HashMap<SourceSpan, Option<ExprId>> = HashMap::new();
+    for let_stmt in file
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::LetStmt::cast)
+    {
+        if let Some(name) = let_stmt.name() {
+            let name_span = SourceSpan::new(source_id, name.text_range());
+            let init_expr_id = let_stmt.expr().and_then(|init| {
+                let init_span = SourceSpan::new(source_id, init.syntax().text_range());
+                by_span.get(&init_span).copied()
+            });
+            init_by_name_span.insert(name_span, init_expr_id);
+        }
+    }
+
     let mut entries = resolution
         .scopes
         .all_definitions_in(source_id)
@@ -948,16 +996,18 @@ fn collect_local_bindings(
     entries
         .into_iter()
         .enumerate()
-        .map(
-            |(index, (body, name_span, name, kind, def_id))| BridgeLocalBinding {
+        .map(|(index, (body, name_span, name, kind, def_id))| {
+            let init_expr = init_by_name_span.get(&name_span).copied().flatten();
+            BridgeLocalBinding {
                 id: BridgeLocalBindingId(index as u32),
                 body,
                 name,
                 name_span,
                 kind,
                 def_id,
-            },
-        )
+                init_expr,
+            }
+        })
         .collect()
 }
 

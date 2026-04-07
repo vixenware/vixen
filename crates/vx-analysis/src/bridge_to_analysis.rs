@@ -5,9 +5,9 @@ use vx_resolve::{DefId, SourceSpan};
 use crate::{
     AnalysisResult, AnalyzedBody, BodyId, BridgeBody, BridgeExpr, BridgeExprKind,
     BridgeLocalBindingId, BridgeLocalBindingKind, CaptureSlot, ClosureEnvLayout, ExprId,
-    ExtractedNode, ExtractedNodeReason, KernelEntrypoint, KernelId, KernelRegion, LayoutId,
-    Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge, SourceExpr,
-    UseSiteId,
+    ExtractedNode, ExtractedNodeReason, FieldKey, KernelEntrypoint, KernelId, KernelRegion,
+    LayoutId, Observation, RuntimeBoundaryKind, RuntimeNode, RuntimeNodeId, SingleSourceBridge,
+    SourceExpr, UseSiteId,
 };
 
 pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
@@ -390,18 +390,120 @@ fn seed_lazy_product_fields(
     next_runtime_node: &mut u32,
     bridge: &SingleSourceBridge,
 ) {
-    let binding_products = bridge
+    // Direct binding → product field keys
+    let binding_products: HashMap<(BodyId, &str), Vec<FieldKey>> = bridge
         .binding_products
         .iter()
-        .map(|product| ((product.body, product.binding.as_str()), &product.fields))
-        .collect::<HashMap<_, _>>();
+        .map(|product| {
+            (
+                (product.body, product.binding.as_str()),
+                product.fields.clone(),
+            )
+        })
+        .collect();
+
+    // Products by (body, expr) → field keys with sub-expression ExprIds
+    let products_by_expr: HashMap<(BodyId, ExprId), &Vec<(FieldKey, Option<ExprId>)>> = bridge
+        .products
+        .iter()
+        .map(|product| ((product.body, product.expr), &product.fields))
+        .collect();
+
+    // Projections indexed by expr
+    let projection_by_expr: HashMap<(BodyId, ExprId), &crate::BridgeProjection> = bridge
+        .projections
+        .iter()
+        .map(|p| ((p.body, p.expr), p))
+        .collect();
+
+    // Derive binding → product field keys by following projection chains.
+    // If `let inner = outer._0` and `outer._0` sub-expression is a product,
+    // then `inner` is effectively that product.
+    let binding_by_name: HashMap<(BodyId, &str), &crate::BridgeLocalBinding> = bridge
+        .local_bindings
+        .iter()
+        .map(|b| ((b.body, b.name.as_str()), b))
+        .collect();
+
+    let mut all_binding_products: HashMap<(BodyId, &str), Vec<FieldKey>> = binding_products;
+
+    // Follow one level of projection: let X = Y.field
+    for binding in &bridge.local_bindings {
+        if binding.kind != crate::BridgeLocalBindingKind::Let {
+            continue;
+        }
+        let Some(init_expr) = binding.init_expr else {
+            continue;
+        };
+        // Is the init expression a projection?
+        let Some(proj) = projection_by_expr.get(&(binding.body, init_expr)) else {
+            continue;
+        };
+        // The projection's base must be a product — find the sub-expression
+        let Some(base_binding_name) = proj.base_binding.as_deref() else {
+            continue;
+        };
+        // Find the product that the base binding is initialized to
+        let Some(base_binding) = binding_by_name.get(&(binding.body, base_binding_name)) else {
+            continue;
+        };
+        let Some(base_init) = base_binding.init_expr else {
+            continue;
+        };
+        let Some(product_fields) = products_by_expr.get(&(binding.body, base_init)) else {
+            continue;
+        };
+        // Find the sub-expression for the projected field
+        let Some(sub_expr) =
+            product_fields.iter().find_map(
+                |(key, expr_id)| {
+                    if *key == proj.field { *expr_id } else { None }
+                },
+            )
+        else {
+            continue;
+        };
+        // Is that sub-expression also a product?
+        if let Some(sub_product) = products_by_expr.get(&(binding.body, sub_expr)) {
+            let sub_keys: Vec<FieldKey> = sub_product
+                .iter()
+                .map(|(k, _): &(FieldKey, _)| k.clone())
+                .collect();
+            if sub_keys.len() > 1 {
+                all_binding_products.insert((binding.body, &binding.name), sub_keys);
+            }
+        }
+    }
+
+    // Inline product field keys (without sub-expr info)
+    let inline_product_keys: HashMap<(BodyId, ExprId), Vec<FieldKey>> = bridge
+        .products
+        .iter()
+        .map(|product| {
+            let keys: Vec<FieldKey> = product.fields.iter().map(|(k, _)| k.clone()).collect();
+            ((product.body, product.expr), keys)
+        })
+        .collect();
+
+    let lookup_fields =
+        |body: BodyId, binding: Option<&str>, base_expr: ExprId| -> Option<Vec<FieldKey>> {
+            if let Some(binding) = binding {
+                if let Some(fields) = all_binding_products.get(&(body, binding)) {
+                    return Some(fields.clone());
+                }
+            }
+            inline_product_keys.get(&(body, base_expr)).cloned()
+        };
 
     let mut seeds = bridge
         .projections
         .iter()
         .filter_map(|projection| {
-            let binding = projection.base_binding.as_deref()?;
-            let fields = binding_products.get(&(projection.body, binding))?;
+            let fields = lookup_fields(
+                projection.body,
+                projection.base_binding.as_deref(),
+                projection.base,
+            )?;
             if fields.len() <= 1 || !fields.contains(&projection.field) {
                 return None;
             }
@@ -442,6 +544,9 @@ fn seed_lazy_product_fields(
     }
 }
 
+/// For `let inner = outer._0` where `outer` is `((safe(), bomb()), ...)`,
+/// derive that `inner` is effectively a product with the fields of the
+/// sub-expression at `outer._0`.
 fn seed_structural_sharing(
     bodies: &mut [AnalyzedBody],
     runtime_nodes: &mut Vec<RuntimeNode>,

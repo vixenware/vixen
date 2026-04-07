@@ -5,7 +5,7 @@ use vx_resolve::SourceSpan;
 
 use crate::{
     AnalysisResult, AnalyzedBody, BodyId, BridgeLocalBindingId, BridgeLocalBindingKind,
-    ExecSliceError::UnsupportedShape, ExprId, KernelId, RuntimeBoundaryKind, RuntimeNode,
+    ExecSliceError::UnsupportedShape, ExprId, FieldKey, KernelId, RuntimeBoundaryKind, RuntimeNode,
     RuntimeNodeId, SingleSourceBridge, SourceExpr, SourceLocalCalleeOrigin,
 };
 
@@ -1448,6 +1448,93 @@ impl<'a> BodyLowering<'a> {
         }
     }
 
+    /// Resolve `receiver._index` through binding chains using bridge data.
+    /// Returns the ExprId of the ultimate selected sub-expression, if resolvable.
+    fn resolve_tuple_field_through_bindings(
+        &self,
+        receiver: &Expr,
+        index: usize,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        let receiver_id = match self.expr_id(receiver) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let binding = match self.use_binding_by_expr.get(&receiver_id).copied() {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        self.resolve_index_for_binding(binding, index)
+    }
+
+    /// Follow a binding to its initializer and resolve `._index` from it.
+    /// Handles: binding → product → select field, or binding → projection → recurse.
+    fn resolve_index_for_binding(
+        &self,
+        binding: BridgeLocalBindingId,
+        index: usize,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        let init_expr = match self.binding_initializers.get(&binding).copied() {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        self.resolve_index_for_expr(init_expr, index)
+    }
+
+    /// Resolve `._index` from an expression. If the expr is a product, select directly.
+    /// If it's a projection (field access), follow through bindings recursively.
+    fn resolve_index_for_expr(
+        &self,
+        expr: ExprId,
+        index: usize,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        // Check if expr is a product — select field directly
+        let field_key = FieldKey::Index(index as u32);
+        if let Some(product) = self
+            .bridge
+            .products
+            .iter()
+            .find(|p| p.body == self.body && p.expr == expr)
+        {
+            if let Some((_key, sub_expr)) = product.fields.iter().find(|(k, _)| *k == field_key) {
+                return Ok(*sub_expr);
+            }
+        }
+
+        // Check if expr is a projection — follow the chain
+        if let Some(proj) = self
+            .bridge
+            .projections
+            .iter()
+            .find(|p| p.body == self.body && p.expr == expr)
+        {
+            // This expr is `base.field` — resolve `base` to the projected sub-expression,
+            // then select `index` from that.
+            let proj_index = match &proj.field {
+                FieldKey::Index(i) => *i as usize,
+                FieldKey::Name(_) => return Ok(None),
+            };
+            if let Some(base_binding_name) = &proj.base_binding {
+                // Find the base binding
+                if let Some(base_binding) = self
+                    .bridge
+                    .local_bindings
+                    .iter()
+                    .find(|b| b.body == self.body && b.name == *base_binding_name)
+                {
+                    // Resolve: what does base_binding._proj_index give us?
+                    if let Some(intermediate) =
+                        self.resolve_index_for_binding(base_binding.id, proj_index)?
+                    {
+                        // Now resolve ._index from that intermediate expression
+                        return self.resolve_index_for_expr(intermediate, index);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn materialize_binding(
         &mut self,
         binding: BridgeLocalBindingId,
@@ -2011,18 +2098,29 @@ impl<'a> BodyLowering<'a> {
                         .parse::<usize>()
                         .map_err(|_| UnsupportedShape(format!("invalid field `{field_name}`")))?;
 
-                    if let Expr::NameRef(_) = receiver
-                        && let Some(receiver_id) = self.expr_id(&receiver)
-                        && let Some(binding) = self.use_binding_by_expr.get(&receiver_id).copied()
-                        && let Some(tuple_expr) = self.binding_initializers.get(&binding).copied()
-                        && let Expr::Tuple(tuple) = self.expr(tuple_expr)?
-                    {
-                        let items = tuple.items().collect::<Vec<_>>();
-                        if index < items.len() {
-                            let selected_id = self
-                                .expr_id(&items[index])
-                                .ok_or(ExecSliceError::MissingExpr(self.source_for(tuple_expr)))?;
-                            return self.lower_expr(selected_id);
+                    // Try to resolve tuple field through bindings (direct + chained projections)
+                    if let Expr::NameRef(_) = receiver {
+                        if let Some(selected) =
+                            self.resolve_tuple_field_through_bindings(&receiver, index)?
+                        {
+                            return self.lower_expr(selected);
+                        }
+                    }
+
+                    // Also try inline tuple: receiver IS a tuple literal (no binding)
+                    if let Some(receiver_id) = self.expr_id(&receiver) {
+                        let field_key = FieldKey::Index(index as u32);
+                        if let Some(product) = self
+                            .bridge
+                            .products
+                            .iter()
+                            .find(|p| p.body == self.body && p.expr == receiver_id)
+                        {
+                            if let Some((_key, Some(sub_expr))) =
+                                product.fields.iter().find(|(k, _)| *k == field_key)
+                            {
+                                return self.lower_expr(*sub_expr);
+                            }
                         }
                     }
 
@@ -2038,6 +2136,25 @@ impl<'a> BodyLowering<'a> {
                         index,
                     });
                     return Ok(Operand::Slot(dst));
+                }
+
+                // Inline struct/product field selection via bridge data:
+                // If the receiver is a product (struct/tuple literal) in the bridge,
+                // directly lower the selected field's sub-expression.
+                if let Some(receiver_id) = self.expr_id(&receiver) {
+                    let field_key = FieldKey::Name(field_name.clone());
+                    if let Some(product) = self
+                        .bridge
+                        .products
+                        .iter()
+                        .find(|p| p.body == self.body && p.expr == receiver_id)
+                    {
+                        if let Some((_key, Some(sub_expr))) =
+                            product.fields.iter().find(|(k, _)| *k == field_key)
+                        {
+                            return self.lower_expr(*sub_expr);
+                        }
+                    }
                 }
 
                 let receiver_id = self
