@@ -3961,8 +3961,12 @@ dependencies = [
 name = "vx-rt"
 version = "0.1.0"
 dependencies = [
+ "datatest-stable",
  "thiserror 2.0.18",
  "vx-analysis",
+ "vx-eval-tests",
+ "vx-parser",
+ "vx-resolve",
 ]
 
 [[package]]

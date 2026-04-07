@@ -1,0 +1,8 @@
+source <<VX,vixen
+fn main() -> U64 (
+  if true ( 1 ) else ( 2 )
+)
+VX
+
+entry main
+expect @u64"1"

@@ -1,0 +1,17 @@
+source <<VX,vixen
+enum Option {
+  struct Some { val: U64 }
+  struct None {}
+}
+
+fn main() -> U64 (
+  let opt = None {};
+  match opt (
+    Some { val } => val,
+    None {} => 99,
+  )
+)
+VX
+
+entry main
+expect @u64"99"

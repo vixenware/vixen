@@ -1,0 +1,9 @@
+source <<VX,vixen
+fn main() -> U64 (
+  let p = ((1, 2), (3, 4));
+  p._0._1
+)
+VX
+
+entry main
+expect @u64"2"

@@ -1,0 +1,11 @@
+source <<VX,vixen
+struct Point { x: U64, y: U64 }
+
+fn main() -> U64 (
+  let p = Point { x: 10, y: 32 };
+  p.x + p.y
+)
+VX
+
+entry main
+expect @u64"42"

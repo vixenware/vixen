@@ -1,0 +1,17 @@
+source <<VX,vixen
+struct Pair { fst: U64, snd: U64 }
+
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  Pair { fst: 42, snd: bomb() }.fst
+)
+VX
+
+entry main
+expect @u64"42"
+
+trace {
+    not_entered (bomb)
+}
+

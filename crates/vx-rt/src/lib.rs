@@ -3,10 +3,25 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use thiserror::Error;
-use vx_analysis::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
+use vx_analysis::{
+    BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SingleSourceBridge, SlotId,
+    build_minimal_analysis, lower_executable_program_for_entry_body,
+};
 
 #[derive(Debug, Error)]
 pub enum RtError {
+    #[error("parse errors: {0:?}")]
+    Parse(Vec<vx_parser::SyntaxError>),
+    #[error("resolve errors: {0:?}")]
+    Resolve(Vec<vx_resolve::ResolveError>),
+    #[error("type errors: {0:?}")]
+    Type(Vec<vx_resolve::TypeError>),
+    #[error("analysis validation: {0:?}")]
+    Analysis(vx_analysis::AnalysisError),
+    #[error("entry function `{0}` not found")]
+    MissingEntry(String),
+    #[error("lowering failed: {0:?}")]
+    Lowering(vx_analysis::ExecSliceError),
     #[error("missing body {0:?}")]
     MissingBody(BodyId),
     #[error("arity mismatch: body expects {expected}, got {actual}")]
@@ -133,6 +148,35 @@ fn expect_bool(val: &RtValue) -> Result<bool, RtError> {
 pub fn eval_program(program: &ExecutableProgram, args: &[RtValue]) -> Result<RtValue, RtError> {
     let result = eval_body(program, program.entry, args)?;
     force_scalar(result, program)
+}
+
+/// Full pipeline: source text → bridge → analysis → lower → demand-driven eval.
+pub fn eval_source(
+    source: &str,
+    function_name: &str,
+    args: &[RtValue],
+) -> Result<RtValue, RtError> {
+    let bridge = SingleSourceBridge::from_source_text(source);
+    if !bridge.parse_errors.is_empty() {
+        return Err(RtError::Parse(bridge.parse_errors.clone()));
+    }
+    if !bridge.resolve_errors.is_empty() {
+        return Err(RtError::Resolve(bridge.resolve_errors.clone()));
+    }
+    if !bridge.type_errors.is_empty() {
+        return Err(RtError::Type(bridge.type_errors.clone()));
+    }
+    let body_id = bridge
+        .bodies
+        .iter()
+        .find(|b| b.name == function_name)
+        .ok_or_else(|| RtError::MissingEntry(function_name.to_owned()))?
+        .id;
+    let analysis = build_minimal_analysis(&bridge);
+    analysis.validate().map_err(RtError::Analysis)?;
+    let program = lower_executable_program_for_entry_body(&analysis, &bridge, body_id)
+        .map_err(RtError::Lowering)?;
+    eval_program(&program, args)
 }
 
 fn eval_body(

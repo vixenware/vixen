@@ -1,0 +1,21 @@
+source <<VX,vixen
+enum Option {
+  struct Some { val: U64 }
+  struct None {}
+}
+
+fn unwrap_or(opt: Option, default: U64) -> U64 (
+  match opt (
+    Some { val } => val,
+    None {} => default,
+  )
+)
+
+fn main() -> U64 (
+  let opt = Some { val: 7 };
+  unwrap_or(opt, 0)
+)
+VX
+
+entry main
+expect @u64"7"

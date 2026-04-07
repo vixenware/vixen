@@ -1,0 +1,22 @@
+source <<VX,vixen
+enum Shape {
+  struct Circle { radius: U64 }
+  struct Rect { w: U64, h: U64 }
+  struct Point {}
+}
+
+fn area(s: Shape) -> U64 (
+  match s (
+    Circle { radius } => radius * radius,
+    Rect { w, h } => w * h,
+    Point {} => 0,
+  )
+)
+
+fn main() -> U64 (
+  area(Rect { w: 3, h: 7 })
+)
+VX
+
+entry main
+expect @u64"21"

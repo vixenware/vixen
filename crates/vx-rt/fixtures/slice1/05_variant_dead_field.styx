@@ -1,0 +1,21 @@
+source <<VX,vixen
+enum Pair {
+  struct MkPair { fst: U64, snd: U64 }
+}
+
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let p = MkPair { fst: 42, snd: bomb() };
+  match p (
+    MkPair { fst } => fst,
+  )
+)
+VX
+
+entry main
+expect @u64"42"
+
+trace {
+  not_entered (bomb)
+}
