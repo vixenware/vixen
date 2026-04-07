@@ -11,8 +11,11 @@
 //!   node carries the inner expression/pattern's span.
 //! - **No call flattening**: curried calls `f(a)(b)` produce nested `CallExpr` nodes.
 //! - **Raw literals**: `LitKind::Int/Float/String` store raw token text, not parsed values.
-//! - **Error recovery**: if the parser produced a syntax node, the builder emits a
-//!   VIR node for it. Missing children become `Error` variants with the parent's span.
+//! - **Error recovery**: the builder emits a VIR node for every element child in
+//!   every list context (blocks, arms, fields, params, args, type refs, patterns).
+//!   Missing children become `Error` variants with the parent's span. The one
+//!   exception is attribute internals, where non-`ATTRIBUTE_ENTRY` children are
+//!   skipped as structural punctuation.
 //! - **Synthetic blocks**: the top-level body's root expression is a synthetic block
 //!   with `synthetic: true` and a span covering the entire file.
 
@@ -2862,8 +2865,11 @@ impl VirBuilder {
     fn build_function_type_ref(&mut self, f: &vx_parser::FunctionType) -> TypeRefId {
         let type_span = self.span(f.syntax());
         // Walk raw children. All Type children except the last are parameters;
-        // the last Type child is the return type. Non-Type children that aren't
-        // CapabilityList or KeywordParameterList get error type refs.
+        // the last Type child is the return type. This is a recovery heuristic
+        // matching the parser's FunctionType.parameter_types() convention, not a
+        // structural guarantee — if the CST is broken, the split may be wrong.
+        // Non-Type children that aren't CapabilityList or KeywordParameterList
+        // get error type refs.
         let mut type_children: Vec<TypeRefId> = Vec::new();
         for child in f.syntax().children() {
             if let Some(t) = vx_parser::Type::cast(child.clone()) {
