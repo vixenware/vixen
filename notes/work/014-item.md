@@ -30,6 +30,7 @@ This is analysis-level only. It should not change parsing, resolution, or type c
 - Add a new unit test where:
 - `main` exists but a disconnected top-level helper exists.
 - The disconnected helper remains `NoObs`.
+- Un-ignore and pass `pair_passed_to_fn_dead_sibling` in [demand_driven.rs](/Users/amos/bearcove/vixen/crates/vx-rt/tests/demand_driven.rs).
 
 ## Notes
 

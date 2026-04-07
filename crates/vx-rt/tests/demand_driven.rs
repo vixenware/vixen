@@ -70,7 +70,7 @@ fn main(n: U64) -> U64 (
 
 /// Pair must be constructed (passed to a function), but dead sibling is lowerable.
 /// This catches "only thunk on UnsupportedShape" — bomb() lowers fine but must not run.
-/// Requires cross-function demand propagation (work item 013).
+/// Requires cross-function demand propagation (work item 014).
 #[test]
 #[ignore]
 fn pair_passed_to_fn_dead_sibling() {
