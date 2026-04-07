@@ -252,6 +252,9 @@ namespace Host {
   fn hash(self, path: String) -> Blob;
 }
 
+/// Halt execution with an error message (testing/debugging primitive).
+fn trap[T](message: String) -> T;
+
 /// Demand or widen a keyed incremental computation.
 fn keyed[K, J, R](key: K, joined: J, resolver: Fn(KeyedContext[K, J]) -> R) -> R;
 /// Read a branch-local assumption.

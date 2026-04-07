@@ -1974,6 +1974,26 @@ impl<'a> BodyLowering<'a> {
                     return Ok(Operand::Slot(dst));
                 }
 
+                if let Expr::NameRef(name_ref) = callee_expr.clone()
+                    && name_ref.token().is_some_and(|token| token.text() == "trap")
+                {
+                    let message = if let Some(arg) = call.positional_args().into_iter().next() {
+                        let id = self
+                            .expr_id(&arg)
+                            .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
+                        self.lower_expr(id)?
+                    } else {
+                        Operand::String("trap".to_owned())
+                    };
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::AssignFailure {
+                        dst,
+                        source,
+                        message,
+                    });
+                    return Ok(Operand::Slot(dst));
+                }
+
                 if let Expr::Field(field) = callee_expr.clone()
                     && let Some(method_name) =
                         field.field_name().map(|token| token.text().to_owned())
