@@ -367,6 +367,7 @@ impl<'a> ProgramEvaluator<'a> {
         match op {
             KernelOp::AssignConstInt { value, .. } => self.int_to_value(function_name, *value),
             KernelOp::AssignConstString { value, .. } => Ok(EvalValue::String(value.clone())),
+            KernelOp::AssignConstBool { value, .. } => Ok(EvalValue::Bool(*value)),
             KernelOp::MakeBlob { value, .. } => {
                 let value = self
                     .resolve_operand(function_name, producers, slots, value)
@@ -455,6 +456,15 @@ impl<'a> ProgramEvaluator<'a> {
                         .wrapping_add(self.expect_u64(function_name, &rhs)?),
                 ))
             }
+            KernelOp::Equal { lhs, rhs, .. } => {
+                let lhs = self
+                    .resolve_operand(function_name, producers, slots, lhs)
+                    .await?;
+                let rhs = self
+                    .resolve_operand(function_name, producers, slots, rhs)
+                    .await?;
+                Ok(EvalValue::Bool(lhs == rhs))
+            }
             KernelOp::NotEqual { lhs, rhs, .. } => {
                 let lhs = self
                     .resolve_operand(function_name, producers, slots, lhs)
@@ -463,6 +473,18 @@ impl<'a> ProgramEvaluator<'a> {
                     .resolve_operand(function_name, producers, slots, rhs)
                     .await?;
                 Ok(EvalValue::Bool(lhs != rhs))
+            }
+            KernelOp::Sub { lhs, rhs, .. } => {
+                let lhs = self
+                    .resolve_operand(function_name, producers, slots, lhs)
+                    .await?;
+                let rhs = self
+                    .resolve_operand(function_name, producers, slots, rhs)
+                    .await?;
+                Ok(EvalValue::U64(
+                    self.expect_u64(function_name, &lhs)?
+                        .wrapping_sub(self.expect_u64(function_name, &rhs)?),
+                ))
             }
             KernelOp::MakeArray { items, .. } => {
                 let mut resolved = Vec::with_capacity(items.len());
@@ -1393,7 +1415,10 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::MakePair { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }
         | KernelOp::Add { dst, .. }
+        | KernelOp::AssignConstBool { dst, .. }
+        | KernelOp::Equal { dst, .. }
         | KernelOp::NotEqual { dst, .. }
+        | KernelOp::Sub { dst, .. }
         | KernelOp::ProjectField { dst, .. }
         | KernelOp::CallMember { dst, .. }
         | KernelOp::BuildTree { dst, .. }

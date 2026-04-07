@@ -189,7 +189,24 @@ pub enum KernelOp {
         lhs: Operand,
         rhs: Operand,
     },
+    AssignConstBool {
+        dst: SlotId,
+        source: SourceExpr,
+        value: bool,
+    },
+    Equal {
+        dst: SlotId,
+        source: SourceExpr,
+        lhs: Operand,
+        rhs: Operand,
+    },
     NotEqual {
+        dst: SlotId,
+        source: SourceExpr,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    Sub {
         dst: SlotId,
         source: SourceExpr,
         lhs: Operand,
@@ -1528,8 +1545,18 @@ impl<'a> BodyLowering<'a> {
                     SyntaxKind::STRING => Ok(Operand::String(normalize_string_literal_token(
                         token.text(),
                     ))),
+                    SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => {
+                        let value = token.kind() == SyntaxKind::TRUE_KW;
+                        let dst = self.alloc_temp();
+                        self.ops.push(KernelOp::AssignConstBool {
+                            dst,
+                            source: self.source_for(expr_id),
+                            value,
+                        });
+                        Ok(Operand::Slot(dst))
+                    }
                     _ => Err(UnsupportedShape(format!(
-                        "only INT/STRING literals supported, got `{}`",
+                        "unsupported literal kind `{}`",
                         token.text()
                     ))),
                 }
@@ -1552,22 +1579,26 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Binary(binary) => {
                 let source = self.source_for(expr_id);
-                let has_plus = binary
+                let op_token = binary
                     .syntax()
                     .children_with_tokens()
                     .filter_map(|child| child.into_token())
-                    .any(|token| token.kind() == SyntaxKind::PLUS);
-                let has_not_equal = binary
-                    .syntax()
-                    .children_with_tokens()
-                    .filter_map(|child| child.into_token())
-                    .any(|token| token.kind() == SyntaxKind::BANG_EQ);
-                if !has_plus && !has_not_equal {
-                    return Err(UnsupportedShape(format!(
-                        "only + and != binary are supported in exec slice (expr {})",
-                        expr_id.0
-                    )));
-                }
+                    .find(|token| {
+                        matches!(
+                            token.kind(),
+                            SyntaxKind::PLUS
+                                | SyntaxKind::MINUS
+                                | SyntaxKind::EQ2
+                                | SyntaxKind::BANG_EQ
+                        )
+                    })
+                    .ok_or_else(|| {
+                        UnsupportedShape(format!(
+                            "unsupported binary operator in exec slice (expr {})",
+                            expr_id.0
+                        ))
+                    })?;
+                let op_kind = op_token.kind();
 
                 let lhs = binary
                     .lhs()
@@ -1584,20 +1615,32 @@ impl<'a> BodyLowering<'a> {
                         .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?,
                 )?;
                 let dst = self.alloc_temp();
-                if has_plus {
-                    self.ops.push(KernelOp::Add {
+                match op_kind {
+                    SyntaxKind::PLUS => self.ops.push(KernelOp::Add {
                         dst,
                         source,
                         lhs,
                         rhs,
-                    });
-                } else {
-                    self.ops.push(KernelOp::NotEqual {
+                    }),
+                    SyntaxKind::MINUS => self.ops.push(KernelOp::Sub {
                         dst,
                         source,
                         lhs,
                         rhs,
-                    });
+                    }),
+                    SyntaxKind::EQ2 => self.ops.push(KernelOp::Equal {
+                        dst,
+                        source,
+                        lhs,
+                        rhs,
+                    }),
+                    SyntaxKind::BANG_EQ => self.ops.push(KernelOp::NotEqual {
+                        dst,
+                        source,
+                        lhs,
+                        rhs,
+                    }),
+                    _ => unreachable!(),
                 }
                 Ok(Operand::Slot(dst))
             }

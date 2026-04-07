@@ -270,6 +270,7 @@ fn eval_op(
             }
         }
         KernelOp::AssignConstString { value, .. } => Ok(RtValue::String(value.clone())),
+        KernelOp::AssignConstBool { value, .. } => Ok(RtValue::Bool(*value)),
         KernelOp::AssignAlias { value, .. } => resolve_operand(program, producers, slots, value),
         KernelOp::AssignCallableAddConst { addend, .. } => {
             let addend = resolve_operand(program, producers, slots, addend)?;
@@ -345,10 +346,24 @@ fn eval_op(
             ))
         }
 
+        KernelOp::Equal { lhs, rhs, .. } => {
+            let lhs = resolve_and_force(program, producers, slots, lhs)?;
+            let rhs = resolve_and_force(program, producers, slots, rhs)?;
+            Ok(RtValue::Bool(expect_u64(&lhs)? == expect_u64(&rhs)?))
+        }
+
         KernelOp::NotEqual { lhs, rhs, .. } => {
             let lhs = resolve_and_force(program, producers, slots, lhs)?;
             let rhs = resolve_and_force(program, producers, slots, rhs)?;
             Ok(RtValue::Bool(expect_u64(&lhs)? != expect_u64(&rhs)?))
+        }
+
+        KernelOp::Sub { lhs, rhs, .. } => {
+            let lhs = resolve_and_force(program, producers, slots, lhs)?;
+            let rhs = resolve_and_force(program, producers, slots, rhs)?;
+            Ok(RtValue::U64(
+                expect_u64(&lhs)?.wrapping_sub(expect_u64(&rhs)?),
+            ))
         }
 
         KernelOp::Select {
@@ -419,7 +434,10 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::MakePair { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }
         | KernelOp::Add { dst, .. }
+        | KernelOp::AssignConstBool { dst, .. }
+        | KernelOp::Equal { dst, .. }
         | KernelOp::NotEqual { dst, .. }
+        | KernelOp::Sub { dst, .. }
         | KernelOp::ProjectField { dst, .. }
         | KernelOp::CallMember { dst, .. }
         | KernelOp::BuildTree { dst, .. }
