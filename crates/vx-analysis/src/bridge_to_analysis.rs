@@ -14,7 +14,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
     let mut bodies = bridge
         .bodies
         .iter()
-        .map(|body| analyzed_body_shell(body, &bridge.exprs))
+        .map(|body| analyzed_body_shell(body, bridge))
         .collect::<Vec<_>>();
 
     // Seed extracted nodes onto bodies BEFORE building kernels, so that
@@ -1143,12 +1143,13 @@ fn seed_closure_layouts(bridge: &SingleSourceBridge) -> Vec<ClosureEnvLayout> {
     layouts
 }
 
-fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody {
-    let first_expr = exprs
-        .iter()
-        .find(|expr| expr.body == Some(body.id))
-        .map(|expr| expr.id)
-        .unwrap_or(crate::ExprId(0));
+fn analyzed_body_shell(body: &BridgeBody, bridge: &SingleSourceBridge) -> AnalyzedBody {
+    let body_expr = *bridge.body_result_exprs.get(&body.id).unwrap_or_else(|| {
+        panic!(
+            "body {:?} ({}) has no body_result_expr — body_expr_span missing or unresolved",
+            body.id, body.name
+        )
+    });
 
     AnalyzedBody {
         id: body.id,
@@ -1164,7 +1165,7 @@ fn analyzed_body_shell(body: &BridgeBody, exprs: &[BridgeExpr]) -> AnalyzedBody 
             body: body.id,
             source: SourceExpr {
                 body: body.id,
-                expr: first_expr,
+                expr: body_expr,
             },
             kernel: KernelId(body.id.0),
             demanded_result: Observation::NeedValue,
@@ -1198,15 +1199,11 @@ fn kernel_shell(
                 .local_bindings
                 .iter()
                 .find(|b| b.body == body.id && b.name_span == param.span)?;
-            let ty = bridge.expr_types.values().next().and_then(|_| {
-                // Look up the type from binding_types or expr_types by finding
-                // an expression at this param's span
-                bridge
-                    .exprs
-                    .iter()
-                    .find(|expr| expr.body == Some(body.id) && expr.span == param.span)
-                    .and_then(|expr| bridge.expr_types.get(&expr.id).cloned())
-            });
+            let ty = bridge
+                .exprs
+                .iter()
+                .find(|expr| expr.body == Some(body.id) && expr.span == param.span)
+                .and_then(|expr| bridge.expr_types.get(&expr.id).cloned());
             Some(crate::KernelParam {
                 name: param.name.clone(),
                 source: None,
@@ -1216,11 +1213,11 @@ fn kernel_shell(
         })
         .collect();
 
-    // Result type: find the last expression in the body and look up its type.
-    let result_ty = body_exprs
-        .iter()
-        .max()
-        .and_then(|expr_id| bridge.expr_types.get(expr_id).cloned());
+    // Result type: use the body expression ExprId.
+    let result_ty = bridge
+        .body_result_exprs
+        .get(&body.id)
+        .and_then(|id| bridge.expr_types.get(id).cloned());
 
     KernelRegion {
         id: KernelId(body.id.0),

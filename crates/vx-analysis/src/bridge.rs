@@ -31,6 +31,8 @@ pub struct BridgeBody {
     pub span: SourceSpan,
     pub def_id: Option<DefId>,
     pub params: Vec<BridgeParam>,
+    /// Span of the body expression (the `( ... )` or block), resolved to ExprId later.
+    pub body_expr_span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +177,8 @@ pub struct SingleSourceBridge {
     pub boundary_arg_closures: Vec<BridgeBoundaryArgClosure>,
     pub local_boundary_inits: Vec<BridgeLocalBoundaryInit>,
     pub expr_types: BTreeMap<ExprId, Ty>,
+    /// Maps each body to the ExprId of its body expression (the result expression).
+    pub body_result_exprs: BTreeMap<BodyId, ExprId>,
     pub parse_errors: Vec<SyntaxError>,
     pub resolve_errors: Vec<ResolveError>,
     pub type_errors: Vec<vx_resolve::TypeError>,
@@ -215,6 +219,8 @@ impl SingleSourceBridge {
             &resolved_refs,
         );
 
+        let body_result_exprs = resolve_body_result_exprs(&collected.bodies, &collected.exprs);
+
         Self {
             source_id,
             parsed,
@@ -234,6 +240,7 @@ impl SingleSourceBridge {
             boundary_arg_closures: collected.boundary_arg_closures,
             local_boundary_inits: collected.local_boundary_inits,
             expr_types: collected.expr_types,
+            body_result_exprs,
             parse_errors,
             resolve_errors: resolution.errors,
             type_errors: type_check.errors,
@@ -275,6 +282,8 @@ impl SingleSourceBridge {
             &resolved_refs,
         );
 
+        let body_result_exprs = resolve_body_result_exprs(&collected.bodies, &collected.exprs);
+
         Ok(Self {
             source_id,
             parsed,
@@ -294,6 +303,7 @@ impl SingleSourceBridge {
             boundary_arg_closures: collected.boundary_arg_closures,
             local_boundary_inits: collected.local_boundary_inits,
             expr_types: collected.expr_types,
+            body_result_exprs,
             parse_errors,
             resolve_errors: resolution.errors,
             type_errors: type_check.errors,
@@ -726,12 +736,16 @@ fn collect_bodies(
                 .into_iter()
                 .find(|def| def.kind == DefKind::Function && def.name_span == name_span)
                 .map(|def| def.id);
+            let body_expr_span = fn_decl
+                .body_expr()
+                .map(|expr| SourceSpan::new(source_id, expr.syntax().text_range()));
             bodies.push(BridgeBody {
                 id: body_id,
                 name: name.text().to_owned(),
                 span: SourceSpan::new(source_id, fn_decl.syntax().text_range()),
                 def_id,
                 params,
+                body_expr_span,
             });
         }
     }
@@ -760,6 +774,21 @@ fn collect_exprs(source_id: SourceId, file: &SourceFile, bodies: &[BridgeBody]) 
             }
         })
         .collect::<Vec<_>>()
+}
+
+fn resolve_body_result_exprs(
+    bodies: &[BridgeBody],
+    exprs: &[BridgeExpr],
+) -> BTreeMap<BodyId, ExprId> {
+    let by_span = expr_id_by_span(exprs);
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let span = body.body_expr_span?;
+            let expr_id = by_span.get(&span).copied()?;
+            Some((body.id, expr_id))
+        })
+        .collect()
 }
 
 fn body_for_range(range: vx_parser::TextRange, bodies: &[BridgeBody]) -> Option<BodyId> {
