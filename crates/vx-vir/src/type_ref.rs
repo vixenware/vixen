@@ -63,6 +63,9 @@ pub struct FunctionTypeRef {
 
     /// The return type.
     pub ret: TypeRefId,
+
+    /// Capability tags on this function type (e.g. `#fs`, `#discover`).
+    pub capabilities: Vec<String>,
 }
 
 /// A tuple type reference: `(A, B, C)`.

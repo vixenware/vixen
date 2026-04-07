@@ -80,6 +80,7 @@ fn arena_round_trip() {
         kind: ItemKind::Function(FunctionItem {
             name: "add".into(),
             name_span: dummy_span(),
+            type_params: vec![],
             body: BodyId(0), // placeholder, fixed below
             type_id: None,
             attributes: vec![],
@@ -95,6 +96,8 @@ fn arena_round_trip() {
             pattern: pat_id,
             ty: None,
             is_keyword: false,
+            has_default: false,
+            doc: None,
         }],
         root_expr: lit_id,
         parent: None,
@@ -223,6 +226,7 @@ fn visitor_traversal_count() {
         kind: ItemKind::Function(FunctionItem {
             name: "add".into(),
             name_span: dummy_span(),
+            type_params: vec![],
             body: BodyId(0),
             type_id: None,
             attributes: vec![],
@@ -237,6 +241,8 @@ fn visitor_traversal_count() {
             pattern: pat_id,
             ty: None,
             is_keyword: false,
+            has_default: false,
+            doc: None,
         }],
         root_expr: bin_id,
         parent: None,

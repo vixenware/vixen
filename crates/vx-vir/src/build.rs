@@ -399,6 +399,7 @@ impl VirBuilder {
         let name_span = f.name().map(|t| self.token_span(&t)).unwrap_or(item_span);
         let attributes = self.build_attributes(f.attributes());
         let type_id = None;
+        let type_params = self.extract_type_params(f.syntax());
 
         // We need to create the item first (for BodyOwner::Function { item }),
         // then create the body.
@@ -409,6 +410,7 @@ impl VirBuilder {
             kind: ItemKind::Function(FunctionItem {
                 name,
                 name_span,
+                type_params,
                 body: placeholder_body,
                 type_id,
                 attributes,
@@ -508,6 +510,8 @@ impl VirBuilder {
                                     pattern: pat_id,
                                     ty,
                                     is_keyword: false,
+                                    has_default: false,
+                                    doc: vx_parser::doc_comment(param.syntax()),
                                 });
                             } else {
                                 // Malformed parameter — emit error param.
@@ -516,6 +520,8 @@ impl VirBuilder {
                                     pattern: this.error_pattern(child_span),
                                     ty: None,
                                     is_keyword: false,
+                                    has_default: false,
+                                    doc: None,
                                 });
                             }
                         }
@@ -533,10 +539,16 @@ impl VirBuilder {
                                     .slot_type()
                                     .and_then(|st| st.ty())
                                     .map(|t| this.build_type_ref(&t));
+                                let has_default = kw_param
+                                    .syntax()
+                                    .children()
+                                    .any(|c| vx_parser::Expr::cast(c).is_some());
                                 params.push(Param {
                                     pattern: pat_id,
                                     ty,
                                     is_keyword: true,
+                                    has_default,
+                                    doc: vx_parser::doc_comment(kw_param.syntax()),
                                 });
                             } else {
                                 // Malformed keyword parameter — emit error param.
@@ -545,6 +557,8 @@ impl VirBuilder {
                                     pattern: this.error_pattern(child_span),
                                     ty: None,
                                     is_keyword: true,
+                                    has_default: false,
+                                    doc: None,
                                 });
                             }
                         }
@@ -805,6 +819,24 @@ impl VirBuilder {
         let def_id = self.next_def_id();
         let name = ns.name().map(|t| t.text().to_string()).unwrap_or_default();
         let name_span = ns.name().map(|t| self.token_span(&t)).unwrap_or(item_span);
+        // Extract type params from namespace target (e.g. `namespace Foo[T, U]`).
+        let type_params: Vec<String> = ns
+            .target()
+            .and_then(|target| target.type_args())
+            .map(|type_args| {
+                type_args
+                    .types()
+                    .filter_map(|ty| match ty {
+                        vx_parser::Type::Path(path) => {
+                            let mut segments = path.segments();
+                            let name = segments.next()?;
+                            segments.next().is_none().then(|| name.text().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // NamespaceDecl doesn't have a typed attributes() method, so
         // extract the AttributeList from raw syntax.
         let attributes = {
@@ -866,6 +898,7 @@ impl VirBuilder {
                 name,
                 name_span,
                 scope: scope_id,
+                type_params,
                 items: child_items,
                 attributes,
             }),
@@ -1228,6 +1261,8 @@ impl VirBuilder {
                                 pattern: pat_id,
                                 ty: None,
                                 is_keyword: false,
+                                has_default: false,
+                                doc: None,
                             });
                         } else {
                             let child_span = this.span(&child);
@@ -1235,6 +1270,8 @@ impl VirBuilder {
                                 pattern: this.error_pattern(child_span),
                                 ty: None,
                                 is_keyword: false,
+                                has_default: false,
+                                doc: None,
                             });
                         }
                     }
@@ -3049,13 +3086,25 @@ impl VirBuilder {
         // Non-Type children that aren't CapabilityList or KeywordParameterList
         // get error type refs.
         let mut type_children: Vec<TypeRefId> = Vec::new();
+        let mut capabilities: Vec<String> = Vec::new();
         for child in f.syntax().children() {
             if let Some(t) = vx_parser::Type::cast(child.clone()) {
                 type_children.push(self.build_type_ref(&t));
-            } else if child.kind() == SyntaxKind::CAPABILITY_LIST
-                || child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST
-            {
-                // Expected non-Type structural children — skip.
+            } else if child.kind() == SyntaxKind::CAPABILITY_LIST {
+                // Extract capability tags from the capability list's syntax children.
+                for tag_node in child.children() {
+                    if tag_node.kind() == SyntaxKind::CAPABILITY_TAG {
+                        if let Some(name_token) = tag_node
+                            .children_with_tokens()
+                            .filter_map(|c| c.into_token())
+                            .find(|t| t.kind() == SyntaxKind::LOWER_IDENT)
+                        {
+                            capabilities.push(name_token.text().to_string());
+                        }
+                    }
+                }
+            } else if child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST {
+                // Expected non-Type structural child — skip.
             } else {
                 type_children.push(self.error_type_ref(self.span(&child)));
             }
@@ -3067,7 +3116,11 @@ impl VirBuilder {
 
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,
-            kind: TypeRefKind::Function(FunctionTypeRef { params, ret }),
+            kind: TypeRefKind::Function(FunctionTypeRef {
+                params,
+                ret,
+                capabilities,
+            }),
         })
     }
 

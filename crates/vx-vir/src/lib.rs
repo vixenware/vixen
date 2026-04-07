@@ -39,6 +39,7 @@ pub mod resolve;
 pub mod scope;
 pub mod source_unit;
 pub mod stmt;
+pub mod type_collect;
 pub mod type_populate;
 pub mod type_ref;
 pub mod visitor;

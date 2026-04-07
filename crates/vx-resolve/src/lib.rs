@@ -28,8 +28,8 @@ pub use scope::{
     top_level_definitions,
 };
 
-mod type_collect;
-pub use type_collect::{TypeCollection, collect_types, collect_types_for_sources};
+pub mod type_collect;
+pub use type_collect::{TypeCollection, TypeKind, collect_types, collect_types_for_sources};
 
 mod type_check;
 pub use type_check::{TypeCheckResult, TypeError, TypeErrorKind, type_check};

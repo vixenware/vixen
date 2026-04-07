@@ -56,6 +56,8 @@ pub struct FunctionItem {
     pub name: String,
     /// Span of the name token.
     pub name_span: SourceSpan,
+    /// Type parameter names (e.g. `["T", "U"]` from `fn foo[T, U](...)`).
+    pub type_params: Vec<String>,
     /// The body of the function.
     pub body: BodyId,
     /// The TypeId assigned during type collection, if applicable.
@@ -173,6 +175,9 @@ pub struct NamespaceItem {
     /// The scope introduced by this namespace.
     /// Populated during: CST walk.
     pub scope: ScopeId,
+    /// Type parameter names from the namespace target (e.g. `["T"]` from `namespace Foo[T]`).
+    /// Populated during: CST walk.
+    pub type_params: Vec<String>,
     /// The contained items (for `namespace Name { ... }` form).
     pub items: Vec<ItemId>,
     /// Attributes on this namespace.

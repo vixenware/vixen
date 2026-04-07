@@ -28,7 +28,7 @@ pub struct TypeCollection {
     /// Map from definition sites to their function signature.
     pub def_to_fn_sig: HashMap<DefSite, FnSig>,
     /// Map from type names to their TypeId and kind (for resolving type annotations).
-    pub(crate) name_to_id: HashMap<String, (TypeId, TypeKind)>,
+    pub name_to_id: HashMap<String, (TypeId, TypeKind)>,
     /// Full alternative sets for sum aliases like `ExecInput = String | Path | ...`.
     pub alias_sum_alternatives: HashMap<TypeId, Vec<Ty>>,
 }
@@ -687,7 +687,7 @@ fn collect_capabilities(decl: &FnDecl) -> Vec<vx_types::Capability> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum TypeKind {
+pub enum TypeKind {
     Struct,
     Enum,
     Newtype,

@@ -89,4 +89,13 @@ pub struct Param {
 
     /// Whether this is a keyword parameter (declared in keyword param list).
     pub is_keyword: bool,
+
+    /// Whether this parameter has a default value expression.
+    /// Only meaningful for keyword parameters.
+    /// Populated during: CST walk.
+    pub has_default: bool,
+
+    /// Doc comment on this parameter, if any.
+    /// Populated during: CST walk.
+    pub doc: Option<String>,
 }
