@@ -32,6 +32,7 @@ pub mod arena;
 pub mod binding;
 pub mod body;
 pub mod build;
+pub mod cap_check;
 pub mod expr;
 pub mod item;
 pub mod pattern;
