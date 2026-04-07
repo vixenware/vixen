@@ -293,6 +293,31 @@ fn eval_op(
             }
         }
 
+        KernelOp::AllocClosure { body, captures, .. } => {
+            let mut capture_vals = Vec::with_capacity(captures.len());
+            for cap in captures {
+                capture_vals.push(resolve_operand(program, producers, slots, cap)?);
+            }
+            Ok(RtValue::Closure(*body, capture_vals))
+        }
+
+        KernelOp::ApplyClosure { closure, args, .. } => {
+            let closure_val = resolve_and_force(program, producers, slots, closure)?;
+            match closure_val {
+                RtValue::Closure(body_id, capture_vals) => {
+                    let mut all_args = capture_vals;
+                    for arg in args {
+                        all_args.push(resolve_operand(program, producers, slots, arg)?);
+                    }
+                    eval_body(program, body_id, &all_args)
+                }
+                other => Err(RtError::TypeError {
+                    expected: "closure",
+                    actual: other.kind_name().to_owned(),
+                }),
+            }
+        }
+
         KernelOp::AssignLazyPoison { label, .. } => {
             Ok(RtValue::Failure(format!("lazy poison: {label}")))
         }
@@ -468,6 +493,8 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AllocThunk { dst, .. }
         | KernelOp::AssignCallableAddConst { dst, .. }
         | KernelOp::ApplyCallable { dst, .. }
+        | KernelOp::AllocClosure { dst, .. }
+        | KernelOp::ApplyClosure { dst, .. }
         | KernelOp::MakePair { dst, .. }
         | KernelOp::MakeStruct { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }

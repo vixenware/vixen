@@ -699,7 +699,9 @@ impl<'a> ProgramEvaluator<'a> {
                 };
                 Ok(EvalValue::SandboxTreeRoot(prefix))
             }
-            KernelOp::AssignHostLocal { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
+            KernelOp::AssignHostLocal { .. }
+            | KernelOp::AllocClosure { .. }
+            | KernelOp::ApplyClosure { .. } => Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),
                 detail: format!("op {op:?}"),
             }),
@@ -1414,6 +1416,8 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AllocThunk { dst, .. }
         | KernelOp::AssignCallableAddConst { dst, .. }
         | KernelOp::ApplyCallable { dst, .. }
+        | KernelOp::AllocClosure { dst, .. }
+        | KernelOp::ApplyClosure { dst, .. }
         | KernelOp::MakePair { dst, .. }
         | KernelOp::MakeStruct { dst, .. }
         | KernelOp::ProjectIndex { dst, .. }

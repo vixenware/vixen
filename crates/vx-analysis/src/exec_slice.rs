@@ -160,6 +160,13 @@ pub enum KernelOp {
         thunk_body: BodyId,
         captures: Vec<Operand>,
     },
+    AllocClosure {
+        dst: SlotId,
+        source: SourceExpr,
+        body: BodyId,
+        captures: Vec<Operand>,
+        param_count: usize,
+    },
     AssignCallableAddConst {
         dst: SlotId,
         source: SourceExpr,
@@ -170,6 +177,12 @@ pub enum KernelOp {
         source: SourceExpr,
         callable: Operand,
         arg: Operand,
+    },
+    ApplyClosure {
+        dst: SlotId,
+        source: SourceExpr,
+        closure: Operand,
+        args: Vec<Operand>,
     },
     MakePair {
         dst: SlotId,
@@ -419,7 +432,7 @@ pub fn lower_executable_program_for_entry_body(
     let fn_by_body = body_nodes_by_id(bridge)?;
     let runtime_nodes = executable_runtime_nodes(analysis, &expr_nodes);
     let mut bodies = BTreeMap::new();
-    let lowerable_bodies = reachable_body_slice(analysis, entry);
+    let lowerable_bodies = reachable_body_slice(analysis, bridge, entry);
     let body_source_by_id = bridge
         .bodies
         .iter()
@@ -543,7 +556,18 @@ fn body_nodes_by_id(
     Ok(fn_by_body)
 }
 
-fn reachable_body_slice(analysis: &AnalysisResult, entry: BodyId) -> BTreeSet<BodyId> {
+fn reachable_body_slice(
+    analysis: &AnalysisResult,
+    bridge: &SingleSourceBridge,
+    entry: BodyId,
+) -> BTreeSet<BodyId> {
+    // Map function DefIds to BodyIds
+    let body_by_def: HashMap<vx_resolve::DefId, BodyId> = bridge
+        .bodies
+        .iter()
+        .filter_map(|b| Some((b.def_id?, b.id)))
+        .collect();
+
     let mut reachable = BTreeSet::new();
     let mut queue = vec![entry];
 
@@ -554,12 +578,37 @@ fn reachable_body_slice(analysis: &AnalysisResult, entry: BodyId) -> BTreeSet<Bo
         let Some(body) = analysis.bodies.iter().find(|body| body.id == body_id) else {
             continue;
         };
+        // Direct call edges
         for edge in &body.source_local_call_edges {
             let SourceLocalCalleeOrigin::TopLevelBody(callee) = edge.callee else {
                 continue;
             };
             if !reachable.contains(&callee) {
                 queue.push(callee);
+            }
+        }
+        // Function refs used as values: resolved refs whose target is a Function def
+        // that maps to a known body
+        for resolved in &bridge.resolved_refs {
+            let Ok(target) = &resolved.target else {
+                continue;
+            };
+            if target.kind != vx_resolve::DefKind::Function {
+                continue;
+            }
+            // Check if this ref is inside this body's span
+            let Some(bridge_body) = bridge.bodies.iter().find(|b| b.id == body_id) else {
+                continue;
+            };
+            if resolved.span.source != bridge_body.span.source
+                || !bridge_body.span.range.contains_range(resolved.span.range)
+            {
+                continue;
+            }
+            if let Some(&callee_body) = body_by_def.get(&target.id) {
+                if !reachable.contains(&callee_body) {
+                    queue.push(callee_body);
+                }
             }
         }
     }
@@ -1107,6 +1156,159 @@ impl<'a> BodyLowering<'a> {
         Ok((thunk_body_id, capture_operands))
     }
 
+    fn synthesize_closure_body(
+        &mut self,
+        body_expr_id: ExprId,
+        closure_param_bindings: &[BridgeLocalBindingId],
+    ) -> Result<(BodyId, Vec<Operand>, usize), ExecSliceError> {
+        let closure_body_id = self.alloc_thunk_body_id();
+
+        // Potential captures: all parent bindings with slots
+        let parent_bindings: Vec<(BridgeLocalBindingId, SlotId)> = self
+            .slot_by_binding
+            .iter()
+            .map(|(binding, slot)| (*binding, *slot))
+            .collect();
+
+        let mut child_slot_by_binding = HashMap::new();
+        let mut child_params = Vec::new();
+        let mut capture_operands = Vec::new();
+        let mut next_slot = 0u32;
+
+        // Provisionally assign capture slots (will be pruned after lowering)
+        let capture_count = parent_bindings.len();
+        for (binding, parent_slot) in &parent_bindings {
+            let slot = SlotId(next_slot);
+            next_slot += 1;
+            child_slot_by_binding.insert(*binding, slot);
+            child_params.push(slot);
+            capture_operands.push(Operand::Slot(*parent_slot));
+        }
+
+        // Closure params come after captures
+        let param_start = next_slot;
+        for binding in closure_param_bindings {
+            let slot = SlotId(next_slot);
+            next_slot += 1;
+            child_slot_by_binding.insert(*binding, slot);
+            child_params.push(slot);
+        }
+
+        let mut child = BodyLowering {
+            bridge: self.bridge,
+            analyzed: self.analyzed,
+            body: self.body,
+            body_source_id: self.body_source_id,
+            expr_nodes: self.expr_nodes,
+            entry_expr: body_expr_id,
+            use_binding_by_expr: self.use_binding_by_expr.clone(),
+            use_binding_by_span: self.use_binding_by_span.clone(),
+            binding_by_name_span: self.binding_by_name_span.clone(),
+            binding_initializers: self.binding_initializers.clone(),
+            slot_by_binding: child_slot_by_binding,
+            runtime_node_by_expr: self.runtime_node_by_expr.clone(),
+            runtime_kind_by_expr: self.runtime_kind_by_expr.clone(),
+            lowerable_bodies: self.lowerable_bodies.clone(),
+            params: child_params.clone(),
+            next_slot,
+            ops: vec![],
+            materialized_bindings: HashSet::new(),
+            lazy_fields_by_expr: self.lazy_fields_by_expr.clone(),
+            lazy_named_fields_by_expr: self.lazy_named_fields_by_expr.clone(),
+            local_call_dependencies: BTreeSet::new(),
+            awaited_runtime_nodes: BTreeSet::new(),
+            thunk_bodies: vec![],
+            next_thunk_body_id: self.next_thunk_body_id,
+        };
+
+        let result_operand = child.lower_expr(body_expr_id)?;
+        let result_slot = child.ensure_slot(result_operand, child.source_for(body_expr_id));
+
+        self.next_thunk_body_id = child.next_thunk_body_id;
+        self.thunk_bodies.extend(child.thunk_bodies);
+
+        // Prune unused captures: collect all slots referenced in ops and result
+        let mut used_slots: HashSet<SlotId> = HashSet::new();
+        used_slots.insert(result_slot);
+        for op in &child.ops {
+            collect_referenced_slots(op, &mut used_slots);
+        }
+
+        // Build old→new slot mapping, keeping only used captures + all closure params
+        let mut slot_remap: HashMap<SlotId, SlotId> = HashMap::new();
+        let mut final_params = Vec::new();
+        let mut final_captures = Vec::new();
+        let mut new_slot = 0u32;
+
+        for i in 0..capture_count {
+            let old_slot = SlotId(i as u32);
+            if used_slots.contains(&old_slot) {
+                // Materialize the parent binding so a producer op exists
+                let (binding, _parent_slot) = parent_bindings[i];
+                self.materialize_binding(binding)?;
+
+                let ns = SlotId(new_slot);
+                new_slot += 1;
+                slot_remap.insert(old_slot, ns);
+                final_params.push(ns);
+                final_captures.push(capture_operands[i].clone());
+            }
+        }
+
+        // Closure params are always kept
+        for i in 0..closure_param_bindings.len() {
+            let old_slot = SlotId(param_start + i as u32);
+            let ns = SlotId(new_slot);
+            new_slot += 1;
+            slot_remap.insert(old_slot, ns);
+            final_params.push(ns);
+        }
+
+        // Remap generated (non-param) slots: these start after all original params
+        let original_param_count = (capture_count + closure_param_bindings.len()) as u32;
+        for s in original_param_count..child.next_slot {
+            let old = SlotId(s);
+            if !slot_remap.contains_key(&old) {
+                slot_remap.insert(old, SlotId(new_slot));
+                new_slot += 1;
+            }
+        }
+
+        let final_result_slot = slot_remap.get(&result_slot).copied().unwrap_or(result_slot);
+        let final_ops: Vec<KernelOp> = child
+            .ops
+            .into_iter()
+            .map(|op| remap_op_slots(op, &slot_remap))
+            .collect();
+
+        let kernel = self
+            .analyzed
+            .kernel_entries
+            .first()
+            .map(|entry| entry.kernel)
+            .unwrap_or(KernelId(0));
+
+        self.thunk_bodies.push((
+            closure_body_id,
+            ExecutableBody {
+                id: closure_body_id,
+                kernel,
+                kernel_kind: KernelKind::Interpreted,
+                params: final_params,
+                ops: final_ops,
+                result_source: ResultSource::Slot(final_result_slot),
+                runtime_boundary_extractions: vec![],
+                local_call_dependencies: child.local_call_dependencies.into_iter().collect(),
+            },
+        ));
+
+        Ok((
+            closure_body_id,
+            final_captures,
+            closure_param_bindings.len(),
+        ))
+    }
+
     fn lower_string_member_call(
         &mut self,
         expr_id: ExprId,
@@ -1587,21 +1789,47 @@ impl<'a> BodyLowering<'a> {
                     ))),
                 }
             }
-            Expr::NameRef(_) => {
-                let binding = self
-                    .use_binding_by_expr
-                    .get(&expr_id)
-                    .copied()
-                    .or_else(|| {
-                        let expr = self.expr_nodes.get(&expr_id)?;
-                        let span = SourceSpan::new(self.body_source_id, expr.syntax().text_range());
-                        self.use_binding_by_span.get(&span).copied()
-                    })
-                    .ok_or(ExecSliceError::MissingBindingForUse(
-                        self.source_for(expr_id),
-                    ))?;
-                let slot = self.materialize_binding(binding)?;
-                Ok(Operand::Slot(slot))
+            Expr::NameRef(name_ref) => {
+                let binding = self.use_binding_by_expr.get(&expr_id).copied().or_else(|| {
+                    let expr = self.expr_nodes.get(&expr_id)?;
+                    let span = SourceSpan::new(self.body_source_id, expr.syntax().text_range());
+                    self.use_binding_by_span.get(&span).copied()
+                });
+                if let Some(binding) = binding {
+                    let slot = self.materialize_binding(binding)?;
+                    return Ok(Operand::Slot(slot));
+                }
+                // Not a local binding — check if it's a top-level function used as a value
+                let name = name_ref.syntax().text().to_string();
+                let fn_body = self
+                    .bridge
+                    .bodies
+                    .iter()
+                    .find(|b| b.name == name && self.lowerable_bodies.contains(&b.id));
+                if let Some(fn_body) = fn_body {
+                    let body_id = fn_body.id;
+                    let param_count = self
+                        .bridge
+                        .local_bindings
+                        .iter()
+                        .filter(|b| {
+                            b.body == body_id && matches!(b.kind, BridgeLocalBindingKind::Parameter)
+                        })
+                        .count();
+                    self.local_call_dependencies.insert(body_id);
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::AllocClosure {
+                        dst,
+                        source: self.source_for(expr_id),
+                        body: body_id,
+                        captures: vec![],
+                        param_count,
+                    });
+                    return Ok(Operand::Slot(dst));
+                }
+                Err(ExecSliceError::MissingBindingForUse(
+                    self.source_for(expr_id),
+                ))
             }
             Expr::Binary(binary) => {
                 let source = self.source_for(expr_id);
@@ -1887,54 +2115,23 @@ impl<'a> BodyLowering<'a> {
             }
             Expr::Closure(closure) => {
                 let param_bindings = self.closure_param_bindings(&closure)?;
-                if param_bindings.len() != 1 {
-                    return Err(UnsupportedShape(
-                        "only single-parameter closure supported".to_owned(),
-                    ));
-                };
-                let param_binding = param_bindings[0];
                 let body = closure
                     .body()
                     .ok_or_else(|| UnsupportedShape("closure body missing".to_owned()))?;
-                let body_id = self
+                let body_expr_id = self
                     .expr_id(&body)
                     .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                let Expr::Binary(binary) = self.expr(body_id)? else {
-                    return Err(UnsupportedShape(
-                        "only closure body `x + captured` supported".to_owned(),
-                    ));
-                };
-                let lhs = binary
-                    .lhs()
-                    .ok_or_else(|| UnsupportedShape("closure lhs missing".to_owned()))?;
-                let rhs = binary
-                    .rhs()
-                    .ok_or_else(|| UnsupportedShape("closure rhs missing".to_owned()))?;
-                let lhs_id = self
-                    .expr_id(&lhs)
-                    .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?;
-                let rhs_id = self
-                    .expr_id(&rhs)
-                    .ok_or(ExecSliceError::MissingExpr(self.source_for(body_id)))?;
-                let lhs_is_param =
-                    self.use_binding_by_expr.get(&lhs_id).copied() == Some(param_binding);
-                let rhs_is_param =
-                    self.use_binding_by_expr.get(&rhs_id).copied() == Some(param_binding);
-                let addend = if lhs_is_param {
-                    self.lower_expr(rhs_id)?
-                } else if rhs_is_param {
-                    self.lower_expr(lhs_id)?
-                } else {
-                    return Err(UnsupportedShape(
-                        "closure add must include parameter on one side".to_owned(),
-                    ));
-                };
+
+                let (closure_body_id, captures, param_count) =
+                    self.synthesize_closure_body(body_expr_id, &param_bindings)?;
 
                 let dst = self.alloc_temp();
-                self.ops.push(KernelOp::AssignCallableAddConst {
+                self.ops.push(KernelOp::AllocClosure {
                     dst,
                     source: self.source_for(expr_id),
-                    addend,
+                    body: closure_body_id,
+                    captures,
+                    param_count,
                 });
                 Ok(Operand::Slot(dst))
             }
@@ -2110,22 +2307,26 @@ impl<'a> BodyLowering<'a> {
                     }
                 }
 
-                if args.len() != 1 {
-                    return Err(UnsupportedShape(format!(
-                        "callable apply supports one arg, got {}",
-                        args.len()
-                    )));
-                }
-                let callee_id = self
-                    .expr_id(&callee_expr)
-                    .ok_or(ExecSliceError::MissingExpr(self.source_for(expr_id)))?;
-                let callable = self.lower_expr(callee_id)?;
+                // Try resolving callee via expr_id, or directly via binding span
+                let callable = if let Some(callee_id) = self.expr_id(&callee_expr) {
+                    self.lower_expr(callee_id)?
+                } else {
+                    // Callee has no BridgeExpr (e.g. NameRef for a parameter) —
+                    // resolve by span
+                    let span =
+                        SourceSpan::new(self.body_source_id, callee_expr.syntax().text_range());
+                    let binding = self.use_binding_by_span.get(&span).copied().ok_or(
+                        ExecSliceError::MissingBindingForUse(self.source_for(expr_id)),
+                    )?;
+                    let slot = self.materialize_binding(binding)?;
+                    Operand::Slot(slot)
+                };
                 let dst = self.alloc_temp();
-                self.ops.push(KernelOp::ApplyCallable {
+                self.ops.push(KernelOp::ApplyClosure {
                     dst,
                     source,
-                    callable,
-                    arg: args[0].clone(),
+                    closure: callable,
+                    args,
                 });
                 Ok(Operand::Slot(dst))
             }
@@ -2359,6 +2560,335 @@ fn parse_tree_path_key(expr: &Expr) -> Option<TreeFilePath> {
     };
     let text = path.syntax().text().to_string();
     Some(TreeFilePath(text.trim().trim_start_matches('@').to_owned()))
+}
+
+fn collect_referenced_slots(op: &KernelOp, slots: &mut HashSet<SlotId>) {
+    fn add_operand(operand: &Operand, slots: &mut HashSet<SlotId>) {
+        if let Operand::Slot(s) = operand {
+            slots.insert(*s);
+        }
+    }
+    match op {
+        KernelOp::AssignConstInt { .. }
+        | KernelOp::AssignConstString { .. }
+        | KernelOp::AssignConstBool { .. }
+        | KernelOp::AssignLazyPoison { .. }
+        | KernelOp::AssignHostLocal { .. }
+        | KernelOp::AssignSandboxTreeRoot { .. } => {}
+        KernelOp::AssignAlias { value, .. } => add_operand(value, slots),
+        KernelOp::AssignCallableAddConst { addend, .. } => add_operand(addend, slots),
+        KernelOp::ApplyCallable { callable, arg, .. } => {
+            add_operand(callable, slots);
+            add_operand(arg, slots);
+        }
+        KernelOp::AllocThunk { captures, .. } => {
+            for c in captures {
+                add_operand(c, slots);
+            }
+        }
+        KernelOp::AllocClosure { captures, .. } => {
+            for c in captures {
+                add_operand(c, slots);
+            }
+        }
+        KernelOp::ApplyClosure { closure, args, .. } => {
+            add_operand(closure, slots);
+            for a in args {
+                add_operand(a, slots);
+            }
+        }
+        KernelOp::MakePair { first, second, .. } => {
+            add_operand(first, slots);
+            add_operand(second, slots);
+        }
+        KernelOp::MakeStruct { fields, .. } => {
+            for (_, op) in fields {
+                add_operand(op, slots);
+            }
+        }
+        KernelOp::ProjectIndex { pair, .. } => add_operand(pair, slots),
+        KernelOp::ProjectNamedField { value, .. } => add_operand(value, slots),
+        KernelOp::Add { lhs, rhs, .. }
+        | KernelOp::Sub { lhs, rhs, .. }
+        | KernelOp::Equal { lhs, rhs, .. }
+        | KernelOp::NotEqual { lhs, rhs, .. } => {
+            add_operand(lhs, slots);
+            add_operand(rhs, slots);
+        }
+        KernelOp::Select {
+            condition,
+            then_value,
+            else_value,
+            ..
+        } => {
+            add_operand(condition, slots);
+            add_operand(then_value, slots);
+            add_operand(else_value, slots);
+        }
+        KernelOp::CallBody { args, .. } => {
+            for a in args {
+                add_operand(a, slots);
+            }
+        }
+        KernelOp::AssignFailure { message, .. } => add_operand(message, slots),
+        KernelOp::ConcatStrings { parts, .. } => {
+            for p in parts {
+                add_operand(p, slots);
+            }
+        }
+        KernelOp::MakeBlob { value, .. } => add_operand(value, slots),
+        KernelOp::ProjectField { value, .. } => add_operand(value, slots),
+        KernelOp::CallMember { receiver, args, .. } => {
+            add_operand(receiver, slots);
+            for a in args {
+                add_operand(a, slots);
+            }
+        }
+        KernelOp::BuildTree { entries, .. } => {
+            for (_, op) in entries {
+                add_operand(op, slots);
+            }
+        }
+        KernelOp::MakeArray { items, .. } => {
+            for e in items {
+                add_operand(e, slots);
+            }
+        }
+        KernelOp::StringLen { value, .. } => add_operand(value, slots),
+        KernelOp::StringSlice {
+            value, start, end, ..
+        } => {
+            add_operand(value, slots);
+            add_operand(start, slots);
+            add_operand(end, slots);
+        }
+        KernelOp::AwaitRuntime { .. } => {}
+    }
+}
+
+fn remap_operand(op: &Operand, map: &HashMap<SlotId, SlotId>) -> Operand {
+    match op {
+        Operand::Slot(s) => Operand::Slot(map.get(s).copied().unwrap_or(*s)),
+        other => other.clone(),
+    }
+}
+
+fn remap_slot(s: SlotId, map: &HashMap<SlotId, SlotId>) -> SlotId {
+    map.get(&s).copied().unwrap_or(s)
+}
+
+fn remap_op_slots(op: KernelOp, map: &HashMap<SlotId, SlotId>) -> KernelOp {
+    match op {
+        KernelOp::AssignConstInt { dst, source, value } => KernelOp::AssignConstInt {
+            dst: remap_slot(dst, map),
+            source,
+            value,
+        },
+        KernelOp::AssignConstString { dst, source, value } => KernelOp::AssignConstString {
+            dst: remap_slot(dst, map),
+            source,
+            value,
+        },
+        KernelOp::AssignConstBool { dst, source, value } => KernelOp::AssignConstBool {
+            dst: remap_slot(dst, map),
+            source,
+            value,
+        },
+        KernelOp::AssignAlias { dst, source, value } => KernelOp::AssignAlias {
+            dst: remap_slot(dst, map),
+            source,
+            value: remap_operand(&value, map),
+        },
+        KernelOp::AssignLazyPoison { dst, source, label } => KernelOp::AssignLazyPoison {
+            dst: remap_slot(dst, map),
+            source,
+            label,
+        },
+        KernelOp::AllocThunk {
+            dst,
+            source,
+            thunk_body,
+            captures,
+        } => KernelOp::AllocThunk {
+            dst: remap_slot(dst, map),
+            source,
+            thunk_body,
+            captures: captures.iter().map(|c| remap_operand(c, map)).collect(),
+        },
+        KernelOp::AllocClosure {
+            dst,
+            source,
+            body,
+            captures,
+            param_count,
+        } => KernelOp::AllocClosure {
+            dst: remap_slot(dst, map),
+            source,
+            body,
+            param_count,
+            captures: captures.iter().map(|c| remap_operand(c, map)).collect(),
+        },
+        KernelOp::AssignCallableAddConst {
+            dst,
+            source,
+            addend,
+        } => KernelOp::AssignCallableAddConst {
+            dst: remap_slot(dst, map),
+            source,
+            addend: remap_operand(&addend, map),
+        },
+        KernelOp::ApplyCallable {
+            dst,
+            source,
+            callable,
+            arg,
+        } => KernelOp::ApplyCallable {
+            dst: remap_slot(dst, map),
+            source,
+            callable: remap_operand(&callable, map),
+            arg: remap_operand(&arg, map),
+        },
+        KernelOp::ApplyClosure {
+            dst,
+            source,
+            closure,
+            args,
+        } => KernelOp::ApplyClosure {
+            dst: remap_slot(dst, map),
+            source,
+            closure: remap_operand(&closure, map),
+            args: args.iter().map(|a| remap_operand(a, map)).collect(),
+        },
+        KernelOp::MakePair {
+            dst,
+            source,
+            first,
+            second,
+        } => KernelOp::MakePair {
+            dst: remap_slot(dst, map),
+            source,
+            first: remap_operand(&first, map),
+            second: remap_operand(&second, map),
+        },
+        KernelOp::MakeStruct {
+            dst,
+            source,
+            fields,
+        } => KernelOp::MakeStruct {
+            dst: remap_slot(dst, map),
+            source,
+            fields: fields
+                .into_iter()
+                .map(|(n, o)| (n, remap_operand(&o, map)))
+                .collect(),
+        },
+        KernelOp::ProjectIndex {
+            dst,
+            source,
+            pair,
+            index,
+        } => KernelOp::ProjectIndex {
+            dst: remap_slot(dst, map),
+            source,
+            pair: remap_operand(&pair, map),
+            index,
+        },
+        KernelOp::ProjectNamedField {
+            dst,
+            source,
+            value,
+            field,
+        } => KernelOp::ProjectNamedField {
+            dst: remap_slot(dst, map),
+            source,
+            value: remap_operand(&value, map),
+            field,
+        },
+        KernelOp::Add {
+            dst,
+            source,
+            lhs,
+            rhs,
+        } => KernelOp::Add {
+            dst: remap_slot(dst, map),
+            source,
+            lhs: remap_operand(&lhs, map),
+            rhs: remap_operand(&rhs, map),
+        },
+        KernelOp::Sub {
+            dst,
+            source,
+            lhs,
+            rhs,
+        } => KernelOp::Sub {
+            dst: remap_slot(dst, map),
+            source,
+            lhs: remap_operand(&lhs, map),
+            rhs: remap_operand(&rhs, map),
+        },
+        KernelOp::Equal {
+            dst,
+            source,
+            lhs,
+            rhs,
+        } => KernelOp::Equal {
+            dst: remap_slot(dst, map),
+            source,
+            lhs: remap_operand(&lhs, map),
+            rhs: remap_operand(&rhs, map),
+        },
+        KernelOp::NotEqual {
+            dst,
+            source,
+            lhs,
+            rhs,
+        } => KernelOp::NotEqual {
+            dst: remap_slot(dst, map),
+            source,
+            lhs: remap_operand(&lhs, map),
+            rhs: remap_operand(&rhs, map),
+        },
+        KernelOp::Select {
+            dst,
+            source,
+            condition,
+            then_value,
+            else_value,
+        } => KernelOp::Select {
+            dst: remap_slot(dst, map),
+            source,
+            condition: remap_operand(&condition, map),
+            then_value: remap_operand(&then_value, map),
+            else_value: remap_operand(&else_value, map),
+        },
+        KernelOp::CallBody {
+            dst,
+            source,
+            callee,
+            args,
+        } => KernelOp::CallBody {
+            dst: remap_slot(dst, map),
+            source,
+            callee,
+            args: args.iter().map(|a| remap_operand(a, map)).collect(),
+        },
+        KernelOp::AssignFailure {
+            dst,
+            source,
+            message,
+        } => KernelOp::AssignFailure {
+            dst: remap_slot(dst, map),
+            source,
+            message: remap_operand(&message, map),
+        },
+        KernelOp::ConcatStrings { dst, source, parts } => KernelOp::ConcatStrings {
+            dst: remap_slot(dst, map),
+            source,
+            parts: parts.iter().map(|p| remap_operand(p, map)).collect(),
+        },
+        // Ops that don't appear in closure bodies but need to compile
+        other => other,
+    }
 }
 
 fn runtime_field_from_name(name: &str) -> Result<RuntimeField, ExecSliceError> {
