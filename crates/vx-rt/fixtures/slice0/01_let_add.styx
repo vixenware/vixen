@@ -1,9 +1,0 @@
-source <<VX,vixen
-fn main() -> U64 (
-  let x = 41;
-  x + 1
-)
-VX
-
-entry main
-expect @u64"42"

@@ -29,5 +29,5 @@ fn run_fixture(path: &Path) -> datatest_stable::Result<()> {
 }
 
 datatest_stable::harness! {
-    { test = run_fixture, root = "fixtures/slice0", pattern = r"\.styx$" },
+    { test = run_fixture, root = "../vx-eval-tests/fixtures/slice0", pattern = r"\.styx$" },
 }

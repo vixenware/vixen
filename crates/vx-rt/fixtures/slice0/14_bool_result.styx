@@ -1,6 +1,0 @@
-source <<VX,vixen
-fn main() -> Bool ( 1 == 1 )
-VX
-
-entry main
-expect @bool"true"
