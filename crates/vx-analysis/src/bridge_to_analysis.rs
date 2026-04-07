@@ -581,8 +581,9 @@ fn seed_lazy_product_fields(
                         return Some((product_expr, fields.clone()));
                     }
                 }
-                // Fallback: use the base expr (may not be ideal but preserves existing behavior)
-                return Some((expr, fields.clone()));
+                // If we can't find a product construction ExprId, we can't seed laziness
+                // in a way exec_slice can consume (it keys on the product expr being lowered).
+                return None;
             }
         }
 
