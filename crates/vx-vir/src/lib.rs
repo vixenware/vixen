@@ -23,14 +23,15 @@
 //!
 //! ## Crate contents
 //!
-//! This crate contains **only data types** — no logic, no CST dependencies.
-//! The CST walk, name resolution, and type checking passes live elsewhere.
+//! This crate contains the VIR data types and the CST-to-VIR builder.
+//! Name resolution and type checking passes live elsewhere.
 
 pub mod ids;
 
 pub mod arena;
 pub mod binding;
 pub mod body;
+pub mod build;
 pub mod expr;
 pub mod item;
 pub mod pattern;

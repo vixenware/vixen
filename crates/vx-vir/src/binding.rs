@@ -43,7 +43,9 @@ pub struct Binding {
     pub ty: Option<Ty>,
 
     /// Whether this binding is the target of an assignment statement.
-    /// Populated during: CST walk (detected when `=` statement references this name).
+    /// Populated during: name resolution pass (detected when `=` statement
+    /// resolves to this binding). The CST walk initializes this to `false`;
+    /// the resolver upgrades it to `true` for bindings that are assigned to.
     pub mutable: bool,
 }
 

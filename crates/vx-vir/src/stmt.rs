@@ -4,7 +4,7 @@
 //! [`StmtId`](crate::StmtId).
 
 use crate::expr::UpdateField;
-use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, TypeRefId};
+use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
 use vx_resolve::SourceSpan;
 
 /// A statement node in the VIR.
@@ -17,6 +17,10 @@ pub struct Stmt {
     /// The body this statement belongs to.
     /// Populated during: CST walk.
     pub body: BodyId,
+
+    /// The lexical scope containing this statement.
+    /// Populated during: CST walk.
+    pub scope: ScopeId,
 
     /// The syntactic form of this statement.
     /// Populated during: CST walk.

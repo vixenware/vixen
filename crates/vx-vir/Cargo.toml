@@ -13,6 +13,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vx-types = { path = "../vx-types" }
 vx-resolve = { path = "../vx-resolve" }
+vx-parser = { path = "../vx-parser" }
 
 [dev-dependencies]
 rowan = "0.16"

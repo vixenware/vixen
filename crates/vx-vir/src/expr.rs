@@ -20,6 +20,12 @@ pub struct Expr {
     /// Populated during: CST walk.
     pub body: BodyId,
 
+    /// The lexical scope containing this expression — the scope in which names
+    /// are resolved for this node. For scope-introducing nodes (blocks, match arms),
+    /// this is the *parent* scope, not the scope they introduce.
+    /// Populated during: CST walk.
+    pub scope: ScopeId,
+
     /// The syntactic form of this expression.
     /// Populated during: CST walk.
     pub kind: ExprKind,
@@ -139,12 +145,13 @@ pub enum ExprKind {
 /// The kind of literal value.
 #[derive(Debug, Clone)]
 pub enum LitKind {
-    /// An integer literal (e.g. `42`, `0xFF`).
-    Int(i64),
-    /// A floating-point literal (e.g. `3.14`).
-    Float(f64),
-    /// A string literal (content without quotes).
-    String(String),
+    /// An integer literal (e.g. `42`, `0xFF`). Raw token text, not parsed.
+    Int { raw: String },
+    /// A floating-point literal (e.g. `3.14`). Raw token text, not parsed.
+    Float { raw: String },
+    /// A string literal. Content with surrounding quotes stripped, but not
+    /// escape-processed. (Not truly raw token text — quotes are removed.)
+    String { raw: String },
     /// A boolean literal: `true` or `false`.
     Bool(bool),
 }
@@ -202,6 +209,10 @@ pub struct BlockExpr {
     /// The optional tail expression (the block's value).
     /// `None` means the block evaluates to unit.
     pub tail: Option<ExprId>,
+
+    /// Whether this block was synthesized by the builder (e.g. top-level body wrapper).
+    /// Synthetic blocks are not user-written code and should not generate diagnostics.
+    pub synthetic: bool,
 }
 
 /// A closure expression: `(x, y) => body`.

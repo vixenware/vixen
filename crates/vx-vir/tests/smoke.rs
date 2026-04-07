@@ -45,6 +45,7 @@ fn arena_round_trip() {
     let pat_id = arena.alloc_pattern(Pattern {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: PatternKind::Binding(PatternBinding {
             name: "x".into(),
             binding: binding_id,
@@ -56,8 +57,9 @@ fn arena_round_trip() {
     let lit_id = arena.alloc_expr(Expr {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: ExprKind::Literal(LiteralExpr {
-            value: LitKind::Int(42),
+            value: LitKind::Int { raw: "42".into() },
         }),
         ty: None,
     });
@@ -136,10 +138,18 @@ fn arena_round_trip() {
 fn visitor_traversal_count() {
     let mut arena = VirArena::new();
 
+    // Scope + binding for body param (allocated first so exprs can reference it)
+    let scope_id = arena.alloc_scope(Scope {
+        parent: None,
+        owner: ScopeOwner::Body(BodyId(0)),
+        bindings: vec![],
+    });
+
     // Build: x + 1
     let name_ref_id = arena.alloc_expr(Expr {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: ExprKind::NameRef(NameRefExpr {
             name: "x".into(),
             resolved: None,
@@ -150,8 +160,9 @@ fn visitor_traversal_count() {
     let lit_id = arena.alloc_expr(Expr {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: ExprKind::Literal(LiteralExpr {
-            value: LitKind::Int(1),
+            value: LitKind::Int { raw: "1".into() },
         }),
         ty: None,
     });
@@ -159,6 +170,7 @@ fn visitor_traversal_count() {
     let bin_id = arena.alloc_expr(Expr {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: ExprKind::Binary(BinaryExpr {
             lhs: name_ref_id,
             op: BinOp::Add,
@@ -166,13 +178,6 @@ fn visitor_traversal_count() {
             rhs: lit_id,
         }),
         ty: None,
-    });
-
-    // Scope + binding for body param
-    let scope_id = arena.alloc_scope(Scope {
-        parent: None,
-        owner: ScopeOwner::Body(BodyId(0)),
-        bindings: vec![],
     });
 
     let binding_id = arena.alloc_binding(Binding {
@@ -190,6 +195,7 @@ fn visitor_traversal_count() {
     let pat_id = arena.alloc_pattern(Pattern {
         span: dummy_span(),
         body: BodyId(0),
+        scope: scope_id,
         kind: PatternKind::Binding(PatternBinding {
             name: "x".into(),
             binding: binding_id,
