@@ -6,7 +6,7 @@ use vx_vir::body::{Body, BodyOwner, Param};
 use vx_vir::expr::{BinOp, BinaryExpr, Expr, ExprKind, LitKind, LiteralExpr, NameRefExpr};
 use vx_vir::item::{FunctionItem, Item, ItemKind};
 use vx_vir::pattern::{Pattern, PatternBinding, PatternKind};
-use vx_vir::scope::{Scope, ScopeOwner};
+use vx_vir::scope::{Scope, ScopeEntry, ScopeEntryTarget, ScopeOwner};
 use vx_vir::source_unit::SourceUnit;
 use vx_vir::visitor;
 use vx_vir::{BodyId, ExprId, VirArena, VirVisitor};
@@ -24,7 +24,9 @@ fn arena_round_trip() {
     let scope_id = arena.alloc_scope(Scope {
         parent: None,
         owner: ScopeOwner::Body(BodyId(0)),
-        bindings: vec![],
+        entries: vec![],
+        promoted_variants: vec![],
+        visibility_cutoff: None,
     });
 
     // Binding
@@ -39,7 +41,10 @@ fn arena_round_trip() {
     });
 
     // Register binding in scope
-    arena[scope_id].bindings.push(binding_id);
+    arena[scope_id].entries.push(ScopeEntry {
+        target: ScopeEntryTarget::Binding(binding_id),
+        decl_order: 0,
+    });
 
     // Pattern for param
     let pat_id = arena.alloc_pattern(Pattern {
@@ -142,7 +147,9 @@ fn visitor_traversal_count() {
     let scope_id = arena.alloc_scope(Scope {
         parent: None,
         owner: ScopeOwner::Body(BodyId(0)),
-        bindings: vec![],
+        entries: vec![],
+        promoted_variants: vec![],
+        visibility_cutoff: None,
     });
 
     // Build: x + 1
@@ -190,7 +197,10 @@ fn visitor_traversal_count() {
         mutable: false,
     });
 
-    arena[scope_id].bindings.push(binding_id);
+    arena[scope_id].entries.push(ScopeEntry {
+        target: ScopeEntryTarget::Binding(binding_id),
+        decl_order: 0,
+    });
 
     let pat_id = arena.alloc_pattern(Pattern {
         span: dummy_span(),

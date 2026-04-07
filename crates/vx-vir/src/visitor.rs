@@ -14,6 +14,7 @@ use crate::expr::{
 };
 use crate::item::ItemKind;
 use crate::pattern::PatternKind;
+use crate::scope::ScopeEntryTarget;
 use crate::stmt::StmtKind;
 use crate::type_ref::TypeRefKind;
 use crate::{
@@ -413,11 +414,14 @@ pub fn walk_type_ref<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Ty
     }
 }
 
-/// Walk the bindings in a scope.
+/// Walk the entries in a scope (visits bindings only — items are visited
+/// through their parent item/source-unit walk).
 pub fn walk_scope<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ScopeId) {
     let scope = &arena[id];
-    for &binding_id in &scope.bindings {
-        v.visit_binding(arena, binding_id);
+    for entry in &scope.entries {
+        if let ScopeEntryTarget::Binding(binding_id) = entry.target {
+            v.visit_binding(arena, binding_id);
+        }
     }
 }
 

@@ -48,7 +48,7 @@ use crate::pattern::{
     StructPatternField as VirStructPatternField, TuplePattern as VirTuplePattern,
     VariantPattern as VirVariantPattern,
 };
-use crate::scope::{Scope, ScopeOwner};
+use crate::scope::{Scope, ScopeEntry, ScopeEntryTarget, ScopeOwner};
 use crate::source_unit::SourceUnit;
 use crate::stmt::{
     AssignStmt, CompoundUpdateStmt, FieldAssignStmt, LetStmt, ReturnStmt, Stmt, StmtKind,
@@ -77,6 +77,15 @@ pub struct VirBuilder {
     scope_stack: Vec<ScopeId>,
     /// Counter for generating unique local DefId values per source file.
     next_local_def: u32,
+    /// The decl_order to use when registering bindings from let-statement
+    /// patterns into the current block scope. Set by `build_stmt_with_order`
+    /// before building the let pattern. For non-let contexts (parameters,
+    /// match arms), binding registration uses `entries.len()` as order.
+    current_let_decl_order: Option<u32>,
+    /// The current statement's decl_order in the enclosing block scope.
+    /// Used to set `visibility_cutoff` on closure body scopes so they
+    /// can only see parent bindings declared before the containing statement.
+    current_block_stmt_order: Option<u32>,
 }
 
 impl VirBuilder {
@@ -108,6 +117,18 @@ impl VirBuilder {
 
     fn token_span(&self, token: &vx_parser::SyntaxToken) -> SourceSpan {
         SourceSpan::new(self.source_id, token.text_range())
+    }
+
+    /// Register a binding in its scope.
+    ///
+    /// If `current_let_decl_order` is set (i.e., we're inside a let-statement
+    /// pattern), use that as the decl_order. Otherwise, use the given `decl_order`.
+    fn register_binding(&mut self, scope: ScopeId, binding_id: crate::BindingId, decl_order: u32) {
+        let order = self.current_let_decl_order.unwrap_or(decl_order);
+        self.arena[scope].entries.push(ScopeEntry {
+            target: ScopeEntryTarget::Binding(binding_id),
+            decl_order: order,
+        });
     }
 
     fn error_expr(&mut self, span: SourceSpan) -> ExprId {
@@ -152,6 +173,33 @@ impl VirBuilder {
         id
     }
 
+    /// Legacy compatibility: promote Option enum variants to the parent scope.
+    ///
+    /// This is a **hardcoded special case**, not a general enum scoping rule.
+    /// When/if Vixen gets a proper prelude or import system, this should be
+    /// replaced with explicit imports.
+    fn maybe_promote_enum_variants_for(&mut self, scope: ScopeId, item_id: ItemId) {
+        // Extract variant data first to avoid borrow conflict.
+        let variants: Vec<(String, SourceSpan)> = match &self.arena[item_id].kind {
+            ItemKind::Enum(e) if e.name == "Option" => e
+                .variants
+                .iter()
+                .map(|v| (v.name.clone(), v.name_span))
+                .collect(),
+            _ => return,
+        };
+        for (i, (name, name_span)) in variants.into_iter().enumerate() {
+            self.arena[scope]
+                .promoted_variants
+                .push(crate::scope::PromotedVariant {
+                    name,
+                    name_span,
+                    enum_item: item_id,
+                    variant_index: i as u32,
+                });
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Public entry points
     // -----------------------------------------------------------------------
@@ -164,6 +212,8 @@ impl VirBuilder {
             body_stack: vec![],
             scope_stack: vec![],
             next_local_def: 0,
+            current_let_decl_order: None,
+            current_block_stmt_order: None,
         };
         let mut source_units = Vec::new();
         for (source_id, file) in sources {
@@ -177,6 +227,16 @@ impl VirBuilder {
     }
 
     /// Build a single source file into the arena. Returns its SourceUnitId.
+    ///
+    /// Creates two scope layers:
+    /// - **Module scope**: contains item definitions (order-independent). Top-level
+    ///   function body scopes parent to this.
+    /// - **Thunk block scope**: child of module scope, contains top-level executable
+    ///   bindings (sequential). This is the scope of the synthetic top-level block.
+    ///
+    /// Top-level bindings always shadow top-level items regardless of source order,
+    /// because the thunk block is checked before the module scope during parent-chain
+    /// lookup. This matches the old scope builder's behavior.
     fn build_source_unit(
         &mut self,
         source_id: SourceId,
@@ -185,20 +245,33 @@ impl VirBuilder {
         self.source_id = source_id;
         self.next_local_def = 0;
 
-        // We need a placeholder body id to create the scope, then fix up.
-        let placeholder_body = BodyId(self.arena.bodies.len() as u32);
+        // Placeholder SourceUnitId for the module scope owner.
+        let placeholder_su = SourceUnitId(self.arena.source_units.len() as u32);
 
-        let scope_id = self.arena.alloc_scope(Scope {
+        // Module scope: contains only top-level item definitions (order-independent).
+        let module_scope_id = self.arena.alloc_scope(Scope {
             parent: None,
-            owner: ScopeOwner::Body(placeholder_body),
-            bindings: vec![],
+            owner: ScopeOwner::Module(placeholder_su),
+            entries: vec![],
+            promoted_variants: vec![],
+            visibility_cutoff: None,
         });
 
-        // Placeholder body — we'll fix root_expr after walking children.
+        // Thunk block scope: child of module scope, holds top-level executable bindings.
+        let thunk_block_scope_id = self.arena.alloc_scope(Scope {
+            parent: Some(module_scope_id),
+            owner: ScopeOwner::Block(ExprId(0)), // fixed up below when block expr is allocated
+            entries: vec![],
+            promoted_variants: vec![],
+            visibility_cutoff: None, // module parent uses order-independent visibility
+        });
+
+        // Top-level body. Body.scope = module_scope (the body's own scope, where
+        // params would go — there are none for a top-level thunk).
         let body_id = self.arena.alloc_body(Body {
             span: self.span(file.syntax()),
             owner: BodyOwner::TopLevel { source: source_id },
-            scope: scope_id,
+            scope: module_scope_id,
             params: vec![],
             root_expr: ExprId(0), // placeholder, fixed below
             parent: None,
@@ -207,26 +280,43 @@ impl VirBuilder {
         });
 
         self.body_stack.push(body_id);
-        self.scope_stack.push(scope_id);
+        // Push the thunk block scope as current — that's where executable code lives.
+        self.scope_stack.push(thunk_block_scope_id);
 
+        // Walk all top-level children in source order, building items and
+        // statements. Items go into the module scope (predeclared, order-independent);
+        // bindings go into the thunk block scope (sequential).
+        let children: Vec<_> = file.syntax().children().collect();
         let mut stmts = Vec::new();
         let mut items = Vec::new();
+        let mut stmt_order: u32 = 0;
 
-        // Walk top-level children in source order.
-        for child in file.syntax().children() {
+        // We need to save module_scope_id for item registration.
+        for child in &children {
             if let Some(item_node) = vx_parser::Item::cast(child.clone()) {
                 let item_id = self.build_item(&item_node);
                 items.push(item_id);
+
+                // Register item in module scope (order-independent, but track
+                // source position for visibility_cutoff of nested constructs).
+                self.arena[module_scope_id].entries.push(ScopeEntry {
+                    target: ScopeEntryTarget::Item(item_id),
+                    decl_order: stmt_order,
+                });
+
+                // Promote Option enum variants to module scope.
+                self.maybe_promote_enum_variants_for(module_scope_id, item_id);
+
                 let stmt_id = self.arena.alloc_stmt(Stmt {
-                    span: self.span(&child),
+                    span: self.span(child),
                     body: self.current_body(),
                     scope: self.current_scope(),
                     kind: StmtKind::Item(item_id),
                 });
                 stmts.push(stmt_id);
             } else if let Some(stmt_node) = vx_parser::Stmt::cast(child.clone()) {
-                // Stmt::cast also matches items (via Stmt::FnDecl etc.) and expressions.
-                // Items were already handled above, so check for them.
+                // Stmt::cast also matches items (via Stmt::FnDecl etc.).
+                // Items were already handled above, so skip them.
                 match &stmt_node {
                     vx_parser::Stmt::FnDecl(_)
                     | vx_parser::Stmt::StructDecl(_)
@@ -234,39 +324,45 @@ impl VirBuilder {
                     | vx_parser::Stmt::NewtypeDecl(_)
                     | vx_parser::Stmt::TypeAliasDecl(_)
                     | vx_parser::Stmt::NamespaceDecl(_) => {
-                        // Already handled by Item::cast above — skip to avoid double-processing.
-                        // Item::cast succeeds for the same node kinds that Stmt wraps as items.
+                        stmt_order += 1;
                         continue;
                     }
                     _ => {}
                 }
-                let stmt_id = self.build_stmt(&stmt_node);
+                let prev_order = self.current_block_stmt_order;
+                self.current_block_stmt_order = Some(stmt_order);
+                let stmt_id = self.build_stmt_with_order(&stmt_node, stmt_order);
+                self.current_block_stmt_order = prev_order;
                 stmts.push(stmt_id);
             } else {
                 // Malformed top-level node — emit error statement.
                 let stmt_id = self.arena.alloc_stmt(Stmt {
-                    span: self.span(&child),
+                    span: self.span(child),
                     body: self.current_body(),
                     scope: self.current_scope(),
                     kind: StmtKind::Error,
                 });
                 stmts.push(stmt_id);
             }
+            stmt_order += 1;
         }
 
         // Create the synthetic top-level block.
         let block_expr_id = self.arena.alloc_expr(Expr {
             span: self.span(file.syntax()),
             body: self.current_body(),
-            scope: self.current_scope(),
+            scope: module_scope_id, // block lives in module scope
             kind: ExprKind::Block(VirBlockExpr {
-                scope: scope_id,
+                scope: thunk_block_scope_id,
                 stmts,
                 tail: None,
                 synthetic: true,
             }),
             ty: None,
         });
+
+        // Fix up thunk block scope's owner.
+        self.arena[thunk_block_scope_id].owner = ScopeOwner::Block(block_expr_id);
 
         // Fix up body's root_expr.
         self.arena[body_id].root_expr = block_expr_id;
@@ -339,20 +435,33 @@ impl VirBuilder {
         });
         let fn_span = self.span(f.syntax());
 
-        // Create body + scope.
-        // Top-level functions get scope.parent = None, matching body.parent = None.
-        // This prevents top-level functions from resolving bindings introduced by
-        // top-level let statements — they are isolated from the top-level thunk.
+        // Scope parent for function bodies:
+        // - Top-level functions → parent = module scope (can see sibling items,
+        //   NOT top-level lets which live in the thunk block scope).
+        // - Nested functions → parent = current scope (the enclosing block).
         let parent_scope = if parent_body.is_some() {
             Some(self.current_scope())
         } else {
-            None
+            // Top-level function: parent to module scope.
+            // The module scope is the parent of the current scope (thunk block).
+            // Walk up to find it.
+            let current = self.current_scope();
+            self.arena[current].parent
         };
         let placeholder_body = BodyId(self.arena.bodies.len() as u32);
         let scope_id = self.arena.alloc_scope(Scope {
             parent: parent_scope,
             owner: ScopeOwner::Body(placeholder_body),
-            bindings: vec![],
+            entries: vec![],
+            promoted_variants: vec![],
+            // Top-level functions: parent is module scope (order-independent) → no cutoff.
+            // Nested functions inside blocks: cutoff = stmt_order so they only
+            // see parent bindings declared before them.
+            visibility_cutoff: if parent_body.is_some() {
+                self.current_block_stmt_order
+            } else {
+                None
+            },
         });
 
         let body_id = self.arena.alloc_body(Body {
@@ -488,7 +597,8 @@ impl VirBuilder {
             mutable: false,
         });
         let scope = self.current_scope();
-        self.arena[scope].bindings.push(binding_id);
+        let order = self.arena[scope].entries.len() as u32;
+        self.register_binding(scope, binding_id, order);
 
         self.arena.alloc_pattern(Pattern {
             span: param_span,
@@ -523,7 +633,8 @@ impl VirBuilder {
             mutable: false,
         });
         let scope = self.current_scope();
-        self.arena[scope].bindings.push(binding_id);
+        let order = self.arena[scope].entries.len() as u32;
+        self.register_binding(scope, binding_id, order);
 
         self.arena.alloc_pattern(Pattern {
             span: param_span,
@@ -701,18 +812,30 @@ impl VirBuilder {
         let scope_id = self.arena.alloc_scope(Scope {
             parent: Some(self.current_scope()),
             owner: ScopeOwner::Namespace(placeholder_item),
-            bindings: vec![],
+            entries: vec![],
+            promoted_variants: vec![],
+            visibility_cutoff: None, // namespace parent determines cutoff
         });
 
         let child_items: Vec<ItemId> = if let Some(body) = ns.body() {
             self.with_scope(scope_id, |this| {
                 let mut items = Vec::new();
-                for child in body.syntax().children() {
+                // PASS 1: Build all items and predeclare them in the namespace scope.
+                let children: Vec<_> = body.syntax().children().collect();
+                let mut order: u32 = 0;
+                for child in &children {
                     if let Some(item_node) = vx_parser::Item::cast(child.clone()) {
-                        items.push(this.build_item(&item_node));
+                        let item_id = this.build_item(&item_node);
+                        items.push(item_id);
+                        this.arena[scope_id].entries.push(ScopeEntry {
+                            target: ScopeEntryTarget::Item(item_id),
+                            decl_order: order,
+                        });
+                        // Promote Option enum variants.
+                        this.maybe_promote_enum_variants_for(scope_id, item_id);
                     } else {
                         // Malformed child inside namespace body — emit error item.
-                        let child_span = this.span(&child);
+                        let child_span = this.span(child);
                         let def_id = this.next_def_id();
                         items.push(this.arena.alloc_item(Item {
                             span: child_span,
@@ -720,6 +843,7 @@ impl VirBuilder {
                             kind: ItemKind::Error,
                         }));
                     }
+                    order += 1;
                 }
                 items
             })
@@ -952,7 +1076,14 @@ impl VirBuilder {
         let scope_id = self.arena.alloc_scope(Scope {
             parent: Some(parent_scope),
             owner: ScopeOwner::Block(placeholder_expr),
-            bindings: vec![],
+            entries: vec![],
+            promoted_variants: vec![],
+            // Blocks inside other blocks: visibility_cutoff not set here because
+            // the block itself is not a declaration — it's an expression. The cutoff
+            // is meaningful for function/closure bodies, not for inner blocks.
+            // Inner blocks see everything their parent scope sees at the point
+            // where the block appears (handled by the parent scope's visibility rules).
+            visibility_cutoff: None,
         });
 
         self.with_scope(scope_id, |this| {
@@ -977,13 +1108,22 @@ impl VirBuilder {
                 }
             });
 
+            let mut stmt_order: u32 = 0;
             for (i, child) in children.iter().enumerate() {
                 if Some(i) == tail_node_index {
                     // This is the tail — skip adding it as a statement.
                     continue;
                 }
+                let prev_order = this.current_block_stmt_order;
+                this.current_block_stmt_order = Some(stmt_order);
                 if let Some(item_node) = vx_parser::Item::cast(child.clone()) {
                     let item_id = this.build_item(&item_node);
+                    // Block items have sequential visibility — register with decl_order.
+                    this.arena[scope_id].entries.push(ScopeEntry {
+                        target: ScopeEntryTarget::Item(item_id),
+                        decl_order: stmt_order,
+                    });
+
                     let stmt_id = this.arena.alloc_stmt(Stmt {
                         span: this.span(child),
                         body: this.current_body(),
@@ -993,7 +1133,7 @@ impl VirBuilder {
                     stmts.push(stmt_id);
                 } else if vx_parser::Stmt::cast(child.clone()).is_some() {
                     let stmt = vx_parser::Stmt::cast(child.clone()).unwrap();
-                    let stmt_id = this.build_stmt(&stmt);
+                    let stmt_id = this.build_stmt_with_order(&stmt, stmt_order);
                     stmts.push(stmt_id);
                 } else {
                     // Malformed child node that doesn't cast to Item or Stmt.
@@ -1006,6 +1146,8 @@ impl VirBuilder {
                     });
                     stmts.push(stmt_id);
                 }
+                this.current_block_stmt_order = prev_order;
+                stmt_order += 1;
             }
 
             // Build the tail expression.
@@ -1044,7 +1186,11 @@ impl VirBuilder {
         let scope_id = self.arena.alloc_scope(Scope {
             parent: Some(parent_scope),
             owner: ScopeOwner::Body(placeholder_body),
-            bindings: vec![],
+            entries: vec![],
+            promoted_variants: vec![],
+            // Closure body scopes inside blocks need a cutoff so they only
+            // see parent bindings declared before the containing statement.
+            visibility_cutoff: self.current_block_stmt_order,
         });
 
         let body_id = self.arena.alloc_body(Body {
@@ -1134,7 +1280,8 @@ impl VirBuilder {
             mutable: false,
         });
         let scope = self.current_scope();
-        self.arena[scope].bindings.push(binding_id);
+        let order = self.arena[scope].entries.len() as u32;
+        self.register_binding(scope, binding_id, order);
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,
@@ -1557,7 +1704,9 @@ impl VirBuilder {
                         match_expr: placeholder_match,
                         arm_index,
                     },
-                    bindings: vec![],
+                    entries: vec![],
+                    promoted_variants: vec![],
+                    visibility_cutoff: None,
                 });
 
                 let vir_arm = self.with_scope(arm_scope, |this| {
@@ -1588,7 +1737,9 @@ impl VirBuilder {
                         match_expr: placeholder_match,
                         arm_index,
                     },
-                    bindings: vec![],
+                    entries: vec![],
+                    promoted_variants: vec![],
+                    visibility_cutoff: None,
                 });
                 let vir_arm = self.with_scope(arm_scope, |this| VirMatchArm {
                     pattern: this.error_pattern(child_span),
@@ -2205,6 +2356,20 @@ impl VirBuilder {
     // Statements
     // -----------------------------------------------------------------------
 
+    /// Build a statement with a known declaration order. For let-statements,
+    /// the decl_order is propagated to the binding registration so that
+    /// bindings get the correct position for sequential visibility.
+    fn build_stmt_with_order(&mut self, stmt: &vx_parser::Stmt, decl_order: u32) -> crate::StmtId {
+        if let vx_parser::Stmt::Let(_) = stmt {
+            self.current_let_decl_order = Some(decl_order);
+            let result = self.build_stmt(stmt);
+            self.current_let_decl_order = None;
+            result
+        } else {
+            self.build_stmt(stmt)
+        }
+    }
+
     fn build_stmt(&mut self, stmt: &vx_parser::Stmt) -> crate::StmtId {
         match stmt {
             vx_parser::Stmt::Let(l) => self.build_let_stmt(l),
@@ -2486,7 +2651,8 @@ impl VirBuilder {
             mutable,
         });
         let scope = self.current_scope();
-        self.arena[scope].bindings.push(binding_id);
+        let order = self.arena[scope].entries.len() as u32;
+        self.register_binding(scope, binding_id, order);
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,
@@ -2581,7 +2747,8 @@ impl VirBuilder {
                                 mutable: false,
                             });
                             let scope = self.current_scope();
-                            self.arena[scope].bindings.push(binding_id);
+                            let order = self.arena[scope].entries.len() as u32;
+                            self.register_binding(scope, binding_id, order);
                             self.arena.alloc_pattern(Pattern {
                                 span,
                                 body: self.current_body(),
@@ -2659,7 +2826,8 @@ impl VirBuilder {
                 mutable: false,
             });
             let scope = self.current_scope();
-            self.arena[scope].bindings.push(binding_id);
+            let order = self.arena[scope].entries.len() as u32;
+            self.register_binding(scope, binding_id, order);
             binding_id
         });
 
@@ -2709,7 +2877,8 @@ impl VirBuilder {
                                         mutable: false,
                                     });
                                     let scope = self.current_scope();
-                                    self.arena[scope].bindings.push(binding_id);
+                                    let order = self.arena[scope].entries.len() as u32;
+                                    self.register_binding(scope, binding_id, order);
                                     self.arena.alloc_pattern(Pattern {
                                         span,
                                         body: self.current_body(),
@@ -2777,7 +2946,8 @@ impl VirBuilder {
             mutable,
         });
         let scope = self.current_scope();
-        self.arena[scope].bindings.push(binding_id);
+        let order = self.arena[scope].entries.len() as u32;
+        self.register_binding(scope, binding_id, order);
 
         let inner = at
             .pattern()

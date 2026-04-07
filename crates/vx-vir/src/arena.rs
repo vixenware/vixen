@@ -9,9 +9,9 @@
 use crate::binding::Binding;
 use crate::body::Body;
 use crate::expr::Expr;
-use crate::item::Item;
+use crate::item::{Item, ItemKind};
 use crate::pattern::Pattern;
-use crate::scope::Scope;
+use crate::scope::{Scope, ScopeEntryTarget};
 use crate::source_unit::SourceUnit;
 use crate::stmt::Stmt;
 use crate::type_ref::TypeRef;
@@ -152,12 +152,31 @@ impl VirArena {
             .map(|(i, b)| (BodyId::from_index(i), b))
     }
 
-    /// Iterate all bindings in a given scope.
+    /// Iterate all bindings in a given scope (filtering the unified entries list).
     pub fn bindings_in_scope(&self, scope: ScopeId) -> impl Iterator<Item = (BindingId, &Binding)> {
-        let binding_ids = &self.scopes[scope.index()].bindings;
-        binding_ids
+        self.scopes[scope.index()]
+            .entries
             .iter()
-            .map(|&id| (id, &self.bindings[id.index()]))
+            .filter_map(|entry| match entry.target {
+                ScopeEntryTarget::Binding(id) => Some((id, &self.bindings[id.index()])),
+                ScopeEntryTarget::Item(_) => None,
+            })
+    }
+
+    /// Get the name of an item by its ID.
+    ///
+    /// Returns the item's declared name (e.g. function name, struct name).
+    /// For error items, returns `"<error>"`.
+    pub fn item_name(&self, id: ItemId) -> &str {
+        match &self.items[id.index()].kind {
+            ItemKind::Function(f) => &f.name,
+            ItemKind::Struct(s) => &s.name,
+            ItemKind::Enum(e) => &e.name,
+            ItemKind::Newtype(n) => &n.name,
+            ItemKind::TypeAlias(t) => &t.name,
+            ItemKind::Namespace(ns) => &ns.name,
+            ItemKind::Error => "<error>",
+        }
     }
 }
 
