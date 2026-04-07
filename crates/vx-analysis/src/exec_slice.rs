@@ -1466,8 +1466,71 @@ impl<'a> BodyLowering<'a> {
         self.resolve_index_for_binding(binding, index)
     }
 
-    /// Follow a binding to its initializer and resolve `._index` from it.
-    /// Handles: binding → product → select field, or binding → projection → recurse.
+    /// Resolve a field selection from an expression, recursively following
+    /// projection chains and bindings. Returns the sub-expression ExprId if
+    /// the chain can be fully resolved statically.
+    fn resolve_field_for_expr(
+        &self,
+        expr: ExprId,
+        field: &FieldKey,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        if !visited.insert(expr) {
+            return Ok(None); // cycle guard
+        }
+
+        // If expr is a product, select the field directly
+        if let Some(product) = self
+            .bridge
+            .products
+            .iter()
+            .find(|p| p.body == self.body && p.expr == expr)
+        {
+            if let Some((_key, sub_expr)) = product.fields.iter().find(|(k, _)| k == field) {
+                return Ok(*sub_expr);
+            }
+        }
+
+        // If expr is a NameRef use, follow through the binding's initializer
+        if let Some(binding) = self.use_binding_by_expr.get(&expr).copied() {
+            if let Some(init_expr) = self.binding_initializers.get(&binding).copied() {
+                if let Some(result) = self.resolve_field_for_expr(init_expr, field, visited)? {
+                    return Ok(Some(result));
+                }
+            }
+        }
+
+        // If expr is a projection (field access), resolve it:
+        // expr = base.proj_field → resolve base to get intermediate, then select field from it
+        if let Some(proj) = self
+            .bridge
+            .projections
+            .iter()
+            .find(|p| p.body == self.body && p.expr == expr)
+        {
+            // First resolve what proj.base.proj.field evaluates to
+            if let Some(intermediate) =
+                self.resolve_field_for_expr(proj.base, &proj.field, visited)?
+            {
+                // Now resolve our field from that intermediate
+                return self.resolve_field_for_expr(intermediate, field, visited);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Convenience: resolve `._index` from an expression.
+    fn resolve_index_for_expr(
+        &self,
+        expr: ExprId,
+        index: usize,
+    ) -> Result<Option<ExprId>, ExecSliceError> {
+        let field = FieldKey::Index(index as u32);
+        self.resolve_field_for_expr(expr, &field, &mut HashSet::new())
+    }
+
+    /// Convenience: resolve `._index` through a binding.
     fn resolve_index_for_binding(
         &self,
         binding: BridgeLocalBindingId,
@@ -1480,95 +1543,18 @@ impl<'a> BodyLowering<'a> {
         self.resolve_index_for_expr(init_expr, index)
     }
 
-    /// Resolve `._index` from an expression. If the expr is a product, select directly.
-    /// If it's a projection (field access), follow through bindings recursively.
-    fn resolve_index_for_expr(
-        &self,
-        expr: ExprId,
-        index: usize,
-    ) -> Result<Option<ExprId>, ExecSliceError> {
-        // Check if expr is a product — select field directly
-        let field_key = FieldKey::Index(index as u32);
-        if let Some(product) = self
-            .bridge
-            .products
-            .iter()
-            .find(|p| p.body == self.body && p.expr == expr)
-        {
-            if let Some((_key, sub_expr)) = product.fields.iter().find(|(k, _)| *k == field_key) {
-                return Ok(*sub_expr);
-            }
-        }
-
-        // Check if expr is a projection — follow the chain
-        if let Some(proj) = self
-            .bridge
-            .projections
-            .iter()
-            .find(|p| p.body == self.body && p.expr == expr)
-        {
-            // This expr is `base.field` — resolve `base` to the projected sub-expression,
-            // then select `index` from that.
-            let proj_index = match &proj.field {
-                FieldKey::Index(i) => *i as usize,
-                FieldKey::Name(_) => return Ok(None),
-            };
-            // Resolve base by ExprId (sound under shadowing, unlike name-based)
-            if let Some(base_binding) = self.use_binding_by_expr.get(&proj.base).copied() {
-                if let Some(intermediate) =
-                    self.resolve_index_for_binding(base_binding, proj_index)?
-                {
-                    return self.resolve_index_for_expr(intermediate, index);
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Resolve `receiver.field_name` through bindings or inline products.
     fn resolve_named_field_through_bindings(
         &self,
         receiver: &Expr,
         field_name: &str,
     ) -> Result<Option<ExprId>, ExecSliceError> {
-        let field_key = FieldKey::Name(field_name.to_owned());
-
-        // Try through binding chain (receiver is a NameRef)
-        if let Some(receiver_id) = self.expr_id(receiver) {
-            if let Some(binding) = self.use_binding_by_expr.get(&receiver_id).copied() {
-                if let Some(init_expr) = self.binding_initializers.get(&binding).copied() {
-                    if let Some(product) = self
-                        .bridge
-                        .products
-                        .iter()
-                        .find(|p| p.body == self.body && p.expr == init_expr)
-                    {
-                        if let Some((_key, Some(sub_expr))) =
-                            product.fields.iter().find(|(k, _)| *k == field_key)
-                        {
-                            return Ok(Some(*sub_expr));
-                        }
-                    }
-                }
-            }
-
-            // Try inline: receiver itself is a product
-            if let Some(product) = self
-                .bridge
-                .products
-                .iter()
-                .find(|p| p.body == self.body && p.expr == receiver_id)
-            {
-                if let Some((_key, Some(sub_expr))) =
-                    product.fields.iter().find(|(k, _)| *k == field_key)
-                {
-                    return Ok(Some(*sub_expr));
-                }
-            }
-        }
-
-        Ok(None)
+        let receiver_id = match self.expr_id(receiver) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let field = FieldKey::Name(field_name.to_owned());
+        self.resolve_field_for_expr(receiver_id, &field, &mut HashSet::new())
     }
 
     fn materialize_binding(

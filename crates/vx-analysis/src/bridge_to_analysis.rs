@@ -494,21 +494,108 @@ fn seed_lazy_product_fields(
         })
         .collect();
 
-    let lookup_fields = |base_expr: ExprId, body: BodyId| -> Option<Vec<FieldKey>> {
-        // Try resolved binding first (sound under shadowing)
-        if let Some(&binding_id) = use_by_expr.get(&base_expr) {
+    // Resolve the product that an expression ultimately refers to, following
+    // bindings and projection chains recursively. Returns the product's field keys.
+    fn resolve_product_fields<'a>(
+        expr: ExprId,
+        body: BodyId,
+        use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
+        all_binding_products: &HashMap<BridgeLocalBindingId, Vec<FieldKey>>,
+        inline_product_keys: &HashMap<(BodyId, ExprId), Vec<FieldKey>>,
+        products_by_expr: &HashMap<(BodyId, ExprId), &'a Vec<(FieldKey, Option<ExprId>)>>,
+        projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+        binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Option<Vec<FieldKey>> {
+        if !visited.insert(expr) {
+            return None; // cycle guard
+        }
+
+        // Direct product?
+        if let Some(keys) = inline_product_keys.get(&(body, expr)) {
+            return Some(keys.clone());
+        }
+
+        // Binding use → follow initializer
+        if let Some(&binding_id) = use_by_expr.get(&expr) {
             if let Some(fields) = all_binding_products.get(&binding_id) {
                 return Some(fields.clone());
             }
+            // Follow through binding initializer
+            if let Some(&init) = binding_inits.get(&binding_id) {
+                if let Some(fields) = resolve_product_fields(
+                    init,
+                    body,
+                    use_by_expr,
+                    all_binding_products,
+                    inline_product_keys,
+                    products_by_expr,
+                    projection_by_expr,
+                    binding_inits,
+                    visited,
+                ) {
+                    return Some(fields);
+                }
+            }
         }
-        inline_product_keys.get(&(body, base_expr)).cloned()
-    };
+
+        // Projection → resolve base.field to get intermediate, check if that's a product
+        if let Some(proj) = projection_by_expr.get(&(body, expr)) {
+            // Resolve what base.field points to
+            if let Some(base_product) = products_by_expr.get(&(body, proj.base)).or_else(|| {
+                // base might be a binding — follow to its init
+                let &bid = use_by_expr.get(&proj.base)?;
+                let &init = binding_inits.get(&bid)?;
+                products_by_expr.get(&(body, init))
+            }) {
+                // Find the sub-expression for proj.field
+                if let Some(sub_expr) = base_product
+                    .iter()
+                    .find_map(|(k, e)| if *k == proj.field { *e } else { None })
+                {
+                    // Is sub_expr a product?
+                    return resolve_product_fields(
+                        sub_expr,
+                        body,
+                        use_by_expr,
+                        all_binding_products,
+                        inline_product_keys,
+                        products_by_expr,
+                        projection_by_expr,
+                        binding_inits,
+                        visited,
+                    );
+                }
+            }
+            // base itself might need recursive resolution
+            // (e.g. outer._0._0 where outer._0's base is another projection)
+        }
+
+        None
+    }
+
+    // Build binding init map for the resolver
+    let binding_inits: HashMap<BridgeLocalBindingId, ExprId> = bridge
+        .local_bindings
+        .iter()
+        .filter_map(|b| Some((b.id, b.init_expr?)))
+        .collect();
 
     let mut seeds = bridge
         .projections
         .iter()
         .flat_map(|projection| {
-            let fields = lookup_fields(projection.base, projection.body)?;
+            let fields = resolve_product_fields(
+                projection.base,
+                projection.body,
+                &use_by_expr,
+                &all_binding_products,
+                &inline_product_keys,
+                &products_by_expr,
+                &projection_by_expr,
+                &binding_inits,
+                &mut HashSet::new(),
+            )?;
             if fields.len() <= 1 || !fields.contains(&projection.field) {
                 return None;
             }

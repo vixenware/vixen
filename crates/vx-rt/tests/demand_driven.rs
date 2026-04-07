@@ -124,6 +124,42 @@ fn main() -> U64 (
     );
 }
 
+/// Deep tuple projection chain (no intermediate lets): outer._0._0._0
+#[test]
+fn deep_tuple_projection_chain() {
+    expect_u64(
+        r#"
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let outer = (((7, bomb()), bomb()), bomb());
+  outer._0._0._0
+)
+"#,
+        &[],
+        7,
+    );
+}
+
+/// Deep named-field projection chain: s.a.a
+#[test]
+fn deep_named_field_projection_chain() {
+    expect_u64(
+        r#"
+struct Pair { a: U64, b: U64 }
+struct Outer { a: Pair, b: U64 }
+fn bomb() -> U64 ( trap("boom") )
+
+fn main() -> U64 (
+  let s = Outer { a: Pair { a: 42, b: bomb() }, b: bomb() };
+  s.a.a
+)
+"#,
+        &[],
+        42,
+    );
+}
+
 /// Program D: higher-order helper
 #[test]
 fn program_d_higher_order() {
