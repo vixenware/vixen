@@ -1,0 +1,18 @@
+[package]
+name = "vx-vir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+vx-types = { path = "../vx-types" }
+vx-resolve = { path = "../vx-resolve" }
+
+[dev-dependencies]
+rowan = "0.16"

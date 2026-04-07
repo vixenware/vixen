@@ -1,0 +1,106 @@
+//! Statement nodes.
+//!
+//! Statements appear inside blocks and at the top level. Each gets a unique
+//! [`StmtId`](crate::StmtId).
+
+use crate::expr::UpdateField;
+use crate::{BindingId, ExprId, ItemId, PatternId, TypeRefId};
+use vx_resolve::SourceSpan;
+
+/// A statement node in the VIR.
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    /// The source location of this statement.
+    /// Populated during: CST walk.
+    pub span: SourceSpan,
+
+    /// The syntactic form of this statement.
+    /// Populated during: CST walk.
+    pub kind: StmtKind,
+}
+
+/// Discriminant for all statement forms.
+#[derive(Debug, Clone)]
+pub enum StmtKind {
+    /// `let pattern = expr` or `let name: Type = expr`.
+    Let(LetStmt),
+
+    /// `name = expr` — reassignment to a mutable binding.
+    Assign(AssignStmt),
+
+    /// `name with= { field: value }` — compound update in place.
+    CompoundUpdate(CompoundUpdateStmt),
+
+    /// `target.field = expr` — field assignment on a mutable binding.
+    FieldAssign(FieldAssignStmt),
+
+    /// `return expr` or `return` (returns unit).
+    Return(ReturnStmt),
+
+    /// A declaration used as a statement (fn, struct, etc. inside a block).
+    Item(ItemId),
+
+    /// An expression used as a statement (its value is discarded).
+    Expr(ExprId),
+}
+
+/// A let statement: `let pattern = expr`.
+#[derive(Debug, Clone)]
+pub struct LetStmt {
+    /// The pattern being bound. For simple `let x = ...` this is a
+    /// [`PatternKind::Binding`](crate::PatternKind::Binding).
+    pub pattern: PatternId,
+
+    /// Optional type annotation: `let x: U64 = ...`.
+    pub ty: Option<TypeRefId>,
+
+    /// The initializer expression.
+    pub init: ExprId,
+}
+
+/// An assignment statement: `name = expr`.
+#[derive(Debug, Clone)]
+pub struct AssignStmt {
+    /// The name being assigned to.
+    pub name: String,
+    /// Span of the name token.
+    pub name_span: SourceSpan,
+    /// The new value expression.
+    pub value: ExprId,
+    /// The binding being assigned to.
+    /// Populated during: name resolution pass.
+    pub resolved: Option<BindingId>,
+}
+
+/// A compound update statement: `name with= { field: value }`.
+#[derive(Debug, Clone)]
+pub struct CompoundUpdateStmt {
+    /// The name being updated.
+    pub name: String,
+    /// Span of the name token.
+    pub name_span: SourceSpan,
+    /// The update fields.
+    pub updates: Vec<UpdateField>,
+    /// The binding being updated.
+    /// Populated during: name resolution pass.
+    pub resolved: Option<BindingId>,
+}
+
+/// A field assignment statement: `a.b.c = expr`.
+#[derive(Debug, Clone)]
+pub struct FieldAssignStmt {
+    /// The dotted path to the field: first element is the base name,
+    /// rest are field names.
+    pub target: Vec<String>,
+    /// Span of the entire target path.
+    pub target_span: SourceSpan,
+    /// The new value expression.
+    pub value: ExprId,
+}
+
+/// A return statement: `return expr` or bare `return`.
+#[derive(Debug, Clone)]
+pub struct ReturnStmt {
+    /// The returned expression. `None` for bare `return` (returns unit).
+    pub value: Option<ExprId>,
+}

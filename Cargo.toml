@@ -6,6 +6,7 @@ members = [
   ## lang crates
   "crates/vx-parser",
   "crates/vx-resolve",
+  "crates/vx-vir",
   "crates/vx-stdlib",
   "crates/vx-lsp",
 
