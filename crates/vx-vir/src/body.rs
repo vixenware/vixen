@@ -4,7 +4,7 @@
 //! a tree via [`parent`](Body::parent) for capture analysis — a closure
 //! body's parent is the body it's lexically nested within.
 
-use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
+use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
 use vx_resolve::{SourceId, SourceSpan};
 
 /// A body is a scope-owning unit: a function, closure, or top-level thunk.
@@ -45,6 +45,11 @@ pub struct Body {
     /// Only meaningful for function bodies.
     /// Populated during: CST walk.
     pub capabilities: Vec<String>,
+
+    /// Bindings from ancestor bodies referenced inside this body.
+    /// Populated during: capture analysis pass. Empty for bodies with
+    /// `parent: None`. Sorted by `BindingId` for deterministic output.
+    pub captures: Vec<BindingId>,
 }
 
 /// What kind of construct owns a body.

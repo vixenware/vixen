@@ -103,6 +103,7 @@ fn arena_round_trip() {
         parent: None,
         return_ty: None,
         capabilities: vec![],
+        captures: vec![],
     });
 
     // Fix up item's body reference
@@ -248,6 +249,7 @@ fn visitor_traversal_count() {
         parent: None,
         return_ty: None,
         capabilities: vec![],
+        captures: vec![],
     });
 
     if let ItemKind::Function(ref mut f) = arena[item_id].kind {

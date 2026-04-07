@@ -277,6 +277,7 @@ impl VirBuilder {
             parent: None,
             return_ty: None,
             capabilities: vec![],
+            captures: vec![],
         });
 
         self.body_stack.push(body_id);
@@ -483,6 +484,7 @@ impl VirBuilder {
             parent: parent_body,
             return_ty: None, // filled below
             capabilities: self.build_capabilities_from_fn(f),
+            captures: vec![],
         });
 
         self.with_body(body_id, |this| {
@@ -1243,6 +1245,7 @@ impl VirBuilder {
             parent: Some(parent_body),
             return_ty: None,
             capabilities: vec![],
+            captures: vec![],
         });
 
         self.with_body(body_id, |this| {
