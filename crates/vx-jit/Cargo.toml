@@ -12,7 +12,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 kajit = { workspace = true }
-kajit-hir = { workspace = true }
 kajit-reprs = { path = "../../../kajit/crates-kajit/kajit-reprs" }
 thiserror = { workspace = true }
 vx-parser = { workspace = true }

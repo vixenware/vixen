@@ -2,9 +2,11 @@
 //! executable machine code via the Kajit pipeline.
 
 use kajit::{CompiledFunction, ir::IrFunc};
-use kajit_hir::{Module, VixenExt};
+use kajit_reprs::hir::Module;
 use thiserror::Error;
 use vx_jit_types::{VixenLoweringError, VixenTypedFunction};
+
+use crate::VixenExt;
 
 #[derive(Debug, Error)]
 pub enum KajitBackendError {

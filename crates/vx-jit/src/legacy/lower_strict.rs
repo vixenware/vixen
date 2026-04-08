@@ -6,19 +6,19 @@
 
 use std::collections::HashMap;
 
-use kajit_hir::{
-    FieldDef, Module, VixenExt,
+use kajit_reprs::hir::{
+    BinaryOp, FieldDef, Literal, LocalId, Module, Type, TypeDef, TypeDefId, TypeDefKind,
 };
-use kajit_reprs::hir::{BinaryOp, Literal, LocalId, Type, TypeDef, TypeDefId, TypeDefKind};
-use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
-use vx_resolve::SourceSpan;
-use vx_types::{Scalar, Ty};
 use vx_jit_types::{
     VixenCallableRef, VixenTypedExpr, VixenTypedFunction, VixenTypedLocal, VixenTypedParam,
     VixenTypedStmt,
 };
+use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
+use vx_resolve::SourceSpan;
+use vx_types::{Scalar, Ty};
 
 use super::{BodyId, ExprId, KernelRegion, SingleSourceBridge};
+use crate::VixenExt;
 
 /// Errors that indicate a kernel cannot be strict-lowered.
 #[derive(Debug, Clone)]

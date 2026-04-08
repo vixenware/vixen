@@ -11,6 +11,8 @@ pub use abi::{
 mod kajit_backend;
 pub use kajit_backend::KajitBackendError;
 pub use kajit_backend::{lower_hir as lower_vtf_to_hir, lower_ir as lower_vtf_to_ir};
+mod vixen_hir;
+pub use vixen_hir::*;
 
 pub mod legacy;
 pub mod strict_from_ops;
@@ -36,7 +38,7 @@ pub enum UnifiedStrictError {
 /// the module it was built on (needed for compilation).
 pub struct UnifiedLowered {
     pub vtf: VixenTypedFunction,
-    pub module: kajit_hir::Module,
+    pub module: kajit_reprs::hir::Module,
 }
 
 /// Lower source text for a named function through the unified path.

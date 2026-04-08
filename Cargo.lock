@@ -3932,7 +3932,6 @@ name = "vx-jit"
 version = "0.1.0"
 dependencies = [
  "kajit",
- "kajit-hir",
  "kajit-reprs",
  "thiserror 2.0.18",
  "vx-jit-types",

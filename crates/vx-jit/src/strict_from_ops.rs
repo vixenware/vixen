@@ -6,8 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kajit_hir::{FieldDef, Module, VixenExt};
-use kajit_reprs::hir::{BinaryOp, Literal, LocalId, Type, TypeDef, TypeDefId, TypeDefKind};
+use kajit_reprs::hir::{
+    BinaryOp, FieldDef, Literal, LocalId, Module, Type, TypeDef, TypeDefId, TypeDefKind,
+};
 use vx_jit_types::{
     VixenCallableRef, VixenTypedExpr, VixenTypedFunction, VixenTypedLocal, VixenTypedParam,
     VixenTypedStmt,
@@ -15,6 +16,8 @@ use vx_jit_types::{
 use vx_types::{Scalar, Ty};
 use vx_vir::exec_types::{BodyId, ExecutableBody, KernelOp, Operand, ResultSource, SlotId};
 use vx_vir::lower::SlotTypeMap;
+
+use crate::VixenExt;
 
 /// Result of successfully strict-lowering a body.
 pub struct StrictLowered {

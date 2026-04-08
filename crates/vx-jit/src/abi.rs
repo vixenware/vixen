@@ -187,7 +187,7 @@ pub enum StrictFragmentAbiError {
 /// Compile a `VixenTypedFunction` into machine code.
 pub fn compile_strict_fragment(
     vtf: &VixenTypedFunction,
-    module: &kajit_hir::Module,
+    module: &kajit_reprs::hir::Module,
 ) -> Result<CompiledFunction, StrictFragmentAbiError> {
     Ok(crate::kajit_backend::compile(vtf, module)?)
 }
