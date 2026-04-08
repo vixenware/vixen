@@ -3819,8 +3819,6 @@ dependencies = [
  "vox",
  "vx-analysis",
  "vx-jit",
- "vx-parser",
- "vx-resolve",
  "vx-runner",
  "vx-services",
  "vx-store",
@@ -3961,8 +3959,6 @@ dependencies = [
  "thiserror 2.0.18",
  "vx-analysis",
  "vx-eval-tests",
- "vx-parser",
- "vx-resolve",
  "vx-vir",
 ]
 
