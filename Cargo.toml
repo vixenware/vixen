@@ -61,6 +61,7 @@ vx-analysis = { path = "crates/vx-analysis" }
 vx-jit = { path = "crates/vx-jit" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
+vx-vir = { path = "crates/vx-vir" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }

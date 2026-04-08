@@ -34,6 +34,7 @@ pub mod body;
 pub mod build;
 pub mod cap_check;
 pub mod capture;
+pub mod compile;
 pub mod demand;
 pub mod expr;
 pub mod item;
