@@ -37,6 +37,7 @@ pub mod capture;
 pub mod demand;
 pub mod expr;
 pub mod item;
+pub mod lower;
 pub mod pattern;
 pub mod resolve;
 pub mod scope;

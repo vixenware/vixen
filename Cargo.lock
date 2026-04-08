@@ -4080,8 +4080,10 @@ name = "vx-vir"
 version = "0.1.0"
 dependencies = [
  "rowan",
+ "vx-analysis",
  "vx-parser",
  "vx-resolve",
+ "vx-rt",
  "vx-types",
 ]
 
