@@ -152,12 +152,22 @@ dependencies = [
 
 [[package]]
 name = "ariadne"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36f5e3dca4e09a6f340a61a0e9c7b61e030c69fc27bf29d73218f7e5e3b7638f"
+dependencies = [
+ "unicode-width 0.1.14",
+ "yansi",
+]
+
+[[package]]
+name = "ariadne"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8454c8a44ce2cb9cc7e7fae67fc6128465b343b92c6631e94beca3c8d1524ea5"
 dependencies = [
  "concolor",
- "unicode-width",
+ "unicode-width 0.2.2",
  "yansi",
 ]
 
@@ -1039,7 +1049,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "752632ec234fe1fb4194d0aa59d2df74c9946bc71c78b8e98adcfac267217655"
 dependencies = [
- "ariadne",
+ "ariadne 0.6.0",
  "facet",
  "facet-core",
  "facet-format",
@@ -1126,7 +1136,7 @@ version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0ffdb761cf6aa5298efdef8ae22dac4057d492f85e1e7434864eb1ccbcfeae5"
 dependencies = [
- "ariadne",
+ "ariadne 0.6.0",
  "camino",
  "facet",
  "facet-core",
@@ -1143,7 +1153,7 @@ dependencies = [
  "strsim",
  "supports-color 3.0.2",
  "tracing",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1905,6 +1915,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kajit-reprs"
+version = "0.1.0"
+dependencies = [
+ "ariadne 0.5.1",
+ "chumsky",
+ "kajit-types",
+]
+
+[[package]]
+name = "kajit-types"
+version = "0.1.0"
+
+[[package]]
 name = "landlock"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2040,7 +2063,7 @@ name = "margin"
 version = "0.1.0"
 dependencies = [
  "facet",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2049,7 +2072,7 @@ version = "0.1.0"
 dependencies = [
  "arborium-theme",
  "margin",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -3092,7 +3115,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fffd467514b106c38630d124d0c2bfae7540e598509653233bc4bbe9e9d92f4d"
 dependencies = [
- "ariadne",
+ "ariadne 0.6.0",
  "facet-testhelpers",
  "styx-parse",
 ]
@@ -3564,6 +3587,12 @@ checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
@@ -3793,7 +3822,7 @@ dependencies = [
  "arborium",
  "arborium-highlight",
  "arborium-theme",
- "ariadne",
+ "ariadne 0.6.0",
  "async-recursion",
  "blake3",
  "camino",
@@ -3840,6 +3869,7 @@ dependencies = [
  "kajit-hir",
  "thiserror 2.0.18",
  "vx-jit",
+ "vx-jit-types",
  "vx-parser",
 ]
 
@@ -3903,11 +3933,20 @@ version = "0.1.0"
 dependencies = [
  "kajit",
  "kajit-hir",
+ "kajit-reprs",
  "thiserror 2.0.18",
+ "vx-jit-types",
  "vx-parser",
  "vx-resolve",
  "vx-types",
  "vx-vir",
+]
+
+[[package]]
+name = "vx-jit-types"
+version = "0.1.0"
+dependencies = [
+ "kajit-reprs",
 ]
 
 [[package]]
@@ -4069,6 +4108,7 @@ version = "0.1.0"
 dependencies = [
  "kajit-hir",
  "rowan",
+ "vx-jit-types",
  "vx-parser",
  "vx-resolve",
  "vx-rt",
