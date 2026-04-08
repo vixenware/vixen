@@ -384,7 +384,7 @@ pub struct IndexExpr {
 }
 
 /// A key identifying a field on a product type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldKey {
     /// A named field: `.name`.
     Name(String),

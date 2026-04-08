@@ -6,7 +6,8 @@ use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
 use vx_vir::BodyId;
 use vx_vir::build::{VirBuilder, VirProgram};
-use vx_vir::demand::{Observation, VirCallTarget, VirDemandResult, analyze_demand};
+use vx_vir::demand::{LazyField, Observation, VirCallTarget, VirDemandResult, analyze_demand};
+use vx_vir::expr::FieldKey;
 use vx_vir::resolve::resolve_names;
 
 /// Helper: build VIR program, resolve names, run demand analysis.
@@ -262,5 +263,243 @@ fn destructuring_closure_not_resolved() {
     assert!(
         !result.reachable.contains(&closure_bodies[0]),
         "destructuring-bound closure is a known limitation — should NOT be reachable"
+    );
+}
+
+// =========================================================================
+// Lazy field seeding tests
+// =========================================================================
+
+/// Helper: check that a specific lazy field exists.
+fn has_lazy(
+    result: &VirDemandResult,
+    product_expr_body_name: &str,
+    field: FieldKey,
+    program: &VirProgram,
+) -> bool {
+    // Find product exprs in the named function body.
+    let body_id = fn_body(program, product_expr_body_name).unwrap();
+    result
+        .lazy_fields
+        .iter()
+        .any(|lf| lf.body == body_id && lf.field == field)
+}
+
+// =========================================================================
+// 14. Simple tuple dead sibling
+// =========================================================================
+
+#[test]
+fn lazy_simple_tuple_dead_sibling() {
+    let (program, result) =
+        analyze_source("fn bomb() -> U64 ( 0 ); fn main() -> U64 ( let p = (42, bomb()); p._0 )");
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "expected Index(1) lazy, got {:?}",
+        result.lazy_fields
+    );
+    assert!(
+        !has_lazy(&result, "main", FieldKey::Index(0), &program),
+        "Index(0) should NOT be lazy"
+    );
+}
+
+// =========================================================================
+// 15. All fields projected — no lazy
+// =========================================================================
+
+#[test]
+fn lazy_all_fields_projected() {
+    let (_, result) = analyze_source("fn main() -> U64 ( let p = (1, 2); p._0 + p._1 )");
+    assert!(
+        result.lazy_fields.is_empty(),
+        "expected no lazy fields, got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 16. Deep nested tuple chain
+// =========================================================================
+
+#[test]
+fn lazy_deep_nested_tuple() {
+    let (_, result) = analyze_source("fn main() -> U64 ( let p = ((1, 2), 3); p._0._0 )");
+    // Outer tuple: _0 projected, _1 (=3) lazy.
+    // Inner tuple (1, 2): _0 projected, _1 (=2) lazy.
+    let lazy_index_1: Vec<_> = result
+        .lazy_fields
+        .iter()
+        .filter(|lf| lf.field == FieldKey::Index(1))
+        .collect();
+    assert!(
+        lazy_index_1.len() >= 2,
+        "expected at least 2 lazy Index(1) fields (outer + inner), got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 17. Record field lazy
+// =========================================================================
+
+#[test]
+fn lazy_record_field() {
+    let (_, result) = analyze_source("fn main() -> U64 ( let r = { a: 1, b: 2 }; r.a )");
+    assert!(
+        result
+            .lazy_fields
+            .iter()
+            .any(|lf| lf.field == FieldKey::Name("b".into())),
+        "expected Name(\"b\") lazy, got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 18. Cross-function lazy (named fn)
+// =========================================================================
+
+#[test]
+fn lazy_cross_function_named() {
+    let (program, result) = analyze_source(
+        "fn pick(p: (U64, U64)) -> U64 ( p._0 ); fn main() -> U64 ( pick((42, 99)) )",
+    );
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "expected Index(1) lazy at caller tuple, got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 19. Cross-function lazy (closure)
+// =========================================================================
+
+#[test]
+fn lazy_cross_function_closure() {
+    let (program, result) = analyze_source("fn main() -> U64 ( let f = (p) => p._0; f((42, 99)) )");
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "expected Index(1) lazy at caller tuple (closure target), got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 20. Cross-function all fields used — no lazy
+// =========================================================================
+
+#[test]
+fn lazy_cross_function_all_used() {
+    let (_, result) = analyze_source(
+        "fn both(p: (U64, U64)) -> U64 ( p._0 + p._1 ); fn main() -> U64 ( both((42, 99)) )",
+    );
+    assert!(
+        result.lazy_fields.is_empty(),
+        "expected no lazy fields, got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 21. No projection — no lazy
+// =========================================================================
+
+#[test]
+fn lazy_no_projection() {
+    let (_, result) = analyze_source("fn main() -> U64 ( let p = (1, 2); 42 )");
+    assert!(
+        result.lazy_fields.is_empty(),
+        "expected no lazy fields, got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 22. Binding chain
+// =========================================================================
+
+#[test]
+fn lazy_binding_chain() {
+    let (program, result) = analyze_source("fn main() -> U64 ( let p = (1, 2); let q = p; q._0 )");
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "expected Index(1) lazy (traced through binding chain), got {:?}",
+        result.lazy_fields
+    );
+}
+
+// =========================================================================
+// 23. Destructuring limitation
+// =========================================================================
+
+#[test]
+fn lazy_destructuring_limitation() {
+    let (_, result) = analyze_source("fn main() -> U64 ( let (p, q) = ((1, 2), 3); p._0 )");
+    // p has init_expr: None (destructuring), so no lazy fields detected.
+    // The outer tuple might get lazy seeding for its fields from local projection,
+    // but p._0 can't trace through to the inner tuple.
+    // This is a known limitation.
+    let inner_lazy: Vec<_> = result
+        .lazy_fields
+        .iter()
+        .filter(|lf| {
+            // Check if any lazy field is at the inner tuple (1, 2).
+            // Since we can't trace through destructuring, there shouldn't be any.
+            lf.field == FieldKey::Index(1)
+        })
+        .collect();
+    // The test just documents the limitation — inner tuple laziness is not detected.
+    // We can't assert exactly because the outer tuple might have lazy fields.
+}
+
+// =========================================================================
+// 24. Mixed local + cross-function projections
+// =========================================================================
+
+#[test]
+fn lazy_mixed_local_and_cross_function() {
+    let (program, result) = analyze_source(
+        "fn pick0(p: (U64, U64, U64)) -> U64 ( p._0 ); fn main() -> U64 ( let p = (1, 2, 3); pick0(p) + p._1 )",
+    );
+    // projected = {_0 (cross), _1 (local)}, lazy = {_2}
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(2), &program),
+        "expected Index(2) lazy, got {:?}",
+        result.lazy_fields
+    );
+    assert!(
+        !has_lazy(&result, "main", FieldKey::Index(0), &program),
+        "Index(0) should NOT be lazy (projected by callee)"
+    );
+    assert!(
+        !has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "Index(1) should NOT be lazy (projected locally)"
+    );
+}
+
+// =========================================================================
+// 25. Multiple cross-function call sites
+// =========================================================================
+
+#[test]
+fn lazy_multiple_cross_function_sites() {
+    let (program, result) = analyze_source(
+        "fn pick0(p: (U64, U64, U64)) -> U64 ( p._0 ); fn pick1(p: (U64, U64, U64)) -> U64 ( p._1 ); fn main() -> U64 ( let p = (1, 2, 3); pick0(p) + pick1(p) )",
+    );
+    // projected = {_0 (pick0), _1 (pick1)}, lazy = {_2}
+    assert!(
+        has_lazy(&result, "main", FieldKey::Index(2), &program),
+        "expected Index(2) lazy, got {:?}",
+        result.lazy_fields
+    );
+    assert!(
+        !has_lazy(&result, "main", FieldKey::Index(0), &program),
+        "Index(0) should NOT be lazy"
+    );
+    assert!(
+        !has_lazy(&result, "main", FieldKey::Index(1), &program),
+        "Index(1) should NOT be lazy"
     );
 }

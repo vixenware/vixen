@@ -2080,6 +2080,11 @@ impl VirBuilder {
                 let text = t.text();
                 if let Ok(idx) = text.parse::<u32>() {
                     FieldKey::Index(idx)
+                } else if let Some(idx) = text
+                    .strip_prefix('_')
+                    .and_then(|digits| digits.parse::<u32>().ok())
+                {
+                    FieldKey::Index(idx)
                 } else {
                     FieldKey::Name(text.to_string())
                 }
