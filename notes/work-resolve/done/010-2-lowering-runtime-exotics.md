@@ -1,6 +1,6 @@
 # 010-2: Runtime Boundaries and Exotic Constructs
 
-Status: Not started.
+Status: Done.
 
 ## Context
 
