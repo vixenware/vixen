@@ -14,7 +14,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vx-types = { path = "../vx-types" }
 vx-resolve = { path = "../vx-resolve" }
 vx-parser = { path = "../vx-parser" }
-vx-analysis = { path = "../vx-analysis" }
+kajit-hir = { workspace = true }
 
 [dev-dependencies]
 rowan = "0.16"

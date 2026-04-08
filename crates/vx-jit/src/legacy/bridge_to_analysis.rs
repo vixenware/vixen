@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use vx_resolve::{DefId, SourceSpan};
 
-use crate::{
+use super::{
     AnalysisResult, AnalyzedBody, BodyId, BridgeBody, BridgeExpr, BridgeExprKind,
     BridgeLocalBindingId, BridgeLocalBindingKind, CaptureSlot, ClosureEnvLayout, ExprId,
     ExtractedNode, ExtractedNodeReason, FieldKey, KernelEntrypoint, KernelId, KernelRegion,
@@ -26,7 +26,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
         .call_sites
         .iter()
         .filter_map(|site| match site.kind {
-            crate::BridgeCallSiteKind::StdlibBoundary(kind) => Some((
+            super::BridgeCallSiteKind::StdlibBoundary(kind) => Some((
                 SourceExpr {
                     body: site.body,
                     expr: site.expr,
@@ -55,7 +55,7 @@ pub fn build_minimal_analysis(bridge: &SingleSourceBridge) -> AnalysisResult {
             RuntimeBoundaryKind::SharedKeyed => RuntimeNode::SharedKeyed {
                 id: node_id,
                 source: source.clone(),
-                keyed: crate::SharedKeyedNode {
+                keyed: super::SharedKeyedNode {
                     key_expr: source.clone(),
                     request_expr: source.clone(),
                     join_expr: source.clone(),
@@ -187,7 +187,7 @@ fn apply_one_step_local_call_demands(
             let mut incoming = BTreeSet::new();
             for body in bodies.iter() {
                 for edge in &body.source_local_call_edges {
-                    if let crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) = edge.callee {
+                    if let super::SourceLocalCalleeOrigin::TopLevelBody(callee_body) = edge.callee {
                         incoming.insert(callee_body);
                     }
                 }
@@ -228,16 +228,16 @@ fn apply_one_step_local_call_demands(
         };
         for edge in &caller.source_local_call_edges {
             match edge.callee {
-                crate::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
+                super::SourceLocalCalleeOrigin::TopLevelBody(callee_body) => {
                     demanded_bodies.insert(callee_body);
                     visit_queue.push(callee_body);
                 }
-                crate::SourceLocalCalleeOrigin::LocalClosure(_) => {
+                super::SourceLocalCalleeOrigin::LocalClosure(_) => {
                     if let Some(layout_id) = caller.callee_closure_layouts.get(&edge.call_expr) {
                         demanded_layouts.insert(*layout_id);
                     }
                 }
-                crate::SourceLocalCalleeOrigin::LocalDef(_) => {}
+                super::SourceLocalCalleeOrigin::LocalDef(_) => {}
             }
         }
     }
@@ -309,7 +309,7 @@ fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &Single
                 if let Some(origin_body) = top_level_by_def.get(def_id) {
                     return Some((
                         *expr,
-                        crate::SourceLocalCalleeOrigin::TopLevelBody(*origin_body),
+                        super::SourceLocalCalleeOrigin::TopLevelBody(*origin_body),
                     ));
                 }
                 if let Some(binding_id) = local_binding_by_def.get(def_id).copied()
@@ -318,11 +318,11 @@ fn seed_source_local_callee_origins(bodies: &mut [AnalyzedBody], bridge: &Single
                 {
                     return Some((
                         *expr,
-                        crate::SourceLocalCalleeOrigin::LocalClosure(closure_source),
+                        super::SourceLocalCalleeOrigin::LocalClosure(closure_source),
                     ));
                 }
                 if local_binding_by_def.contains_key(def_id) {
-                    return Some((*expr, crate::SourceLocalCalleeOrigin::LocalDef(*def_id)));
+                    return Some((*expr, super::SourceLocalCalleeOrigin::LocalDef(*def_id)));
                 }
                 None
             })
@@ -339,18 +339,18 @@ fn seed_source_local_call_edges(bodies: &mut [AnalyzedBody]) {
         let mut edges = body
             .callee_local_origins
             .iter()
-            .map(|(call_expr, callee)| crate::SourceLocalCallEdge {
+            .map(|(call_expr, callee)| super::SourceLocalCallEdge {
                 call_expr: *call_expr,
                 callee: callee.clone(),
             })
             .collect::<Vec<_>>();
         edges.sort_by_key(|edge| {
             let callee_rank = match &edge.callee {
-                crate::SourceLocalCalleeOrigin::TopLevelBody(body) => (0u8, body.0, 0u32),
-                crate::SourceLocalCalleeOrigin::LocalClosure(source_expr) => {
+                super::SourceLocalCalleeOrigin::TopLevelBody(body) => (0u8, body.0, 0u32),
+                super::SourceLocalCalleeOrigin::LocalClosure(source_expr) => {
                     (1, source_expr.body.0, source_expr.expr.0)
                 }
-                crate::SourceLocalCalleeOrigin::LocalDef(DefId::Source { source, local }) => {
+                super::SourceLocalCalleeOrigin::LocalDef(DefId::Source { source, local }) => {
                     (2, source.0, *local)
                 }
             };
@@ -371,11 +371,11 @@ fn seed_callee_closure_layout_links(bodies: &mut [AnalyzedBody], layouts: &[Clos
             .callee_local_origins
             .iter()
             .filter_map(|(call_expr, origin)| match origin {
-                crate::SourceLocalCalleeOrigin::LocalClosure(source) => {
+                super::SourceLocalCalleeOrigin::LocalClosure(source) => {
                     Some((*call_expr, *layout_by_source.get(source)?))
                 }
-                crate::SourceLocalCalleeOrigin::TopLevelBody(_)
-                | crate::SourceLocalCalleeOrigin::LocalDef(_) => None,
+                super::SourceLocalCalleeOrigin::TopLevelBody(_)
+                | super::SourceLocalCalleeOrigin::LocalDef(_) => None,
             })
             .collect::<Vec<_>>();
         seeds.sort_by_key(|(expr, layout)| (expr.0, layout.0));
@@ -425,7 +425,7 @@ fn seed_lazy_product_fields(
         .collect();
 
     // Projections indexed by expr
-    let projection_by_expr: HashMap<(BodyId, ExprId), &crate::BridgeProjection> = bridge
+    let projection_by_expr: HashMap<(BodyId, ExprId), &super::BridgeProjection> = bridge
         .projections
         .iter()
         .map(|p| ((p.body, p.expr), p))
@@ -438,7 +438,7 @@ fn seed_lazy_product_fields(
 
     // Follow one level of projection: let X = Y.field
     for binding in &bridge.local_bindings {
-        if binding.kind != crate::BridgeLocalBindingKind::Let {
+        if binding.kind != super::BridgeLocalBindingKind::Let {
             continue;
         }
         let Some(init_expr) = binding.init_expr else {
@@ -494,7 +494,7 @@ fn seed_lazy_product_fields(
         body: BodyId,
         use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
         products_by_expr: &HashMap<(BodyId, ExprId), &'a Vec<(FieldKey, Option<ExprId>)>>,
-        projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+        projection_by_expr: &HashMap<(BodyId, ExprId), &super::BridgeProjection>,
         binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
         visited: &mut HashSet<ExprId>,
     ) -> Option<(ExprId, &'a Vec<(FieldKey, Option<ExprId>)>)> {
@@ -563,7 +563,7 @@ fn seed_lazy_product_fields(
         use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
         all_binding_products: &HashMap<BridgeLocalBindingId, Vec<FieldKey>>,
         products_by_expr: &HashMap<(BodyId, ExprId), &Vec<(FieldKey, Option<ExprId>)>>,
-        projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+        projection_by_expr: &HashMap<(BodyId, ExprId), &super::BridgeProjection>,
         binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
         visited: &mut HashSet<ExprId>,
     ) -> Option<(ExprId, Vec<FieldKey>)> {
@@ -703,7 +703,7 @@ fn seed_cross_function_lazy_fields(
         .collect();
 
     // Projections indexed by expr
-    let projection_by_expr: HashMap<(BodyId, ExprId), &crate::BridgeProjection> = bridge
+    let projection_by_expr: HashMap<(BodyId, ExprId), &super::BridgeProjection> = bridge
         .projections
         .iter()
         .map(|p| ((p.body, p.expr), p))
@@ -720,7 +720,7 @@ fn seed_cross_function_lazy_fields(
     let params_by_body: HashMap<BodyId, Vec<BridgeLocalBindingId>> = {
         let mut map: HashMap<BodyId, Vec<_>> = HashMap::new();
         for binding in &bridge.local_bindings {
-            if binding.kind == crate::BridgeLocalBindingKind::Parameter {
+            if binding.kind == super::BridgeLocalBindingKind::Parameter {
                 map.entry(binding.body).or_default().push(binding.id);
             }
         }
@@ -738,7 +738,7 @@ fn seed_cross_function_lazy_fields(
             if bridge
                 .local_bindings
                 .iter()
-                .any(|b| b.id == binding_id && b.kind == crate::BridgeLocalBindingKind::Parameter)
+                .any(|b| b.id == binding_id && b.kind == super::BridgeLocalBindingKind::Parameter)
             {
                 projected_fields_by_param
                     .entry((proj.body, binding_id))
@@ -837,7 +837,7 @@ fn resolve_to_product<'a>(
     body: BodyId,
     use_by_expr: &HashMap<ExprId, BridgeLocalBindingId>,
     products_by_expr: &HashMap<(BodyId, ExprId), &'a Vec<(FieldKey, Option<ExprId>)>>,
-    projection_by_expr: &HashMap<(BodyId, ExprId), &crate::BridgeProjection>,
+    projection_by_expr: &HashMap<(BodyId, ExprId), &super::BridgeProjection>,
     binding_inits: &HashMap<BridgeLocalBindingId, ExprId>,
     visited: &mut HashSet<ExprId>,
 ) -> Option<(ExprId, &'a Vec<(FieldKey, Option<ExprId>)>)> {
@@ -978,12 +978,12 @@ fn seed_use_observations(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridg
 
     for site in &bridge.call_sites {
         match site.kind {
-            crate::BridgeCallSiteKind::DirectNamedFunction
-            | crate::BridgeCallSiteKind::LocalCallableBinding
-            | crate::BridgeCallSiteKind::StdlibBoundary(_) => {
+            super::BridgeCallSiteKind::DirectNamedFunction
+            | super::BridgeCallSiteKind::LocalCallableBinding
+            | super::BridgeCallSiteKind::StdlibBoundary(_) => {
                 seeds.push((site.body, site.expr, Observation::NeedCallable));
             }
-            crate::BridgeCallSiteKind::Other => {
+            super::BridgeCallSiteKind::Other => {
                 if site.target.is_some() {
                     seeds.push((site.body, site.expr, Observation::NeedCallable));
                 }
@@ -1032,10 +1032,10 @@ fn seed_callee_targets(bodies: &mut [AnalyzedBody], bridge: &SingleSourceBridge)
         .filter_map(|site| {
             let target = site.target?;
             match site.kind {
-                crate::BridgeCallSiteKind::DirectNamedFunction
-                | crate::BridgeCallSiteKind::LocalCallableBinding
-                | crate::BridgeCallSiteKind::Other => Some((site.body, site.expr, target)),
-                crate::BridgeCallSiteKind::StdlibBoundary(_) => None,
+                super::BridgeCallSiteKind::DirectNamedFunction
+                | super::BridgeCallSiteKind::LocalCallableBinding
+                | super::BridgeCallSiteKind::Other => Some((site.body, site.expr, target)),
+                super::BridgeCallSiteKind::StdlibBoundary(_) => None,
             }
         })
         .collect::<Vec<_>>();
@@ -1204,7 +1204,7 @@ fn kernel_shell(
                 .iter()
                 .find(|expr| expr.body == Some(body.id) && expr.span == param.span)
                 .and_then(|expr| bridge.expr_types.get(&expr.id).cloned());
-            Some(crate::KernelParam {
+            Some(super::KernelParam {
                 name: param.name.clone(),
                 source: None,
                 ty,

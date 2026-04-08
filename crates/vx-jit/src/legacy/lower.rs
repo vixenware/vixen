@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{
+use super::{
     AnalysisResult, BodyId, SingleSourceBridge,
     exec_slice::{
         self, ExecSliceError, ExecutableBody, ExecutableProgram, KernelKind, ResultSource,
@@ -37,7 +37,7 @@ pub fn lower_executable_program(
             .kernel_entries
             .first()
             .map(|e| e.kernel)
-            .unwrap_or(crate::KernelId(analyzed.id.0));
+            .unwrap_or(super::KernelId(analyzed.id.0));
 
         if let Some(vtf) = kernel.and_then(|k| lowerer.try_lower_kernel(k, bridge).ok()) {
             bodies.insert(

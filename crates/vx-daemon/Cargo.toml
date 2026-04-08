@@ -26,7 +26,6 @@ blake3 = { workspace = true }
 
 vx-services.workspace = true
 vx-jit.workspace = true
-vx-analysis.workspace = true
 vx-vir.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use vx_parser::{AstNode, CallExpr, Expr, FieldExpr, FnDecl, RangeExpr, Stmt, SyntaxKind};
 use vx_resolve::SourceSpan;
 
-use crate::{
+use super::{
     AnalysisResult, AnalyzedBody, BodyId, BridgeLocalBindingId, BridgeLocalBindingKind,
     ExecSliceError::UnsupportedShape, ExprId, FieldKey, KernelId, RuntimeBoundaryKind, RuntimeNode,
     RuntimeNodeId, SingleSourceBridge, SourceExpr, SourceLocalCalleeOrigin,
@@ -731,7 +731,7 @@ fn runtime_pending_for_body(analysis: &AnalysisResult, body: BodyId) -> Vec<Runt
                 .extracted_nodes
                 .iter()
                 .filter_map(|node| match node.reason {
-                    crate::ExtractedNodeReason::RuntimeBoundary { .. } => Some(node.id),
+                    super::ExtractedNodeReason::RuntimeBoundary { .. } => Some(node.id),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -761,8 +761,8 @@ fn pick_entry_body(
         .bodies
         .iter()
         .filter(|body| {
-            body.result_observation == crate::Observation::NeedValue
-                && body.incoming_use_observation == crate::Observation::NoObs
+            body.result_observation == super::Observation::NeedValue
+                && body.incoming_use_observation == super::Observation::NoObs
         })
         .map(|body| body.id)
         .collect::<Vec<_>>();
@@ -770,7 +770,7 @@ fn pick_entry_body(
         roots = analysis
             .bodies
             .iter()
-            .filter(|body| body.result_observation == crate::Observation::NeedValue)
+            .filter(|body| body.result_observation == super::Observation::NeedValue)
             .map(|body| body.id)
             .collect::<Vec<_>>();
     }
@@ -934,7 +934,7 @@ impl<'a> BodyLowering<'a> {
         let mut runtime_node_by_expr = HashMap::new();
         let mut runtime_kind_by_expr = HashMap::new();
         for extracted in &analyzed.extracted_nodes {
-            if let crate::ExtractedNodeReason::RuntimeBoundary { kind } = extracted.reason {
+            if let super::ExtractedNodeReason::RuntimeBoundary { kind } = extracted.reason {
                 runtime_node_by_expr.insert(extracted.source.expr, extracted.id);
                 runtime_kind_by_expr.insert(extracted.source.expr, kind);
             }
@@ -943,16 +943,16 @@ impl<'a> BodyLowering<'a> {
         let mut lazy_named_fields_by_expr = HashMap::<ExprId, BTreeSet<String>>::new();
         for extracted in &analyzed.extracted_nodes {
             match &extracted.reason {
-                crate::ExtractedNodeReason::LazyProductField {
-                    field: crate::FieldKey::Index(index),
+                super::ExtractedNodeReason::LazyProductField {
+                    field: super::FieldKey::Index(index),
                 } => {
                     lazy_fields_by_expr
                         .entry(extracted.source.expr)
                         .or_default()
                         .insert(*index);
                 }
-                crate::ExtractedNodeReason::LazyProductField {
-                    field: crate::FieldKey::Name(name),
+                super::ExtractedNodeReason::LazyProductField {
+                    field: super::FieldKey::Name(name),
                 } => {
                     lazy_named_fields_by_expr
                         .entry(extracted.source.expr)

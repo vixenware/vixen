@@ -1,7 +1,7 @@
-//! Fresh analysis-output skeleton for the eval restart.
+//! Legacy analysis pipeline — moved from vx-analysis.
 //!
-//! This crate intentionally models analysis decisions only.
-//! It does not model lowering or backend concerns.
+//! Used only by the strict (Kajit) JIT compilation path.
+//! Will be replaced when StrictLowerer is rewritten to work on VIR.
 
 mod model;
 pub use model::{
@@ -37,9 +37,3 @@ pub use exec_slice::{
     SharedKeyedBoundaryPayload, SlotId, TreeFilePath, lower_executable_program,
     lower_executable_program_for_entry_body,
 };
-
-#[cfg(test)]
-mod bridge_tests;
-
-#[cfg(test)]
-mod bridge_to_analysis_tests;

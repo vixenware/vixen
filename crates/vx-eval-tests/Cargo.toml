@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-vx-analysis = { workspace = true }
 vx-jit = { workspace = true }
 kajit = { workspace = true }
 kajit-hir = { workspace = true }

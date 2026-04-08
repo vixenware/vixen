@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use vx_analysis::ExecutableProgram;
+use crate::exec_types::ExecutableProgram;
 use vx_resolve::SourceId;
 
 use crate::build::VirBuilder;

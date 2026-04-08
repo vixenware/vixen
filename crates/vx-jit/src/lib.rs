@@ -12,10 +12,12 @@ mod kajit_backend;
 pub use kajit_backend::KajitBackendError;
 pub use kajit_backend::{lower_hir as lower_vtf_to_hir, lower_ir as lower_vtf_to_ir};
 
+pub mod legacy;
+
 use kajit::CompiledFunction;
 use kajit_hir::VixenTypedFunction;
+use legacy::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 use thiserror::Error;
-use vx_analysis::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 
 /// Error from the unified strict-fragment pipeline.
 #[derive(Debug, Error)]
@@ -45,7 +47,7 @@ pub fn lower_source_text_unified(
 ) -> Result<UnifiedLowered, UnifiedStrictError> {
     let bridge = SingleSourceBridge::from_source_text(source);
     let analysis = build_minimal_analysis(&bridge);
-    let program = vx_analysis::lower::lower_executable_program(&analysis, &bridge)
+    let program = legacy::lower::lower_executable_program(&analysis, &bridge)
         .map_err(|e| UnifiedStrictError::Lowering(format!("{e:?}")))?;
 
     let body = program
@@ -60,7 +62,7 @@ pub fn lower_source_text_unified(
         unreachable!();
     };
 
-    let lowerer = vx_analysis::lower_strict::StrictLowerer::new();
+    let lowerer = legacy::lower_strict::StrictLowerer::new();
     Ok(UnifiedLowered {
         vtf: vtf.clone(),
         module: lowerer.module,

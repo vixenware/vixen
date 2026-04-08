@@ -12,7 +12,7 @@ use vx_resolve::{
 };
 use vx_types::Ty;
 
-use crate::{
+use super::{
     BodyId, ExprId, FieldKey, RuntimeBoundaryKind, SourceExpr, boundary::classify_runtime_boundary,
 };
 

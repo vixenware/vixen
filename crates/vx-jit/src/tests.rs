@@ -78,16 +78,16 @@ fn cargo_resolve_function_source(function_name: &str) -> String {
 /// Helper: lower source through unified path, find the named function body,
 /// assert it's strict, compile via Kajit, return the compiled function pointer.
 fn unified_compile(source: &str, function_name: &str) -> kajit::CompiledFunction {
-    let bridge = vx_analysis::SingleSourceBridge::from_source_text(source);
-    let analysis = vx_analysis::build_minimal_analysis(&bridge);
-    let program = vx_analysis::lower::lower_executable_program(&analysis, &bridge)
+    let bridge = crate::legacy::SingleSourceBridge::from_source_text(source);
+    let analysis = crate::legacy::build_minimal_analysis(&bridge);
+    let program = crate::legacy::lower::lower_executable_program(&analysis, &bridge)
         .expect("unified lowering should succeed");
 
     let body = program
         .bodies
         .values()
         .find(|b| {
-            matches!(&b.kernel_kind, vx_analysis::KernelKind::Strict { vtf } if vtf.name == function_name)
+            matches!(&b.kernel_kind, crate::legacy::KernelKind::Strict { vtf } if vtf.name == function_name)
         })
         .unwrap_or_else(|| {
             panic!(
@@ -100,11 +100,11 @@ fn unified_compile(source: &str, function_name: &str) -> kajit::CompiledFunction
             )
         });
 
-    let vx_analysis::KernelKind::Strict { vtf } = &body.kernel_kind else {
+    let crate::legacy::KernelKind::Strict { vtf } = &body.kernel_kind else {
         unreachable!();
     };
 
-    let lowerer = vx_analysis::lower_strict::StrictLowerer::new();
+    let lowerer = crate::legacy::lower_strict::StrictLowerer::new();
     let module = lowerer
         .module
         .lower_vixen_typed_function_into_module(vtf)
@@ -116,14 +116,14 @@ fn unified_compile(source: &str, function_name: &str) -> kajit::CompiledFunction
 
 #[test]
 fn unified_path_marks_strict_add_as_strict() {
-    let bridge = vx_analysis::SingleSourceBridge::from_source_text(SOURCE_ADD_U64);
-    let analysis = vx_analysis::build_minimal_analysis(&bridge);
-    let program = vx_analysis::lower::lower_executable_program(&analysis, &bridge)
+    let bridge = crate::legacy::SingleSourceBridge::from_source_text(SOURCE_ADD_U64);
+    let analysis = crate::legacy::build_minimal_analysis(&bridge);
+    let program = crate::legacy::lower::lower_executable_program(&analysis, &bridge)
         .expect("unified lowering should succeed");
 
     let body = program.bodies.values().next().expect("should have a body");
     assert!(
-        matches!(body.kernel_kind, vx_analysis::KernelKind::Strict { .. }),
+        matches!(body.kernel_kind, crate::legacy::KernelKind::Strict { .. }),
         "add(U64, U64) -> U64 should be lowered as strict, got {:?}",
         body.kernel_kind
     );

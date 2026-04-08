@@ -15,7 +15,7 @@ use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
 use vx_resolve::SourceSpan;
 use vx_types::{Scalar, Ty};
 
-use crate::{BodyId, ExprId, KernelRegion, SingleSourceBridge};
+use super::{BodyId, ExprId, KernelRegion, SingleSourceBridge};
 
 /// Errors that indicate a kernel cannot be strict-lowered.
 #[derive(Debug, Clone)]

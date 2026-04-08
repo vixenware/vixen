@@ -1,6 +1,6 @@
 use vx_resolve::{DefKind, SourceId};
 
-use crate::{BridgeResolvedRef, RuntimeBoundaryKind};
+use super::{BridgeResolvedRef, RuntimeBoundaryKind};
 
 pub(crate) fn classify_runtime_boundary(
     source_id: SourceId,

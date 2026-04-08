@@ -36,6 +36,7 @@ pub mod cap_check;
 pub mod capture;
 pub mod compile;
 pub mod demand;
+pub mod exec_types;
 pub mod expr;
 pub mod item;
 pub mod lower;

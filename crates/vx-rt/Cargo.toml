@@ -11,7 +11,6 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-vx-analysis = { path = "../vx-analysis" }
 vx-vir = { path = "../vx-vir" }
 thiserror = "2"
 

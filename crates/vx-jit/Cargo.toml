@@ -14,7 +14,9 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 kajit = { workspace = true }
 kajit-hir = { workspace = true }
 thiserror = { workspace = true }
-vx-analysis = { workspace = true }
+vx-parser = { workspace = true }
+vx-resolve = { workspace = true }
+vx-types = { workspace = true }
 
 [lints]
 workspace = true

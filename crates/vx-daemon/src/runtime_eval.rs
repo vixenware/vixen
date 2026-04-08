@@ -9,11 +9,6 @@ use tokio::sync::mpsc;
 use async_recursion::async_recursion;
 use thiserror::Error;
 use vox::Tx;
-use vx_analysis::{
-    BodyId, ExecutableClosure, ExecutableProgram, KernelOp, Operand, ResultSource,
-    RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField,
-    RuntimeMemberOp, SlotId,
-};
 use vx_jit::{StrictFragmentValue, execute_source_text_unified};
 use vx_services::EvalProgressEvent;
 use vx_services::{
@@ -23,6 +18,11 @@ use vx_services::{
 };
 use vx_vfsd::{VfsdService, protocol::Vfsd};
 use vx_vir::compile::CompileError;
+use vx_vir::exec_types::{
+    BodyId, ExecutableClosure, ExecutableProgram, KernelOp, Operand, ResultSource,
+    RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField,
+    RuntimeMemberOp, SlotId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EvalValue {
@@ -237,7 +237,7 @@ struct ProgramEvaluator<'a> {
     program: &'a ExecutableProgram,
     progress: Option<Tx<EvalProgressEvent>>,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
-    runtime_exec_prefixes: HashMap<vx_analysis::RuntimeNodeId, String>,
+    runtime_exec_prefixes: HashMap<vx_vir::exec_types::RuntimeNodeId, String>,
     next_exec_prefix: u64,
 }
 
@@ -835,10 +835,10 @@ impl<'a> ProgramEvaluator<'a> {
     async fn eval_runtime_boundary(
         &mut self,
         function_name: &str,
-        node: vx_analysis::RuntimeNodeId,
+        node: vx_vir::exec_types::RuntimeNodeId,
         positional_inputs: &[RuntimeBoundaryInputSpec],
-        mounts: &[(vx_analysis::TreeFilePath, RuntimeBoundaryInputSpec)],
-        writable_roots: &[vx_analysis::TreeFilePath],
+        mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
+        writable_roots: &[vx_vir::exec_types::TreeFilePath],
         coarse_mounts: &[RuntimeBoundaryInputSpec],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
@@ -1056,9 +1056,9 @@ impl<'a> ProgramEvaluator<'a> {
     async fn prepare_local_exec_vfs(
         &mut self,
         function_name: &str,
-        node: vx_analysis::RuntimeNodeId,
-        mounts: &[(vx_analysis::TreeFilePath, RuntimeBoundaryInputSpec)],
-        writable_roots: &[vx_analysis::TreeFilePath],
+        node: vx_vir::exec_types::RuntimeNodeId,
+        mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
+        writable_roots: &[vx_vir::exec_types::TreeFilePath],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<(String, String), RuntimeEvalError> {

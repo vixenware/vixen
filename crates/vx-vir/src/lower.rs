@@ -8,10 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use vx_analysis::{
-    BodyId as ABodyId, ExecSliceError, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode,
-    FieldKey, KernelKind, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
-    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SlotId, SourceExpr,
+use crate::exec_types::{
+    BodyId as ABodyId, BridgeLocalBindingId, ExecSliceError, ExecutableBody, ExecutableProgram,
+    ExecutableRuntimeNode, FieldKey, KernelKind, KernelOp, Operand, ResultSource,
+    RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SlotId,
+    SourceExpr,
 };
 
 use crate::binding::BindingKind;
@@ -31,8 +32,8 @@ fn a_body(id: BodyId) -> ABodyId {
     ABodyId(id.0)
 }
 
-fn a_expr(id: ExprId) -> vx_analysis::ExprId {
-    vx_analysis::ExprId(id.0)
+fn a_expr(id: ExprId) -> crate::exec_types::ExprId {
+    crate::exec_types::ExprId(id.0)
 }
 
 fn source_expr(body: BodyId, expr: ExprId) -> SourceExpr {
@@ -259,7 +260,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         Ok(ExecutableBody {
             id: a_body(self.body_id),
-            kernel: vx_analysis::KernelId(self.body_id.0),
+            kernel: crate::exec_types::KernelId(self.body_id.0),
             kernel_kind: KernelKind::Interpreted,
             params: self.params,
             ops: self.ops,
@@ -941,7 +942,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         let payload = match kind {
             RuntimeBoundaryKind::Exec => {
-                RuntimeBoundaryPayload::Exec(vx_analysis::ExecBoundaryPayload {
+                RuntimeBoundaryPayload::Exec(crate::exec_types::ExecBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
                     has_where_clause: false,
                     has_mounts: false,
@@ -950,13 +951,13 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 })
             }
             RuntimeBoundaryKind::Discover => {
-                RuntimeBoundaryPayload::Discover(vx_analysis::DiscoverBoundaryPayload {
+                RuntimeBoundaryPayload::Discover(crate::exec_types::DiscoverBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
                     has_closure_arg: false,
                 })
             }
             RuntimeBoundaryKind::SharedKeyed => {
-                RuntimeBoundaryPayload::SharedKeyed(vx_analysis::SharedKeyedBoundaryPayload {
+                RuntimeBoundaryPayload::SharedKeyed(crate::exec_types::SharedKeyedBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
                 })
             }
@@ -994,7 +995,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                     let operand = self.lower_expr(expr_id)?;
                     let slot = self.ensure_slot(operand, self.body_id, expr_id);
                     Ok(RuntimeBoundaryInputSpec::Binding {
-                        binding: vx_analysis::BridgeLocalBindingId(slot.0),
+                        binding: BridgeLocalBindingId(slot.0),
                         slot,
                     })
                 }
@@ -1002,7 +1003,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::PathLiteral(ref pl) => {
                 let path = self.assemble_path_literal(pl);
                 Ok(RuntimeBoundaryInputSpec::PathLiteral(
-                    vx_analysis::TreeFilePath(path),
+                    crate::exec_types::TreeFilePath(path),
                 ))
             }
             ExprKind::Array(ref arr) => {
@@ -1026,7 +1027,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 let operand = self.lower_expr(expr_id)?;
                 let slot = self.ensure_slot(operand, self.body_id, expr_id);
                 Ok(RuntimeBoundaryInputSpec::Binding {
-                    binding: vx_analysis::BridgeLocalBindingId(slot.0),
+                    binding: BridgeLocalBindingId(slot.0),
                     slot,
                 })
             }
@@ -1089,9 +1090,9 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             }
             "collect" | "blob" | "which" => {
                 let method = match method_name.as_str() {
-                    "collect" => vx_analysis::RuntimeMemberOp::Collect,
-                    "blob" => vx_analysis::RuntimeMemberOp::Blob,
-                    "which" => vx_analysis::RuntimeMemberOp::Which,
+                    "collect" => crate::exec_types::RuntimeMemberOp::Collect,
+                    "blob" => crate::exec_types::RuntimeMemberOp::Blob,
+                    "which" => crate::exec_types::RuntimeMemberOp::Which,
                     _ => unreachable!(),
                 };
                 let mut args = Vec::new();
@@ -1426,7 +1427,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         let exec_body = ExecutableBody {
             id: a_body(closure_body_id),
-            kernel: vx_analysis::KernelId(closure_body_id.0),
+            kernel: crate::exec_types::KernelId(closure_body_id.0),
             kernel_kind: KernelKind::Interpreted,
             params: child.params,
             ops: child.ops,
@@ -1563,7 +1564,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         let exec_body = ExecutableBody {
             id: thunk_body_id,
-            kernel: vx_analysis::KernelId(thunk_body_id.0),
+            kernel: crate::exec_types::KernelId(thunk_body_id.0),
             kernel_kind: KernelKind::Interpreted,
             params: final_params,
             ops: final_ops,

@@ -11,7 +11,6 @@ members = [
   "crates/vx-lsp",
 
   ## eval crates
-  "crates/vx-analysis",
   "crates/vx-jit",
   "crates/vx-rt",
   "crates/vx-eval-tests",
@@ -57,7 +56,6 @@ vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
-vx-analysis = { path = "crates/vx-analysis" }
 vx-jit = { path = "crates/vx-jit" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }

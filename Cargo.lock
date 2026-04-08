@@ -3787,16 +3787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-analysis"
-version = "0.1.0"
-dependencies = [
- "kajit-hir",
- "vx-parser",
- "vx-resolve",
- "vx-types",
-]
-
-[[package]]
 name = "vx-daemon"
 version = "0.1.0"
 dependencies = [
@@ -3817,7 +3807,6 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen",
  "vox",
- "vx-analysis",
  "vx-jit",
  "vx-runner",
  "vx-services",
@@ -3850,7 +3839,6 @@ dependencies = [
  "kajit",
  "kajit-hir",
  "thiserror 2.0.18",
- "vx-analysis",
  "vx-jit",
  "vx-parser",
 ]
@@ -3916,7 +3904,9 @@ dependencies = [
  "kajit",
  "kajit-hir",
  "thiserror 2.0.18",
- "vx-analysis",
+ "vx-parser",
+ "vx-resolve",
+ "vx-types",
 ]
 
 [[package]]
@@ -3957,7 +3947,6 @@ version = "0.1.0"
 dependencies = [
  "datatest-stable",
  "thiserror 2.0.18",
- "vx-analysis",
  "vx-eval-tests",
  "vx-vir",
 ]
@@ -4077,8 +4066,8 @@ dependencies = [
 name = "vx-vir"
 version = "0.1.0"
 dependencies = [
+ "kajit-hir",
  "rowan",
- "vx-analysis",
  "vx-parser",
  "vx-resolve",
  "vx-rt",

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use vx_resolve::DefId;
 use vx_types::Ty;
 
-use crate::BridgeLocalBindingId;
+use super::BridgeLocalBindingId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BodyId(pub u32);

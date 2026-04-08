@@ -10,8 +10,8 @@ use std::rc::Rc;
 
 use kajit::CompiledFunction;
 use kajit_hir::VixenTypedFunction;
-use vx_analysis::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 use vx_jit::StrictFragmentValue;
+use vx_jit::legacy::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 use vx_parser::{
     AstNode, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, EnumDecl, Expr, FnDecl,
     IfExpr, IndexExpr, Item, LetStmt, LiteralExpr, MatchExpr, NameRefExpr, Parameter, Pattern,
@@ -36,7 +36,7 @@ struct CompiledEnv {
 fn build_compiled_env(source: &str) -> CompiledEnv {
     let bridge = SingleSourceBridge::from_source_text(source);
     let analysis = build_minimal_analysis(&bridge);
-    let program = match vx_analysis::lower::lower_executable_program(&analysis, &bridge) {
+    let program = match vx_jit::legacy::lower::lower_executable_program(&analysis, &bridge) {
         Ok(p) => p,
         Err(_) => {
             return CompiledEnv {
@@ -45,7 +45,7 @@ fn build_compiled_env(source: &str) -> CompiledEnv {
         }
     };
 
-    let lowerer = vx_analysis::lower_strict::StrictLowerer::new();
+    let lowerer = vx_jit::legacy::lower_strict::StrictLowerer::new();
     let mut fns = HashMap::new();
 
     for body in program.bodies.values() {

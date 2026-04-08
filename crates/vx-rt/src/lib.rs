@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use thiserror::Error;
-use vx_analysis::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
 use vx_vir::compile::CompileError;
+use vx_vir::exec_types::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
 
 #[derive(Debug, Error)]
 pub enum RtError {
