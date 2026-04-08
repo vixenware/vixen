@@ -413,3 +413,39 @@ fn match_binding_with_body() {
 fn type_ascription_passthrough() {
     expect_u64("fn main() -> U64 ( let x: U64 = 42; x )", &[], 42);
 }
+
+// =========================================================================
+// String builtins
+// =========================================================================
+
+#[test]
+fn string_len() {
+    expect_u64(r#"fn main() -> U64 ( "hello".len() )"#, &[], 5);
+}
+
+#[test]
+fn string_slice() {
+    expect_string(
+        r#"fn main() -> String ( "hello world".slice(0, 5) )"#,
+        &[],
+        "hello",
+    );
+}
+
+#[test]
+fn string_len_empty() {
+    expect_u64(r#"fn main() -> U64 ( "".len() )"#, &[], 0);
+}
+
+// =========================================================================
+// Match on string
+// =========================================================================
+
+#[test]
+fn match_string() {
+    expect_u64(
+        r#"fn main() -> U64 ( match "b" ( "a" => 1, "b" => 42, _ => 0 ) )"#,
+        &[],
+        42,
+    );
+}

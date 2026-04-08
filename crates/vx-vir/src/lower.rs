@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use vx_analysis::{
-    BodyId as ABodyId, ExecSliceError, ExecutableBody, ExecutableProgram, FieldKey, KernelKind,
-    KernelOp, Operand, ResultSource, SlotId, SourceExpr,
+    BodyId as ABodyId, ExecSliceError, ExecutableBody, ExecutableProgram, ExecutableRuntimeNode,
+    FieldKey, KernelKind, KernelOp, Operand, ResultSource, RuntimeBoundaryInputSpec,
+    RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SlotId, SourceExpr,
 };
 
 use crate::binding::BindingKind;
@@ -78,16 +79,26 @@ impl From<LowerError> for ExecSliceError {
 
 struct LoweringContext<'a> {
     arena: &'a crate::VirArena,
+    /// Source IDs of user sources (non-stdlib). Functions from other sources
+    /// with known names (exec, discover, stabilize) are runtime boundaries.
+    user_sources: HashSet<vx_resolve::SourceId>,
     /// Lazy fields from demand analysis, indexed for fast lookup.
     lazy_fields: HashSet<(BodyId, ExprId, FieldKey)>,
     /// Next body ID for synthesized thunk/closure bodies.
     next_synth_body_id: u32,
     /// Synthesized bodies (thunks, closure bodies lowered inline).
     synth_bodies: BTreeMap<ABodyId, ExecutableBody>,
+    /// Runtime node allocator.
+    next_runtime_node_id: u32,
+    runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
 }
 
 impl<'a> LoweringContext<'a> {
-    fn new(arena: &'a crate::VirArena, demand: &VirDemandResult) -> Self {
+    fn new(
+        arena: &'a crate::VirArena,
+        demand: &VirDemandResult,
+        user_sources: HashSet<vx_resolve::SourceId>,
+    ) -> Self {
         let mut lazy_fields = HashSet::new();
         for lf in &demand.lazy_fields {
             lazy_fields.insert((lf.body, lf.product_expr, to_analysis_field_key(&lf.field)));
@@ -96,9 +107,37 @@ impl<'a> LoweringContext<'a> {
         let next_synth_body_id = arena.bodies.len() as u32;
         LoweringContext {
             arena,
+            user_sources,
             lazy_fields,
             next_synth_body_id,
             synth_bodies: BTreeMap::new(),
+            next_runtime_node_id: 0,
+            runtime_nodes: BTreeMap::new(),
+        }
+    }
+
+    fn alloc_runtime_node(&mut self) -> RuntimeNodeId {
+        let id = RuntimeNodeId(self.next_runtime_node_id);
+        self.next_runtime_node_id += 1;
+        id
+    }
+
+    /// Check if a function item is a runtime boundary (exec/discover/stabilize from stdlib).
+    fn classify_runtime_boundary(&self, item_id: crate::ItemId) -> Option<RuntimeBoundaryKind> {
+        let item = &self.arena[item_id];
+        if let ItemKind::Function(ref f) = item.kind {
+            // If the function's source is one of the user sources, it's not a boundary.
+            if self.user_sources.contains(&item.span.source) {
+                return None;
+            }
+            match f.name.as_str() {
+                "exec" => Some(RuntimeBoundaryKind::Exec),
+                "discover" => Some(RuntimeBoundaryKind::Discover),
+                "stabilize" => Some(RuntimeBoundaryKind::SharedKeyed),
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -135,7 +174,14 @@ pub fn lower_vir_program(
         .first()
         .ok_or(LowerError::NoEntryPoint)?;
 
-    let mut ctx = LoweringContext::new(&program.arena, demand);
+    // Collect user source IDs so we can distinguish stdlib functions.
+    let user_sources: HashSet<vx_resolve::SourceId> = program
+        .source_units
+        .iter()
+        .map(|su_id| program.arena[*su_id].source)
+        .collect();
+
+    let mut ctx = LoweringContext::new(&program.arena, demand, user_sources);
     let mut bodies: BTreeMap<ABodyId, ExecutableBody> = BTreeMap::new();
 
     for &body_id in &demand.reachable {
@@ -150,7 +196,7 @@ pub fn lower_vir_program(
     Ok(ExecutableProgram {
         entry: a_body(entry),
         bodies,
-        runtime_nodes: BTreeMap::new(),
+        runtime_nodes: ctx.runtime_nodes,
     })
 }
 
@@ -363,9 +409,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Import(_) => Err(LowerError::UnsupportedShape(
                 "import (not in executable slice)".into(),
             )),
-            ExprKind::PathLiteral(_) => Err(LowerError::UnsupportedShape(
-                "path literal (not in executable slice)".into(),
-            )),
+            ExprKind::PathLiteral(pl) => self.lower_path_literal(&pl),
             ExprKind::Map(_) => Err(LowerError::UnsupportedShape(
                 "map (not in executable slice)".into(),
             )),
@@ -734,6 +778,31 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
     }
 
     // -----------------------------------------------------------------------
+    // PathLiteral
+    // -----------------------------------------------------------------------
+
+    fn lower_path_literal(
+        &mut self,
+        pl: &crate::expr::PathLiteralExpr,
+    ) -> Result<Operand, LowerError> {
+        Ok(Operand::String(self.assemble_path_literal(pl)))
+    }
+
+    fn assemble_path_literal(&self, pl: &crate::expr::PathLiteralExpr) -> String {
+        let mut result = String::new();
+        for part in &pl.parts {
+            match part {
+                crate::expr::StringPart::Text(t) => result.push_str(t),
+                crate::expr::StringPart::Expr(_) => {
+                    // Interpolated path segments — for now just placeholder.
+                    result.push_str("<expr>");
+                }
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
     // InterpolatedString
     // -----------------------------------------------------------------------
 
@@ -771,11 +840,21 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         expr_id: ExprId,
         call: &crate::expr::CallExpr,
     ) -> Result<Operand, LowerError> {
+        // Check for builtin method calls: receiver.method(args).
+        if let Some(result) = self.try_lower_method_call(expr_id, call)? {
+            return Ok(result);
+        }
+
         // Check if callee is a direct named function.
         let callee_kind = self.arena()[call.callee].kind.clone();
         if let ExprKind::NameRef(ref nr) = callee_kind {
             match nr.resolved {
                 Some(DefTarget::Item(item_id)) => {
+                    // Check for runtime boundary (exec/discover/stabilize from stdlib).
+                    if let Some(boundary_kind) = self.ctx.classify_runtime_boundary(item_id) {
+                        return self.lower_runtime_boundary_call(expr_id, call, boundary_kind);
+                    }
+
                     if let ItemKind::Function(ref func) = self.arena()[item_id].kind {
                         // Direct named-body call → CallBody.
                         let callee_body = a_body(func.body);
@@ -828,6 +907,209 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             args,
         });
         Ok(Operand::Slot(dst))
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime boundary calls
+    // -----------------------------------------------------------------------
+
+    fn lower_runtime_boundary_call(
+        &mut self,
+        expr_id: ExprId,
+        call: &crate::expr::CallExpr,
+        kind: RuntimeBoundaryKind,
+    ) -> Result<Operand, LowerError> {
+        let node_id = self.ctx.alloc_runtime_node();
+
+        // Lower positional args to RuntimeBoundaryInputSpec.
+        let mut positional_inputs = Vec::new();
+        for arg in &call.args {
+            let input = self.lower_boundary_input(arg.expr)?;
+            positional_inputs.push(input);
+        }
+
+        let dst = self.alloc_temp();
+        self.ops.push(KernelOp::AwaitRuntime {
+            dst,
+            source: self.source_for(expr_id),
+            node: node_id,
+            positional_inputs: positional_inputs.clone(),
+            mounts: vec![],
+            writable_roots: vec![],
+            coarse_mounts: vec![],
+        });
+
+        let payload = match kind {
+            RuntimeBoundaryKind::Exec => {
+                RuntimeBoundaryPayload::Exec(vx_analysis::ExecBoundaryPayload {
+                    positional_arg_count: positional_inputs.len(),
+                    has_where_clause: false,
+                    has_mounts: false,
+                    has_writable: false,
+                    has_coarse_mounts: false,
+                })
+            }
+            RuntimeBoundaryKind::Discover => {
+                RuntimeBoundaryPayload::Discover(vx_analysis::DiscoverBoundaryPayload {
+                    positional_arg_count: positional_inputs.len(),
+                    has_closure_arg: false,
+                })
+            }
+            RuntimeBoundaryKind::SharedKeyed => {
+                RuntimeBoundaryPayload::SharedKeyed(vx_analysis::SharedKeyedBoundaryPayload {
+                    positional_arg_count: positional_inputs.len(),
+                })
+            }
+        };
+
+        self.ctx.runtime_nodes.insert(
+            node_id,
+            ExecutableRuntimeNode {
+                id: node_id,
+                kind,
+                source: self.source_for(expr_id),
+                payload,
+            },
+        );
+
+        Ok(Operand::Slot(dst))
+    }
+
+    fn lower_boundary_input(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Result<RuntimeBoundaryInputSpec, LowerError> {
+        let kind = self.arena()[expr_id].kind.clone();
+        match kind {
+            ExprKind::Literal(lit) => match &lit.value {
+                LitKind::Int { raw } => {
+                    let value: i64 = raw
+                        .parse()
+                        .map_err(|_| LowerError::InvalidLiteral { raw: raw.clone() })?;
+                    Ok(RuntimeBoundaryInputSpec::IntLiteral(value))
+                }
+                LitKind::String { raw } => Ok(RuntimeBoundaryInputSpec::StringLiteral(raw.clone())),
+                _ => {
+                    // Fall back to lowering as an expression and using a slot binding.
+                    let operand = self.lower_expr(expr_id)?;
+                    let slot = self.ensure_slot(operand, self.body_id, expr_id);
+                    Ok(RuntimeBoundaryInputSpec::Binding {
+                        binding: vx_analysis::BridgeLocalBindingId(slot.0),
+                        slot,
+                    })
+                }
+            },
+            ExprKind::PathLiteral(ref pl) => {
+                let path = self.assemble_path_literal(pl);
+                Ok(RuntimeBoundaryInputSpec::PathLiteral(
+                    vx_analysis::TreeFilePath(path),
+                ))
+            }
+            ExprKind::Array(ref arr) => {
+                let mut items = Vec::new();
+                for elem in &arr.elements {
+                    match elem {
+                        crate::expr::ArrayElement::Expr(id) => {
+                            items.push(self.lower_boundary_input(*id)?);
+                        }
+                        crate::expr::ArrayElement::Spread(_) => {
+                            return Err(LowerError::UnsupportedShape(
+                                "spread in runtime boundary array arg".into(),
+                            ));
+                        }
+                    }
+                }
+                Ok(RuntimeBoundaryInputSpec::Array(items))
+            }
+            _ => {
+                // General expression → lower to slot.
+                let operand = self.lower_expr(expr_id)?;
+                let slot = self.ensure_slot(operand, self.body_id, expr_id);
+                Ok(RuntimeBoundaryInputSpec::Binding {
+                    binding: vx_analysis::BridgeLocalBindingId(slot.0),
+                    slot,
+                })
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Builtin method calls
+    // -----------------------------------------------------------------------
+
+    /// Try to lower `receiver.method(args)` as a builtin method call.
+    /// Returns `Ok(None)` if this is not a method call pattern.
+    fn try_lower_method_call(
+        &mut self,
+        expr_id: ExprId,
+        call: &crate::expr::CallExpr,
+    ) -> Result<Option<Operand>, LowerError> {
+        let callee_kind = self.arena()[call.callee].kind.clone();
+        let field = match callee_kind {
+            ExprKind::Field(f) => f,
+            _ => return Ok(None),
+        };
+
+        let method_name = match &field.field {
+            crate::expr::FieldKey::Name(n) => n.clone(),
+            _ => return Ok(None),
+        };
+
+        let receiver = self.lower_expr(field.receiver)?;
+        let source = self.source_for(expr_id);
+
+        match method_name.as_str() {
+            "len" => {
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::StringLen {
+                    dst,
+                    source,
+                    value: receiver,
+                });
+                Ok(Some(Operand::Slot(dst)))
+            }
+            "slice" => {
+                if call.args.len() != 2 {
+                    return Err(LowerError::UnsupportedShape(format!(
+                        ".slice() expects 2 args, got {}",
+                        call.args.len()
+                    )));
+                }
+                let start = self.lower_expr(call.args[0].expr)?;
+                let end = self.lower_expr(call.args[1].expr)?;
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::StringSlice {
+                    dst,
+                    source,
+                    value: receiver,
+                    start,
+                    end,
+                });
+                Ok(Some(Operand::Slot(dst)))
+            }
+            "collect" | "blob" | "which" => {
+                let method = match method_name.as_str() {
+                    "collect" => vx_analysis::RuntimeMemberOp::Collect,
+                    "blob" => vx_analysis::RuntimeMemberOp::Blob,
+                    "which" => vx_analysis::RuntimeMemberOp::Which,
+                    _ => unreachable!(),
+                };
+                let mut args = Vec::new();
+                for arg in &call.args {
+                    args.push(self.lower_expr(arg.expr)?);
+                }
+                let dst = self.alloc_temp();
+                self.ops.push(KernelOp::CallMember {
+                    dst,
+                    source,
+                    receiver,
+                    method,
+                    args,
+                });
+                Ok(Some(Operand::Slot(dst)))
+            }
+            _ => Ok(None), // Not a builtin method — fall through to normal call.
+        }
     }
 
     // -----------------------------------------------------------------------

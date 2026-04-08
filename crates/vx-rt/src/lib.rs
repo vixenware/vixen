@@ -488,6 +488,66 @@ fn eval_op(
             Ok(RtValue::String(result))
         }
 
+        KernelOp::StringLen { value, .. } => {
+            let val = resolve_and_force(program, producers, slots, value)?;
+            match val {
+                RtValue::String(s) => Ok(RtValue::U64(s.len() as u64)),
+                other => Err(RtError::TypeError {
+                    expected: "string",
+                    actual: other.kind_name().to_owned(),
+                }),
+            }
+        }
+
+        KernelOp::StringSlice {
+            value, start, end, ..
+        } => {
+            let val = resolve_and_force(program, producers, slots, value)?;
+            let s = match val {
+                RtValue::String(s) => s,
+                other => {
+                    return Err(RtError::TypeError {
+                        expected: "string",
+                        actual: other.kind_name().to_owned(),
+                    });
+                }
+            };
+            let start_val =
+                expect_u64(&resolve_and_force(program, producers, slots, start)?)? as usize;
+            let end_val = expect_u64(&resolve_and_force(program, producers, slots, end)?)? as usize;
+            if start_val > s.len() || end_val > s.len() || start_val > end_val {
+                return Err(RtError::Failure(format!(
+                    "string slice out of bounds: [{start_val}..{end_val}] on string of length {}",
+                    s.len()
+                )));
+            }
+            Ok(RtValue::String(s[start_val..end_val].to_string()))
+        }
+
+        KernelOp::MakeArray { items, .. } => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                let val = resolve_operand(program, producers, slots, item)?;
+                values.push(val);
+            }
+            // Arrays aren't a first-class RtValue yet — represent as a struct
+            // with indexed fields for now.
+            let thunk_fields: Vec<(String, Thunk)> = values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (i.to_string(), Thunk::ready(v)))
+                .collect();
+            Ok(RtValue::Struct(thunk_fields))
+        }
+
+        KernelOp::AwaitRuntime { .. } => {
+            // Runtime boundaries require host integration (file system, process execution).
+            // In the unit test evaluator, they cannot be executed.
+            Err(RtError::Unsupported(
+                "AwaitRuntime requires host integration".into(),
+            ))
+        }
+
         // Stubs for ops not yet needed
         _ => Err(RtError::Unsupported(format!("{op:?}"))),
     }
