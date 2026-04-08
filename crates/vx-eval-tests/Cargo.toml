@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 vx-jit = { workspace = true }
+vx-jit-types = { workspace = true }
 kajit = { workspace = true }
 kajit-hir = { workspace = true }
 facet = { workspace = true }

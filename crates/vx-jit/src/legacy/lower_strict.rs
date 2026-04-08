@@ -7,13 +7,16 @@
 use std::collections::HashMap;
 
 use kajit_hir::{
-    BinaryOp, FieldDef, Literal, LocalId, Module, Type, TypeDef, TypeDefId, TypeDefKind,
-    VixenCallableRef, VixenTypedExpr, VixenTypedFunction, VixenTypedLocal, VixenTypedParam,
-    VixenTypedStmt,
+    FieldDef, Module, VixenExt,
 };
+use kajit_reprs::hir::{BinaryOp, Literal, LocalId, Type, TypeDef, TypeDefId, TypeDefKind};
 use vx_parser::{AstNode, Expr, FnDecl, Stmt, SyntaxKind};
 use vx_resolve::SourceSpan;
 use vx_types::{Scalar, Ty};
+use vx_jit_types::{
+    VixenCallableRef, VixenTypedExpr, VixenTypedFunction, VixenTypedLocal, VixenTypedParam,
+    VixenTypedStmt,
+};
 
 use super::{BodyId, ExprId, KernelRegion, SingleSourceBridge};
 

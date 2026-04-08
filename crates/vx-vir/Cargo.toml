@@ -15,6 +15,7 @@ vx-types = { path = "../vx-types" }
 vx-resolve = { path = "../vx-resolve" }
 vx-parser = { path = "../vx-parser" }
 kajit-hir = { workspace = true }
+vx-jit-types = { workspace = true }
 
 [dev-dependencies]
 rowan = "0.16"

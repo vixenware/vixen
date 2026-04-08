@@ -4,6 +4,7 @@
 //! evaluator (vx-rt) and the JIT compiler (vx-jit).
 
 use std::collections::BTreeMap;
+use vx_jit_types::VixenTypedFunction;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -77,7 +78,7 @@ pub enum KernelKind {
     #[default]
     Interpreted,
     Strict {
-        vtf: kajit_hir::VixenTypedFunction,
+        vtf: VixenTypedFunction,
     },
 }
 

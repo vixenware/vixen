@@ -12,6 +12,7 @@ members = [
 
   ## eval crates
   "crates/vx-jit",
+  "crates/vx-jit-types",
   "crates/vx-rt",
   "crates/vx-eval-tests",
   "crates/vx-diagnostics",
@@ -57,6 +58,7 @@ vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-jit = { path = "crates/vx-jit" }
+vx-jit-types = { path = "crates/vx-jit-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-vir = { path = "crates/vx-vir" }

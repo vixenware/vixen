@@ -1,9 +1,10 @@
-//! Kajit backend: compiles a `VixenTypedFunction` (from kajit-hir) into
+//! Kajit backend: compiles a `VixenTypedFunction` into
 //! executable machine code via the Kajit pipeline.
 
 use kajit::{CompiledFunction, ir::IrFunc};
-use kajit_hir::{Module, VixenLoweringError, VixenTypedFunction};
+use kajit_hir::{Module, VixenExt};
 use thiserror::Error;
+use vx_jit_types::{VixenLoweringError, VixenTypedFunction};
 
 #[derive(Debug, Error)]
 pub enum KajitBackendError {

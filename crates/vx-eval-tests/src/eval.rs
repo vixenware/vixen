@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use kajit::CompiledFunction;
-use kajit_hir::VixenTypedFunction;
 use vx_jit::StrictFragmentValue;
 use vx_jit::legacy::{KernelKind, SingleSourceBridge, build_minimal_analysis};
+use vx_jit_types::VixenTypedFunction;
 use vx_parser::{
     AstNode, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, EnumDecl, Expr, FnDecl,
     IfExpr, IndexExpr, Item, LetStmt, LiteralExpr, MatchExpr, NameRefExpr, Parameter, Pattern,

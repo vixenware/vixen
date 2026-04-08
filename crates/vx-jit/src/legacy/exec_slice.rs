@@ -29,7 +29,7 @@ pub enum KernelKind {
     /// Strict scalar kernel ready for Kajit compilation.
     /// The body's ops/result_source are still populated as a fallback,
     /// but this carries the `VixenTypedFunction` for JIT compilation.
-    Strict { vtf: kajit_hir::VixenTypedFunction },
+    Strict { vtf: vx_jit_types::VixenTypedFunction },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

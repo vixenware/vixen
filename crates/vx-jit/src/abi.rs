@@ -8,8 +8,9 @@
 use std::str::Utf8Error;
 
 use kajit::CompiledFunction;
-use kajit_hir::{Type, VixenTypedFunction};
+use kajit_reprs::hir::Type;
 use thiserror::Error;
+use vx_jit_types::VixenTypedFunction;
 
 use crate::KajitBackendError;
 
