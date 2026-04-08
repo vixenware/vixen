@@ -3,25 +3,31 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use thiserror::Error;
-use vx_analysis::{
-    BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SingleSourceBridge, SlotId,
-    build_minimal_analysis, lower_executable_program_for_entry_body,
-};
+use vx_analysis::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
+use vx_vir::build::VirBuilder;
+use vx_vir::cap_check::check_capabilities_vir;
+use vx_vir::capture::analyze_captures;
+use vx_vir::demand::analyze_demand_for_entry;
+use vx_vir::item::ItemKind;
+use vx_vir::lower::{LowerError, lower_vir_program};
+use vx_vir::resolve::resolve_names;
+use vx_vir::type_check::type_check_vir;
+use vx_vir::type_collect::collect_types_vir;
 
 #[derive(Debug, Error)]
 pub enum RtError {
     #[error("parse errors: {0:?}")]
     Parse(Vec<vx_parser::SyntaxError>),
     #[error("resolve errors: {0:?}")]
-    Resolve(Vec<vx_resolve::ResolveError>),
+    Resolve(Vec<vx_vir::resolve::ResolveError>),
     #[error("type errors: {0:?}")]
-    Type(Vec<vx_resolve::TypeError>),
-    #[error("analysis validation: {0:?}")]
-    Analysis(vx_analysis::AnalysisError),
+    Type(Vec<vx_vir::type_check::TypeError>),
+    #[error("capability errors: {0:?}")]
+    Capability(Vec<vx_resolve::CapError>),
     #[error("entry function `{0}` not found")]
     MissingEntry(String),
     #[error("lowering failed: {0:?}")]
-    Lowering(vx_analysis::ExecSliceError),
+    Lowering(LowerError),
     #[error("missing body {0:?}")]
     MissingBody(BodyId),
     #[error("arity mismatch: body expects {expected}, got {actual}")]
@@ -164,33 +170,76 @@ pub fn eval_program(program: &ExecutableProgram, args: &[RtValue]) -> Result<RtV
     force_scalar(result, program)
 }
 
-/// Full pipeline: source text → bridge → analysis → lower → demand-driven eval.
+/// Full pipeline: source text → VIR → semantic passes → lower → demand-driven eval.
 pub fn eval_source(
     source: &str,
     function_name: &str,
     args: &[RtValue],
 ) -> Result<RtValue, RtError> {
-    let bridge = SingleSourceBridge::from_source_text(source);
-    if !bridge.parse_errors.is_empty() {
-        return Err(RtError::Parse(bridge.parse_errors.clone()));
+    use vx_resolve::SourceId;
+
+    // Parse user source — short-circuit on errors.
+    let parsed = vx_parser::parse_source_file(source);
+    if !parsed.errors().is_empty() {
+        return Err(RtError::Parse(parsed.errors().to_vec()));
     }
-    if !bridge.resolve_errors.is_empty() {
-        return Err(RtError::Resolve(bridge.resolve_errors.clone()));
+
+    // Parse stdlib sources (known-good, assert no errors).
+    let mut sources: Vec<(SourceId, vx_parser::SourceFile)> = vec![(SourceId(0), parsed.tree())];
+    for (i, stdlib) in vx_resolve::stdlib_sources().iter().enumerate() {
+        let stdlib_parsed = vx_parser::parse_source_file(stdlib.text);
+        assert!(
+            stdlib_parsed.errors().is_empty(),
+            "stdlib source {} has parse errors: {:?}",
+            stdlib.logical_path,
+            stdlib_parsed.errors()
+        );
+        sources.push((SourceId(i as u32 + 1), stdlib_parsed.tree()));
     }
-    if !bridge.type_errors.is_empty() {
-        return Err(RtError::Type(bridge.type_errors.clone()));
+
+    // Build VIR.
+    let mut program = VirBuilder::build_program(&sources);
+
+    // Semantic passes.
+    let types = collect_types_vir(&mut program.arena);
+    let resolve_errors = resolve_names(&mut program.arena);
+    if !resolve_errors.is_empty() {
+        return Err(RtError::Resolve(resolve_errors));
     }
-    let body_id = bridge
-        .bodies
+    let tc_result = type_check_vir(&mut program.arena, &types);
+    if !tc_result.errors.is_empty() {
+        return Err(RtError::Type(tc_result.errors.clone()));
+    }
+    let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
+    if !cap_result.errors.is_empty() {
+        return Err(RtError::Capability(cap_result.errors));
+    }
+    analyze_captures(&mut program.arena);
+
+    // Find entry body by name in primary source unit (first match by item order).
+    let primary_su = program
+        .source_units
+        .first()
+        .copied()
+        .expect("program must have at least one source unit");
+    let su = &program.arena[primary_su];
+    let entry_body = su
+        .items
         .iter()
-        .find(|b| b.name == function_name)
-        .ok_or_else(|| RtError::MissingEntry(function_name.to_owned()))?
-        .id;
-    let analysis = build_minimal_analysis(&bridge);
-    analysis.validate().map_err(RtError::Analysis)?;
-    let program = lower_executable_program_for_entry_body(&analysis, &bridge, body_id)
-        .map_err(RtError::Lowering)?;
-    eval_program(&program, args)
+        .find_map(|&item_id| {
+            if let ItemKind::Function(ref f) = program.arena[item_id].kind {
+                if f.name == function_name {
+                    return Some(f.body);
+                }
+            }
+            None
+        })
+        .ok_or_else(|| RtError::MissingEntry(function_name.to_owned()))?;
+
+    // Demand analysis + lowering.
+    let demand = analyze_demand_for_entry(&program, entry_body);
+    let executable = lower_vir_program(&program, &demand).map_err(RtError::Lowering)?;
+    eval_program(&executable, args)
 }
 
 fn eval_body(

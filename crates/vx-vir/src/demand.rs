@@ -150,6 +150,66 @@ pub fn analyze_demand(program: &VirProgram) -> VirDemandResult {
     }
 }
 
+/// Run demand analysis with an explicit entry point (no auto-selection).
+///
+/// Used by vx-rt where the caller already knows which function to run.
+pub fn analyze_demand_for_entry(program: &VirProgram, entry: BodyId) -> VirDemandResult {
+    let arena = &program.arena;
+
+    // Step 1: Build call graph for every body.
+    let mut bodies: Vec<VirAnalyzedBody> = arena
+        .bodies
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let body_id = BodyId(i as u32);
+            let mut edges = Vec::new();
+            let root_expr = arena[body_id].root_expr;
+            collect_call_edges(arena, body_id, root_expr, &mut edges);
+            VirAnalyzedBody {
+                body_id,
+                result_observation: Observation::NoObs,
+                call_edges: edges,
+            }
+        })
+        .collect();
+
+    let entry_points = vec![entry];
+
+    // BFS reachability from the single entry.
+    let mut reachable = BTreeSet::new();
+    let mut queue: Vec<BodyId> = entry_points.clone();
+    reachable.insert(entry);
+
+    while let Some(caller_id) = queue.pop() {
+        let caller = &bodies[caller_id.0 as usize];
+        for edge in &caller.call_edges {
+            let callee_body = match edge.callee {
+                VirCallTarget::Body(b) | VirCallTarget::Closure(b) => b,
+                VirCallTarget::Unknown => continue,
+            };
+            if reachable.insert(callee_body) {
+                queue.push(callee_body);
+            }
+        }
+    }
+
+    for body in &mut bodies {
+        if reachable.contains(&body.body_id) {
+            body.result_observation = Observation::NeedValue;
+        }
+    }
+
+    let lazy_fields = seed_lazy_fields(arena, &bodies, &reachable);
+
+    VirDemandResult {
+        bodies,
+        reachable,
+        entry_points,
+        lazy_fields,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Call graph extraction
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vx-analysis = { path = "../vx-analysis" }
 vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }
+vx-vir = { path = "../vx-vir" }
 thiserror = "2"
 
 [dev-dependencies]

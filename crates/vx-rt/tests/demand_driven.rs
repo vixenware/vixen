@@ -74,7 +74,7 @@ fn main(n: U64) -> U64 (
 fn pair_passed_to_fn_dead_sibling() {
     expect_u64(
         r#"
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 fn pick_first(p: (U64, U64)) -> U64 ( p._0 )
 
 fn main() -> U64 (
@@ -92,7 +92,7 @@ fn main() -> U64 (
 fn chained_projection_no_let() {
     expect_u64(
         r#"
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 
 fn main() -> U64 (
   let outer = ((7, bomb()), (bomb(), bomb()));
@@ -110,7 +110,7 @@ fn let_bound_struct_named_field() {
     expect_u64(
         r#"
 struct Pair { a: U64, b: U64 }
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 
 fn main() -> U64 (
   let s = Pair { a: 42, b: bomb() };
@@ -127,7 +127,7 @@ fn main() -> U64 (
 fn deep_tuple_projection_chain() {
     expect_u64(
         r#"
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 
 fn main() -> U64 (
   let outer = (((7, bomb()), bomb()), bomb());
@@ -146,7 +146,7 @@ fn deep_named_field_projection_chain() {
         r#"
 struct Pair { a: U64, b: U64 }
 struct Outer { a: Pair, b: U64 }
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 
 fn main() -> U64 (
   let s = Outer { a: Pair { a: 42, b: bomb() }, b: bomb() };

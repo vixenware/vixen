@@ -1,5 +1,5 @@
 source <<VX,vixen
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 
 fn main() -> U64 (
   let p = (

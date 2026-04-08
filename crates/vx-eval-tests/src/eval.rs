@@ -370,6 +370,14 @@ fn eval_expr(
         }
         Expr::Block(block) => eval_block(block, env, functions, compiled, variant_map, trace),
         Expr::Closure(closure) => eval_closure(closure, env),
+        Expr::Fail(fail) => {
+            let msg = if let Some(arg) = fail.message() {
+                eval_expr(&arg, env, functions, compiled, variant_map, trace)?
+            } else {
+                Value::String("explicit failure".into())
+            };
+            Err(format!("fail: {msg:?}"))
+        }
         _ => Err(format!(
             "unsupported expression: {:?}",
             expr.syntax().kind()

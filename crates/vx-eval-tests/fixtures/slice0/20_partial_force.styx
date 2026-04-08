@@ -1,5 +1,5 @@
 source <<VX,vixen
-fn bomb() -> U64 ( trap("boom") )
+fn bomb() -> U64 ( fail("boom") )
 fn safe() -> U64 ( 7 )
 
 fn main() -> U64 (
