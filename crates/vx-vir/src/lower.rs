@@ -338,40 +338,36 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Index(_) => Err(LowerError::UnsupportedShape(
                 "index access (not in executable slice)".into(),
             )),
-            ExprKind::Match(_) => Err(LowerError::UnsupportedShape(
-                "match (deferred to 010-2)".into(),
-            )),
+            ExprKind::Match(m) => self.lower_match(expr_id, &m),
 
-            // 010-2: runtime, exotics
+            // 010-2: invoke, type ascription
+            ExprKind::Invoke(inv) => self.lower_invoke(expr_id, &inv),
+            ExprKind::TypeOp(top) => self.lower_type_op(expr_id, &top),
+
+            // Unsupported shapes
             ExprKind::Where(_) => Err(LowerError::UnsupportedShape(
-                "where (deferred to 010-2)".into(),
-            )),
-            ExprKind::Invoke(_) => Err(LowerError::UnsupportedShape(
-                "invoke (deferred to 010-2)".into(),
+                "where (not in executable slice)".into(),
             )),
             ExprKind::PartialApp(_) => Err(LowerError::UnsupportedShape(
-                "partial application (deferred to 010-2)".into(),
+                "partial application (not in executable slice)".into(),
             )),
             ExprKind::Range(_) => Err(LowerError::UnsupportedShape(
-                "range (deferred to 010-2)".into(),
-            )),
-            ExprKind::TypeOp(_) => Err(LowerError::UnsupportedShape(
-                "type op (deferred to 010-2)".into(),
+                "range (not in executable slice)".into(),
             )),
             ExprKind::With(_) => Err(LowerError::UnsupportedShape(
-                "with (deferred to 010-2)".into(),
+                "with (not in executable slice)".into(),
             )),
             ExprKind::Fallible(_) => Err(LowerError::UnsupportedShape(
-                "fallible (deferred to 010-2)".into(),
+                "fallible (not in executable slice)".into(),
             )),
             ExprKind::Import(_) => Err(LowerError::UnsupportedShape(
                 "import (not in executable slice)".into(),
             )),
             ExprKind::PathLiteral(_) => Err(LowerError::UnsupportedShape(
-                "path literal (deferred to 010-2)".into(),
+                "path literal (not in executable slice)".into(),
             )),
             ExprKind::Map(_) => Err(LowerError::UnsupportedShape(
-                "map (deferred to 010-2)".into(),
+                "map (not in executable slice)".into(),
             )),
             ExprKind::Error => Err(LowerError::UnsupportedShape("error node".into())),
         }
@@ -588,6 +584,153 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             message,
         });
         Ok(Operand::Slot(dst))
+    }
+
+    // -----------------------------------------------------------------------
+    // Match
+    // -----------------------------------------------------------------------
+
+    fn lower_match(
+        &mut self,
+        expr_id: ExprId,
+        m: &crate::expr::MatchExpr,
+    ) -> Result<Operand, LowerError> {
+        if m.arms.is_empty() {
+            return Err(LowerError::UnsupportedShape("empty match".into()));
+        }
+
+        let scrutinee = self.lower_expr(m.scrutinee)?;
+
+        // Lower arms right-to-left, building a chain of Select ops.
+        // The innermost (last) arm must be a wildcard/binding (catch-all) or we emit a failure.
+        let mut result: Option<Operand> = None;
+
+        for arm in m.arms.iter().rev() {
+            let pat = &self.arena()[arm.pattern].kind.clone();
+            let body_expr = arm.body;
+
+            match pat {
+                crate::pattern::PatternKind::Wildcard => {
+                    // Catch-all: just the body.
+                    let body_val = self.lower_expr(body_expr)?;
+                    result = Some(match result {
+                        None => body_val,
+                        Some(else_val) => {
+                            // Wildcard not in last position — it shadows everything after.
+                            // Just use wildcard's value (dead code after it).
+                            let _ = else_val;
+                            body_val
+                        }
+                    });
+                }
+                crate::pattern::PatternKind::Binding(b) => {
+                    // Bind scrutinee to the pattern's binding, then evaluate body.
+                    let slot = self.alloc_binding_slot(b.binding);
+                    self.ops.push(KernelOp::AssignAlias {
+                        dst: slot,
+                        source: self.source_for(expr_id),
+                        value: scrutinee.clone(),
+                    });
+                    self.materialized.insert(b.binding);
+                    let body_val = self.lower_expr(body_expr)?;
+                    result = Some(match result {
+                        None => body_val,
+                        Some(_else_val) => body_val, // binding is catch-all
+                    });
+                }
+                crate::pattern::PatternKind::Literal(lit) => {
+                    let body_val = self.lower_expr(body_expr)?;
+                    let condition = self.lower_pattern_test(expr_id, &scrutinee, &lit.value)?;
+                    let else_val = result.unwrap_or_else(|| {
+                        // No catch-all — emit failure for non-exhaustive match.
+                        let fail_dst = self.alloc_temp();
+                        self.ops.push(KernelOp::AssignFailure {
+                            dst: fail_dst,
+                            source: self.source_for(expr_id),
+                            message: Operand::String("non-exhaustive match".into()),
+                        });
+                        Operand::Slot(fail_dst)
+                    });
+                    let dst = self.alloc_temp();
+                    self.ops.push(KernelOp::Select {
+                        dst,
+                        source: self.source_for(expr_id),
+                        condition,
+                        then_value: body_val,
+                        else_value: else_val,
+                    });
+                    result = Some(Operand::Slot(dst));
+                }
+                other => {
+                    return Err(LowerError::UnsupportedShape(format!(
+                        "match pattern: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        result.ok_or_else(|| LowerError::UnsupportedShape("empty match arms".into()))
+    }
+
+    /// Emit an equality test between scrutinee and a literal pattern value.
+    fn lower_pattern_test(
+        &mut self,
+        expr_id: ExprId,
+        scrutinee: &Operand,
+        lit: &LitKind,
+    ) -> Result<Operand, LowerError> {
+        let lit_operand = self.lower_literal(expr_id, lit)?;
+        let dst = self.alloc_temp();
+        self.ops.push(KernelOp::Equal {
+            dst,
+            source: self.source_for(expr_id),
+            lhs: scrutinee.clone(),
+            rhs: lit_operand,
+        });
+        Ok(Operand::Slot(dst))
+    }
+
+    // -----------------------------------------------------------------------
+    // Invoke
+    // -----------------------------------------------------------------------
+
+    fn lower_invoke(
+        &mut self,
+        expr_id: ExprId,
+        inv: &crate::expr::InvokeExpr,
+    ) -> Result<Operand, LowerError> {
+        let callee = self.lower_expr(inv.callee)?;
+        let dst = self.alloc_temp();
+        self.ops.push(KernelOp::ApplyClosure {
+            dst,
+            source: self.source_for(expr_id),
+            closure: callee,
+            args: vec![],
+        });
+        Ok(Operand::Slot(dst))
+    }
+
+    // -----------------------------------------------------------------------
+    // TypeOp
+    // -----------------------------------------------------------------------
+
+    fn lower_type_op(
+        &mut self,
+        _expr_id: ExprId,
+        top: &crate::expr::TypeOpExpr,
+    ) -> Result<Operand, LowerError> {
+        match top.op {
+            crate::expr::TypeOpKind::Ascription => {
+                // Passthrough — no runtime effect.
+                self.lower_expr(top.expr)
+            }
+            crate::expr::TypeOpKind::As => Err(LowerError::UnsupportedShape(
+                "type cast (as) not in executable slice".into(),
+            )),
+            crate::expr::TypeOpKind::Is => Err(LowerError::UnsupportedShape(
+                "type test (is) not in executable slice".into(),
+            )),
+        }
     }
 
     // -----------------------------------------------------------------------

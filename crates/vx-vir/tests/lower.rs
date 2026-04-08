@@ -362,3 +362,54 @@ fn main() -> U64 ( pick((42, bomb())) )
         42,
     );
 }
+
+// =========================================================================
+// 010-2: Match, Invoke, TypeOp
+// =========================================================================
+
+#[test]
+fn match_bool_true() {
+    expect_u64(
+        "fn main() -> U64 ( match true ( true => 42, false => 0 ) )",
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn match_bool_false() {
+    expect_u64(
+        "fn main() -> U64 ( match false ( true => 0, false => 42 ) )",
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn match_int() {
+    expect_u64(
+        "fn main(n: U64) -> U64 ( match n ( 1 => 10, 2 => 20, 3 => 42 ) )",
+        &[RtValue::U64(3)],
+        42,
+    );
+}
+
+#[test]
+fn match_wildcard() {
+    expect_u64("fn main() -> U64 ( match 99 ( 1 => 0, _ => 42 ) )", &[], 42);
+}
+
+#[test]
+fn match_binding() {
+    expect_u64("fn main() -> U64 ( match 42 ( n => n ) )", &[], 42);
+}
+
+#[test]
+fn match_binding_with_body() {
+    expect_u64("fn main() -> U64 ( match 40 ( n => n + 2 ) )", &[], 42);
+}
+
+#[test]
+fn type_ascription_passthrough() {
+    expect_u64("fn main() -> U64 ( let x: U64 = 42; x )", &[], 42);
+}

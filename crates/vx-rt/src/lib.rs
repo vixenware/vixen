@@ -127,6 +127,18 @@ fn force_scalar(val: RtValue, program: &ExecutableProgram) -> Result<RtValue, Rt
     }
 }
 
+fn rt_eq(a: &RtValue, b: &RtValue) -> Result<bool, RtError> {
+    match (a, b) {
+        (RtValue::U64(a), RtValue::U64(b)) => Ok(a == b),
+        (RtValue::Bool(a), RtValue::Bool(b)) => Ok(a == b),
+        (RtValue::String(a), RtValue::String(b)) => Ok(a == b),
+        _ => Err(RtError::TypeError {
+            expected: a.kind_name(),
+            actual: b.kind_name().to_owned(),
+        }),
+    }
+}
+
 fn expect_u64(val: &RtValue) -> Result<u64, RtError> {
     match val {
         RtValue::U64(n) => Ok(*n),
@@ -411,13 +423,13 @@ fn eval_op(
         KernelOp::Equal { lhs, rhs, .. } => {
             let lhs = resolve_and_force(program, producers, slots, lhs)?;
             let rhs = resolve_and_force(program, producers, slots, rhs)?;
-            Ok(RtValue::Bool(expect_u64(&lhs)? == expect_u64(&rhs)?))
+            Ok(RtValue::Bool(rt_eq(&lhs, &rhs)?))
         }
 
         KernelOp::NotEqual { lhs, rhs, .. } => {
             let lhs = resolve_and_force(program, producers, slots, lhs)?;
             let rhs = resolve_and_force(program, producers, slots, rhs)?;
-            Ok(RtValue::Bool(expect_u64(&lhs)? != expect_u64(&rhs)?))
+            Ok(RtValue::Bool(!rt_eq(&lhs, &rhs)?))
         }
 
         KernelOp::Sub { lhs, rhs, .. } => {
