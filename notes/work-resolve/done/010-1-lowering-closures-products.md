@@ -1,6 +1,6 @@
 # 010-1: Closures, Products, and Lazy Thunks
 
-Status: Not started.
+Status: Done.
 
 ## Context
 
