@@ -323,11 +323,20 @@ fn collect_call_edges(
                 }
             }
         }
-        ExprKind::NameRef(_)
-        | ExprKind::Literal(_)
-        | ExprKind::PathLiteral(_)
-        | ExprKind::Import(_)
-        | ExprKind::Error => {}
+        ExprKind::NameRef(ref nr) => {
+            // Function-as-value: if a NameRef resolves to a function item,
+            // that function's body is reachable (it may be called indirectly).
+            if let Some(DefTarget::Item(item_id)) = nr.resolved {
+                if let ItemKind::Function(ref f) = arena[item_id].kind {
+                    edges.push(VirCallEdge {
+                        call_expr: expr_id,
+                        callee: VirCallTarget::Body(f.body),
+                    });
+                }
+            }
+        }
+        ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Import(_) | ExprKind::Error => {
+        }
     }
 }
 

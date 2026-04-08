@@ -6,6 +6,7 @@ use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
 use vx_rt::{RtValue, eval_program};
 use vx_vir::build::VirBuilder;
+use vx_vir::capture::analyze_captures;
 use vx_vir::demand::analyze_demand;
 use vx_vir::lower::lower_vir_program;
 use vx_vir::resolve::resolve_names;
@@ -16,6 +17,7 @@ fn eval_vir(source: &str, args: &[RtValue]) -> Result<RtValue, String> {
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let _errors = resolve_names(&mut program.arena);
+    analyze_captures(&mut program.arena);
     let demand = analyze_demand(&program);
     let executable = lower_vir_program(&program, &demand).map_err(|e| format!("lower: {e:?}"))?;
     eval_program(&executable, args).map_err(|e| format!("eval: {e:?}"))
@@ -233,6 +235,129 @@ fn nested_if() {
 fn multi_arg_call() {
     expect_u64(
         "fn add(a: U64, b: U64) -> U64 ( a + b )\nfn main() -> U64 ( add(20, 22) )",
+        &[],
+        42,
+    );
+}
+
+// =========================================================================
+// 010-1: Tuples, closures, products, lazy thunks
+// =========================================================================
+
+#[test]
+fn tuple_projection_0() {
+    expect_u64("fn main() -> U64 ( let p = (42, 99); p._0 )", &[], 42);
+}
+
+#[test]
+fn tuple_projection_1() {
+    expect_u64("fn main() -> U64 ( let p = (99, 42); p._1 )", &[], 42);
+}
+
+#[test]
+fn lazy_field_bomb_not_evaluated() {
+    expect_u64(
+        r#"
+fn bomb() -> U64 ( bomb() )
+fn main() -> U64 (
+  let p = (42, bomb());
+  p._0
+)
+"#,
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn closure_no_capture() {
+    expect_u64("fn main() -> U64 ( let f = (x) => x + 1; f(41) )", &[], 42);
+}
+
+#[test]
+fn closure_capture() {
+    expect_u64(
+        "fn main(n: U64) -> U64 ( let add_n = (x) => x + n; add_n(32) )",
+        &[RtValue::U64(10)],
+        42,
+    );
+}
+
+#[test]
+fn higher_order_function() {
+    expect_u64(
+        r#"
+fn apply(f: Fn(U64) -> U64, x: U64) -> U64 ( f(x) )
+fn main() -> U64 ( let inc = (x) => x + 1; apply(inc, 41) )
+"#,
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn function_as_value() {
+    expect_u64(
+        r#"
+fn add_one(n: U64) -> U64 ( n + 1 )
+fn apply(f: Fn(U64) -> U64, x: U64) -> U64 ( f(x) )
+fn main() -> U64 ( apply(add_one, 41) )
+"#,
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn chained_projection() {
+    expect_u64(
+        "fn main() -> U64 ( let p = ((42, 99), 0); p._0._0 )",
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn deep_lazy_chain() {
+    expect_u64(
+        r#"
+fn bomb() -> U64 ( bomb() )
+fn main() -> U64 (
+  let outer = ((7, bomb()), (bomb(), bomb()));
+  outer._0._0
+)
+"#,
+        &[],
+        7,
+    );
+}
+
+#[test]
+fn binding_chain_through_product() {
+    expect_u64(
+        "fn main() -> U64 ( let p = (1, 2); let q = p; q._0 )",
+        &[],
+        1,
+    );
+}
+
+#[test]
+fn record_field() {
+    expect_u64(
+        "fn main() -> U64 ( let r = { a: 42, b: 99 }; r.a )",
+        &[],
+        42,
+    );
+}
+
+#[test]
+fn cross_function_lazy() {
+    expect_u64(
+        r#"
+fn pick(p: (U64, U64)) -> U64 ( p._0 )
+fn bomb() -> U64 ( bomb() )
+fn main() -> U64 ( pick((42, bomb())) )
+"#,
         &[],
         42,
     );
