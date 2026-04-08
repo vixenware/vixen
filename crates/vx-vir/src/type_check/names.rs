@@ -26,7 +26,7 @@ pub(crate) fn infer_name_ref(tc: &mut TypeChecker, _expr_id: ExprId, nr: &NameRe
 }
 
 /// Get the type of a binding.
-pub(crate) fn type_of_binding(tc: &TypeChecker, binding_id: BindingId) -> Ty {
+pub(crate) fn type_of_binding(tc: &mut TypeChecker, binding_id: BindingId) -> Ty {
     let binding = &tc.arena[binding_id];
 
     // If already typed (e.g. by let-stmt processing), return it.
@@ -36,8 +36,9 @@ pub(crate) fn type_of_binding(tc: &TypeChecker, binding_id: BindingId) -> Ty {
 
     match binding.kind {
         BindingKind::Parameter => {
-            // Look up type from the enclosing function's FnSig.
+            // Look up type from the enclosing function's FnSig and persist it.
             if let Some(ty) = param_type_from_fn_sig(tc, binding_id) {
+                tc.arena[binding_id].ty = Some(ty.clone());
                 return ty;
             }
             Ty::Poison

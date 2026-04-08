@@ -391,3 +391,110 @@ fn lower_source_text_unified_returns_vtf() {
     assert_eq!(lowered.vtf.name, "add");
     assert_eq!(lowered.vtf.params.len(), 2);
 }
+
+#[test]
+fn debug_string_len_condition() {
+    // Minimal test: string param → len → if len == 5 return "yes" else "no"
+    let source = r#"
+fn check(name: String) -> String (
+  if name.len() == 5 (
+    "yes"
+  ) else (
+    "no"
+  )
+)
+"#;
+    let result = unsafe {
+        execute_source_text_unified(
+            source,
+            "check",
+            &[StrictFragmentValue::String("serde".to_owned())],
+        )
+    }
+    .expect("check should execute");
+    assert_eq!(result, StrictFragmentValue::String("yes".to_owned()));
+}
+
+#[test]
+fn debug_nested_if() {
+    let source = r#"
+fn classify(name: String) -> String (
+  let len = name.len();
+  if len == 1 (
+    "one"
+  ) else (
+    if len == 5 (
+      "five"
+    ) else (
+      "other"
+    )
+  )
+)
+"#;
+    let result = unsafe {
+        execute_source_text_unified(
+            source,
+            "classify",
+            &[StrictFragmentValue::String("serde".to_owned())],
+        )
+    }
+    .expect("classify should execute");
+    assert_eq!(result, StrictFragmentValue::String("five".to_owned()));
+}
+
+#[test]
+fn debug_nested_if_u64() {
+    let source = r#"
+fn classify(n: U64) -> U64 (
+  if n == 1 ( 10 ) else (
+    if n == 5 ( 50 ) else ( 0 )
+  )
+)
+"#;
+    let result =
+        unsafe { execute_source_text_unified(source, "classify", &[StrictFragmentValue::U64(5)]) }
+            .expect("classify u64 should execute");
+    assert_eq!(result, StrictFragmentValue::U64(50));
+}
+
+#[test]
+fn debug_nested_if_string_no_concat() {
+    let source = r#"
+fn classify(name: String) -> String (
+  let len = name.len();
+  if len == 1 ( "one" ) else (
+    if len == 5 ( "five" ) else ( "other" )
+  )
+)
+"#;
+    let result = unsafe {
+        execute_source_text_unified(
+            source,
+            "classify",
+            &[StrictFragmentValue::String("serde".to_owned())],
+        )
+    }
+    .expect("classify should execute");
+    assert_eq!(result, StrictFragmentValue::String("five".to_owned()));
+}
+
+#[test]
+fn debug_nested_if_with_concat() {
+    let source = r#"
+fn classify(name: String) -> String (
+  let len = name.len();
+  if len == 1 ( "one" ) else (
+    if len == 3 ( `3/{name.slice(0..1)}` ) else ( "other" )
+  )
+)
+"#;
+    let result = unsafe {
+        execute_source_text_unified(
+            source,
+            "classify",
+            &[StrictFragmentValue::String("serde".to_owned())],
+        )
+    }
+    .expect("classify should execute");
+    assert_eq!(result, StrictFragmentValue::String("other".to_owned()));
+}

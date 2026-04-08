@@ -13,11 +13,11 @@ pub use kajit_backend::KajitBackendError;
 pub use kajit_backend::{lower_hir as lower_vtf_to_hir, lower_ir as lower_vtf_to_ir};
 
 pub mod legacy;
+pub mod strict_from_ops;
 
 use kajit::CompiledFunction;
-use kajit_hir::VixenTypedFunction;
-use legacy::{KernelKind, SingleSourceBridge, build_minimal_analysis};
 use thiserror::Error;
+use vx_jit_types::VixenTypedFunction;
 
 /// Error from the unified strict-fragment pipeline.
 #[derive(Debug, Error)]
@@ -45,27 +45,34 @@ pub fn lower_source_text_unified(
     source: &str,
     function_name: &str,
 ) -> Result<UnifiedLowered, UnifiedStrictError> {
-    let bridge = SingleSourceBridge::from_source_text(source);
-    let analysis = build_minimal_analysis(&bridge);
-    let program = legacy::lower::lower_executable_program(&analysis, &bridge)
-        .map_err(|e| UnifiedStrictError::Lowering(format!("{e:?}")))?;
+    let output = vx_vir::compile::compile_source_with_types(source, function_name)
+        .map_err(|e| UnifiedStrictError::Lowering(format!("{e}")))?;
 
-    let body = program
-        .bodies
-        .values()
-        .find(|b| matches!(&b.kernel_kind, KernelKind::Strict { vtf } if vtf.name == function_name))
-        .ok_or_else(|| UnifiedStrictError::NotStrict {
-            function_name: function_name.to_owned(),
-        })?;
+    // Try strict lowering on each body, find the one matching function_name.
+    eprintln!(
+        "[unified] entry={:?}, original_body_count={}, bodies: {:?}",
+        output.program.entry,
+        output.original_body_count,
+        output.program.bodies.keys().collect::<Vec<_>>()
+    );
+    for body in output.program.bodies.values() {
+        if let Some(mut lowered) =
+            strict_from_ops::try_strict_lower(body, &output.slot_types, output.original_body_count)
+        {
+            // The entry body is the named function.
+            if body.id == output.program.entry {
+                lowered.vtf.name = function_name.to_owned();
+                eprintln!("[unified] VTF body:\n{:#?}", lowered.vtf.body);
+                return Ok(UnifiedLowered {
+                    vtf: lowered.vtf,
+                    module: lowered.module,
+                });
+            }
+        }
+    }
 
-    let KernelKind::Strict { vtf } = &body.kernel_kind else {
-        unreachable!();
-    };
-
-    let lowerer = legacy::lower_strict::StrictLowerer::new();
-    Ok(UnifiedLowered {
-        vtf: vtf.clone(),
-        module: lowerer.module,
+    Err(UnifiedStrictError::NotStrict {
+        function_name: function_name.to_owned(),
     })
 }
 

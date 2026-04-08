@@ -8,12 +8,27 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use vx_types::Ty;
+
 use crate::exec_types::{
     BodyId as ABodyId, BridgeLocalBindingId, ExecSliceError, ExecutableBody, ExecutableProgram,
     ExecutableRuntimeNode, FieldKey, KernelKind, KernelOp, Operand, ResultSource,
     RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SlotId,
     SourceExpr,
 };
+
+/// Slot type map keyed in executable ID space.
+pub type SlotTypeMap = HashMap<(ABodyId, SlotId), Ty>;
+
+/// Output of [`lower_vir_program`].
+pub struct LoweringOutput {
+    pub program: ExecutableProgram,
+    /// Types for each (body, slot) pair, populated during lowering from VIR arena types.
+    pub slot_types: SlotTypeMap,
+    /// Number of original VIR bodies. Bodies with `id.0 >= original_body_count` are
+    /// synthesized (thunks, closure wrappers) and should not be strict-lowered.
+    pub original_body_count: u32,
+}
 
 use crate::binding::BindingKind;
 use crate::build::VirProgram;
@@ -92,6 +107,8 @@ struct LoweringContext<'a> {
     /// Runtime node allocator.
     next_runtime_node_id: u32,
     runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
+    /// Slot type map, populated as slots are created.
+    slot_types: SlotTypeMap,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -114,6 +131,7 @@ impl<'a> LoweringContext<'a> {
             synth_bodies: BTreeMap::new(),
             next_runtime_node_id: 0,
             runtime_nodes: BTreeMap::new(),
+            slot_types: SlotTypeMap::new(),
         }
     }
 
@@ -169,7 +187,7 @@ fn to_analysis_field_key(fk: &crate::expr::FieldKey) -> FieldKey {
 pub fn lower_vir_program(
     program: &VirProgram,
     demand: &VirDemandResult,
-) -> Result<ExecutableProgram, LowerError> {
+) -> Result<LoweringOutput, LowerError> {
     let entry = *demand
         .entry_points
         .first()
@@ -182,6 +200,7 @@ pub fn lower_vir_program(
         .map(|su_id| program.arena[*su_id].source)
         .collect();
 
+    let original_body_count = program.arena.bodies.len() as u32;
     let mut ctx = LoweringContext::new(&program.arena, demand, user_sources);
     let mut bodies: BTreeMap<ABodyId, ExecutableBody> = BTreeMap::new();
 
@@ -194,10 +213,14 @@ pub fn lower_vir_program(
     // Add synthesized thunk/closure bodies.
     bodies.extend(ctx.synth_bodies);
 
-    Ok(ExecutableProgram {
-        entry: a_body(entry),
-        bodies,
-        runtime_nodes: ctx.runtime_nodes,
+    Ok(LoweringOutput {
+        program: ExecutableProgram {
+            entry: a_body(entry),
+            bodies,
+            runtime_nodes: ctx.runtime_nodes,
+        },
+        slot_types: ctx.slot_types,
+        original_body_count,
     })
 }
 
@@ -227,13 +250,17 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let mut slot_by_binding = HashMap::new();
         let mut params = Vec::new();
 
-        // Pre-allocate param slots.
+        // Pre-allocate param slots and record their types.
+        let a_body_id = a_body(body_id);
         for param in &body.params {
             if let crate::pattern::PatternKind::Binding(ref b) = ctx.arena[param.pattern].kind {
                 let slot = SlotId(next_slot);
                 next_slot += 1;
                 slot_by_binding.insert(b.binding, slot);
                 params.push(slot);
+                if let Some(ty) = ctx.arena[b.binding].ty.clone() {
+                    ctx.slot_types.insert((a_body_id, slot), ty);
+                }
             }
         }
 
@@ -276,11 +303,20 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         s
     }
 
+    /// Allocate a temp slot and record its type from the given expression.
+    fn alloc_typed_temp(&mut self, expr_id: ExprId) -> SlotId {
+        let s = self.alloc_temp();
+        if let Some(ty) = self.arena()[expr_id].ty.clone() {
+            self.ctx.slot_types.insert((a_body(self.body_id), s), ty);
+        }
+        s
+    }
+
     fn ensure_slot(&mut self, operand: Operand, body: BodyId, expr: ExprId) -> SlotId {
         match operand {
             Operand::Slot(s) => s,
             Operand::Int(v) => {
-                let dst = self.alloc_temp();
+                let dst = self.alloc_typed_temp(expr);
                 self.ops.push(KernelOp::AssignConstInt {
                     dst,
                     source: source_expr(body, expr),
@@ -289,7 +325,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 dst
             }
             Operand::String(v) => {
-                let dst = self.alloc_temp();
+                let dst = self.alloc_typed_temp(expr);
                 self.ops.push(KernelOp::AssignConstString {
                     dst,
                     source: source_expr(body, expr),
@@ -315,6 +351,11 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let s = SlotId(self.next_slot);
         self.next_slot += 1;
         self.slot_by_binding.insert(bid, s);
+        // Record binding type in SlotTypeMap if available.
+        if let Some(ty) = self.arena()[bid].ty.clone() {
+            let exec_body_id = a_body(self.body_id);
+            self.ctx.slot_types.insert((exec_body_id, s), ty);
+        }
         s
     }
 
@@ -432,7 +473,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             }
             LitKind::String { raw } => Ok(Operand::String(raw.clone())),
             LitKind::Bool(b) => {
-                let dst = self.alloc_temp();
+                let dst = self.alloc_typed_temp(expr_id);
                 self.ops.push(KernelOp::AssignConstBool {
                     dst,
                     source: self.source_for(expr_id),
@@ -466,7 +507,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                         .iter()
                         .filter(|p| !p.is_keyword)
                         .count();
-                    let dst = self.alloc_temp();
+                    let dst = self.alloc_typed_temp(expr_id);
                     self.ops.push(KernelOp::AllocClosure {
                         dst,
                         source: self.source_for(expr_id),
@@ -523,7 +564,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
     ) -> Result<Operand, LowerError> {
         let lhs = self.lower_expr(bin.lhs)?;
         let rhs = self.lower_expr(bin.rhs)?;
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         let source = self.source_for(expr_id);
 
         match bin.op {
@@ -596,7 +637,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let then_value = self.lower_expr(if_.then_branch)?;
         let else_value = self.lower_expr(else_branch)?;
 
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::Select {
             dst,
             source: self.source_for(expr_id),
@@ -622,7 +663,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             Operand::String("explicit failure".into())
         };
 
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::AssignFailure {
             dst,
             source: self.source_for(expr_id),
@@ -688,7 +729,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                     let condition = self.lower_pattern_test(expr_id, &scrutinee, &lit.value)?;
                     let else_val = result.unwrap_or_else(|| {
                         // No catch-all — emit failure for non-exhaustive match.
-                        let fail_dst = self.alloc_temp();
+                        let fail_dst = self.alloc_typed_temp(expr_id);
                         self.ops.push(KernelOp::AssignFailure {
                             dst: fail_dst,
                             source: self.source_for(expr_id),
@@ -696,7 +737,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                         });
                         Operand::Slot(fail_dst)
                     });
-                    let dst = self.alloc_temp();
+                    let dst = self.alloc_typed_temp(expr_id);
                     self.ops.push(KernelOp::Select {
                         dst,
                         source: self.source_for(expr_id),
@@ -725,7 +766,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         lit: &LitKind,
     ) -> Result<Operand, LowerError> {
         let lit_operand = self.lower_literal(expr_id, lit)?;
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::Equal {
             dst,
             source: self.source_for(expr_id),
@@ -745,7 +786,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         inv: &crate::expr::InvokeExpr,
     ) -> Result<Operand, LowerError> {
         let callee = self.lower_expr(inv.callee)?;
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::ApplyClosure {
             dst,
             source: self.source_for(expr_id),
@@ -823,7 +864,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 }
             }
         }
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::ConcatStrings {
             dst,
             source: self.source_for(expr_id),
@@ -863,7 +904,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                         for arg in &call.args {
                             args.push(self.lower_expr(arg.expr)?);
                         }
-                        let dst = self.alloc_temp();
+                        let dst = self.alloc_typed_temp(expr_id);
                         self.local_call_deps.insert(callee_body);
                         self.ops.push(KernelOp::CallBody {
                             dst,
@@ -881,7 +922,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                     for arg in &call.args {
                         args.push(self.lower_expr(arg.expr)?);
                     }
-                    let dst = self.alloc_temp();
+                    let dst = self.alloc_typed_temp(expr_id);
                     self.ops.push(KernelOp::ApplyClosure {
                         dst,
                         source: self.source_for(expr_id),
@@ -900,7 +941,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         for arg in &call.args {
             args.push(self.lower_expr(arg.expr)?);
         }
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::ApplyClosure {
             dst,
             source: self.source_for(expr_id),
@@ -929,7 +970,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             positional_inputs.push(input);
         }
 
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::AwaitRuntime {
             dst,
             source: self.source_for(expr_id),
@@ -1061,7 +1102,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         match method_name.as_str() {
             "len" => {
-                let dst = self.alloc_temp();
+                let dst = self.alloc_typed_temp(expr_id);
                 self.ops.push(KernelOp::StringLen {
                     dst,
                     source,
@@ -1070,15 +1111,34 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 Ok(Some(Operand::Slot(dst)))
             }
             "slice" => {
-                if call.args.len() != 2 {
+                let (start, end) = if call.args.len() == 2 {
+                    (
+                        self.lower_expr(call.args[0].expr)?,
+                        self.lower_expr(call.args[1].expr)?,
+                    )
+                } else if call.args.len() == 1 {
+                    // .slice(start..end) — single range arg
+                    let arg_expr = call.args[0].expr;
+                    if let ExprKind::Range(ref range) = self.arena()[arg_expr].kind {
+                        let s = range.start.ok_or_else(|| {
+                            LowerError::UnsupportedShape(".slice() range missing start".into())
+                        })?;
+                        let e = range.end.ok_or_else(|| {
+                            LowerError::UnsupportedShape(".slice() range missing end".into())
+                        })?;
+                        (self.lower_expr(s)?, self.lower_expr(e)?)
+                    } else {
+                        return Err(LowerError::UnsupportedShape(
+                            ".slice() expects 2 args or a range, got 1 non-range arg".into(),
+                        ));
+                    }
+                } else {
                     return Err(LowerError::UnsupportedShape(format!(
-                        ".slice() expects 2 args, got {}",
+                        ".slice() expects 2 args or a range, got {}",
                         call.args.len()
                     )));
-                }
-                let start = self.lower_expr(call.args[0].expr)?;
-                let end = self.lower_expr(call.args[1].expr)?;
-                let dst = self.alloc_temp();
+                };
+                let dst = self.alloc_typed_temp(expr_id);
                 self.ops.push(KernelOp::StringSlice {
                     dst,
                     source,
@@ -1099,7 +1159,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 for arg in &call.args {
                     args.push(self.lower_expr(arg.expr)?);
                 }
-                let dst = self.alloc_temp();
+                let dst = self.alloc_typed_temp(expr_id);
                 self.ops.push(KernelOp::CallMember {
                     dst,
                     source,
@@ -1132,7 +1192,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let first = self.lower_element_or_thunk(expr_id, t.elements[0], FieldKey::Index(0))?;
         let second = self.lower_element_or_thunk(expr_id, t.elements[1], FieldKey::Index(1))?;
 
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::MakePair {
             dst,
             source: self.source_for(expr_id),
@@ -1157,7 +1217,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             let operand = self.lower_element_or_thunk(expr_id, f.value, fk)?;
             fields.push((f.name.clone(), operand));
         }
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::MakeStruct {
             dst,
             source: self.source_for(expr_id),
@@ -1181,7 +1241,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             let operand = self.lower_element_or_thunk(expr_id, f.value, fk)?;
             fields.push((f.name.clone(), operand));
         }
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::MakeStruct {
             dst,
             source: self.source_for(expr_id),
@@ -1212,7 +1272,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 }
             }
         }
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::MakeArray {
             dst,
             source: self.source_for(expr_id),
@@ -1237,7 +1297,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
 
         // Fall back to runtime projection.
         let receiver = self.lower_expr(f.receiver)?;
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         let source = self.source_for(expr_id);
 
         match &f.field {
@@ -1349,7 +1409,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let closure_a_body = a_body(closure_body);
         self.lower_closure_body(closure_body, &captures_list)?;
 
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::AllocClosure {
             dst,
             source: self.source_for(expr_id),
@@ -1576,7 +1636,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         self.ctx.synth_bodies.insert(thunk_body_id, exec_body);
 
         // Emit AllocThunk in parent.
-        let dst = self.alloc_temp();
+        let dst = self.alloc_typed_temp(product_expr);
         self.ops.push(KernelOp::AllocThunk {
             dst,
             source: self.source_for(product_expr),
