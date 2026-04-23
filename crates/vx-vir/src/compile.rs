@@ -314,20 +314,25 @@ fn probe() #discover -> String (
             cap_result.errors
         );
 
-        let lowered = super::compile_source(SOURCE_EXEC_STDOUT, "probe");
+        let lowered = super::compile_source(SOURCE_EXEC_STDOUT, "probe")
+            .expect("exec source should now compile through lowering");
         assert!(
             lowered
-                .err()
-                .is_some_and(|error| matches!(error, super::CompileError::Lowering(_))),
-            "exec source should now make it past resolution and fail later in lowering"
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in lowered program"
         );
 
-        let lowered = super::compile_source_with_types(SOURCE_EXEC_STDOUT, "probe");
+        let lowered = super::compile_source_with_types(SOURCE_EXEC_STDOUT, "probe")
+            .expect("typed compile path should also lower exec");
         assert!(
             lowered
-                .err()
-                .is_some_and(|error| matches!(error, super::CompileError::Lowering(_))),
-            "typed compile path should also make it past resolution"
+                .program
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in typed lowering output"
         );
     }
 

@@ -469,9 +469,12 @@ impl<'a> ProgramEvaluator<'a> {
             KernelOp::MakeStruct { .. } => Ok(EvalValue::Pending(
                 "struct (not yet supported in eager evaluator)".to_owned(),
             )),
-            KernelOp::ProjectNamedField { .. } => Ok(EvalValue::Pending(
-                "named field (not yet supported in eager evaluator)".to_owned(),
-            )),
+            KernelOp::ProjectNamedField { value, field, .. } => {
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
+                self.eval_project_named_field(function_name, value, field)
+            }
             KernelOp::AssignCallableAddConst { addend, .. } => {
                 let addend = self
                     .resolve_operand(function_name, producers, slots, addend)
@@ -952,6 +955,26 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
+    fn eval_project_named_field(
+        &mut self,
+        function_name: &str,
+        value: EvalValue,
+        field: &str,
+    ) -> Result<EvalValue, RuntimeEvalError> {
+        match (value, field) {
+            (EvalValue::Process { exit_code, .. }, "exit_code") => Ok(EvalValue::U64(exit_code)),
+            (EvalValue::Process { stdout, .. }, "stdout") => Ok(EvalValue::ProcessStdout(stdout)),
+            (EvalValue::Process { stderr, .. }, "stderr") => Ok(EvalValue::ProcessStderr(stderr)),
+            (value, field) => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!(
+                    "unsupported named field projection `{field}` on {}",
+                    value.kind_name()
+                ),
+            }),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn eval_runtime_boundary(
         &mut self,
@@ -1016,7 +1039,28 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: "exec argv must not be empty".to_owned(),
                     });
                 }
-                self.run_local_exec(function_name, &argv).await
+                let process = self.run_local_exec(function_name, &argv).await?;
+                let observer = positional_inputs.iter().find_map(|input| match input {
+                    RuntimeBoundaryInputSpec::Closure { closure, .. } => Some(closure),
+                    _ => None,
+                });
+                if let Some(observer) = observer {
+                    let vfs_root = self
+                        .runtime_exec_prefixes
+                        .get(&node)
+                        .cloned()
+                        .map(EvalValue::SandboxTreeRoot)
+                        .unwrap_or_else(|| {
+                            EvalValue::Pending(
+                                "exec observer vfs root is unavailable in local runtime eval"
+                                    .to_owned(),
+                            )
+                        });
+                    self.eval_closure(function_name, observer, &[process, vfs_root])
+                        .await
+                } else {
+                    Ok(process)
+                }
             }
             (RuntimeBoundaryKind::Discover, RuntimeBoundaryPayload::Discover(_payload)) => {
                 let closure = positional_inputs
