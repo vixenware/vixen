@@ -60,6 +60,17 @@ pub struct RuntimeEvalContext {
 pub enum RuntimeEvalError {
     #[error("compilation failed: {0}")]
     Compile(#[from] CompileError),
+    #[error("function `{function}` is not strict-compatible with the Cranelift backend")]
+    CraneliftNotStrictCompatible { function: String },
+    #[error("Cranelift backend does not support runtime argument kind `{kind}` in `{function}`")]
+    CraneliftUnsupportedArgKind {
+        function: String,
+        kind: &'static str,
+    },
+    #[error("Cranelift compilation failed for `{function}`: {detail}")]
+    CraneliftCompile { function: String, detail: String },
+    #[error("Cranelift execution failed for `{function}`: {detail}")]
+    CraneliftExecute { function: String, detail: String },
     #[error("arity mismatch in `{function}`: expected {expected} args, got {actual}")]
     ArityMismatch {
         function: String,
@@ -113,9 +124,7 @@ pub async fn evaluate_source_text_function(
     progress: Option<Tx<EvalProgressEvent>>,
 ) -> Result<EvalOutput, RuntimeEvalError> {
     if request.backend == StrictEvalBackend::Cranelift {
-        if let Some(output) = try_cranelift_fast_path(&request)? {
-            return Ok(output);
-        }
+        return evaluate_with_cranelift(&request);
     }
 
     let program = vx_vir::compile::compile_source(request.source, request.function_name)?;
@@ -146,30 +155,25 @@ pub async fn evaluate_source_text_function(
     })
 }
 
-fn try_cranelift_fast_path(
-    request: &EvalRequest<'_>,
-) -> Result<Option<EvalOutput>, RuntimeEvalError> {
-    let frag_args = match request
+fn evaluate_with_cranelift(request: &EvalRequest<'_>) -> Result<EvalOutput, RuntimeEvalError> {
+    let frag_args = request
         .args
         .iter()
         .cloned()
-        .map(fragment_arg_from_runtime)
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(a) => a,
-        Err(_) => return Ok(None),
-    };
+        .map(|arg| fragment_arg_from_runtime(request.function_name, arg))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let output =
-        match vx_vir::compile::compile_source_with_types(request.source, request.function_name) {
-            Ok(o) => o,
-            Err(_) => return Ok(None),
-        };
+    let output = vx_vir::compile::compile_source_with_types(request.source, request.function_name)?;
 
     let entry = output.program.entry;
     let body = match output.program.bodies.get(&entry) {
         Some(b) => b,
-        None => return Ok(None),
+        None => {
+            return Err(RuntimeEvalError::UnsupportedOperation {
+                function: request.function_name.to_owned(),
+                detail: "compiled program is missing its entry body".to_owned(),
+            });
+        }
     };
 
     let mut func = match vx_jit::lower_to_strict::try_strict_lower(
@@ -178,7 +182,11 @@ fn try_cranelift_fast_path(
         output.original_body_count,
     ) {
         Some(f) => f,
-        None => return Ok(None),
+        None => {
+            return Err(RuntimeEvalError::CraneliftNotStrictCompatible {
+                function: request.function_name.to_owned(),
+            });
+        }
     };
     func.name = request.function_name.to_owned();
 
@@ -196,32 +204,60 @@ fn try_cranelift_fast_path(
             None
         };
 
-    let compiled = match vx_jit::compile(&func) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
+    let compiled = vx_jit::compile(&func).map_err(|error| RuntimeEvalError::CraneliftCompile {
+        function: request.function_name.to_owned(),
+        detail: error.to_string(),
+    })?;
 
     // Cranelift textual IR dumps are not yet exposed by vx_jit::compile.
     let _ = request.include_clif_dump;
 
-    match compiled.call(&frag_args) {
-        Ok(result) => runtime_value_from_fragment_result(result).map(|value| {
-            Some(EvalOutput {
-                value,
-                strict_fragment_dump,
-                clif_dump: None,
-            })
-        }),
-        Err(_) => Ok(None),
-    }
+    let result = compiled
+        .call(&frag_args)
+        .map_err(|error| RuntimeEvalError::CraneliftExecute {
+            function: request.function_name.to_owned(),
+            detail: error.to_string(),
+        })?;
+
+    runtime_value_from_fragment_result(result).map(|value| EvalOutput {
+        value,
+        strict_fragment_dump,
+        clif_dump: None,
+    })
 }
 
-fn fragment_arg_from_runtime(value: RuntimeValue) -> Result<FragmentArg, ()> {
+fn fragment_arg_from_runtime(
+    function_name: &str,
+    value: RuntimeValue,
+) -> Result<FragmentArg, RuntimeEvalError> {
     Ok(match value {
         RuntimeValue::U64(v) => FragmentArg::U64(v),
         RuntimeValue::Bool(v) => FragmentArg::Bool(v),
         RuntimeValue::String(v) => FragmentArg::String(v),
-        _ => return Err(()),
+        RuntimeValue::Path(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "path",
+            });
+        }
+        RuntimeValue::StringArray(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "string_array",
+            });
+        }
+        RuntimeValue::StringMap(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "string_map",
+            });
+        }
+        RuntimeValue::Tree(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "tree",
+            });
+        }
     })
 }
 
@@ -1487,7 +1523,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 mod tests {
     use vx_services::{RuntimeValue, StrictEvalBackend};
 
-    use super::{EvalRequest, RuntimeEvalContext, evaluate_source_text_function};
+    use super::{EvalRequest, RuntimeEvalContext, RuntimeEvalError, evaluate_source_text_function};
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
@@ -1532,6 +1568,12 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_CRANELIFT_SYMBOL_COLLISION: &str = r#"
+fn __vx_alloc(name: String) -> String (
+  `{name}!`
+)
+"#;
+
     #[tokio::test]
     async fn evaluates_non_strict_top_level_body_call() {
         let output = evaluate_source_text_function(
@@ -1553,6 +1595,33 @@ fn probe() #discover -> String (
     }
 
     #[tokio::test]
+    async fn explicit_cranelift_rejects_non_strict_programs() {
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_NON_STRICT_CALL,
+                function_name: "build",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("non-strict programs should not silently fall back"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RuntimeEvalError::CraneliftNotStrictCompatible { function }
+            if function == "build"
+        ));
+    }
+
+    #[tokio::test]
     async fn evaluates_non_strict_string_len_via_local_call() {
         let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
@@ -1570,6 +1639,53 @@ fn probe() #discover -> String (
         .expect("build_len should evaluate");
 
         assert_eq!(output.value, RuntimeValue::U64(5));
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_surfaces_jit_compile_failures() {
+        let interpreter_output = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
+                function_name: "__vx_alloc",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        .expect("interpreter should still evaluate the function");
+
+        assert_eq!(
+            interpreter_output.value,
+            RuntimeValue::String("serde!".to_owned())
+        );
+
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
+                function_name: "__vx_alloc",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("Cranelift compile failures should be reported"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RuntimeEvalError::CraneliftCompile { function, .. }
+            if function == "__vx_alloc"
+        ));
     }
 
     #[tokio::test]
